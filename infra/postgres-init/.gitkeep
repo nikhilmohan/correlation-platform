@@ -1,0 +1,1 @@
+# Postgres/AGE init scripts (*.sql) run on first container start. e.g. CREATE EXTENSION age;

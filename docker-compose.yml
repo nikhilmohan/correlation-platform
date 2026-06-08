@@ -1,0 +1,89 @@
+# Integration environment for the AI/ML Alarm Correlation Platform (Core IP MVP).
+#
+# Starter scope: infrastructure only — Apache Kafka (KRaft, single broker) and Apache AGE
+# (PostgreSQL + graph extension). Per-service app containers, Kafka topic creation, and the
+# Spark runtime for pattern-miner are DEFERRED (see the commented block at the bottom) and
+# added as each service is built.
+#
+# Permissive images only: apache/kafka (Apache-2.0) and apache/age (PostgreSQL license).
+# Explicitly NOT Confluent, NOT Redpanda, NOT ZooKeeper. No Schema Registry — event-model's
+# in-repo JSON Schema is the contract.
+
+name: correlation-platform
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: cp-kafka
+    ports:
+      - "9092:9092"      # external listener for host clients
+    environment:
+      # --- KRaft single-node (broker + controller in one process) ---
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:29092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      # Auto-create is convenient for the walking skeleton; topic creation becomes an explicit
+      # init job once the topic catalog is enforced.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    networks:
+      - cp-net
+
+  postgres-age:
+    image: apache/age:latest
+    container_name: cp-postgres-age
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: correlation
+      POSTGRES_PASSWORD: correlation
+      POSTGRES_DB: correlation
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      # Place *.sql here to bootstrap schemas / `CREATE EXTENSION age;` on first start.
+      - ./infra/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U correlation -d correlation"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
+# -----------------------------------------------------------------------------------------
+# DEFERRED — added as services are built (each needs a real Dockerfile + image):
+#
+#   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
+#   noise-filter, pattern-manager, correlation-engine, web-ui
+#
+#   Also deferred:
+#     - kafka-init: one-shot container creating the architecture.md topic catalog
+#       (topology.raw, topology.changed, trails.built, codebook.generated, knowledge.updated,
+#        alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, transactions.clean,
+#        patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq)
+#     - spark: PySpark runtime for pattern-miner (container-only)
+#     - prometheus / superset: metrics + dashboards (Apache-2.0)
+# -----------------------------------------------------------------------------------------
+
+volumes:
+  kafka-data:
+  pg-data:
+
+networks:
+  cp-net:
+    driver: bridge

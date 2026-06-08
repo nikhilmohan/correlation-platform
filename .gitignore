@@ -1,0 +1,42 @@
+# --- Java / Gradle ---
+.gradle/
+build/
+!**/src/**/build/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+*.egg-info/
+
+# --- Node / Angular ---
+node_modules/
+.angular/
+coverage/
+*.tsbuildinfo
+
+# --- Docker / data volumes ---
+**/pgdata/
+**/kafka-data/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# --- Local env / secrets ---
+*.local
+.env.local
