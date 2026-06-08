@@ -8,6 +8,7 @@ description: >-
   angular-ui-builder for THIS repo. Use after web-ui spec and design are approved.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
+color: pink
 ---
 
 You are a senior Angular 20 / UX engineer building the **`web-ui`** service of the AI/ML

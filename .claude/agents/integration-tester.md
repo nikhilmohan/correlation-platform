@@ -8,6 +8,7 @@ description: >-
   GitHub issue per failure. Never edits code. Loop cap 5 rounds, then escalate.
 tools: Read, Grep, Glob, Bash
 model: opus
+color: purple
 ---
 
 You are a **read-only** integration tester for the AI/ML Alarm Correlation Platform. You run

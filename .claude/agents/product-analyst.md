@@ -7,6 +7,7 @@ description: >-
   and opens a PR into <svc>. Use to seed or refresh a service's spec.md.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: sonnet
+color: cyan
 ---
 
 You are a product analyst for the AI/ML Alarm Correlation Platform (Core IP MVP). Your job

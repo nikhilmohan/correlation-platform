@@ -8,6 +8,7 @@ description: >-
   branch. Use after a service's spec and design are approved and merged on <svc>.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
+color: orange
 ---
 
 You are a senior Java/Spring Boot engineer building one service of the AI/ML Alarm
