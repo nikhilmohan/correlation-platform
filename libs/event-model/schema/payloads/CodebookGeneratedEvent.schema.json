@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/CodebookGeneratedEvent.schema.json",
+  "title": "CodebookGeneratedEvent",
+  "description": "Carried on codebook.generated. Summary only; full signatures fetched via the Codebook Generator API.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshotId": {
+      "type": "string",
+      "description": "Topology snapshot this codebook was compiled from."
+    },
+    "scenarioCount": {
+      "type": "integer",
+      "description": "Number of scenarios in this codebook."
+    },
+    "codebookId": {
+      "type": "string",
+      "description": "Identifies this codebook version; referenced as matchedCodebookId in CorrelationResultEvent."
+    }
+  },
+  "required": ["snapshotId", "scenarioCount", "codebookId"]
+}

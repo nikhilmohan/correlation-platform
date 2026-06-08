@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/common/managedObjectId.schema.json",
+  "title": "ManagedObjectId",
+  "description": "Shared identity binding for network objects. Format '<objectType>:<id>' where objectType is one of the nine known typed graph layers and id is a stable, non-empty string containing no colon. Used identically by the Simulator (alarm generation) and the Topology Service (graph nodes).",
+  "type": "string",
+  "pattern": "^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$"
+}

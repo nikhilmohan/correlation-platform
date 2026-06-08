@@ -1,0 +1,175 @@
+// event-model — Java binding build.
+//
+// Single source of truth: ../schema (JSON Schema 2020-12), shared verbatim with the
+// Python binding. The model classes are NEVER hand-authored: jsonschema2pojo generates
+// the Envelope + 9 payload POJOs from ../schema at build time (criterion 2). The only
+// hand-written code is the schema-agnostic helper layer under src/main/java
+// (EventCodec, SchemaVersionPolicy, ManagedObjectId, TypeRegistry). Tests read the SAME
+// golden fixtures under ../schema/fixtures that the Python tests read (criterion 1).
+//
+// All dependencies are permissive (Apache-2.0): jsonschema2pojo, Jackson,
+// networknt/json-schema-validator. No GPL/AGPL/BSL.
+
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'jacoco'
+    // Generates Java POJOs from the JSON Schema at build time (Apache-2.0).
+    id 'org.jsonschema2pojo' version '1.2.1'
+}
+
+group = 'com.acp'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+    withSourcesJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    jacksonVersion = '2.17.1'
+    networkntVersion = '1.4.0'
+    junitVersion = '5.10.2'
+}
+
+dependencies {
+    // Jackson — canonical JSON (de)serialization (Apache-2.0).
+    api "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    api "com.fasterxml.jackson.datatype:jackson-datatype-jsr310:${jacksonVersion}"
+    // networknt — validate against the SAME JSON Schema 2020-12 files (Apache-2.0).
+    api "com.networknt:json-schema-validator:${networkntVersion}"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    // Drive jsonschema2pojo programmatically to prove single-source propagation (criterion 2):
+    // edit a schema -> regenerate -> the new field appears in the generated POJO. Apache-2.0.
+    testImplementation 'org.jsonschema2pojo:jsonschema2pojo-core:1.2.1'
+}
+
+// --- Single-source generation: ../schema -> Java POJOs (jsonschema2pojo) ----------------
+// The plugin walks the payload schema directory; each *.schema.json yields a POJO named
+// after its `title`. The shared $ref to common/managedObjectId.schema.json resolves
+// relative to the schema files, so managedObjectId binds as a plain String on the wire
+// (it is a JSON Schema `string`), exactly as the fixtures encode it.
+jsonSchema2Pojo {
+    // Generate from the payload schemas (the envelope's `payload` is an open object on the
+    // wire; the typed payload classes are what services bind to). The envelope itself is
+    // bound by the hand-written codec via Jackson tree + per-field reads, so only the nine
+    // payloads need generated POJOs.
+    source = files("${projectDir}/../schema/payloads")
+    targetPackage = 'com.acp.eventmodel.generated'
+    sourceType = 'jsonschema'
+    // JSON Schema 2020-12 / draft-07-style keywords used in our schema.
+    useTitleAsClassname = true
+    // Capture additional properties via @JsonAnyGetter/@JsonAnySetter so genuinely-open
+    // sub-objects (timing, vendorRaw, topology node/edge descriptors — all
+    // `additionalProperties:true` in the schema) round-trip their keys losslessly (criterion 1).
+    // Strict rejection of unknown payload-ROOT fields (additionalProperties:false on the payload
+    // schemas, criterion 10) is enforced by networknt schema validation in the codec, not by the
+    // POJO — so the contract gate is the schema, exactly as on the Python side.
+    includeAdditionalProperties = true
+    includeJsr303Annotations = false
+    generateBuilders = true
+    // Keep generated POJOs Jackson-friendly and extensible (non-final) per the design's
+    // no-fork extensibility rule.
+    usePrimitives = false
+    initializeCollections = false
+    dateTimeType = 'java.lang.String'   // datetimes stay ISO-8601 UTC strings on the wire
+    includeConstructors = false
+    includeHashcodeAndEquals = true
+    includeToString = true
+    // Optional fields omitted from the wire when absent (canonical wire format): the generated
+    // POJOs carry @JsonInclude(NON_NULL) so clearedAt/vendorRaw/codebookMatchId/... never serialize
+    // as null.
+    inclusionLevel = 'NON_NULL'
+}
+
+// --- Bundle the shared schema into the jar -----------------------------------------------
+// The codec validates wire JSON against the SAME ../schema files at runtime (networknt).
+// Copy them into resources so the published jar is self-contained: a downstream Spring
+// service that depends on com.acp:event-model gets the schema on its classpath, no source
+// dependency on this repo's directory layout. Layout under resources mirrors ../schema so
+// relative $ref (payloads -> ../common/managedObjectId.schema.json) resolves unchanged.
+tasks.register('copySchema', Copy) {
+    from("${projectDir}/../schema") {
+        include 'envelope.schema.json'
+        include 'common/**'
+        include 'payloads/**'
+    }
+    into "${layout.buildDirectory.get()}/schema-resources/schema"
+}
+
+sourceSets {
+    main {
+        resources {
+            srcDir "${layout.buildDirectory.get()}/schema-resources"
+        }
+    }
+}
+
+processResources.dependsOn copySchema
+
+// sourcesJar packages both the generated POJOs and the bundled schema resources; make the
+// dependency explicit so Gradle's task-validation is satisfied.
+tasks.named('sourcesJar') {
+    dependsOn 'copySchema', 'generateJsonSchema2Pojo'
+}
+
+test {
+    useJUnitPlatform()
+    finalizedBy jacocoTestReport
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    // Coverage is measured on the hand-written helper layer (the contract logic). The
+    // generated POJOs are excluded — they are derived artifacts, fully exercised via the
+    // fixture round-trip tests but not the unit under measurement.
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: ['com/acp/eventmodel/generated/**'])
+            })
+        )
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            element = 'BUNDLE'
+            limit {
+                counter = 'LINE'
+                minimum = 0.80
+            }
+        }
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: ['com/acp/eventmodel/generated/**'])
+            })
+        )
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+        }
+    }
+}

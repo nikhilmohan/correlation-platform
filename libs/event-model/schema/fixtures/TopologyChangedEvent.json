@@ -1,0 +1,19 @@
+{
+  "eventId": "22222222-2222-4222-8222-222222222222",
+  "type": "TopologyChangedEvent",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:35:00Z",
+  "source": "topology",
+  "traceId": "trace-topo-0001",
+  "payload": {
+    "snapshotId": "SNAP-2026-06-08-001",
+    "changeType": "full-load",
+    "nodes": [
+      { "managedObjectId": "Node:PE1", "objectType": "Node" },
+      { "managedObjectId": "Port:PE1-LC2-P3", "objectType": "Port" }
+    ],
+    "edges": [
+      { "from": "Node:PE1", "to": "Port:PE1-LC2-P3", "relation": "contains" }
+    ]
+  }
+}

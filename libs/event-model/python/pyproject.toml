@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acp-event-model"
+version = "0.1.0"
+description = "ACP Alarm Correlation Platform — canonical event model (Pydantic v2 binding)."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ACP Platform Team" }]
+dependencies = [
+    "pydantic>=2.6,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "datamodel-code-generator>=0.25,<0.26",
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.5",
+    "black>=24",
+    "jsonschema>=4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+acp_event_model = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# Generated model module is machine-produced; do not lint it for style.
+exclude = ["src/acp_event_model/_generated.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=acp_event_model --cov-report=term-missing"
+
+[tool.coverage.run]
+omit = ["src/acp_event_model/_generated.py"]

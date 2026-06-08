@@ -1,0 +1,13 @@
+{
+  "eventId": "33333333-3333-4333-8333-333333333333",
+  "type": "TrailsBuiltEvent",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:36:00Z",
+  "source": "trail-builder",
+  "traceId": "trace-trails-0001",
+  "payload": {
+    "snapshotId": "SNAP-2026-06-08-001",
+    "trailIds": ["TRAIL-0001", "TRAIL-0002", "TRAIL-0003"],
+    "trailCount": 3
+  }
+}

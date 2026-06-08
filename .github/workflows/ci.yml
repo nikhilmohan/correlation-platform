@@ -48,19 +48,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      # Guard: until a service has real sources, there is nothing to lint/test. Once code
-      # lands (requirements.txt / pyproject.toml + tests), replace this guard with the real
-      # install + checks below.
-      - name: Lint + test (Python cohort)
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+      # The event-model Python binding (acp-event-model) is a real package: install it
+      # with its dev extras and run the cohort gate (ruff/black/pytest --cov) against it.
+      - name: Lint + test (event-model Python binding)
         run: |
-          if ! ls services/*/src/*.py >/dev/null 2>&1 && ! ls libs/event-model/src/*.py >/dev/null 2>&1; then
-            echo "No Python sources yet — skipping (scaffold)."
-            exit 0
+          if [ -f libs/event-model/python/pyproject.toml ]; then
+            python -m pip install ./libs/event-model/python[dev]
+            python -c "import acp_event_model"   # clean-import check (criterion 18)
+            (cd libs/event-model/python && \
+              ruff check . && \
+              black --check . && \
+              pytest --cov --cov-fail-under=80)
+          else
+            echo "No event-model Python binding yet — skipping."
           fi
-          python -m pip install --upgrade pip ruff black pytest pytest-cov
-          ruff check .
-          black --check .
-          pytest --cov --cov-fail-under=80
+      # Python services: lint/test each that has real sources. Until a service lands
+      # (pyproject.toml / requirements.txt + tests) this is a no-op.
+      - name: Lint + test (Python services)
+        run: |
+          ran=0
+          for d in services/simulator services/trail-builder services/codebook-generator services/noise-filter services/pattern-miner; do
+            if [ -f "$d/pyproject.toml" ] || [ -f "$d/requirements.txt" ]; then
+              ran=1
+              python -m pip install ruff black pytest pytest-cov
+              (cd "$d" && ruff check . && black --check . && pytest --cov --cov-fail-under=80)
+            fi
+          done
+          if [ "$ran" = "0" ]; then echo "No Python service sources yet — skipping (scaffold)."; fi
 
   java:
     needs: changes
@@ -74,13 +90,14 @@ jobs:
           java-version: '17'
       - name: Build (Java cohort)
         run: |
-          if ! ls services/*/gradlew libs/event-model/gradlew >/dev/null 2>&1; then
-            echo "No Gradle project yet — skipping (scaffold)."
-            exit 0
-          fi
-          for d in services/topology services/knowledge services/enrichment services/pattern-manager services/correlation-engine; do
-            if [ -f "$d/gradlew" ]; then (cd "$d" && ./gradlew --no-daemon build); fi
+          # The event-model Java binding lives in libs/event-model/java; build it too.
+          # The -f gradlew guard makes each entry a no-op until that Gradle project exists,
+          # so this loop is safe to land before @java-dev adds the Java binding.
+          built=0
+          for d in libs/event-model/java services/topology services/knowledge services/enrichment services/pattern-manager services/correlation-engine; do
+            if [ -f "$d/gradlew" ]; then built=1; (cd "$d" && ./gradlew --no-daemon clean build); fi
           done
+          if [ "$built" = "0" ]; then echo "No Gradle project yet — skipping (scaffold)."; fi
 
   angular:
     needs: changes
