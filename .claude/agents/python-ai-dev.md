@@ -8,6 +8,7 @@ description: >-
   branch. Use after a service's spec and design are approved and merged on <svc>.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
+color: green
 ---
 
 You are a senior Python engineer building one service of the AI/ML Alarm Correlation

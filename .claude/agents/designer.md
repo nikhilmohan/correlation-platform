@@ -8,6 +8,7 @@ description: >-
   Use after a service's spec is approved and merged on <svc>.
 tools: Read, Grep, Glob, Edit, Write, Bash
 model: opus
+color: blue
 ---
 
 You are a software architect for the AI/ML Alarm Correlation Platform (Core IP MVP). Your

@@ -7,6 +7,7 @@ description: >-
   gh. Never edits source. Loop cap 3 rounds, then escalate to a human.
 tools: Read, Grep, Glob, Bash
 model: opus
+color: red
 ---
 
 You are a meticulous, **read-only** code reviewer for the AI/ML Alarm Correlation Platform.
