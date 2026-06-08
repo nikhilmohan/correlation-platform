@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI/ML Alarm Correlation Platform — Core IP MVP</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<style>
+  :root{
+    --ink:#1d1c1a; --muted:#6b6862; --rule:#e2ddd3; --accent:#9a3b1b;
+    --code-bg:#f4f1ea; --code-bd:#ddd6c8; --paper:#fdfcf8;
+    --serif:Georgia,"Iowan Old Style","Palatino Linotype",Palatino,serif;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--serif); font-size:17px; line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .doc{max-width:820px; margin:0 auto; padding:64px 32px 120px;}
+  h1{font-size:2.05rem; line-height:1.15; margin:0 0 .35rem; font-weight:700; letter-spacing:-.01em;}
+  .subtitle{font-size:1.02rem; color:var(--muted); margin:0 0 1.4rem;}
+  h2{font-size:1.5rem; margin:2.6rem 0 .9rem; font-weight:700; letter-spacing:-.01em;}
+  h3{font-size:1.14rem; margin:1.9rem 0 .5rem; font-weight:700;}
+  h4{font-size:1rem; margin:1.3rem 0 .35rem; font-weight:700;}
+  p{margin:.7rem 0;}
+  ul,ol{margin:.6rem 0 .9rem; padding-left:1.5rem;}
+  li{margin:.32rem 0;}
+  hr{border:none; border-top:1px solid var(--rule); margin:2.4rem 0;}
+  strong{font-weight:700;}
+  em{font-style:italic;}
+  code{
+    font-family:var(--mono); font-size:.82em; background:var(--code-bg);
+    border:1px solid var(--code-bd); border-radius:5px; padding:1px 6px; white-space:nowrap;
+  }
+  pre.code{
+    font-family:var(--mono); font-size:.8rem; line-height:1.5; background:var(--code-bg);
+    border:1px solid var(--code-bd); border-radius:8px; padding:16px 18px; overflow-x:auto; margin:1rem 0;
+  }
+  pre.code code{background:none; border:none; padding:0; white-space:pre; font-size:1em;}
+  table{border-collapse:collapse; width:100%; margin:1.1rem 0; font-size:.92rem;}
+  th{text-align:left; font-weight:700; border-bottom:2px solid var(--ink); padding:8px 10px;}
+  td{border-bottom:1px solid var(--rule); padding:8px 10px; vertical-align:top;}
+  td code,th code{white-space:nowrap;}
+  .revnote{
+    border-left:3px solid var(--accent); background:#fbf4ef; padding:14px 18px;
+    margin:1.4rem 0 0; border-radius:0 6px 6px 0; font-size:.95rem;
+  }
+  .revnote h4{margin:0 0 .35rem; color:var(--accent);}
+  .revnote ul{margin:.3rem 0 0;}
+  .note{
+    border-left:3px solid var(--rule); padding:6px 16px; margin:1.1rem 0;
+    color:var(--muted); font-size:.95rem;
+  }
+  .new-badge{
+    display:inline-block; font-family:var(--mono); font-size:.62em; font-weight:700;
+    color:#fff; background:var(--accent); border-radius:4px; padding:2px 6px;
+    vertical-align:middle; margin-left:8px; letter-spacing:.04em; white-space:nowrap;
+  }
+  figure{margin:1.4rem 0; text-align:center;}
+  figure.diagram{background:#fff; border:1px solid var(--rule); border-radius:10px; padding:18px 12px;}
+  .mermaid{font-family:var(--serif)!important;}
+  figcaption{color:var(--muted); font-size:.85rem; margin-top:.5rem; font-style:italic;}
+  @media print{
+    body{background:#fff; font-size:11pt;}
+    .doc{max-width:none; padding:0 12mm;}
+    figure.diagram{break-inside:avoid; border-color:#ccc;}
+    h2{break-after:avoid;} h3{break-after:avoid;}
+    a{color:inherit; text-decoration:none;}
+  }
+  @media (max-width:560px){ body{font-size:16px;} .doc{padding:40px 20px 80px;} }
+</style>
+</head>
+<body>
+<main class="doc">
+
+  <h1>AI/ML Alarm Correlation Platform — Core IP MVP</h1>
+  <p class="subtitle"><strong>Solution Design &amp; AI-Led Build Specification</strong> · Version 0.2 (MVP) · Domain: Core IP network fault correlation</p>
+
+  <div class="revnote">
+    <h4>Revision note (v0.1 → v0.2)</h4>
+    <ul>
+      <li><strong>Pattern Miner Service</strong> reduced to PrefixSpan model execution and configuration only (PySpark). It no longer owns RCA, codebook reconciliation, explainability, the Pattern Store, or lifecycle.</li>
+      <li><strong>Pattern Manager Service</strong> added — owns pattern status/lifecycle, RCA, reconciliation, explainability metadata and the Pattern Store. The ML step is now cleanly separated from pattern management.</li>
+      <li><strong>Tech stack split by workload:</strong> graph/simulation and ML services run Python (Simulator, Trail Builder, Codebook Generator on <code>networkx</code>; Noise Filter on scikit-learn; Pattern Miner on PySpark); API/streaming/state services run <strong>Spring Boot</strong> (Topology, Knowledge, Enrichment, Pattern Manager, Correlation Engine); UI on <strong>Angular 20</strong>.</li>
+      <li>New <code>patterns.mined</code> topic and <code>PatternMinedEvent</code> payload connect Miner → Manager.</li>
+    </ul>
+  </div>
+
+  <hr>
+
+  <h2>1. Problem Statement</h2>
+  <p>Telco networks emit very high volumes of alarms. A single underlying fault (a fiber cut, a line-card failure, an optical amplifier loss) propagates upward through the physical, link, routing, transport and service layers, producing tens to thousands of alarms for one root cause. Network Operations Centres (NOCs) are flooded with these symptomatic alarms, struggle to identify the true root cause, and waste effort on duplicate incidents.</p>
+  <p>Pure rule-based correlation is brittle and unmaintainable at network scale; pure unsupervised mining on raw alarm streams produces noise because it lacks network structure. The platform therefore takes a <strong>hybrid, topology-grounded approach</strong>: it uses the network topology to constrain <em>where</em> correlation can happen, combines a <strong>model-derived codebook</strong> (works from day one, covers rare critical faults) with <strong>data-driven pattern mining</strong> (learns the messy real-world behaviour), and keeps a <strong>human-in-the-loop</strong> for pattern approval and incident correction.</p>
+  <p>This document specifies an MVP covering the <strong>Core IP domain only</strong>, exercised against a <strong>synthesized but grounded topology and alarm dataset</strong>, built as <strong>Docker-based, event-driven microservices</strong>.</p>
+
+  <hr>
+
+  <h2>2. Goals &amp; Non-Goals</h2>
+  <h3>Goals (MVP)</h3>
+  <ul>
+    <li>Ingest a synthesized multi-layer Core IP topology and build <strong>correlation trails</strong> (spatial clusters) plus a <strong>codebook</strong> (fault → symptom signatures) using domain knowledge.</li>
+    <li>Discover correlation patterns from historical alarms using <strong>DBSCAN noise filtering</strong> and <strong>PrefixSpan</strong> sequence mining, with <strong>structural + temporal RCA</strong> and <strong>explainability</strong>.</li>
+    <li>Allow a human to <strong>approve/reject</strong> discovered patterns.</li>
+    <li>Perform <strong>real-time correlation</strong> of live alarms against approved patterns and the codebook, tagging a <strong>root cause</strong> and <strong>child alarms</strong>.</li>
+    <li>Provide an <strong>Angular UI</strong> for topology/trail visualization, pattern review + explainability, configuration, and correlation effectiveness stats.</li>
+    <li>Be measurable: because synthetic data carries injected ground-truth root causes, report <strong>alarm-reduction ratio</strong> and <strong>RCA accuracy</strong>.</li>
+  </ul>
+
+  <h3>Non-Goals (MVP)</h3>
+  <ul>
+    <li>Other domains (RAN, Transport, Mobile Core) — the design must generalize but only Core IP is built.</li>
+    <li>Production-grade HA/scale, multi-tenancy, real OSS connectors.</li>
+    <li>Redundancy/protection-aware propagation (FRR, ECMP) — deferred; templates assume straight-up propagation initially.</li>
+    <li>Automated retraining / closed-loop feedback execution (the feedback path is captured but not auto-applied).</li>
+    <li>Schema registry — replaced by a <strong>shared canonical event model library</strong> (see §7).</li>
+  </ul>
+
+  <h3>Constraints</h3>
+  <ul>
+    <li><strong>Open-source, permissive licenses only</strong> (Apache-2.0 / BSD / MIT / PostgreSQL). No GPL/AGPL/BSL/source-available components.</li>
+    <li>Event-driven via <strong>Apache Kafka</strong>; persistence via <strong>PostgreSQL</strong>; topology graph via <strong>Apache AGE</strong> (Postgres extension), abstracted inside the Topology Service.</li>
+  </ul>
+
+  <hr>
+
+  <h2>3. Solution Overview</h2>
+  <h3>Core concepts</h3>
+  <ul>
+    <li><strong>Topology graph</strong> — a typed, multi-layer model (fiber → IP link → IGP adjacency / LSP → VPN service), assembled from synthesized source data.</li>
+    <li><strong>Trail</strong> — an undirected, policy-bounded cluster of connected objects that may correlate together. A device belongs to <strong>multiple overlapping trails</strong> (per LSP path, per SRLG, per IGP area).</li>
+    <li><strong>Codebook</strong> — a compiled matrix of <em>candidate root cause → predicted symptom signature</em>, generated by running forward-propagation templates from each enumerated fault origin over the graph. Each scenario is <strong>tagged to the trail(s) it occupies</strong>.</li>
+    <li><strong>Pattern</strong> — a data-mined, ordered alarm sequence (PrefixSpan) with support/confidence/lift, RCA, and timing stats; lifecycle <code>draft → approved → deprecated</code>. Mining is performed by the Pattern Miner; all status, RCA and metadata are owned by the Pattern Manager.</li>
+    <li><strong>Two pattern producers, one consumer</strong> — the codebook (model) and the approved patterns (data) both feed the real-time correlation engine.</li>
+  </ul>
+
+  <h3>Three phases</h3>
+  <ol>
+    <li><strong>Phase 1 — Topology &amp; scopes (offline):</strong> ingest topology → build trails → compile codebook → visualize.</li>
+    <li><strong>Phase 2 — Learning (offline):</strong> enrich + deterministic-filter alarms → DBSCAN noise removal → PrefixSpan mining → RCA + codebook reconciliation + explainability → human approval.</li>
+    <li><strong>Phase 3 — Real-time correlation (online):</strong> enrich + filter live alarms → stateful match/decode against approved patterns + codebook → score + conflict-resolve → tag RCA + child alarms → stats.</li>
+  </ol>
+
+  <hr>
+
+  <h2>4. Architecture</h2>
+
+  <h3>4.1 System architecture</h3>
+  <figure class="diagram">
+    <pre class="mermaid">
+flowchart TD
+  SIM["Simulator Service<br/>topology + labeled alarms"]
+  KAFKA(["Apache Kafka"])
+  AGE[("Apache AGE<br/>topology graph")]
+  PG[("PostgreSQL<br/>alarms · patterns · incidents · knowledge")]
+  UI["Angular Web UI<br/>topology / patterns / stats"]
+
+  subgraph P1["Phase 1 — offline"]
+    KS["Knowledge Service<br/>templates, policy, params"]
+    TOP["Topology Service<br/>owns AGE graph"]
+    TB["Trail Builder Service"]
+    CG["Codebook Generator Service"]
+  end
+
+  subgraph P2["Phase 2 — learning"]
+    ENR["Enrichment Service<br/>dedup, det. filter, trail tag"]
+    NF["Noise Filter Service<br/>DBSCAN · scikit-learn"]
+    PMN["Pattern Miner Service<br/>PrefixSpan · PySpark"]
+    PMG["Pattern Manager Service<br/>lifecycle · RCA · reconcile · XAI"]
+  end
+
+  subgraph P3["Phase 3 — real-time"]
+    CE["Correlation Engine Service<br/>match · score · RCA · children"]
+  end
+
+  SIM -->|"topology.raw / alarms.history / alarms.live"| KAFKA
+  KAFKA -->|"topology.raw"| TOP
+  TOP <--> AGE
+  TOP -->|"topology.changed"| TB
+  TOP -->|"topology.changed"| UI
+  TB -->|"trails.built"| CG
+  CG -->|"codebook.generated"| PMG
+  CG -->|"codebook.generated"| CE
+  KS -->|"knowledge.updated"| ENR
+  KAFKA -->|"alarms.history"| ENR
+  KAFKA -->|"alarms.live"| ENR
+  ENR -->|"alarms.enriched"| NF
+  ENR -->|"alarms.enriched.live"| CE
+  NF -->|"transactions.clean"| PMN
+  PMN -->|"patterns.mined"| PMG
+  PMG -->|"patterns.discovered"| UI
+  UI -->|"patterns.approved"| PMG
+  PMG -->|"patterns.approved"| CE
+  CE -->|"correlation.results"| UI
+  CE --> PG
+  PMG --> PG
+    </pre>
+    <figcaption>System architecture — Pattern Miner (ML execution) and Pattern Manager (state/metadata) are now distinct services.</figcaption>
+  </figure>
+  <p class="note">Every <code>X → Y</code> that is not a topic label is an API/event read. The Topology Service is the <strong>single owner</strong> of the graph; Trail Builder, Codebook Generator, Pattern Manager and Correlation read trails/codebook via API or event, never the graph directly.</p>
+
+  <h3>4.2 End-to-end flow</h3>
+  <figure class="diagram">
+    <pre class="mermaid">
+flowchart LR
+  ST["Synthesized<br/>topology"] --> BT["Build trails"]
+  ST --> CC["Compile<br/>codebook"]
+  AH["Alarm history"] --> EF["Enrich +<br/>det. filter"] --> DC["DBSCAN<br/>clean"]
+  DC --> PS["PrefixSpan mine<br/>(Pattern Miner)"]
+  PS --> PMG["RCA + reconcile<br/>+ lifecycle<br/>(Pattern Manager)"]
+  PMG --> HA{"Human<br/>approve"}
+  LA["Live alarms"] --> EF2["Enrich +<br/>filter"] --> CEN["Correlation<br/>engine"]
+  CC --> CEN
+  HA -->|"approved patterns"| CEN
+  CEN --> IRC["Incident:<br/>root cause + children"] --> NOC{"NOC confirm<br/>/ correct"}
+  NOC -.->|"feedback"| PMG
+    </pre>
+    <figcaption>End-to-end flow. Mining and pattern governance are separate stages.</figcaption>
+  </figure>
+
+  <h3>4.3 Event-driven design &amp; canonical event model</h3>
+  <p>No schema registry is used. Instead, a <strong>shared canonical event library</strong> (a versioned package imported by every service) defines:</p>
+  <ul>
+    <li>A common <strong>envelope</strong> (<code>id</code>, <code>type</code>, <code>schemaVersion</code>, <code>occurredAt</code>, <code>source</code>, <code>traceId</code>, <code>payload</code>).</li>
+    <li>A set of <strong>specialized payloads</strong> (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent, CodebookGeneratedEvent, TransactionEvent, PatternMinedEvent, PatternDiscoveredEvent, PatternApprovedEvent, CorrelationResultEvent).</li>
+  </ul>
+  <figure class="diagram">
+    <pre class="mermaid">
+classDiagram
+  class EventEnvelope {
+    +string eventId
+    +string type
+    +int schemaVersion
+    +datetime occurredAt
+    +string source
+    +string traceId
+    +object payload
+  }
+  class AlarmEvent {
+    +string alarmId
+    +string managedObjectId
+    +string eventType
+    +string probableCause
+    +string perceivedSeverity
+    +datetime raisedAt
+    +string state
+    +string[] trailIds
+  }
+  class TopologyChangedEvent {
+    +string snapshotId
+    +string changeType
+    +object[] nodes
+    +object[] edges
+  }
+  class PatternMinedEvent {
+    +string[] sequence
+    +float support
+    +float confidence
+    +float lift
+    +string trailId
+    +object timing
+  }
+  class PatternDiscoveredEvent {
+    +string patternId
+    +string[] sequence
+    +string rootCauseAlarmType
+    +float support
+    +float confidence
+    +float lift
+    +string codebookMatchId
+    +string lifecycle
+  }
+  class CorrelationResultEvent {
+    +string incidentId
+    +string rootCauseAlarmId
+    +string[] childAlarmIds
+    +string matchedPatternId
+    +string matchedCodebookId
+    +float confidence
+  }
+  EventEnvelope &lt;|-- AlarmEvent
+  EventEnvelope &lt;|-- TopologyChangedEvent
+  EventEnvelope &lt;|-- PatternMinedEvent
+  EventEnvelope &lt;|-- PatternDiscoveredEvent
+  EventEnvelope &lt;|-- CorrelationResultEvent
+    </pre>
+    <figcaption>Canonical event model. <code>PatternMinedEvent</code> is the raw Miner output; the Manager enriches it into <code>PatternDiscoveredEvent</code>.</figcaption>
+  </figure>
+  <p>Governance without a registry: the library is the single source of truth, versioned with the repo; <code>schemaVersion</code> in the envelope guards compatibility; consumers reject envelopes with an unknown major <code>schemaVersion</code>.</p>
+
+  <h3>4.4 Data stores</h3>
+  <ul>
+    <li><strong>Apache AGE (Postgres extension)</strong> — topology graph; accessed only through the Topology Service.</li>
+    <li><strong>PostgreSQL</strong> — alarm store, pattern store (owned by the Pattern Manager, with lifecycle), incident/correlation-group store, knowledge store (templates, policy, params). Logical separation by schema.</li>
+    <li><strong>Apache Kafka</strong> — inter-service event bus.</li>
+  </ul>
+
+  <h3>4.5 Cross-cutting concerns</h3>
+  <ul>
+    <li><strong>Identity binding (critical):</strong> synthesized alarms MUST reference the same <code>managedObjectId</code> values used by the topology graph, so enrichment can map alarm → object → trail. Define the ID scheme once in the canonical library.</li>
+    <li><strong>Topology versioning:</strong> every topology load creates a <code>snapshotId</code>; trails and codebook reference the snapshot they were built from.</li>
+    <li><strong>Idempotency:</strong> Kafka is at-least-once; consumers key on <code>eventId</code>/<code>alarmId</code> and dedupe.</li>
+    <li><strong>Observability:</strong> structured JSON logs + Prometheus metrics (Apache-2.0). Dashboards rendered in the Angular UI or Apache Superset (avoid AGPL Grafana).</li>
+    <li><strong>Error handling:</strong> dead-letter topic per consumer; poison messages routed there, not dropped silently.</li>
+  </ul>
+
+  <hr>
+
+  <h2>5. Topology Graph Model</h2>
+  <figure class="diagram">
+    <pre class="mermaid">
+flowchart BT
+  LC["Line card"] -->|"HOSTED_ON"| PORT["Port"]
+  PORT --> IPL["IP link"]
+  FIB["Fiber span"] -->|"RIDES_ON"| IPL
+  IPL -->|"ADJACENCY_OVER"| IGP["IGP adjacency"]
+  IPL -->|"TRAVERSES"| LSP["LSP"]
+  LSP -->|"SERVES"| VPN["VPN service"]
+  SRLG["SRLG group"] -->|"MEMBER_OF"| IPL
+    </pre>
+    <figcaption>Typed multi-layer topology.</figcaption>
+  </figure>
+  <p><strong>Fault-origin types (authored):</strong> <code>Fiber</code>, <code>LineCard</code>, <code>Port</code>, <code>Node</code>. (<code>IPLink</code>, <code>Adj</code>, <code>LSP</code>, <code>VPN</code> are effects, not origins.)</p>
+
+  <h4>Propagation templates (authored, generic, per edge type):</h4>
+  <pre class="code"><code>RIDES_ON        : fault(Fiber)        =&gt; LinkDown(IPLink)
+HOSTED_ON       : fault(LineCard)     =&gt; PortDown(each Port);  PortDown =&gt; LinkDown(its IPLink)
+ADJACENCY_OVER  : LinkDown(IPLink)    =&gt; AdjDown(IGPAdjacency)
+TRAVERSES       : LinkDown(IPLink)    =&gt; LSPDown(LSP head-end)
+SERVES          : LSPDown(LSP)        =&gt; ReachabilityLoss(VPN)
+MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
+  <p><strong>Trail policy (authored):</strong> trail = transitive closure over the dependency edges from each seed, bounded by IGP area; all links in one SRLG join the same trail. Trails overlap; a device may belong to many.</p>
+
+  <hr>
+
+  <h2>6. Microservice Specifications</h2>
+  <p>Each spec is written as a directive build brief for an AI coding agent. Standard expectations for <strong>all</strong> services: containerized (Docker), import the shared canonical event library, expose <code>/health</code> and <code>/metrics</code>, structured logging, config via environment variables, unit + contract tests, README with run instructions.</p>
+
+  <h3>6.1 Simulator Service</h3>
+  <p><strong>Responsibility:</strong> Generate a grounded synthetic Core IP topology and labeled alarm streams (historical + live); replay them onto Kafka. Doubles as the evaluation harness (ground-truth labels).</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Generate a realistic Core IP topology: PE/P/RR/peering nodes, line cards, ports, IP links, IGP adjacencies, LSPs over link paths, VPN services over LSPs, fiber spans with SRLG groupings. Make size configurable (e.g., 10–200 nodes).</li>
+    <li>Assign stable <code>managedObjectId</code>s shared between topology and alarms (per §4.5).</li>
+    <li>Emit a <code>topology.raw</code> snapshot event.</li>
+    <li>Generate <strong>labeled fault scenarios</strong>: inject known root cause → cascade (e.g., fiber cut → LinkDown ×2 → AdjDown → LSPDown → VPNloss) with configurable timing jitter; add background noise (flapping, self-clearing transients, chatty standing alarms, coincidental unrelated alarms). Persist the ground-truth label (which root cause, which children) for evaluation.</li>
+    <li>Replay modes: <code>history</code> (batch onto <code>alarms.history</code>) and <code>live</code> (streamed onto <code>alarms.live</code> with wall-clock pacing).</li>
+  </ul>
+  <p><strong>Technologies:</strong> Python; <code>networkx</code> (BSD) for topology generation; <code>confluent-kafka</code> / <code>kafka-python</code> (Apache/permissive); Pydantic for the event models (shared canonical event library).</p>
+  <p><strong>Integrations:</strong> Produces <code>topology.raw</code>, <code>alarms.history</code>, <code>alarms.live</code>. Reads scenario configs from local files or Knowledge Service.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>Produces a valid, internally consistent topology snapshot with shared IDs.</li>
+    <li>Can emit a labeled fiber-cut scenario whose cascade matches the propagation templates, plus ≥3 noise classes.</li>
+    <li>Ground-truth labels retrievable for evaluation.</li>
+    <li>History and live replay both demonstrably land on the correct topics.</li>
+  </ul>
+
+  <h3>6.2 Topology Service</h3>
+  <p><strong>Responsibility:</strong> Sole owner of the topology graph. Ingests <code>topology.raw</code>, lifts flat records into the typed multi-layer graph in <strong>Apache AGE</strong>, versions snapshots, exposes query APIs, emits <code>topology.changed</code>.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Consume <code>topology.raw</code>; apply <strong>lifting rules</strong> (flat link/adjacency/LSP/VPN/fiber records → typed nodes + typed edges per §5).</li>
+    <li>Persist into AGE, <strong>abstract AGE entirely behind a service API</strong> (openCypher internally; callers never touch the DB).</li>
+    <li>Maintain <code>snapshotId</code> versioning; keep current + previous snapshot.</li>
+    <li>Expose REST/gRPC: get node/edge, get neighbors, traverse by edge types (bounded), resolve <code>managedObjectId</code> → object + layer, list objects by type.</li>
+    <li>Emit <code>topology.changed</code> with the new <code>snapshotId</code>.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Java (Spring Boot); PostgreSQL + Apache AGE; openCypher.</p>
+  <p><strong>Integrations:</strong> Consumes <code>topology.raw</code>; produces <code>topology.changed</code>; serves Trail Builder, Codebook Generator, Enrichment, UI.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>A snapshot with N nodes/edges loads and is queryable; AGE is never exposed outside the service.</li>
+    <li>Bounded traversal by edge types returns correct closures (verified against the synthetic topology).</li>
+    <li><code>managedObjectId</code> resolution returns the object and its layer.</li>
+    <li>Re-ingesting a changed topology creates a new <code>snapshotId</code> and emits <code>topology.changed</code>.</li>
+  </ul>
+
+  <h3>6.3 Knowledge Service</h3>
+  <p><strong>Responsibility:</strong> Authoritative store for domain knowledge — propagation templates, fault-origin types, trail policy, and Phase-2 model parameters (DBSCAN params, session-window gap, min-support, etc.). Versioned, served via API; backed by config UI.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Model templates/policy/params as versioned, validated records in PostgreSQL.</li>
+    <li>Expose CRUD + versioned read APIs.</li>
+    <li>Validate edits (e.g., a template must reference a known edge type).</li>
+    <li>Emit <code>knowledge.updated</code> so dependent services can refresh.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Java (Spring Boot); PostgreSQL.</p>
+  <p><strong>Integrations:</strong> Serves Trail Builder, Codebook Generator, Pattern Miner, Pattern Manager, Noise Filter, UI config page; produces <code>knowledge.updated</code>.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>Templates, origin types, trail policy and model params are CRUD-able and versioned.</li>
+    <li>Invalid edits are rejected with clear errors.</li>
+    <li>Consumers can fetch a specific version; <code>knowledge.updated</code> is emitted on change.</li>
+  </ul>
+
+  <h3>6.4 Trail Builder Service</h3>
+  <p><strong>Responsibility:</strong> Build correlation trails from the topology graph + trail policy. Produces overlapping, policy-bounded clusters; a device may appear in many trails.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>On <code>topology.changed</code> (or on demand), fetch the relevant graph closures from the Topology Service and the trail policy from the Knowledge Service.</li>
+    <li>Compute trails: transitive closure over dependency edges, bounded by IGP area; union SRLG members.</li>
+    <li>Persist trail definitions (members + the <code>snapshotId</code>); expose <code>getTrailsForObject(managedObjectId)</code> and <code>getTrail(trailId)</code>.</li>
+    <li>Emit <code>trails.built</code>.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Python; <code>networkx</code> (BSD) for in-memory closure; PostgreSQL for trail persistence.</p>
+  <p><strong>Integrations:</strong> Consumes <code>topology.changed</code>, reads Topology + Knowledge; produces <code>trails.built</code>; serves Enrichment, Noise Filter, Pattern Miner, UI.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>For the synthetic topology, a device on two LSPs and one SRLG appears in the expected multiple trails.</li>
+    <li>Trails are bounded per policy (no unbounded whole-network blob).</li>
+    <li><code>getTrailsForObject</code> returns all trails containing the object.</li>
+  </ul>
+
+  <h3>6.5 Codebook Generator Service</h3>
+  <p><strong>Responsibility:</strong> Compile the codebook — enumerate candidate root-cause instances and generate each one's predicted symptom signature via forward propagation; tag scenarios to trails.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Enumerate every graph instance whose type is in the fault-origin list (from Knowledge Service).</li>
+    <li>For each, run the propagation templates forward over the graph closure to collect the predicted symptom set (the codebook row), including the origin's own alarm.</li>
+    <li>Tag each scenario with the trail(s) its symptoms occupy.</li>
+    <li>Persist the codebook (scenarios + signatures + trail tags + <code>snapshotId</code>); emit <code>codebook.generated</code>.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Python; <code>networkx</code> (BSD) for forward propagation; PostgreSQL.</p>
+  <p><strong>Integrations:</strong> Consumes <code>trails.built</code>, reads Topology + Knowledge; produces <code>codebook.generated</code>; serves Pattern Manager (reconcile) and Correlation (match).</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>For the synthetic topology, the "fiber cut" scenario's signature matches the expected cascade; "line-card fault" and "port fault" are distinguishable (LOS / PortDown discriminators present/absent).</li>
+    <li>Every scenario is tagged to at least one trail.</li>
+    <li>Regenerating after a topology change produces an updated codebook tied to the new <code>snapshotId</code>.</li>
+  </ul>
+
+  <h3>6.6 Enrichment Service</h3>
+  <p><strong>Responsibility:</strong> First-stage alarm processing (used in both Phase 2 and Phase 3): normalization to the canonical alarm model, <strong>deduplication</strong>, <strong>deterministic noise filtering</strong> (flap-damping, self-clear suppression, maintenance suppression, known-chatter list), and <strong>trail tagging</strong>.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Consume <code>alarms.history</code> and <code>alarms.live</code>.</li>
+    <li>Normalize to the canonical <code>AlarmEvent</code> (X.733-aligned fields).</li>
+    <li>Dedup repeated identical alarms within a short window (count-collapse).</li>
+    <li>Apply deterministic filters: suppress self-clearing transients below a hold time; flap-damp objects oscillating &gt; N times/window into a single summary; drop maintenance-window and known-chatter alarms.</li>
+    <li>Tag each alarm with its <code>trailIds</code> via Trail Builder (<code>getTrailsForObject</code>).</li>
+    <li>Emit <code>alarms.enriched</code> (history) and <code>alarms.enriched.live</code> (live).</li>
+  </ul>
+  <p><strong>Technologies:</strong> Java (Spring Boot); stateless where possible, small windowed state for flap detection (in-memory or Kafka state store).</p>
+  <p><strong>Integrations:</strong> Consumes <code>alarms.*</code>, reads Trail Builder; produces <code>alarms.enriched</code>, <code>alarms.enriched.live</code>.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>Duplicates collapse; flapping reduces to a single summary; self-clear/maintenance/chatter are removed.</li>
+    <li>Every surviving alarm carries correct <code>trailIds</code>.</li>
+    <li>Same service instance works for both history and live inputs.</li>
+  </ul>
+
+  <h3>6.7 Noise Filter Service (DBSCAN)</h3>
+  <p><strong>Responsibility:</strong> Phase-2 statistical noise removal. Scope enriched alarms into per-trail windows and use <strong>DBSCAN</strong> to keep dense incident clusters and drop sparse outliers; output cleaned, trail-scoped groups for the Miner.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Consume <code>alarms.enriched</code> (history).</li>
+    <li>Group alarms per trail within a coarse time window.</li>
+    <li>Feature-vectorize each alarm (timestamp, position in dependency graph, alarm type, severity).</li>
+    <li>Run DBSCAN/HDBSCAN per trail-window; keep dense clusters, label and drop noise points.</li>
+    <li>Emit cleaned, trail-scoped alarm groups as <code>transactions.clean</code> (raw groups; final session-window boundaries are the Miner's responsibility — see 6.8).</li>
+  </ul>
+  <p><strong>Technologies:</strong> Python; scikit-learn (BSD) DBSCAN, <code>hdbscan</code> (BSD). <em>Stays a Python ML service.</em></p>
+  <p><strong>Integrations:</strong> Consumes <code>alarms.enriched</code>, reads Trail Builder + Knowledge (DBSCAN params); produces <code>transactions.clean</code>.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>A coincidental chatty alarm injected into a fiber-cut window is labeled noise and dropped.</li>
+    <li>The tight cascade cluster is preserved intact.</li>
+    <li>DBSCAN params are read from Knowledge Service (tunable, not hard-coded).</li>
+  </ul>
+
+  <h3>6.8 Pattern Miner Service</h3>
+  <p><strong>Responsibility:</strong> <strong>ML execution only.</strong> Assemble trail-scoped, session-windowed transactions and run <strong>PrefixSpan</strong> to discover frequent ordered alarm sequences with support/confidence/lift. Owns the mining model and its configuration. It holds no pattern state: no RCA, no codebook reconciliation, no explainability, no Pattern Store, no lifecycle — those belong to the Pattern Manager (6.9).</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Consume <code>transactions.clean</code>; finalize transactions using a <strong>session window</strong> (gap-based, per trail; gap is a tunable Knowledge-Service parameter).</li>
+    <li>Run <strong>PrefixSpan</strong> (Spark MLlib via PySpark) to discover frequent ordered alarm sequences; compute <strong>support / confidence / lift / conviction</strong>.</li>
+    <li>Expose mining configuration (min-support, max pattern length, gap/window constraints, max sequence count) sourced from the Knowledge Service — no hard-coded thresholds.</li>
+    <li>Attach mining provenance to each result (source trail, window reference, snapshot/codebook version in scope) so the Manager can do RCA and reconciliation downstream.</li>
+    <li>Emit raw mined sequences as <code>patterns.mined</code> (a <code>PatternMinedEvent</code> per sequence). Do not persist patterns or assign lifecycle.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Python; <strong>PySpark</strong> / Spark MLlib PrefixSpan (Apache-2.0). Runs as a stateless Spark job.</p>
+  <p><strong>Integrations:</strong> Consumes <code>transactions.clean</code>; reads Knowledge (mining params); produces <code>patterns.mined</code> for the Pattern Manager.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>Given a transaction set containing the injected fiber-cut sequence, PrefixSpan recovers it as a frequent ordered sequence with correct support.</li>
+    <li>Spurious high-support / low-lift co-occurrences are surfaced with their lift so the Manager can flag them.</li>
+    <li>Mining thresholds are read from Knowledge Service; changing min-support changes the result set.</li>
+    <li>Each emitted <code>PatternMinedEvent</code> carries the sequence, support/confidence/lift, and provenance — and nothing about lifecycle or RCA.</li>
+  </ul>
+
+  <h3>6.9 Pattern Manager Service <span class="new-badge">NEW</span></h3>
+  <p><strong>Responsibility:</strong> Own the full pattern domain — the <strong>Pattern Store</strong>, pattern <strong>status/lifecycle</strong> (<code>draft → approved → deprecated</code>), and all <strong>associated metadata</strong>: RCA, codebook reconciliation, explainability, and the human-approval workflow. This service deliberately contains no ML; it consumes the Miner's raw output and turns it into governed, reviewable, downstream-ready patterns.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Consume <code>patterns.mined</code> (raw sequences + support/confidence/lift + provenance from the Miner).</li>
+    <li><strong>RCA:</strong> map alarms → graph objects; the alarm whose object has no upstream dependency within the group (lowest in the dependency graph), corroborated by earliest timestamp, is tagged root cause. Where a mined pattern overlaps a codebook scenario, take RCA from the scenario.</li>
+    <li><strong>Reconcile</strong> each pattern against the codebook: confirm matches, merge complementary appendages, flag patterns with no model explanation.</li>
+    <li><strong>Explainability:</strong> assemble instance count, support/confidence/lift, timing (median inter-arrival, timeframe), codebook overlap, and supporting example incidents as pattern metadata.</li>
+    <li>Persist to the <strong>Pattern Store</strong> (PostgreSQL) with lifecycle <code>draft</code>; expose a read API for the UI; emit <code>patterns.discovered</code>.</li>
+    <li>Consume <code>patterns.approved</code> (from the UI) → transition lifecycle to <code>approved</code> and emit <code>patterns.approved</code> downstream for Correlation. Support deprecation transitions.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Java (Spring Boot); PostgreSQL (Pattern Store).</p>
+  <p><strong>Integrations:</strong> Consumes <code>patterns.mined</code> (Miner), <code>patterns.approved</code> (UI); reads Topology, Knowledge, Codebook; produces <code>patterns.discovered</code>, <code>patterns.approved</code>; <strong>owns the Pattern Store</strong>.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>For a mined fiber-cut sequence, the service assigns correct ordering-based RCA and a codebook-overlap result.</li>
+    <li>Spurious high-support/low-lift co-occurrences are flagged via lift.</li>
+    <li>Each discovered pattern carries full explainability metadata and a lifecycle state.</li>
+    <li>Approval transitions lifecycle <code>draft → approved</code> and propagates <code>patterns.approved</code>; deprecation is supported.</li>
+  </ul>
+
+  <h3>6.10 Correlation Engine Service</h3>
+  <p><strong>Responsibility:</strong> Real-time correlation. Stateful matching of live enriched alarms against approved patterns and the codebook (partial/closest-match allowed); confidence scoring; conflict resolution; tag root cause + child alarms; persist incidents.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Load approved patterns (Pattern Store + <code>patterns.approved</code>) and the codebook (<code>codebook.generated</code>), scoped by trail.</li>
+    <li>Consume <code>alarms.enriched.live</code>; maintain <strong>per-trail sliding-window state</strong> with timeouts.</li>
+    <li>For each window, evaluate:
+      <ul>
+        <li><strong>Pattern match:</strong> advance per-pattern sequence state machines; fire when the match condition is met (partial allowed).</li>
+        <li><strong>Codebook decode:</strong> score observed symptom set against trail-scoped scenarios using minimum-distance/closest-match (tolerate missing alarms, penalize spurious); pick best.</li>
+      </ul>
+    </li>
+    <li><strong>Conflict resolution:</strong> when multiple patterns/scenarios claim the same alarm, pick by specificity then confidence.</li>
+    <li>On a winning match: create an incident, tag the <strong>root-cause alarm</strong>, mark the rest as <strong>child alarms</strong>, persist to the <strong>Incident Store</strong>, emit <code>correlation.results</code>.</li>
+    <li>Keep the runtime window aligned with the Phase-2 session gap.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Java (Spring Boot) with Kafka Streams (Apache-2.0) for stateful streaming; PostgreSQL (Incident Store).</p>
+  <p><strong>Integrations:</strong> Consumes <code>alarms.enriched.live</code>, <code>patterns.approved</code>, <code>codebook.generated</code>; reads Pattern Store (via Pattern Manager), Codebook; produces <code>correlation.results</code>; owns Incident Store.</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>For a replayed fiber-cut storm, produces <strong>one</strong> incident with the LOS tagged as root cause and the downstream alarms as children — even with one trap dropped (partial match).</li>
+    <li>Multiple competing patterns resolve deterministically.</li>
+    <li>Alarm-reduction ratio and RCA accuracy computable against ground-truth labels.</li>
+  </ul>
+
+  <h3>6.11 Angular Web UI</h3>
+  <p><strong>Responsibility:</strong> Operator and engineer interface. One Angular application, four modules.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li><strong>Topology &amp; trails module:</strong> organize topology by <strong>geo sites</strong>; zoom into a site to view site-level topology and toggle <strong>logical layers</strong> (fiber / IP / IGP / LSP / service); visualize <strong>trail clusters</strong> and highlight a device's multiple trails. Use Cytoscape.js (MIT) for graph rendering and MapLibre GL / deck.gl (BSD/MIT) for the geo view.</li>
+    <li><strong>Pattern review &amp; XAI module:</strong> list discovered patterns (from the Pattern Manager) with support/confidence/lift, RCA, timing, codebook overlap, supporting instances; <strong>approve/reject</strong> actions (emit <code>patterns.approved</code> to the Pattern Manager).</li>
+    <li><strong>Config module:</strong> edit Knowledge-Service model parameters (DBSCAN, session-window gap, min-support, etc.).</li>
+    <li><strong>Correlation stats module:</strong> live incidents, root-cause + children, <strong>noise-filter stats</strong>, <strong>alarm-reduction ratio</strong>, RCA accuracy — to demonstrate effectiveness.</li>
+  </ul>
+  <p><strong>Technologies:</strong> Angular 20 (MIT), Cytoscape.js, MapLibre GL/deck.gl; talks to a thin BFF or directly to service APIs.</p>
+  <p><strong>Integrations:</strong> Reads Topology, Trail Builder, Pattern Store (via Pattern Manager), Incident Store; writes approvals (→ Pattern Manager) and config (→ Knowledge Service).</p>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>Geo-site view zooms into site topology with layer toggles and trail overlays.</li>
+    <li>Patterns can be reviewed with full explainability and approved/rejected.</li>
+    <li>Config edits persist via Knowledge Service.</li>
+    <li>Stats view shows reduction ratio and RCA accuracy for a replayed scenario.</li>
+  </ul>
+
+  <h3>6.12 Shared Canonical Event Library (build deliverable, not a runtime service)</h3>
+  <p><strong>Responsibility:</strong> Single source of truth for the event envelope and specialized payloads (§4.3); imported by every service.</p>
+  <h4>Build instructions:</h4>
+  <ul>
+    <li>Define the envelope and payload models as the canonical contract. Ship <strong>two bindings generated from one JSON Schema</strong>: a <strong>Java library</strong> for the Spring Boot services (Topology, Knowledge, Enrichment, Pattern Manager, Correlation) and a <strong>Python/Pydantic</strong> library for the Python services (Simulator, Trail Builder, Codebook Generator, Noise Filter, Pattern Miner).</li>
+    <li>Include the <code>PatternMinedEvent</code> payload (raw Miner output) alongside <code>PatternDiscoveredEvent</code> / <code>PatternApprovedEvent</code> (Pattern Manager output).</li>
+    <li>Version with the repo; expose <code>schemaVersion</code>; provide (de)serialization helpers and validation.</li>
+    <li>Provide the shared <code>managedObjectId</code> scheme and the canonical <strong>AlarmEvent</strong> (X.733 fields).</li>
+  </ul>
+  <h4>Acceptance criteria:</h4>
+  <ul>
+    <li>All services import and validate against the library; the Java and Python bindings agree on the wire format.</li>
+    <li>Unknown major <code>schemaVersion</code> is rejected by consumers.</li>
+    <li>One change to a payload propagates to all services via the shared dependency.</li>
+  </ul>
+
+  <hr>
+
+  <h2>7. Canonical Event Model (detail)</h2>
+  <p><strong>Envelope:</strong> <code>eventId</code>, <code>type</code>, <code>schemaVersion</code>, <code>occurredAt</code>, <code>source</code>, <code>traceId</code>, <code>payload</code>.</p>
+  <p><strong>AlarmEvent (X.733-aligned):</strong> <code>alarmId</code>, <code>managedObjectId</code>, <code>eventType</code>, <code>probableCause</code>, <code>perceivedSeverity</code>, <code>raisedAt</code>, <code>clearedAt?</code>, <code>state</code> (raised/cleared), <code>vendorRaw?</code>, <code>trailIds[]</code> (added by Enrichment).</p>
+  <p><strong>TopologyChangedEvent:</strong> <code>snapshotId</code>, <code>changeType</code>, <code>nodes[]</code>, <code>edges[]</code> (typed).</p>
+  <p><strong>TrailsBuiltEvent / CodebookGeneratedEvent:</strong> reference <code>snapshotId</code>; carry trail/scenario summaries (full data via API).</p>
+  <p><strong>PatternMinedEvent</strong> (Pattern Miner → Pattern Manager): <code>sequence[]</code>, <code>support</code>, <code>confidence</code>, <code>lift</code>, <code>trailId</code>, <code>timing</code>, provenance (source window, snapshot/codebook version). No RCA, no lifecycle.</p>
+  <p><strong>PatternDiscoveredEvent / PatternApprovedEvent</strong> (Pattern Manager): <code>patternId</code>, <code>sequence[]</code>, <code>rootCauseAlarmType</code>, <code>support</code>, <code>confidence</code>, <code>lift</code>, <code>timing</code>, <code>codebookMatchId?</code>, <code>lifecycle</code>.</p>
+  <p><strong>CorrelationResultEvent:</strong> <code>incidentId</code>, <code>rootCauseAlarmId</code>, <code>childAlarmIds[]</code>, <code>matchedPatternId?</code>, <code>matchedCodebookId?</code>, <code>confidence</code>, <code>trailId</code>.</p>
+  <p>Specialization rule: payloads share the envelope; each <code>type</code> maps to exactly one payload schema in the library.</p>
+
+  <hr>
+
+  <h2>8. Kafka Topics</h2>
+  <table>
+    <thead><tr><th>Topic</th><th>Producer</th><th>Consumers</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>topology.raw</code></td><td>Simulator</td><td>Topology</td><td>snapshot in</td></tr>
+      <tr><td><code>topology.changed</code></td><td>Topology</td><td>Trail Builder, UI</td><td>new <code>snapshotId</code></td></tr>
+      <tr><td><code>trails.built</code></td><td>Trail Builder</td><td>Codebook Gen, (others read API)</td><td></td></tr>
+      <tr><td><code>codebook.generated</code></td><td>Codebook Gen</td><td>Pattern Manager, Correlation</td><td>reconcile + match</td></tr>
+      <tr><td><code>knowledge.updated</code></td><td>Knowledge</td><td>dependents</td><td>refresh trigger</td></tr>
+      <tr><td><code>alarms.history</code></td><td>Simulator</td><td>Enrichment</td><td>batch learning</td></tr>
+      <tr><td><code>alarms.live</code></td><td>Simulator</td><td>Enrichment</td><td>streamed</td></tr>
+      <tr><td><code>alarms.enriched</code></td><td>Enrichment</td><td>Noise Filter</td><td>history path</td></tr>
+      <tr><td><code>alarms.enriched.live</code></td><td>Enrichment</td><td>Correlation</td><td>live path</td></tr>
+      <tr><td><code>transactions.clean</code></td><td>Noise Filter</td><td>Pattern Miner</td><td>DBSCAN-cleaned groups</td></tr>
+      <tr><td><code>patterns.mined</code> <span class="new-badge">NEW</span></td><td>Pattern Miner</td><td>Pattern Manager</td><td>raw PrefixSpan sequences</td></tr>
+      <tr><td><code>patterns.discovered</code></td><td>Pattern Manager</td><td>UI</td><td>for review (draft)</td></tr>
+      <tr><td><code>patterns.approved</code></td><td>UI → Pattern Manager; Pattern Manager → Correlation</td><td>Pattern Manager, Correlation</td><td>lifecycle</td></tr>
+      <tr><td><code>correlation.results</code></td><td>Correlation</td><td>UI</td><td>incidents</td></tr>
+      <tr><td><code>*.dlq</code></td><td>all consumers</td><td>ops</td><td>dead-letter</td></tr>
+    </tbody>
+  </table>
+
+  <hr>
+
+  <h2>9. Build Roadmap (walking skeleton first)</h2>
+  <ol>
+    <li><strong>Skeleton (one scenario end-to-end):</strong> Simulator (small topology + one fiber-cut scenario + IDs) → Topology Service (load into AGE, query) → Trail Builder (one trail) → Codebook Generator (scenarios) → Topology UI renders it.</li>
+    <li><strong>Learning slice:</strong> Enrichment (dedup/det-filter/trail-tag) → Noise Filter (DBSCAN) → Pattern Miner (session-window + PrefixSpan) → Pattern Manager (RCA + reconcile + XAI + lifecycle) recovers the injected pattern → Pattern UI approve.</li>
+    <li><strong>Real-time slice:</strong> Correlation Engine consumes live replay, matches approved pattern + codebook, emits one incident with RCA + children → Stats UI shows reduction ratio + RCA accuracy.</li>
+    <li><strong>Breadth:</strong> more scenarios, larger topology, more noise classes, multiple overlapping trails, conflict resolution, config tuning.</li>
+    <li><strong>Hardening:</strong> DLQs, idempotency, metrics dashboards, topology versioning edge cases.</li>
+  </ol>
+  <p>Each step is independently demoable; do not start a later slice before the prior one passes its acceptance criteria.</p>
+
+  <hr>
+
+  <h2>10. Synthetic Data &amp; Evaluation</h2>
+  <p>The Simulator is the evaluation harness: every injected scenario carries a ground-truth <code>{rootCause, children}</code> label. Metrics to report in the Stats UI:</p>
+  <ul>
+    <li><strong>Alarm-reduction ratio</strong> — raw alarms ÷ correlated incidents.</li>
+    <li><strong>RCA accuracy</strong> — fraction of incidents whose tagged root cause matches the injected label.</li>
+    <li><strong>Noise-filter effectiveness</strong> — % of injected noise removed vs. real alarms retained.</li>
+    <li><strong>Pattern quality</strong> — recovered injected patterns ÷ total injected.</li>
+  </ul>
+  <p>Data realism requirements: X.733-shaped alarms, shared <code>managedObjectId</code>s, controllable timing jitter and noise mix, at least the fiber-cut, line-card-fault and port-fault scenarios plus 3+ noise classes.</p>
+
+  <hr>
+
+  <h2>11. Tech Stack &amp; Licenses (all permissive)</h2>
+  <table>
+    <thead><tr><th>Component</th><th>Choice</th><th>License</th></tr></thead>
+    <tbody>
+      <tr><td>Messaging</td><td>Apache Kafka</td><td>Apache-2.0</td></tr>
+      <tr><td>Relational store</td><td>PostgreSQL</td><td>PostgreSQL (BSD-like)</td></tr>
+      <tr><td>Graph store</td><td>Apache AGE (Postgres ext.)</td><td>Apache-2.0</td></tr>
+      <tr><td>Backend services (API / streaming / state)</td><td>Spring Boot (Java)</td><td>Apache-2.0</td></tr>
+      <tr><td>Graph / simulation services</td><td>Python (FastAPI), <code>networkx</code></td><td>BSD</td></tr>
+      <tr><td>Clustering (DBSCAN)</td><td>Python — scikit-learn, hdbscan</td><td>BSD</td></tr>
+      <tr><td>Pattern mining (PrefixSpan)</td><td>Python — PySpark / Spark MLlib</td><td>Apache-2.0</td></tr>
+      <tr><td>Stream processing</td><td>Kafka Streams (Spring)</td><td>Apache-2.0</td></tr>
+      <tr><td>UI</td><td>Angular 20, Cytoscape.js, MapLibre GL/deck.gl</td><td>MIT / BSD</td></tr>
+      <tr><td>Metrics</td><td>Prometheus (+ Superset for dashboards)</td><td>Apache-2.0</td></tr>
+      <tr><td>Containerization</td><td>Docker, Docker Compose</td><td>Apache-2.0</td></tr>
+    </tbody>
+  </table>
+  <p class="note"><strong>Stack split (by workload, not by default):</strong> services whose core job is in-process graph computation or ML run Python — Simulator, Trail Builder and Codebook Generator (<code>networkx</code>), Noise Filter (scikit-learn) and Pattern Miner (PySpark). Services whose core job is API, persistence, streaming or domain state run Spring Boot — Topology, Knowledge, Enrichment, Pattern Manager and Correlation Engine. The Topology Service stays on Spring Boot because the graph work lives in Apache AGE (openCypher), not in process.</p>
+  <p><strong>Explicitly excluded:</strong> Neo4j Community (GPLv3), ArangoDB CE (BSL/restrictive since 3.12), SPMF mining lib (GPLv3), Confluent Schema Registry (community license), Grafana (AGPLv3), Redpanda (BSL).</p>
+
+  <hr>
+
+  <h2>12. AI-Led Build Guidance</h2>
+  <ul>
+    <li>Build <strong>one service per agent task</strong>, using its §6 spec as the prompt. Hand the agent: the service spec, the canonical event library (§6.12/§7), the relevant topic contracts (§8), and the acceptance criteria.</li>
+    <li>Build the <strong>canonical event library first</strong> — it is the contract every other service depends on.</li>
+    <li><strong>Match the agent to the stack:</strong> the build now has a Python cohort (Simulator, Trail Builder, Codebook Generator, Noise Filter, Pattern Miner) and a Spring Boot cohort (Topology, Knowledge, Enrichment, Pattern Manager, Correlation) — route each to the appropriate specialist agent pool rather than a single generalist.</li>
+    <li>Enforce acceptance criteria as automated tests before integration.</li>
+    <li>Integrate along the <strong>roadmap order</strong> (§9); the Simulator's ground-truth labels are the integration test oracle.</li>
+    <li>Keep the Topology Service as the only component touching AGE; keep the Knowledge Service as the only home for authored templates/policy/params; keep the Pattern Manager as the only owner of pattern state — these boundaries prevent the architecture from rotting.</li>
+    <li>Defer (explicitly out of MVP): redundancy/protection-aware templates, closed-loop feedback execution, multi-domain, HA/scale.</li>
+  </ul>
+
+</main>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'neutral',
+    securityLevel: 'loose',
+    flowchart: { useMaxWidth: true, htmlLabels: true, curve: 'basis' },
+    themeVariables: { fontFamily: 'Georgia, serif', fontSize: '14px' }
+  });
+</script>
+</body>
+</html>
