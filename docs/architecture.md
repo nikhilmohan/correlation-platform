@@ -6,8 +6,8 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 ## Service inventory
 | Service | Cohort | Responsibility | Consumes | Produces |
 |---|---|---|---|---|
-| simulator | Python | synthetic topology + labeled alarms; eval oracle | — | topology.raw, alarms.history, alarms.live |
-| topology | Spring Boot | sole owner of AGE graph; versioned snapshots; query API | topology.raw | topology.changed |
+| simulator | Python | domain-grounded synthetic topology + labeled alarms; eval oracle. Multi-domain by design (Core IP is the MVP domain pack) | — | alarms.history, alarms.live (+ a topology snapshot **file** uploaded to the Topology ingestion API) |
+| topology | Spring Boot | sole owner of AGE graph; versioned snapshots; query API. Ingests topology snapshots via a published **ingestion API** (file upload), not a Kafka topic | topology snapshot file (via ingestion API) | topology.changed |
 | knowledge | Spring Boot | authored templates/policy/params (versioned) | — | knowledge.updated |
 | trail-builder | Python | policy-bounded correlation trails | topology.changed | trails.built |
 | codebook-generator | Python | forward-propagation codebook | trails.built | codebook.generated |
@@ -27,10 +27,18 @@ Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Pyt
 Consumers reject unknown major `schemaVersion`.
 
 ## Kafka topics
-topology.raw, topology.changed, trails.built, codebook.generated, knowledge.updated,
+topology.changed, trails.built, codebook.generated, knowledge.updated,
 alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, transactions.clean,
 patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq.
 Producers/consumers per the table. **Adding a topic is a contract change.**
+
+> **Topology ingestion is file/API-based, not a topic.** The raw topology snapshot is **not**
+> a Kafka event. The Simulator generates a domain-grounded topology snapshot **file** and uploads
+> it to the Topology Service's published **ingestion API**; the Topology Service lifts it into the
+> AGE graph, versions it (`snapshotId`), and emits `topology.changed`. The **topology-snapshot file
+> schema** is a versioned contract (see "Topology snapshot file" below), exactly like the topic and
+> event-model contracts. (Historical note: an earlier `topology.raw` topic was removed in favour of
+> this — the raw-vs-lifted distinction and large snapshot payloads suit a file/API hand-off better.)
 
 ## Data stores & ownership
 Apache AGE — topology graph; only via Topology Service. PostgreSQL — alarm / pattern (owned
@@ -78,6 +86,34 @@ contract**.
 This requirement is captured per service in each `services/<svc>/spec.md` (Contract section)
 and detailed in `design.md` (API contracts + integration points), and is checked by the
 `code-review` and `integration-test` skills.
+
+## Topology snapshot file & ingestion API
+Topology is loaded by **file upload to an API**, not by a Kafka event:
+
+- **Topology snapshot file (a versioned contract).** A domain-grounded topology snapshot is a
+  structured file (JSON) describing the typed nodes and edges of the graph (per the domain's
+  layer model — for the Core IP domain, the §"Topology Graph Model" types: Node/LineCard/Port/
+  IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG and their edges). Every object carries its
+  `managedObjectId` in the canonical `<objectType>:<id>` scheme. The **file schema is a contract**
+  (versioned; a change to it requires an `architecture.md`/spec update + human approval, like a
+  topic/payload). It is the hand-off between any topology *producer* (the Simulator today) and the
+  Topology Service. Where it lives (event-model vs. a `schema/` dir) is a design decision.
+- **Topology ingestion API (owned by the Topology Service).** The Topology Service publishes an
+  OpenAPI 3.1 ingestion endpoint that accepts a topology snapshot file, lifts it into AGE, mints a
+  `snapshotId`, and emits `topology.changed`. Producers (the Simulator) build their upload client
+  against the Topology Service's **published OpenAPI**, never its source — same no-coupling rule as
+  every other synchronous call. The endpoint is a config-switchable integration point for the
+  producer (mock from Topology's OpenAPI for unit tests, real Topology in integration).
+
+## Domain extensibility (Core IP is the MVP domain)
+The platform targets the **Core IP** domain for the MVP, but generation of grounded synthetic data
+is **domain-parameterized by design**: the Simulator separates a reusable generation/replay engine
+from a **domain pack** (the domain's object/edge types, propagation templates, alarm shapes, and
+scenario library). The Core IP domain pack is the only one built for the MVP; a new domain is added
+as a new pack without reworking the engine. Domain-specific business data does **not** leak into the
+shared reusable engine, and the engine is extensible (a new domain pack plugs in). Downstream
+services remain domain-agnostic: they operate on the typed graph, the canonical event model, and
+Knowledge-Service-authored templates/policy — none of which hard-code Core IP specifics.
 
 ## Test frameworks (standard per cohort)
 The unit/contract test framework is fixed per cohort — do not substitute:
