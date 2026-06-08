@@ -31,9 +31,11 @@ the designer and dev agents build against.
   buried in the doc. Don't resolve a contract gap yourself; it is a human decision.
 
 ## Output
-A `services/<svc>/spec.md` with the skill's sections: Purpose, Scope (in/out), Contract
-(topics consumed/produced, APIs, data owned), Non-functional (idempotency key, config,
-health/metrics), **testable Acceptance criteria**, Open questions.
+A `services/<svc>/spec.md` with the skill's sections: Purpose, Scope, **Out of scope**,
+**Tasks (high-level — the discrete units of work the service performs)**, Contract (topics
+consumed/produced, APIs, data owned), Non-functional (idempotency key, config, health/metrics),
+**testable Acceptance criteria**, Open questions. The Tasks section is what the designer builds
+on — keep it outcome-oriented and implementation-free.
 
 ## Process
 Branch `spec/<svc>`; commit the spec; open a PR into `<svc>`. The spec PR is a **human gate** —

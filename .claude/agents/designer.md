@@ -36,10 +36,14 @@ job is to turn an **approved** `services/<svc>/spec.md` into a buildable
   web-ui. Match the Solution Design's stack split.
 
 ## Output
-A `services/<svc>/design.md` with the skill's sections: Stack, module breakdown, data model
-(owned datastore + schema), event handling (consumers/producers, idempotency, DLQ), API
-contracts, key flows, **test plan that maps every acceptance criterion to a specific test**,
-config/observability, build/run.
+A `services/<svc>/design.md` with the skill's sections: Stack, **Task breakdown (builds on the
+spec's Tasks — every spec task realized and traceable)**, module breakdown, data model (owned
+datastore + schema), event handling (consumers/producers, idempotency, DLQ), API contracts,
+integration points, key flows, **Design alternatives (options considered + rationale)**, and a
+**Test plan** that (a) maps every acceptance criterion to a specific test and (b) defines the
+**E2E scenarios from this design unit's point of view** (incl. failure/partial paths),
+config/observability, build/run. **Use Mermaid diagrams** where a flow, state machine, component
+interaction, or data model is clearer as a picture.
 
 ## Process
 Branch `design/<svc>`; commit the design; open a PR into `<svc>`. The design PR is a **human

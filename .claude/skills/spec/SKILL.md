@@ -22,12 +22,18 @@ Derive it; do not invent.
    the data it owns, and its acceptance criteria from the Solution Design.
 2. Fill the **template** below. Use the **exact** topic and payload names from
    `architecture.md` — do not paraphrase or rename them.
-3. Phrase every acceptance criterion so it can map to a **single unit test** (concrete,
-   observable, testable).
-4. Anything not already in the contract — a needed new topic/payload/field, an undefined
+3. Capture a **high-level view of the Tasks** the service performs — the discrete units of work
+   it is responsible for (the *what*, not the *how*). Each task is a short, outcome-oriented
+   statement (e.g. "Ingest `topology.raw` and lift flat records into the typed graph"). These
+   tasks are what the `design` skill builds on and detail out. Keep them implementation-free.
+4. Be explicit about **Out of scope** — what this service deliberately does NOT do (deferred
+   MVP items, responsibilities owned by other services). This bounds the design.
+5. Phrase every acceptance criterion so it can map to a **single unit test** (concrete,
+   observable, testable). Where useful, relate criteria back to the tasks they verify.
+6. Anything not already in the contract — a needed new topic/payload/field, an undefined
    behaviour, an ambiguity — goes under **Open questions**. Do **not** guess and do **not**
    introduce a contract change here.
-5. Stay in the "what/why". No stack, modules, or algorithms — that is the design stage.
+7. Stay in the "what/why". No stack, modules, or algorithms — that is the design stage.
 
 ## Template (`services/<svc>/spec.md`)
 ```markdown
@@ -38,7 +44,17 @@ Derive it; do not invent.
 
 ## Scope
 **In scope:** <bullets>
-**Out of scope:** <bullets — e.g. deferred MVP items>
+
+## Out of scope
+<bullets — what this service deliberately does NOT do: deferred MVP items, responsibilities
+owned by other services. Bounds the design.>
+
+## Tasks (high-level)
+<The discrete units of work this service is responsible for — outcome-oriented, implementation-
+free. The design builds on and details these.>
+1. <Task — e.g. "Ingest `topology.raw` and lift flat records into the typed multi-layer graph">
+2. <Task>
+…
 
 ## Contract
 - **Consumes (Kafka):** <exact topic names, or "—">
@@ -70,6 +86,7 @@ Derive it; do not invent.
 
 ## Gate (must hold before the spec PR)
 - Every topic/payload/API reference matches `docs/architecture.md` exactly.
+- **Tasks (high-level)** and **Out of scope** are both populated — the design depends on them.
 - **No silent new topic/payload/field** — any such need is an Open question, not part of the
   contract.
 - If the service exposes an HTTP API, the spec states it **publishes OpenAPI 3.1** and lists
