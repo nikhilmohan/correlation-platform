@@ -73,7 +73,7 @@ services:
 #
 #   Also deferred:
 #     - kafka-init: one-shot container creating the architecture.md topic catalog
-#       (topology.raw, topology.changed, trails.built, codebook.generated, knowledge.updated,
+#       (topology.changed, trails.built, codebook.generated, knowledge.updated,
 #        alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, transactions.clean,
 #        patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq)
 #     - spark: PySpark runtime for pattern-miner (container-only)

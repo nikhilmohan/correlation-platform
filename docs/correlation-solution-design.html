@@ -174,8 +174,8 @@ flowchart TD
     CE["Correlation Engine Service<br/>match · score · RCA · children"]
   end
 
-  SIM -->|"topology.raw / alarms.history / alarms.live"| KAFKA
-  KAFKA -->|"topology.raw"| TOP
+  SIM -->|"alarms.history / alarms.live"| KAFKA
+  SIM -->|"topology snapshot file (ingestion API)"| TOP
   TOP <--> AGE
   TOP -->|"topology.changed"| TB
   TOP -->|"topology.changed"| UI
@@ -343,12 +343,12 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
   <ul>
     <li>Generate a realistic Core IP topology: PE/P/RR/peering nodes, line cards, ports, IP links, IGP adjacencies, LSPs over link paths, VPN services over LSPs, fiber spans with SRLG groupings. Make size configurable (e.g., 10–200 nodes).</li>
     <li>Assign stable <code>managedObjectId</code>s shared between topology and alarms (per §4.5).</li>
-    <li>Emit a <code>topology.raw</code> snapshot event.</li>
+    <li>Generate a domain-grounded topology snapshot <strong>file</strong> and upload it to the Topology Service's <strong>ingestion API</strong> (not a Kafka event). Generation is domain-parameterized (a reusable engine + a domain pack; Core IP is the MVP pack).</li>
     <li>Generate <strong>labeled fault scenarios</strong>: inject known root cause → cascade (e.g., fiber cut → LinkDown ×2 → AdjDown → LSPDown → VPNloss) with configurable timing jitter; add background noise (flapping, self-clearing transients, chatty standing alarms, coincidental unrelated alarms). Persist the ground-truth label (which root cause, which children) for evaluation.</li>
     <li>Replay modes: <code>history</code> (batch onto <code>alarms.history</code>) and <code>live</code> (streamed onto <code>alarms.live</code> with wall-clock pacing).</li>
   </ul>
   <p><strong>Technologies:</strong> Python; <code>networkx</code> (BSD) for topology generation; <code>confluent-kafka</code> / <code>kafka-python</code> (Apache/permissive); Pydantic for the event models (shared canonical event library).</p>
-  <p><strong>Integrations:</strong> Produces <code>topology.raw</code>, <code>alarms.history</code>, <code>alarms.live</code>. Reads scenario configs from local files or Knowledge Service.</p>
+  <p><strong>Integrations:</strong> Produces <code>alarms.history</code>, <code>alarms.live</code>; uploads the topology snapshot file to the Topology Service ingestion API (client built against Topology's published OpenAPI). Reads scenario configs from local files or Knowledge Service.</p>
   <h4>Acceptance criteria:</h4>
   <ul>
     <li>Produces a valid, internally consistent topology snapshot with shared IDs.</li>
@@ -358,17 +358,17 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
   </ul>
 
   <h3>6.2 Topology Service</h3>
-  <p><strong>Responsibility:</strong> Sole owner of the topology graph. Ingests <code>topology.raw</code>, lifts flat records into the typed multi-layer graph in <strong>Apache AGE</strong>, versions snapshots, exposes query APIs, emits <code>topology.changed</code>.</p>
+  <p><strong>Responsibility:</strong> Sole owner of the topology graph. Ingests a topology snapshot <strong>file via a published ingestion API</strong>, lifts records into the typed multi-layer graph in <strong>Apache AGE</strong>, versions snapshots, exposes query APIs, emits <code>topology.changed</code>.</p>
   <h4>Build instructions:</h4>
   <ul>
-    <li>Consume <code>topology.raw</code>; apply <strong>lifting rules</strong> (flat link/adjacency/LSP/VPN/fiber records → typed nodes + typed edges per §5).</li>
+    <li>Expose a <strong>topology ingestion API</strong> (OpenAPI 3.1) accepting a topology snapshot file (the versioned topology-file schema); apply <strong>lifting rules</strong> (flat link/adjacency/LSP/VPN/fiber records → typed nodes + typed edges per §5).</li>
     <li>Persist into AGE, <strong>abstract AGE entirely behind a service API</strong> (openCypher internally; callers never touch the DB).</li>
     <li>Maintain <code>snapshotId</code> versioning; keep current + previous snapshot.</li>
     <li>Expose REST/gRPC: get node/edge, get neighbors, traverse by edge types (bounded), resolve <code>managedObjectId</code> → object + layer, list objects by type.</li>
     <li>Emit <code>topology.changed</code> with the new <code>snapshotId</code>.</li>
   </ul>
   <p><strong>Technologies:</strong> Java (Spring Boot); PostgreSQL + Apache AGE; openCypher.</p>
-  <p><strong>Integrations:</strong> Consumes <code>topology.raw</code>; produces <code>topology.changed</code>; serves Trail Builder, Codebook Generator, Enrichment, UI.</p>
+  <p><strong>Integrations:</strong> Ingests the topology snapshot file via its published ingestion API (producers upload against that OpenAPI); produces <code>topology.changed</code>; serves Trail Builder, Codebook Generator, Enrichment, UI.</p>
   <h4>Acceptance criteria:</h4>
   <ul>
     <li>A snapshot with N nodes/edges loads and is queryable; AGE is never exposed outside the service.</li>
@@ -589,7 +589,7 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
   <table>
     <thead><tr><th>Topic</th><th>Producer</th><th>Consumers</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td><code>topology.raw</code></td><td>Simulator</td><td>Topology</td><td>snapshot in</td></tr>
+      <tr><td><em>(topology snapshot)</em></td><td>Simulator</td><td>Topology</td><td><strong>not a topic</strong> — uploaded as a file to the Topology ingestion API</td></tr>
       <tr><td><code>topology.changed</code></td><td>Topology</td><td>Trail Builder, UI</td><td>new <code>snapshotId</code></td></tr>
       <tr><td><code>trails.built</code></td><td>Trail Builder</td><td>Codebook Gen, (others read API)</td><td></td></tr>
       <tr><td><code>codebook.generated</code></td><td>Codebook Gen</td><td>Pattern Manager, Correlation</td><td>reconcile + match</td></tr>
