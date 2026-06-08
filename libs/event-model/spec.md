@@ -19,10 +19,11 @@ source code to access event shapes.
   `source`, `traceId`, `payload`.
 - Define all nine **payload schemas** with their authoritative field lists (see Contract section).
 - Define the **`managedObjectId` scheme** — the shared identity binding that allows alarms and
-  the topology graph to reference the same objects.
+  the topology graph to reference the same objects. Format: `<objectType>:<id>` (see Contract
+  section for known types and validation rule).
 - Enforce the **specialization rule**: each `type` value maps to exactly one payload schema.
-- Enforce the **`schemaVersion` compatibility policy**: consumers reject envelopes whose major
-  `schemaVersion` exceeds the supported major.
+- Enforce the **`schemaVersion` compatibility policy**: the initial supported major version is
+  **1**. Consumers accept major `1` and **reject major ≥ 2**.
 - Provide **(de)serialization helpers and validation** for both Java and Python bindings.
 - Be buildable as a versioned, importable **Java library** (Gradle) and a versioned, importable
   **Python/Pydantic package** (pip).
@@ -37,7 +38,7 @@ source code to access event shapes.
 - A schema registry (explicitly excluded from MVP; the library replaces it).
 - REST or HTTP endpoints — this library has none; it is an importable dependency.
 - Automated schema migration or backward-compatibility transformation — the `schemaVersion`
-  policy is reject-on-unknown-major; migration is a future concern.
+  policy is reject-on-major-≥2; migration is a future concern.
 - Redundancy/protection-aware propagation fields, multi-domain payloads, HA/scale — all deferred
   per MVP non-goals.
 
@@ -47,11 +48,13 @@ source code to access event shapes.
    `source`, `traceId`, `payload`, and generate both Java and Python bindings from it.
 2. Define each of the **nine payload schemas** (see Contract) from one JSON Schema source,
    generating both bindings, such that each `type` string resolves to exactly one payload.
-3. Define and encode the **`managedObjectId` scheme** — the shared identity format used by the
-   Simulator for alarm emission and by the Topology Service for graph nodes — so all services
-   referencing network objects use the same identifier format.
+3. Define and encode the **`managedObjectId` scheme** — format `<objectType>:<id>`, known
+   `objectType` values restricted to the typed graph layers (`Node`, `LineCard`, `Port`,
+   `IPLink`, `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`, `SRLG`), `id` a stable
+   non-empty string — so the Simulator (alarm generation) and Topology Service (graph nodes)
+   use the same identifier format per §4.5.
 4. Implement **`schemaVersion` validation** in both bindings: deserialization raises/rejects when
-   the event's major `schemaVersion` exceeds the supported major.
+   the event's `schemaVersion` is ≥ 2 (i.e., major exceeds supported major `1`).
 5. Provide **(de)serialization helpers** in both bindings: serialize an envelope+payload to JSON;
    deserialize JSON to the correct typed payload based on `type`; raise on schema violations.
 6. Publish the library as importable **versioned artifacts** (Gradle for Java, pip-installable
@@ -75,7 +78,7 @@ source code to access event shapes.
 |---|---|---|---|
 | `eventId` | string (UUID) | yes | globally unique per event; idempotency key |
 | `type` | string | yes | discriminator; maps 1:1 to a payload schema |
-| `schemaVersion` | integer | yes | consumers reject unknown major version |
+| `schemaVersion` | integer | yes | initial value `1`; consumers accept `1`, reject ≥ `2` |
 | `occurredAt` | datetime (ISO-8601) | yes | when the event occurred |
 | `source` | string | yes | originating service name |
 | `traceId` | string | yes | distributed trace identifier |
@@ -88,7 +91,7 @@ source code to access event shapes.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `alarmId` | string | yes | unique alarm identifier |
-| `managedObjectId` | string | yes | must match topology graph identity scheme |
+| `managedObjectId` | string | yes | must match topology graph identity scheme (format: `<objectType>:<id>`) |
 | `eventType` | string | yes | X.733 event type |
 | `probableCause` | string | yes | X.733 probable cause |
 | `perceivedSeverity` | string | yes | X.733 severity |
@@ -109,23 +112,38 @@ source code to access event shapes.
 
 **TrailsBuiltEvent** (carried on `trails.built`):
 
+Summary only — full trail membership is fetched via the Trail Builder API (`getTrail(trailId)`),
+per §6.4.
+
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `snapshotId` | string | yes | topology snapshot this build references |
-| (summary fields) | — | — | carries trail summaries; full data available via Trail Builder API |
+| `trailIds` | string[] | yes | array of trail identifiers built in this snapshot |
+| `trailCount` | integer | yes | number of trails built (must equal `trailIds.length`) |
 
 **CodebookGeneratedEvent** (carried on `codebook.generated`):
+
+Summary only — full signatures are fetched via the Codebook Generator API, per §6.5.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `snapshotId` | string | yes | topology snapshot this codebook was compiled from |
-| (summary fields) | — | — | carries scenario summaries; full data available via Codebook Generator API |
+| `scenarioCount` | integer | yes | number of scenarios in this codebook |
+| `codebookId` | string | yes | identifies this codebook version; referenced as `matchedCodebookId` in CorrelationResultEvent |
 
 **TransactionEvent** (carried on `transactions.clean`):
 
+Raw DBSCAN-cleaned, trail-scoped alarm groups from the Noise Filter (§6.7); the Pattern Miner
+finalizes session-window boundaries downstream (§6.8).
+
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| (trail-scoped alarm group fields) | — | — | DBSCAN-cleaned, trail-scoped alarm group for the Pattern Miner |
+| `transactionId` | string | yes | unique identifier for this transaction group |
+| `trailId` | string | yes | trail scope of the alarm group |
+| `snapshotId` | string | yes | topology snapshot in scope when this group was formed |
+| `alarmIds` | string[] | yes | alarm identifiers in this DBSCAN-cleaned group |
+| `windowStart` | datetime | yes | start of the raw time window |
+| `windowEnd` | datetime | yes | end of the raw time window |
 
 **PatternMinedEvent** (carried on `patterns.mined`; Miner output only — no RCA, no lifecycle):
 
@@ -135,9 +153,17 @@ source code to access event shapes.
 | `support` | float | yes | frequency of the sequence |
 | `confidence` | float | yes | conditional probability |
 | `lift` | float | yes | lift over baseline |
-| `trailId` | string | yes | trail scope the pattern was mined from |
+| `trailId` | string | yes | trail scope the pattern was mined from (top-level field) |
 | `timing` | object | yes | inter-arrival timing statistics for the sequence |
-| `provenance` | object | yes | source window reference, snapshot version, codebook version in scope |
+| `provenance` | object | yes | nested object; see sub-fields below |
+
+`provenance` sub-fields:
+
+| Sub-field | Type | Required | Notes |
+|---|---|---|---|
+| `sourceWindowId` | string | yes | identifies the transaction window this pattern was mined from |
+| `snapshotId` | string | yes | topology snapshot version in scope when mining ran |
+| `codebookVersion` | string | yes | codebook version in scope when mining ran |
 
 **PatternDiscoveredEvent** (carried on `patterns.discovered`; Pattern Manager output):
 
@@ -175,16 +201,26 @@ source code to access event shapes.
 | `rootCauseAlarmId` | string | yes | `alarmId` of the tagged root-cause alarm |
 | `childAlarmIds` | string[] | yes | `alarmId`s of correlated child alarms |
 | `matchedPatternId` | string | no | pattern that matched, if any |
-| `matchedCodebookId` | string | no | codebook scenario that matched, if any |
+| `matchedCodebookId` | string | no | codebook scenario that matched, if any; references `codebookId` from CodebookGeneratedEvent |
 | `confidence` | float | yes | correlation confidence score |
 | `trailId` | string | yes | trail scope of the incident |
 
 ### `managedObjectId` scheme
 
-The `managedObjectId` is the shared identity binding for network objects: the **same identifier
-format** must be used by the Simulator when generating alarms and by the Topology Service when
-persisting graph nodes. The scheme is defined once in this library and referenced by both
-cohorts. Its exact format (prefix conventions, structure) is specified in the JSON Schema source.
+The `managedObjectId` is the shared identity binding for network objects. Format:
+
+```
+<objectType>:<id>
+```
+
+- `objectType` MUST be one of the nine known typed graph layers (from Solution Design §5):
+  `Node`, `LineCard`, `Port`, `IPLink`, `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`, `SRLG`.
+- `id` MUST be a stable, non-empty string (no colon characters permitted in `id`).
+- **Validation rule:** the value matches `<knownObjectType>:<non-empty-id>` where `objectType`
+  is in the known set above. Values that fail this rule are invalid.
+- **Examples:** `Port:PE1-LC2-P3`, `FiberSpan:SPAN-AB-01`, `Node:PE1`, `LineCard:PE1-LC2`.
+- This same scheme is used by the Simulator when generating alarms and by the Topology Service
+  when persisting graph nodes, per §4.5. It is defined once here and referenced by both cohorts.
 
 ## Non-functional
 
@@ -197,9 +233,11 @@ cohorts. Its exact format (prefix conventions, structure) is specified in the JS
 - **API contract:** N/A — this library has no HTTP surface. The JSON Schema is the contract;
   it is checked into the repo. Any change to the schema is a contract change requiring
   `docs/architecture.md` update and human approval before dependent services proceed.
-- **`schemaVersion` compatibility policy:** consumers MUST reject any envelope whose major
-  `schemaVersion` exceeds the highest major version supported by the installed library. Minor
-  version increments are additive/backward-compatible; major increments are breaking.
+- **`schemaVersion` compatibility policy:** The initial supported major version is **1**.
+  Consumers MUST accept envelopes with `schemaVersion = 1`. Consumers MUST reject any envelope
+  with `schemaVersion ≥ 2` (i.e., any major version that exceeds the supported major). Minor
+  version increments are additive/backward-compatible; major increments are breaking. The
+  boundary values for testing are: `schemaVersion = 1` → accept; `schemaVersion = 2` → reject.
 - **Error handling:** N/A for the library itself. Services consuming events from Kafka route
   deserialization failures (e.g., unknown major version, missing required field) to the
   `<topic>.dlq` dead-letter topic — per each service's spec.
@@ -221,10 +259,10 @@ cohorts. Its exact format (prefix conventions, structure) is specified in the JS
    either binding's source. (Verified by: re-run the binding-generation step; assert the new
    field is present in both generated artifacts.)
 
-3. **Unknown major `schemaVersion` rejected:** Deserializing an envelope whose `schemaVersion`
-   major component exceeds the supported major (e.g., `schemaVersion = 2` when the library
-   supports major `1`) raises a validation error / exception in both the Java binding and the
-   Python binding. A `schemaVersion` at or below the supported major is accepted.
+3. **Unknown major `schemaVersion` rejected:** Deserializing an envelope with `schemaVersion = 1`
+   succeeds in both the Java binding and the Python binding. Deserializing an envelope with
+   `schemaVersion = 2` raises a validation error / exception in both bindings. (Two boundary
+   values; both assertions required in each binding.)
 
 ### Envelope
 
@@ -260,48 +298,51 @@ cohorts. Its exact format (prefix conventions, structure) is specified in the JS
     an object with those fields results in either validation failure or those fields being
     stripped — they are not present in the wire format.
 
-### managedObjectId scheme
+11. **PatternMinedEvent provenance is a nested object with required sub-fields:** Deserializing
+    a `PatternMinedEvent` where `provenance` is absent, or where any of `provenance.sourceWindowId`,
+    `provenance.snapshotId`, or `provenance.codebookVersion` is absent, raises a validation error
+    in both bindings. `trailId` is a top-level field and is validated independently.
 
-11. **`managedObjectId` scheme is defined in the library:** The library exposes a documented
-    identifier scheme (e.g., format string, validation regex, or factory) for `managedObjectId`
-    values. A `managedObjectId` that does not conform to the scheme fails validation when
-    validated against the scheme.
+### TrailsBuiltEvent
+
+12. **TrailsBuiltEvent required fields enforced:** Deserializing a `TrailsBuiltEvent` with any
+    of `snapshotId`, `trailIds`, or `trailCount` absent raises a validation error in both bindings.
+    Deserializing a valid `TrailsBuiltEvent` with all three fields present succeeds.
+
+### CodebookGeneratedEvent
+
+13. **CodebookGeneratedEvent required fields enforced:** Deserializing a `CodebookGeneratedEvent`
+    with any of `snapshotId`, `scenarioCount`, or `codebookId` absent raises a validation error
+    in both bindings. Deserializing a valid `CodebookGeneratedEvent` with all three fields present
+    succeeds.
+
+### TransactionEvent
+
+14. **TransactionEvent required fields enforced:** Deserializing a `TransactionEvent` with any
+    of `transactionId`, `trailId`, `snapshotId`, `alarmIds`, `windowStart`, or `windowEnd`
+    absent raises a validation error in both bindings. Deserializing a valid `TransactionEvent`
+    with all six fields present succeeds.
+
+### `managedObjectId` scheme
+
+15. **`managedObjectId` valid format accepted:** A `managedObjectId` value of the form
+    `<knownObjectType>:<non-empty-id>` (e.g., `Port:PE1-LC2-P3`, `FiberSpan:SPAN-AB-01`) passes
+    the library's `managedObjectId` validation in both bindings.
+
+16. **`managedObjectId` invalid format rejected:** Each of the following is rejected by the
+    library's `managedObjectId` validation in both bindings: (a) an unknown `objectType`
+    (e.g., `Switch:X1`), (b) an empty `id` component (e.g., `Port:`), (c) a value with no
+    colon separator (e.g., `PE1-LC2-P3`), (d) an empty string. (Four sub-cases; all must fail
+    validation.)
 
 ### Build and import
 
-12. **Java binding builds cleanly:** Running the Java build (Gradle) with no pre-existing
+17. **Java binding builds cleanly:** Running the Java build (Gradle) with no pre-existing
     generated artifacts produces a buildable, importable JAR with no compilation errors.
 
-13. **Python binding installs cleanly:** Installing the Python package (pip install) with no
+18. **Python binding installs cleanly:** Installing the Python package (pip install) with no
     pre-existing generated artifacts produces an importable package with no import errors.
 
 ## Open questions
 
-- **`TrailsBuiltEvent` summary fields:** §7 states this event carries "trail summaries (full
-  data via API)" but does not enumerate the summary fields. The exact field list for
-  `TrailsBuiltEvent` is not specified in `docs/architecture.md` or §7. **Resolution needed:**
-  what summary fields (e.g., `trailCount`, `trailIds[]`, `snapshotId`) must this payload carry?
-  (A human must decide; the designer cannot define the schema until this is resolved.)
-
-- **`CodebookGeneratedEvent` summary fields:** §7 states this event carries "scenario
-  summaries (full data via API)" but does not enumerate the summary fields. **Resolution
-  needed:** what summary fields (e.g., `scenarioCount`, `snapshotId`) must this payload carry?
-
-- **`TransactionEvent` field list:** §7 describes `TransactionEvent` as a "DBSCAN-cleaned,
-  trail-scoped alarm group" but does not enumerate the fields. **Resolution needed:** what
-  fields does this payload carry (e.g., `trailId`, `alarmIds[]`, `windowStart`, `windowEnd`)?
-
-- **`managedObjectId` format:** The scheme is referenced in §4.5 and §7 as "defined once in
-  the canonical library" but the exact format (e.g., `<domain>:<type>:<id>`, UUID, structured
-  string) is not specified in `docs/architecture.md` or §7. **Resolution needed:** the designer
-  cannot produce the JSON Schema constraint until the format is defined by a human.
-
-- **`schemaVersion` initial value:** The library version is "versioned with the repo" per §4.3,
-  but the initial `schemaVersion` integer (e.g., `1`) is not stated explicitly. **Resolution
-  needed:** confirm the initial supported major version so consumers can be coded to reject
-  anything above it.
-
-- **`PatternMinedEvent` provenance sub-fields:** §7 names `provenance` as a field (source
-  window, snapshot/codebook version in scope) but does not specify whether `provenance` is a
-  nested object with named sub-fields or a flat string. **Resolution needed:** define the
-  sub-field names and types for `provenance` so the schema can be specified precisely.
+None.
