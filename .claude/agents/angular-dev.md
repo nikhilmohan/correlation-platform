@@ -38,6 +38,16 @@ with four modules:
   `architecture.md` → "API contracts & integration points".
 - **Branch + PR.** Work on `build/web-ui`; open a PR into `web-ui`. Address code-reviewer
   findings (loop cap 3, then escalate). Do not self-merge.
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` for: how to escalate (open a
+  `gh` issue / PR comment — a missing endpoint goes here, never lost in prose), how to count
+  review rounds, the contract-change procedure, self-verification before a PR, and PR/commit
+  conventions.
+- **Closing action.** When the reviewer says APPROVE and CI is green, do **not** merge — post a
+  PR comment stating "reviewer APPROVE + CI green — awaiting human merge of `build/web-ui` →
+  `web-ui`" and stop.
+- **Integration issues.** If `@integration-tester` filed an issue labeled `service:web-ui`,
+  pick it up on `build/web-ui`, fix to the failing assertion, and signal readiness on the
+  issue. Respect the 5-round integration cap.
 
 ## Engineering standards
 - **Angular 20 standalone components** (no NgModules); **signals** for reactive state;

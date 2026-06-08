@@ -32,6 +32,19 @@ trail-tag), `pattern-manager` (Pattern Store, RCA, reconcile, XAI, lifecycle), a
   Other services read via API/event, never the store directly.
 - **Branch + PR.** Work on `build/<svc>`; open a PR into `<svc>`. Address code-reviewer
   findings (loop cap 3, then escalate). Do not self-merge.
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` for: how to escalate (open a
+  `gh` issue / PR comment — never lose it in prose), how to count review rounds, the
+  contract-change procedure, the event-model-frozen precondition, self-verification before a
+  PR, and PR/commit conventions.
+- **Precondition.** Before building, confirm `libs/event-model` exists and is **frozen** (the
+  Java binding imports). If not, stop and escalate — never invent a payload to work around it.
+- **Closing action.** When the reviewer says APPROVE and CI is green, do **not** merge — post a
+  PR comment stating "reviewer APPROVE + CI green — awaiting human merge of `build/<svc>` →
+  `<svc>`" and stop.
+- **Integration issues.** If `@integration-tester` filed an issue labeled `service:<svc>` for a
+  service you own, pick it up on `build/<svc>`, fix to the failing assertion, and on merge note
+  in the issue that it is ready for the next integration run (you do not run integration
+  yourself; you signal it is fixable). Respect the 5-round integration cap.
 
 ## Engineering standards
 - **Tests first.** Write tests mapping 1:1 to the spec's acceptance criteria before

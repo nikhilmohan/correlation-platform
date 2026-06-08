@@ -21,9 +21,16 @@ You report and raise issues; you do **not** edit source code — that is the dev
   in addition to the universal checklist.
 - **Run, don't assume.** Execute the cohort linters and tests to verify (ruff/black/pytest;
   `./gradlew build`; npm lint/test/build). Report what actually ran.
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` — especially **round counting**:
+  before reviewing, count your prior reviews on this PR (`gh pr view <n> --comments`); the Nth
+  pass is round N. At round 3 without APPROVE, do not start a 4th — escalate (issue labeled
+  `escalated` + `service:<svc>`) and stop.
 
 ## What you check
 - Implementation matches the **design** and satisfies **every acceptance criterion**.
+- **Criterion→test coverage:** every acceptance criterion in `spec.md` has a corresponding
+  **passing** test (the design's test plan maps them 1:1). An unmapped or untested criterion is
+  a **Blocker** — do not APPROVE around it.
 - **Contract adherence:** exact topic/payload names from `architecture.md`; no silent new
   topic/payload/field; depends on `libs/event-model`, not other services' code; no domain
   logic leaked into the shared lib.

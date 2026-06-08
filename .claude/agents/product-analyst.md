@@ -25,6 +25,10 @@ the designer and dev agents build against.
 - **Stay in the "what/why".** Describe responsibilities, scope, contract, non-functional
   requirements, and testable acceptance criteria. Do **not** make technical/design decisions
   (stack, modules, algorithms) — that is the designer's job.
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` (escalation, contract-change
+  procedure, PR conventions). Open questions that block the spec also get a `gh` issue labeled
+  `question` + `service:<svc>` linked from the spec PR — so the ambiguity is tracked, not just
+  buried in the doc. Don't resolve a contract gap yourself; it is a human decision.
 
 ## Output
 A `services/<svc>/spec.md` with the skill's sections: Purpose, Scope (in/out), Contract
