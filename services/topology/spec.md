@@ -33,8 +33,10 @@ business logic.
 - Expose a **query API** (OpenAPI 3.1): get node by `managedObjectId`, get edge, get neighbors,
   bounded traversal by edge type(s), resolve `managedObjectId` to object + layer, list objects
   by type.
-- Own and publish the **topology-snapshot file schema** (versioned contract); changes to the
-  schema require the same contract-change approval process as a new Kafka topic/payload.
+- Own and publish the **topology-snapshot file schema** at
+  `services/topology/schema/snapshot.schema.json` (versioned contract co-located with the
+  owning service); changes to the schema require the same contract-change approval process as a
+  new Kafka topic/payload.
 - Publish **OpenAPI 3.1** at `/openapi.json` (plus a human-readable UI) and check the generated
   `openapi.json` into `services/topology/`; this spec is the single source of truth for the
   HTTP surface.
@@ -63,13 +65,16 @@ business logic.
 - **Domain-specific business logic is out of scope for the engine.** The typed layers come
   from the ingested file; the service does not hard-code Core IP specifics. New domains are
   supported by uploading a conforming snapshot file — no code change required.
+- **`delete` changeType is out of scope for MVP.** Only `full-load` and `incremental` are
+  supported changeType values in this release; delete operations are deferred.
 
 ---
 
 ## Tasks (high-level)
 
 1. **Validate and ingest a topology snapshot file.** Accept a file upload via the ingestion
-   API, validate it against the topology-file schema (reject non-conforming files with a
+   API, validate it against the topology-file schema at
+   `services/topology/schema/snapshot.schema.json` (reject non-conforming files with a
    structured error), and persist the lifted graph into Apache AGE under a freshly minted
    `snapshotId`.
 
@@ -83,8 +88,8 @@ business logic.
 
 4. **Emit `topology.changed`.** After every successful ingest, publish a `TopologyChangedEvent`
    (envelope + payload per the frozen event-model) on `topology.changed` carrying the new
-   `snapshotId`, the `changeType`, and the full `nodes[]` / `edges[]` summaries. Deduplicate
-   on `eventId` to satisfy at-least-once delivery.
+   `snapshotId`, the `changeType` (one of `full-load` or `incremental`), and the full
+   `nodes[]` / `edges[]` summaries. Deduplicate on `eventId` to satisfy at-least-once delivery.
 
 5. **Serve the query API.** Answer caller requests: get a node by `managedObjectId`, get an
    edge, get the direct neighbors of a node, perform bounded traversal by one or more edge
@@ -108,14 +113,21 @@ business logic.
   - Envelope: standard envelope — `eventId` (UUID, idempotency key), `type`, `schemaVersion`,
     `occurredAt`, `source`, `traceId`, `payload`
   - Failed-delivery fallback: `topology.changed.dlq`
+  - **`changeType` convention (MVP):** the frozen `TopologyChangedEvent.schema.json` keeps
+    `changeType` as a free-form string. For the MVP, the Topology Service emits only two values:
+    - `full-load` — a complete snapshot replacement (the graph is replaced in full).
+    - `incremental` — a partial update to the existing graph.
+    The value `delete` is deferred and out of scope for MVP. This is a documented convention in
+    this spec; the event-model schema is not modified (no enum constraint is added). Consumers
+    should handle other future values gracefully.
 
 - **APIs exposed** (published as OpenAPI 3.1 at `/openapi.json` + checked-in
   `services/topology/openapi.json`; a change to this surface is a **contract change**):
 
   *Ingestion API:*
   - `POST /topology/snapshots` — upload a topology snapshot file; returns `snapshotId` on
-    success or a structured validation error on rejection. Accepts the versioned
-    topology-snapshot file schema (see "Data owned" below).
+    success or a structured validation error on rejection. Validates against the topology-file
+    schema at `services/topology/schema/snapshot.schema.json`.
 
   *Query API:*
   - `GET /topology/nodes/{managedObjectId}` — return the node object and its layer.
@@ -144,12 +156,35 @@ business logic.
 
 - **Data owned:**
   - **Apache AGE topology graph** — the sole owner; internal only; never shared as a store.
-  - **Topology-snapshot file schema** (versioned contract) — owned by this service. The schema
-    describes the typed nodes and edges of a snapshot (every object carries its
-    `managedObjectId` in the canonical `<objectType>:<id>` scheme). Where the schema file
-    physically lives (e.g., `libs/event-model/schema/topology/` vs.
-    `services/topology/schema/`) is a **design-stage decision** (see Open questions). A change
-    to the schema is a contract change requiring `architecture.md`/spec update + human approval.
+  - **Topology-snapshot file schema** — owned by this service at
+    `services/topology/schema/snapshot.schema.json`. This file is a versioned contract; it is
+    NOT a Kafka payload and does NOT reside in `libs/event-model`. Schema changes are a
+    `services/topology` PR, still contract-gated (an `architecture.md`/spec update + human
+    approval is required, exactly as for a new Kafka topic/payload). The designer authors the
+    actual JSON Schema file at this path.
+
+    **Approved field-level definition** (this is what the ingestion API validates against):
+
+    Top-level object:
+    - `schemaVersion` (integer, required) — the topology-file schema version, independent of
+      the event-model `schemaVersion`.
+    - `snapshotId` (string, optional) — producer-supplied identifier. If absent, the Topology
+      Service mints one on ingest.
+    - `domain` (string, required) — the domain-pack identifier (e.g. `core-ip`); supports
+      multi-domain per `architecture.md` "Domain extensibility".
+    - `nodes` (array, required) — each element is a node object:
+      - `managedObjectId` (string, required) — must match the pattern
+        `^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$`.
+      - `objectType` (string, required) — one of the 9 known types; must be consistent with the
+        prefix of `managedObjectId`.
+      - `name` (string, optional).
+      - `properties` (object, optional) — free-form per-node attributes.
+    - `edges` (array, required) — each element is an edge object:
+      - `from` (string, required) — a `managedObjectId` present in `nodes`.
+      - `to` (string, required) — a `managedObjectId` present in `nodes`.
+      - `relation` (string, required) — one of the §5 typed edge vocabulary:
+        `HOSTED_ON`, `RIDES_ON`, `ADJACENCY_OVER`, `TRAVERSES`, `SERVES`, `MEMBER_OF`.
+      - `properties` (object, optional) — free-form per-edge attributes.
 
 ---
 
@@ -175,6 +210,10 @@ business logic.
   `services/topology/openapi.json`. The service's own OpenAPI spec drives its contract/unit
   tests (request/response schema validation); collaborating services integrate against it. A
   change to the OpenAPI surface is a contract change.
+
+- **`changeType` convention:** for MVP, the only emitted `changeType` values are `full-load`
+  and `incremental`. The `delete` value is deferred. The frozen `TopologyChangedEvent` schema
+  keeps `changeType` as a free-form string — no enum constraint is added to the event-model.
 
 - **Error handling:**
   - Invalid or non-conforming snapshot file → HTTP 422 with a structured validation error body;
@@ -202,86 +241,95 @@ Each criterion maps to a single unit test (JUnit 5).
    `snapshotId`, and subsequent calls to the query API return the correct node and edge data.
    AGE credentials and openCypher endpoints are not reachable from outside the service process.
 
-2. **Schema validation — accept.** A snapshot file conforming to the topology-file schema is
-   accepted with HTTP 200 and the payload is persisted to AGE.
+2. **Schema validation — accept conforming file.** A snapshot file fully conforming to
+   `services/topology/schema/snapshot.schema.json` (all required fields present: `schemaVersion`,
+   `domain`, `nodes[]`, `edges[]`; each node has a valid `managedObjectId` matching the pattern
+   and a consistent `objectType`; each edge has `from`, `to`, `relation` referencing known
+   vocabulary) is accepted with HTTP 200 and the payload is persisted to AGE.
 
-3. **Schema validation — reject.** A snapshot file missing a required field (e.g., absent
-   `managedObjectId` on a node) is rejected with HTTP 422 and a structured error body; no
-   partial write is made to AGE; no `topology.changed` event is emitted.
+3. **Schema validation — reject missing required field.** A snapshot file missing a top-level
+   required field (e.g., absent `domain`, absent `schemaVersion`, or absent `nodes`) is rejected
+   with HTTP 422 and a structured error body; no partial write is made to AGE; no
+   `topology.changed` event is emitted.
 
-4. **Lifting rules — typed multi-layer graph.** After ingesting a snapshot containing at least
-   one node of each of the nine `managedObjectId` object types
-   (Node, LineCard, Port, IPLink, IGPAdjacency, LSP, VPNService, FiberSpan, SRLG) and their
-   typed edges, the query API returns each node with the correct `objectType` and each edge
-   with the correct typed relation (HOSTED_ON, RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES,
-   MEMBER_OF as applicable).
+4. **Schema validation — reject invalid `managedObjectId` scheme.** A snapshot file containing
+   a node whose `managedObjectId` does not match the pattern
+   `^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$` is
+   rejected with HTTP 422 before any write to AGE.
 
-5. **Bounded traversal by edge type.** Given a known synthetic topology, a bounded traversal
-   request over a specified edge type (e.g., RIDES_ON) from a given start node returns exactly
-   the expected set of reachable nodes within the depth bound, and no nodes reachable only via
-   other edge types.
+5. **Schema validation — reject inconsistent `objectType`.** A snapshot file where a node's
+   `objectType` is inconsistent with its `managedObjectId` prefix (e.g., `managedObjectId` is
+   `Port:p1` but `objectType` is `Node`) is rejected with HTTP 422 before any write to AGE.
 
-6. **`managedObjectId` resolution.** `GET /topology/nodes/{managedObjectId}` with a valid
-   `<objectType>:<id>` value returns the node object and its layer; an unknown
-   `managedObjectId` returns HTTP 404.
+6. **Schema validation — reject dangling edge reference.** A snapshot file containing an edge
+   whose `from` or `to` `managedObjectId` is not present in the `nodes` array is rejected with
+   HTTP 422 before any write to AGE.
 
-7. **List objects by type and get neighbors.** `GET /topology/nodes?objectType=Port` returns
-   all Port nodes and no nodes of other types. `GET /topology/nodes/{id}/neighbors` returns
-   all directly connected nodes.
+7. **Schema validation — reject unknown edge relation.** A snapshot file containing an edge
+   whose `relation` is not one of `HOSTED_ON`, `RIDES_ON`, `ADJACENCY_OVER`, `TRAVERSES`,
+   `SERVES`, `MEMBER_OF` is rejected with HTTP 422 before any write to AGE.
 
-8. **Snapshot versioning — new `snapshotId` on re-ingest.** Submitting a second snapshot file
-   (with any change) causes the service to mint a new `snapshotId` distinct from the first;
-   both the current and previous `snapshotId` are available via `GET /topology/snapshots`.
+8. **Producer-supplied `snapshotId` is honoured.** When a snapshot file includes a `snapshotId`
+   field, the ingestion API uses that value as the `snapshotId` returned in the 200 response and
+   carried in the emitted `topology.changed` event.
 
-9. **`topology.changed` emission.** After a successful ingest, exactly one `topology.changed`
-   event is emitted; its payload deserialises correctly against the frozen
-   `TopologyChangedEvent` Java binding from `libs/event-model`; the `snapshotId` in the event
-   matches the `snapshotId` returned by the ingestion API.
+9. **Service-minted `snapshotId` when absent.** When a snapshot file omits the `snapshotId`
+   field, the service mints a unique non-empty `snapshotId` and returns it in the 200 response.
 
-10. **`topology.changed` event-model conformance.** The emitted `topology.changed` event
+10. **Lifting rules — typed multi-layer graph.** After ingesting a snapshot containing at least
+    one node of each of the nine `managedObjectId` object types
+    (Node, LineCard, Port, IPLink, IGPAdjacency, LSP, VPNService, FiberSpan, SRLG) and their
+    typed edges, the query API returns each node with the correct `objectType` and each edge
+    with the correct typed relation (HOSTED_ON, RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES,
+    MEMBER_OF as applicable).
+
+11. **Bounded traversal by edge type.** Given a known synthetic topology, a bounded traversal
+    request over a specified edge type (e.g., RIDES_ON) from a given start node returns exactly
+    the expected set of reachable nodes within the depth bound, and no nodes reachable only via
+    other edge types.
+
+12. **`managedObjectId` resolution.** `GET /topology/nodes/{managedObjectId}` with a valid
+    `<objectType>:<id>` value returns the node object and its layer; an unknown
+    `managedObjectId` returns HTTP 404.
+
+13. **List objects by type and get neighbors.** `GET /topology/nodes?objectType=Port` returns
+    all Port nodes and no nodes of other types. `GET /topology/nodes/{id}/neighbors` returns
+    all directly connected nodes.
+
+14. **Snapshot versioning — new `snapshotId` on re-ingest.** Submitting a second snapshot file
+    (with any change) causes the service to mint a new `snapshotId` distinct from the first;
+    both the current and previous `snapshotId` are available via `GET /topology/snapshots`.
+
+15. **`topology.changed` emission on first ingest — `full-load`.** After the very first
+    successful ingest, exactly one `topology.changed` event is emitted with `changeType` equal
+    to `full-load`; its payload deserialises correctly against the frozen `TopologyChangedEvent`
+    Java binding from `libs/event-model`; the `snapshotId` in the event matches the `snapshotId`
+    returned by the ingestion API.
+
+16. **`changeType` values are within the approved convention.** The service never emits a
+    `topology.changed` event with a `changeType` outside the set `{ full-load, incremental }`;
+    specifically `delete` is never emitted in the MVP.
+
+17. **`topology.changed` event-model conformance.** The emitted `topology.changed` event
     validates against the frozen `TopologyChangedEvent.schema.json` from `libs/event-model`
     (all required fields present: `snapshotId`, `changeType`, `nodes`, `edges`; envelope fields
     present: `eventId`, `type`, `schemaVersion`, `occurredAt`, `source`, `traceId`, `payload`).
 
-11. **OpenAPI 3.1 contract.** The service serves its OpenAPI document at `/openapi.json`; the
+18. **OpenAPI 3.1 contract.** The service serves its OpenAPI document at `/openapi.json`; the
     document includes both the ingestion endpoint (`POST /topology/snapshots`) and all query
     endpoints; a contract test confirms that the live service response for each operation
     matches the schema declared in the checked-in `openapi.json`.
 
-12. **AGE abstraction boundary.** No HTTP endpoint, environment variable, log line, or response
+19. **AGE abstraction boundary.** No HTTP endpoint, environment variable, log line, or response
     body exposes an AGE connection string, AGE port, or raw openCypher query result structure.
     All graph data is returned through the service's typed API response shapes.
-
-13. **Invalid `managedObjectId` scheme rejected.** A snapshot file containing a node whose
-    `managedObjectId` does not match the pattern
-    `^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$` is
-    rejected by the ingestion API with HTTP 422 before any write to AGE.
 
 ---
 
 ## Open questions
 
-1. **Physical location of the topology-snapshot file schema.**
-   `architecture.md` states that the topology-snapshot file schema is a versioned contract and
-   leaves the physical location (e.g., `libs/event-model/schema/topology/` vs.
-   `services/topology/schema/`) as a design decision. This needs a human decision before the
-   designer can finalise the ingest-API contract test setup. Tracked in GitHub issue
-   [#18](https://github.com/nikhilmohan/correlation-platform/issues/18) (labeled `question`,
-   `service:topology`).
-
-2. **Topology-file schema definition — field-level detail.**
-   The topology-file schema is declared a versioned contract, but its full field list (beyond
-   `managedObjectId`, `objectType`, and edge relation type) is not yet defined in
-   `architecture.md` or `libs/event-model`. The designer will need this to implement schema
-   validation in the ingestion API. Recommend a human-approved schema definition (or a pointer
-   to where it will be authored) before design proceeds. Tracked in GitHub issue
-   [#19](https://github.com/nikhilmohan/correlation-platform/issues/19) (labeled `question`,
-   `service:topology`).
-
-3. **`changeType` vocabulary.**
-   The frozen `TopologyChangedEvent` schema defines `changeType` as a free-form string.
-   Allowed values (e.g., `full-load`, `incremental`, `delete`) are not specified in
-   `architecture.md`. The designer will need the allowed values to implement emission logic and
-   contract tests. Tracked in GitHub issue
-   [#20](https://github.com/nikhilmohan/correlation-platform/issues/20) (labeled `question`,
-   `service:topology`).
+None. All open questions from the spec phase have been resolved and folded into the spec above
+(schema file location and field definition — issues #18 and #19; `changeType` vocabulary
+convention — issue #20). Any remaining decisions about internal design (e.g., how the designer
+structures AGE queries, Spring module layout, lifting algorithm) are design-stage decisions and
+belong in `design.md`.
