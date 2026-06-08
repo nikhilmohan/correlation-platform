@@ -98,6 +98,64 @@ wire_json = serialize(env)               # canonical wire JSON
 Deserialization errors are the signal a consuming service uses to route a poison
 message to `<topic>.dlq` (the library itself has no Kafka/DLQ behaviour).
 
+## Java binding — build, test, use
+
+Gradle project at [`java/`](java/), Java 17 (Temurin), artifact `com.acp:event-model`.
+The model classes are **generated at build time** by the `jsonschema2pojo` Gradle
+plugin from the SAME `../schema/*.json` files (single-source guarantee, criterion 2):
+running `generateJsonSchema2Pojo` (wired before `compileJava`) emits the nine payload
+POJOs under `com.acp.eventmodel.generated`. The only hand-written code is the
+schema-agnostic helper layer in `src/main/java/com/acp/eventmodel`: `EventCodec`,
+`SchemaVersionPolicy`, `ManagedObjectId`, `TypeRegistry`. Runtime validation uses
+`networknt/json-schema-validator` against the same schema files (bundled into the jar
+under `/schema`), so required-field / enum / `managedObjectId` / `additionalProperties`
+rules behave identically to the Pydantic side.
+
+### Build + test
+
+```bash
+cd libs/event-model/java
+./gradlew --no-daemon clean build   # generate POJOs, compile, JUnit 5, JaCoCo, produce the jar
+```
+
+This produces `build/libs/event-model-<version>.jar`. The JUnit suite reads the SAME
+golden fixtures under `../schema/fixtures` that the Python tests read — the Java↔Python
+wire-format agreement (criterion 1) is proven without a polyglot CI job.
+
+### Use (downstream Spring service)
+
+Add the dependency (published to the repo's local/internal Maven coordinates):
+
+```groovy
+dependencies {
+    implementation("com.acp:event-model:0.1.0")
+}
+```
+
+```java
+import com.acp.eventmodel.*;
+import com.acp.eventmodel.generated.AlarmEvent;
+
+EventCodec codec = new EventCodec();
+TypedEnvelope<Object> env = codec.deserialize(kafkaMessage);  // raises CodecException /
+                                                              // SchemaVersionException /
+                                                              // UnknownEventTypeException
+if (env.getPayload() instanceof AlarmEvent alarm) {
+    ManagedObjectId moi = ManagedObjectId.parse(alarm.getManagedObjectId());
+}
+String wireJson = codec.serialize(env);   // canonical wire JSON
+```
+
+`CodecException` (and its subtypes `SchemaVersionException`, `UnknownEventTypeException`,
+`ManagedObjectIdException`) are the signal a consuming service uses to route a poison
+message to `<topic>.dlq`.
+
+### No Dockerfile
+
+Like the Python binding, the Java binding is a **build-time library with no runtime
+process** — it has no Dockerfile. Downstream services depend on the published jar; the
+schema travels inside the jar (`/schema`) for runtime validation.
+
 ## Extensibility (no-fork rule)
 
 A service that needs a service-local convenience view may **subclass** a payload

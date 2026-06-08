@@ -1,0 +1,6 @@
+// event-model — Java binding (Spring Boot cohort dependency).
+// Single source of truth is ../schema (JSON Schema 2020-12). This Gradle project
+// generates POJOs from that schema at build time (jsonschema2pojo) and ships the
+// hand-written, schema-agnostic helper layer (codec, version policy,
+// managedObjectId, type registry).
+rootProject.name = 'event-model'
