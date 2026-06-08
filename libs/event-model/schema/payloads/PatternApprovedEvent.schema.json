@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/PatternApprovedEvent.schema.json",
+  "title": "PatternApprovedEvent",
+  "description": "Carried on patterns.approved; Pattern Manager output after human approval.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "patternId": { "type": "string" },
+    "sequence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ordered alarm type sequence."
+    },
+    "rootCauseAlarmType": {
+      "type": "string",
+      "description": "Alarm type tagged as root cause."
+    },
+    "support": { "type": "number" },
+    "confidence": { "type": "number" },
+    "lift": { "type": "number" },
+    "timing": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Timing statistics."
+    },
+    "codebookMatchId": {
+      "type": "string",
+      "description": "Matched codebook scenario, if any."
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "'approved' at the point this event is emitted."
+    }
+  },
+  "required": [
+    "patternId",
+    "sequence",
+    "rootCauseAlarmType",
+    "support",
+    "confidence",
+    "lift",
+    "timing",
+    "lifecycle"
+  ]
+}

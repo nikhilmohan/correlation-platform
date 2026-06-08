@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/PatternMinedEvent.schema.json",
+  "title": "PatternMinedEvent",
+  "description": "Carried on patterns.mined; Pattern Miner output only. Deliberately carries NO rootCauseAlarmType, lifecycle, or patternId field (RCA and lifecycle belong to the Pattern Manager).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sequence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ordered alarm type sequence discovered."
+    },
+    "support": {
+      "type": "number",
+      "description": "Frequency of the sequence."
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Conditional probability."
+    },
+    "lift": {
+      "type": "number",
+      "description": "Lift over baseline."
+    },
+    "trailId": {
+      "type": "string",
+      "description": "Trail scope the pattern was mined from (top-level field)."
+    },
+    "timing": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Inter-arrival timing statistics for the sequence."
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Mining provenance.",
+      "properties": {
+        "sourceWindowId": {
+          "type": "string",
+          "description": "Identifies the transaction window this pattern was mined from."
+        },
+        "snapshotId": {
+          "type": "string",
+          "description": "Topology snapshot version in scope when mining ran."
+        },
+        "codebookVersion": {
+          "type": "string",
+          "description": "Codebook version in scope when mining ran."
+        }
+      },
+      "required": ["sourceWindowId", "snapshotId", "codebookVersion"]
+    }
+  },
+  "required": [
+    "sequence",
+    "support",
+    "confidence",
+    "lift",
+    "trailId",
+    "timing",
+    "provenance"
+  ]
+}

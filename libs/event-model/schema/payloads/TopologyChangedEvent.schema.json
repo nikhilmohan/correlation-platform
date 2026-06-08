@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/TopologyChangedEvent.schema.json",
+  "title": "TopologyChangedEvent",
+  "description": "Carried on topology.changed; emitted by the Topology Service.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshotId": {
+      "type": "string",
+      "description": "Identifies the topology snapshot version."
+    },
+    "changeType": {
+      "type": "string",
+      "description": "Describes the nature of the topology change."
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true },
+      "description": "Typed node descriptors."
+    },
+    "edges": {
+      "type": "array",
+      "items": { "type": "object", "additionalProperties": true },
+      "description": "Typed edge descriptors."
+    }
+  },
+  "required": ["snapshotId", "changeType", "nodes", "edges"]
+}

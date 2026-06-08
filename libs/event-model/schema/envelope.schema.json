@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/envelope.schema.json",
+  "title": "Envelope",
+  "description": "Canonical event envelope. 'type' discriminates 'payload' to exactly one of the nine payload schemas. schemaVersion major must equal the supported major (1); consumers reject >= 2.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Globally unique per event; idempotency key."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "AlarmEvent",
+        "TopologyChangedEvent",
+        "TrailsBuiltEvent",
+        "CodebookGeneratedEvent",
+        "TransactionEvent",
+        "PatternMinedEvent",
+        "PatternDiscoveredEvent",
+        "PatternApprovedEvent",
+        "CorrelationResultEvent"
+      ],
+      "description": "Discriminator; maps 1:1 to a payload schema."
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "description": "Initial value 1; consumers accept 1, reject >= 2."
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the event occurred (ISO-8601 UTC)."
+    },
+    "source": {
+      "type": "string",
+      "description": "Originating service name."
+    },
+    "traceId": {
+      "type": "string",
+      "description": "Distributed trace identifier."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Typed per 'type'; one of the nine payload schemas."
+    }
+  },
+  "required": [
+    "eventId",
+    "type",
+    "schemaVersion",
+    "occurredAt",
+    "source",
+    "traceId",
+    "payload"
+  ]
+}

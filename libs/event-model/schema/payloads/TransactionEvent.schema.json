@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/TransactionEvent.schema.json",
+  "title": "TransactionEvent",
+  "description": "Carried on transactions.clean. Raw DBSCAN-cleaned, trail-scoped alarm groups from the Noise Filter.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "transactionId": {
+      "type": "string",
+      "description": "Unique identifier for this transaction group."
+    },
+    "trailId": {
+      "type": "string",
+      "description": "Trail scope of the alarm group."
+    },
+    "snapshotId": {
+      "type": "string",
+      "description": "Topology snapshot in scope when this group was formed."
+    },
+    "alarmIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Alarm identifiers in this DBSCAN-cleaned group."
+    },
+    "windowStart": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Start of the raw time window (ISO-8601 UTC)."
+    },
+    "windowEnd": {
+      "type": "string",
+      "format": "date-time",
+      "description": "End of the raw time window (ISO-8601 UTC)."
+    }
+  },
+  "required": [
+    "transactionId",
+    "trailId",
+    "snapshotId",
+    "alarmIds",
+    "windowStart",
+    "windowEnd"
+  ]
+}

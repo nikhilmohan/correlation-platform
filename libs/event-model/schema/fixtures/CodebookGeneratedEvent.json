@@ -1,0 +1,13 @@
+{
+  "eventId": "44444444-4444-4444-8444-444444444444",
+  "type": "CodebookGeneratedEvent",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:37:00Z",
+  "source": "codebook-generator",
+  "traceId": "trace-codebook-0001",
+  "payload": {
+    "snapshotId": "SNAP-2026-06-08-001",
+    "scenarioCount": 12,
+    "codebookId": "CODEBOOK-2026-06-08-001"
+  }
+}

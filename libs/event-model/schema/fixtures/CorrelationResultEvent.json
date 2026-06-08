@@ -1,0 +1,17 @@
+{
+  "eventId": "99999999-9999-4999-8999-999999999999",
+  "type": "CorrelationResultEvent",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:42:00Z",
+  "source": "correlation-engine",
+  "traceId": "trace-result-0001",
+  "payload": {
+    "incidentId": "INC-0001",
+    "rootCauseAlarmId": "ALM-0001",
+    "childAlarmIds": ["ALM-0002", "ALM-0003"],
+    "matchedPatternId": "PAT-0001",
+    "matchedCodebookId": "CODEBOOK-2026-06-08-001",
+    "confidence": 0.91,
+    "trailId": "TRAIL-0001"
+  }
+}
