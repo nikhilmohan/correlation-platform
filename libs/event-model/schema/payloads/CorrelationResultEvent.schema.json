@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/CorrelationResultEvent.schema.json",
+  "title": "CorrelationResultEvent",
+  "description": "Carried on correlation.results; Correlation Engine output.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "incidentId": {
+      "type": "string",
+      "description": "Unique incident identifier."
+    },
+    "rootCauseAlarmId": {
+      "type": "string",
+      "description": "alarmId of the tagged root-cause alarm."
+    },
+    "childAlarmIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "alarmIds of correlated child alarms."
+    },
+    "matchedPatternId": {
+      "type": "string",
+      "description": "Pattern that matched, if any."
+    },
+    "matchedCodebookId": {
+      "type": "string",
+      "description": "Codebook scenario that matched, if any; references codebookId from CodebookGeneratedEvent."
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Correlation confidence score."
+    },
+    "trailId": {
+      "type": "string",
+      "description": "Trail scope of the incident."
+    }
+  },
+  "required": [
+    "incidentId",
+    "rootCauseAlarmId",
+    "childAlarmIds",
+    "confidence",
+    "trailId"
+  ]
+}

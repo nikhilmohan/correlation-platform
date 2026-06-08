@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/AlarmEvent.schema.json",
+  "title": "AlarmEvent",
+  "description": "X.733-aligned network alarm; carried on alarms.* topics.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "alarmId": {
+      "type": "string",
+      "description": "Unique alarm identifier; idempotency key for alarm dedup."
+    },
+    "managedObjectId": {
+      "$ref": "../common/managedObjectId.schema.json",
+      "description": "Must match topology graph identity scheme '<objectType>:<id>'."
+    },
+    "eventType": {
+      "type": "string",
+      "description": "X.733 event type."
+    },
+    "probableCause": {
+      "type": "string",
+      "description": "X.733 probable cause."
+    },
+    "perceivedSeverity": {
+      "type": "string",
+      "description": "X.733 severity."
+    },
+    "raisedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the alarm was raised (ISO-8601 UTC)."
+    },
+    "clearedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Set when the alarm is cleared (ISO-8601 UTC)."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["raised", "cleared"],
+      "description": "Current alarm state."
+    },
+    "vendorRaw": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Original vendor alarm payload, pass-through."
+    },
+    "trailIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Populated by Enrichment Service; empty before enrichment."
+    }
+  },
+  "required": [
+    "alarmId",
+    "managedObjectId",
+    "eventType",
+    "probableCause",
+    "perceivedSeverity",
+    "raisedAt",
+    "state",
+    "trailIds"
+  ]
+}

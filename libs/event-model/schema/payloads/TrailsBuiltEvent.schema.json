@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/TrailsBuiltEvent.schema.json",
+  "title": "TrailsBuiltEvent",
+  "description": "Carried on trails.built. Summary only; full membership fetched via the Trail Builder API.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshotId": {
+      "type": "string",
+      "description": "Topology snapshot this build references."
+    },
+    "trailIds": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Array of trail identifiers built in this snapshot."
+    },
+    "trailCount": {
+      "type": "integer",
+      "description": "Number of trails built (must equal trailIds.length)."
+    }
+  },
+  "required": ["snapshotId", "trailIds", "trailCount"]
+}

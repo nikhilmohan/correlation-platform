@@ -1,0 +1,24 @@
+{
+  "eventId": "66666666-6666-4666-8666-666666666666",
+  "type": "PatternMinedEvent",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:39:00Z",
+  "source": "pattern-miner",
+  "traceId": "trace-mined-0001",
+  "payload": {
+    "sequence": ["lossOfSignal", "linkDown", "bgpPeerDown"],
+    "support": 0.42,
+    "confidence": 0.87,
+    "lift": 3.1,
+    "trailId": "TRAIL-0001",
+    "timing": {
+      "meanInterArrivalSeconds": 4.5,
+      "stdDevSeconds": 1.2
+    },
+    "provenance": {
+      "sourceWindowId": "TXN-0001",
+      "snapshotId": "SNAP-2026-06-08-001",
+      "codebookVersion": "CODEBOOK-2026-06-08-001"
+    }
+  }
+}

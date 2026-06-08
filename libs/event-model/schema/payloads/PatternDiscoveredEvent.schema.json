@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/PatternDiscoveredEvent.schema.json",
+  "title": "PatternDiscoveredEvent",
+  "description": "Carried on patterns.discovered; Pattern Manager output.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "patternId": {
+      "type": "string",
+      "description": "Stable identifier assigned by Pattern Manager."
+    },
+    "sequence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Ordered alarm type sequence."
+    },
+    "rootCauseAlarmType": {
+      "type": "string",
+      "description": "Alarm type tagged as root cause."
+    },
+    "support": { "type": "number" },
+    "confidence": { "type": "number" },
+    "lift": { "type": "number" },
+    "timing": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Timing statistics."
+    },
+    "codebookMatchId": {
+      "type": "string",
+      "description": "Matched codebook scenario, if any."
+    },
+    "lifecycle": {
+      "type": "string",
+      "description": "Pattern lifecycle state (e.g. draft)."
+    }
+  },
+  "required": [
+    "patternId",
+    "sequence",
+    "rootCauseAlarmType",
+    "support",
+    "confidence",
+    "lift",
+    "timing",
+    "lifecycle"
+  ]
+}

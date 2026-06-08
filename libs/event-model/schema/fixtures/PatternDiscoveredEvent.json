@@ -1,0 +1,22 @@
+{
+  "eventId": "77777777-7777-4777-8777-777777777777",
+  "type": "PatternDiscoveredEvent",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:40:00Z",
+  "source": "pattern-manager",
+  "traceId": "trace-discovered-0001",
+  "payload": {
+    "patternId": "PAT-0001",
+    "sequence": ["lossOfSignal", "linkDown", "bgpPeerDown"],
+    "rootCauseAlarmType": "lossOfSignal",
+    "support": 0.42,
+    "confidence": 0.87,
+    "lift": 3.1,
+    "timing": {
+      "meanInterArrivalSeconds": 4.5,
+      "stdDevSeconds": 1.2
+    },
+    "codebookMatchId": "SCN-0007",
+    "lifecycle": "draft"
+  }
+}

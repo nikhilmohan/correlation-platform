@@ -1,0 +1,4 @@
+# Gradle / Java build artifacts — generated; not committed.
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
