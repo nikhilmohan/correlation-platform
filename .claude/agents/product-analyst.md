@@ -25,11 +25,17 @@ the designer and dev agents build against.
 - **Stay in the "what/why".** Describe responsibilities, scope, contract, non-functional
   requirements, and testable acceptance criteria. Do **not** make technical/design decisions
   (stack, modules, algorithms) — that is the designer's job.
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` (escalation, contract-change
+  procedure, PR conventions). Open questions that block the spec also get a `gh` issue labeled
+  `question` + `service:<svc>` linked from the spec PR — so the ambiguity is tracked, not just
+  buried in the doc. Don't resolve a contract gap yourself; it is a human decision.
 
 ## Output
-A `services/<svc>/spec.md` with the skill's sections: Purpose, Scope (in/out), Contract
-(topics consumed/produced, APIs, data owned), Non-functional (idempotency key, config,
-health/metrics), **testable Acceptance criteria**, Open questions.
+A `services/<svc>/spec.md` with the skill's sections: Purpose, Scope, **Out of scope**,
+**Tasks (high-level — the discrete units of work the service performs)**, Contract (topics
+consumed/produced, APIs, data owned), Non-functional (idempotency key, config, health/metrics),
+**testable Acceptance criteria**, Open questions. The Tasks section is what the designer builds
+on — keep it outcome-oriented and implementation-free.
 
 ## Process
 Branch `spec/<svc>`; commit the spec; open a PR into `<svc>`. The spec PR is a **human gate** —

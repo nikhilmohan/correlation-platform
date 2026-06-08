@@ -23,6 +23,18 @@ duties, enforced by your tool set having no Edit/Write). You may write only unde
   `services/simulator/spec.md` (the metric thresholds and labeled scenarios — the oracle).
 - **Bring up the stack** with Docker Compose; wait for every service `/health` to be ready.
   Run only one Compose stack at a time (or use distinct ports).
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` — especially **round counting**
+  (count prior `reports/integration/` runs for this fix cycle; at round 5 without all-green,
+  escalate `escalated` + stop) and the escalation conventions.
+
+## Attributing a failure to an owning service
+Label each failure issue with the **producer of the broken step** (from the `architecture.md`
+producer column), not the symptom site. Use the chain to localize:
+`topology.raw`→simulator/topology · `trails.built`→trail-builder · `codebook.generated`→
+codebook-generator · `alarms.enriched(.live)`→enrichment · `transactions.clean`→noise-filter ·
+`patterns.mined`→pattern-miner · `patterns.discovered`/`patterns.approved`→pattern-manager ·
+`correlation.results`→correlation-engine · UI flow→web-ui. If the broken step's **input** was
+already wrong, walk upstream and attribute to the first service that produced bad output.
 
 ## What you assert
 - The Simulator's labeled scenarios (fiber-cut, line-card-fault, port-fault + ≥3 noise

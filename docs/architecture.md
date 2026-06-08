@@ -41,7 +41,57 @@ Identity binding: alarms use the same `managedObjectId` as the graph (defined in
 Snapshot versioning: each topology load mints a `snapshotId`; trails/codebook reference it.
 Idempotency: dedupe on `eventId`/`alarmId`. Observability: JSON logs + `/metrics`, `/health`.
 Errors: poison messages → `<topic>.dlq`. Contract-first: with the library + topic contracts
-frozen, the services build in parallel.
+frozen, the services build in parallel. API contracts: every service publishes an OpenAPI spec
+and exposes configurable integration points (mock for unit tests, real for integration) — see
+below.
+
+## API contracts & integration points
+Alongside the event model (the Kafka contract), every service's **synchronous API is also a
+contract**.
+
+- **Published OpenAPI spec (mandatory).** Every service that exposes an HTTP API publishes an
+  OpenAPI 3.1 document at `/openapi.json` (and a human-readable UI such as Swagger UI / Spring
+  springdoc / FastAPI docs) and checks the generated `openapi.json` into its
+  `services/<svc>/` directory. The spec is the **single source of truth for the service's HTTP
+  surface** — request/response shapes reuse the `libs/event-model` payloads where applicable.
+- **Used for unit testing.** A service's own published OpenAPI spec drives its **contract/unit
+  tests** — request/response schema validation and (provider-side) contract verification —
+  so the implementation cannot drift from the published spec.
+- **Used by collaborating services for integration.** A consuming service builds its client
+  against the **producer's published OpenAPI spec**, never against the producer's source code.
+  This keeps the contract-first, no-cross-service-coupling invariant intact for synchronous
+  calls just as the topic contracts do for events. A change to a service's OpenAPI surface is a
+  **contract change** → it requires an `architecture.md`/spec update **and** human approval,
+  exactly like adding a topic/payload/field.
+- **Configurable integration points (mock vs. real).** Every service defines its outbound
+  integration points (the other services / endpoints it calls) through **configuration, not
+  hard-coded URLs**. Each integration point is switchable per environment:
+  - **Unit testing → mock.** Backed by a **mock/stub generated from the collaborator's
+    published OpenAPI spec** (e.g. Prism/WireMock/`respx`/MockWebServer), so unit tests run in
+    isolation with no live dependency.
+  - **Integration testing → actual.** Pointed at the **real collaborating service** (the
+    Docker Compose address on the `integration` branch).
+  - Resolution is by environment/config (base-URLs + a `mock|real` toggle from env or the
+    Knowledge Service where appropriate), so the same code runs against mocks in CI and against
+    live services in integration without modification.
+
+This requirement is captured per service in each `services/<svc>/spec.md` (Contract section)
+and detailed in `design.md` (API contracts + integration points), and is checked by the
+`code-review` and `integration-test` skills.
+
+## Test frameworks (standard per cohort)
+The unit/contract test framework is fixed per cohort — do not substitute:
+
+| Cohort | Unit / contract tests | E2E |
+|---|---|---|
+| Java (Spring Boot) | **JUnit 5** (+ Testcontainers for integration) | — (covered by integration-test) |
+| Python | **pytest** | — (covered by integration-test) |
+| web-ui (Angular 20) | **Vitest + Angular TestBed** (component/unit, jsdom; mock backends from producers' OpenAPI) | **Playwright** (browser E2E, owned by web-ui, run against the integration stack) |
+
+Playwright is **E2E only** — it drives a real browser against a running app and is **not** the
+UI unit-test runner. UI unit/component tests use Vitest + TestBed against mocked backends.
+Cross-service end-to-end behaviour is asserted by the `integration-test` skill (Simulator
+oracle + topic chain); the web-ui's Playwright suite covers UI user flows.
 
 ## Test oracle
 Simulator injects fiber-cut, line-card-fault, port-fault + ≥3 noise classes with ground-truth

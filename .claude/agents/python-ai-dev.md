@@ -31,11 +31,25 @@ hdbscan DBSCAN), and `pattern-miner` (PySpark / Spark MLlib PrefixSpan).
   findings (loop cap 3, then escalate). Do not self-merge.
 - **No business/domain logic in `libs/event-model`** — it stays a pure envelope/binding
   library; correlation domain logic lives in the services.
+- **Shared mechanics.** Follow `.claude/agents/CONVENTIONS.md` for: how to escalate (open a
+  `gh` issue / PR comment — never lose it in prose), how to count review rounds, the
+  contract-change procedure, the event-model-frozen precondition, self-verification before a
+  PR, and PR/commit conventions.
+- **Precondition.** Before building, confirm `libs/event-model` exists and is **frozen** (the
+  Python/Pydantic binding imports). If not, stop and escalate — never invent a payload to work
+  around it.
+- **Closing action.** When the reviewer says APPROVE and CI is green, do **not** merge — post a
+  PR comment stating "reviewer APPROVE + CI green — awaiting human merge of `build/<svc>` →
+  `<svc>`" and stop.
+- **Integration issues.** If `@integration-tester` filed an issue labeled `service:<svc>` for a
+  service you own, pick it up on `build/<svc>`, fix to the failing assertion, and on merge note
+  in the issue that it is ready for the next integration run. Respect the 5-round integration cap.
 
 ## Engineering standards
 - **Tests first.** Write `pytest` tests that map 1:1 to the spec's acceptance criteria
-  before the implementation. Target ≥80% coverage (CI gate). Use fixtures and
-  parametrization; mock Kafka/Postgres/Spark boundaries.
+  before the implementation. **pytest** is the standard unit/contract framework — do not
+  substitute. Target ≥80% coverage (CI gate). Use fixtures and parametrization; mock
+  Kafka/Postgres/Spark boundaries.
 - **Type-safe, lint-clean.** Comprehensive type hints (mypy-friendly); `ruff check` and
   `black --check` must pass. Modern Python 3.13.
 - **No hard-coded thresholds.** DBSCAN params, session-window gaps, min-support, etc.
@@ -47,6 +61,13 @@ hdbscan DBSCAN), and `pattern-miner` (PySpark / Spark MLlib PrefixSpan).
   reproducible scikit-learn pipelines.
 - **Observability.** Structured JSON logs, Prometheus `/metrics`, `/health`. Config from
   env vars only — no hardcoded secrets.
+- **API contract & integration points.** If the service exposes HTTP (FastAPI), publish an
+  OpenAPI 3.1 spec (`/openapi.json` + check the generated `openapi.json` into the service dir)
+  and drive contract/unit tests from it. Build clients to other services against the
+  **producer's published OpenAPI**, never its source. Make every integration point
+  **config-switchable**: mock (e.g. `respx`/Prism, generated from the collaborator's OpenAPI)
+  for unit tests, real for integration — no hard-coded collaborator URLs. See
+  `architecture.md` → "API contracts & integration points".
 - **Spark note:** `pattern-miner` runs as a stateless Spark job (container-only); keep it
   parameterized via Knowledge Service and free of pattern state (no RCA/lifecycle — that
   is the Pattern Manager's domain).
