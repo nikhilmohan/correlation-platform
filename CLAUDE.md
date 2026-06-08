@@ -36,6 +36,13 @@ correlation-engine. Angular 20: web-ui.
 - Java: Spring Boot, Gradle, JUnit 5, constructor injection, explicit idempotent Kafka config.
 - Angular: Angular 20 standalone components, typed, lint clean, unit tests.
 
+## Test frameworks (standard — do not substitute)
+- Java services: **JUnit 5** (unit/contract); Testcontainers for integration.
+- Python services: **pytest** (unit/contract).
+- web-ui: **Vitest + Angular TestBed** for unit/component tests; **Playwright** for UI E2E
+  (owned by web-ui, run against the integration stack). Playwright is E2E only — never the
+  unit-test runner.
+
 ## Definition of Done
 Implementation satisfies every acceptance criterion in `spec.md`, each maps to a passing unit
 test, CI is green, and the code-reviewer has approved.

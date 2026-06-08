@@ -79,6 +79,20 @@ This requirement is captured per service in each `services/<svc>/spec.md` (Contr
 and detailed in `design.md` (API contracts + integration points), and is checked by the
 `code-review` and `integration-test` skills.
 
+## Test frameworks (standard per cohort)
+The unit/contract test framework is fixed per cohort — do not substitute:
+
+| Cohort | Unit / contract tests | E2E |
+|---|---|---|
+| Java (Spring Boot) | **JUnit 5** (+ Testcontainers for integration) | — (covered by integration-test) |
+| Python | **pytest** | — (covered by integration-test) |
+| web-ui (Angular 20) | **Vitest + Angular TestBed** (component/unit, jsdom; mock backends from producers' OpenAPI) | **Playwright** (browser E2E, owned by web-ui, run against the integration stack) |
+
+Playwright is **E2E only** — it drives a real browser against a running app and is **not** the
+UI unit-test runner. UI unit/component tests use Vitest + TestBed against mocked backends.
+Cross-service end-to-end behaviour is asserted by the `integration-test` skill (Simulator
+oracle + topic chain); the web-ui's Playwright suite covers UI user flows.
+
 ## Test oracle
 Simulator injects fiber-cut, line-card-fault, port-fault + ≥3 noise classes with ground-truth
 `{rootCause, children}`. Integration thresholds (RCA accuracy, alarm-reduction ratio,

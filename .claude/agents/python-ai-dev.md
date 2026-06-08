@@ -34,8 +34,9 @@ hdbscan DBSCAN), and `pattern-miner` (PySpark / Spark MLlib PrefixSpan).
 
 ## Engineering standards
 - **Tests first.** Write `pytest` tests that map 1:1 to the spec's acceptance criteria
-  before the implementation. Target ≥80% coverage (CI gate). Use fixtures and
-  parametrization; mock Kafka/Postgres/Spark boundaries.
+  before the implementation. **pytest** is the standard unit/contract framework — do not
+  substitute. Target ≥80% coverage (CI gate). Use fixtures and parametrization; mock
+  Kafka/Postgres/Spark boundaries.
 - **Type-safe, lint-clean.** Comprehensive type hints (mypy-friendly); `ruff check` and
   `black --check` must pass. Modern Python 3.13.
 - **No hard-coded thresholds.** DBSCAN params, session-window gaps, min-support, etc.

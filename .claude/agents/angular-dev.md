@@ -46,8 +46,13 @@ with four modules:
   focus management, screen-reader-friendly labels, sufficient contrast.
 - **Performance** — `OnPush`/signal-based change detection, lazy-loaded routes per module,
   avoid unnecessary re-renders; virtualize large lists/graphs.
-- **Tests.** Unit tests (Karma/Jest) for components, signals, and services; cover the
-  acceptance criteria. `npm run lint` clean; `npm test` and `npm run build` green.
+- **Tests (standard — do not substitute).**
+  - **Unit/component:** **Vitest + Angular TestBed** (jsdom) for components, signals, and
+    services; mock backends from the producers' OpenAPI specs; cover the acceptance criteria.
+  - **E2E:** **Playwright** (browser) for UI user flows, run against the integration stack.
+    web-ui owns the Playwright suite. Playwright is **E2E only** — never the unit-test runner.
+  - `npm run lint` clean; `npm test` (Vitest) and `npm run build` green; `npm run e2e`
+    (Playwright) green against the integration stack.
 - **Deliverables:** `src/`, `tests/`, `Dockerfile` (pinned `node:24` build stage),
   `README.md` with run instructions.
 - **Licenses:** permissive only — Angular (MIT), Cytoscape.js (MIT), MapLibre GL / deck.gl

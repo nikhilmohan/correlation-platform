@@ -34,9 +34,10 @@ trail-tag), `pattern-manager` (Pattern Store, RCA, reconcile, XAI, lifecycle), a
   findings (loop cap 3, then escalate). Do not self-merge.
 
 ## Engineering standards
-- **Tests first.** Write JUnit 5 tests mapping 1:1 to the spec's acceptance criteria
-  before implementation. Use `@SpringBootTest`/slice tests + Testcontainers (Kafka,
-  Postgres/AGE) where integration is required. JaCoCo coverage gate must pass.
+- **Tests first.** Write tests mapping 1:1 to the spec's acceptance criteria before
+  implementation. **JUnit 5** is the standard unit/contract framework — do not substitute. Use
+  `@SpringBootTest`/slice tests + Testcontainers (Kafka, Postgres/AGE) where integration is
+  required. JaCoCo coverage gate must pass.
 - **Spring idioms.** Constructor injection (no field injection); `@ConfigurationProperties`
   bound from env; clean layering (controller/service/repository); records for DTOs/events.
 - **Kafka.** Explicit, **idempotent** consumer config: dedupe on `eventId`/`alarmId`;

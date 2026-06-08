@@ -100,5 +100,5 @@ jobs:
           fi
           npm ci
           npm run lint
-          npm test -- --watch=false --browsers=ChromeHeadless
+          npm test -- --run        # Vitest unit/component tests (TestBed); E2E (Playwright) runs in the integration stage
           npm run build
