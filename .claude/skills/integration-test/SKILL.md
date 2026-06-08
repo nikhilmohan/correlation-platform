@@ -33,7 +33,10 @@ never edit service source. You may write only under `reports/integration/`.
   children — including a **partial match** (one trap dropped).
 - **Metric thresholds** (from the Simulator spec): RCA accuracy, alarm-reduction ratio,
   noise-filter effectiveness, pattern quality.
-- **Contract conformance:** envelope + payloads + `schemaVersion` on the wire.
+- **Contract conformance:** envelope + payloads + `schemaVersion` on the wire; each HTTP
+  service serves its **OpenAPI 3.1** at `/openapi.json` and its responses conform to it.
+- **Real integration points:** services run with integration points set to **real** (live
+  Compose addresses), not mocks — confirm collaborators are reached over the wire.
 
 ## Output
 - `reports/integration/<timestamp>.md` — pass/fail per scenario and metric, with the numbers.

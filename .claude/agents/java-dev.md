@@ -48,6 +48,13 @@ trail-tag), `pattern-manager` (Pattern Store, RCA, reconcile, XAI, lifecycle), a
   the graph DB.
 - **Observability.** Spring Actuator `/health` + Micrometer/Prometheus `/metrics`; structured
   JSON logging; config from env only — no hardcoded secrets.
+- **API contract & integration points.** Publish an OpenAPI 3.1 spec (springdoc → `/openapi.json`
+  + Swagger UI; check the generated `openapi.json` into the service dir) and drive contract/unit
+  tests from it. Build clients to other services against the **producer's published OpenAPI**,
+  never its source. Make every integration point **config-switchable** (`@ConfigurationProperties`
+  base-URLs + a `mock|real` toggle): mock (e.g. WireMock/MockWebServer, generated from the
+  collaborator's OpenAPI) for unit tests, real for integration — no hard-coded collaborator URLs.
+  See `architecture.md` → "API contracts & integration points".
 - **Build.** Gradle; `./gradlew build` (tests + JaCoCo) must be green. Java 17 (Temurin).
 - **Deliverables per service:** `src/`, `tests/`, `Dockerfile` (pinned `eclipse-temurin:17-jdk`,
   multi-stage), `README.md` with run instructions.

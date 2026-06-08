@@ -43,14 +43,20 @@ Derive it; do not invent.
 ## Contract
 - **Consumes (Kafka):** <exact topic names, or "—">
 - **Produces (Kafka):** <exact topic names, or "—">
-- **APIs exposed:** <REST/gRPC operations, or "—">
-- **APIs/data consumed from other services:** <e.g. Topology getNeighbors, Knowledge params>
+- **APIs exposed:** <REST operations; published as OpenAPI 3.1 at /openapi.json + checked-in
+  openapi.json, or "—">
+- **APIs/data consumed from other services:** <each as a named integration point, e.g. Topology
+  getNeighbors, Knowledge params — built against the producer's published OpenAPI spec>
+- **Integration points (mock vs. real):** <list outbound dependencies; each must be config-
+  switchable: mock (from collaborator's OpenAPI) for unit tests, real for integration>
 - **Data owned:** <datastore + what it owns, e.g. "PostgreSQL Pattern Store", or "—">
 
 ## Non-functional
 - **Idempotency key:** <eventId | alarmId | …>
-- **Config:** <env vars / Knowledge-Service params — no hard-coded thresholds>
+- **Config:** <env vars / Knowledge-Service params — no hard-coded thresholds or integration URLs>
 - **Observability:** /health, /metrics (Prometheus), structured JSON logs
+- **API contract:** publishes OpenAPI 3.1 (/openapi.json + checked-in spec); own spec drives
+  contract/unit tests; collaborators integrate against it (a surface change is a contract change)
 - **Error handling:** poison messages → <topic>.dlq
 
 ## Acceptance criteria
@@ -66,6 +72,9 @@ Derive it; do not invent.
 - Every topic/payload/API reference matches `docs/architecture.md` exactly.
 - **No silent new topic/payload/field** — any such need is an Open question, not part of the
   contract.
+- If the service exposes an HTTP API, the spec states it **publishes OpenAPI 3.1** and lists
+  its **integration points** as config-switchable (mock for unit tests / real for integration),
+  per `architecture.md` → "API contracts & integration points".
 - Each acceptance criterion is testable.
 
 ## Output & process

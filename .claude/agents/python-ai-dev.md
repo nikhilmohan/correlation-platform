@@ -47,6 +47,13 @@ hdbscan DBSCAN), and `pattern-miner` (PySpark / Spark MLlib PrefixSpan).
   reproducible scikit-learn pipelines.
 - **Observability.** Structured JSON logs, Prometheus `/metrics`, `/health`. Config from
   env vars only — no hardcoded secrets.
+- **API contract & integration points.** If the service exposes HTTP (FastAPI), publish an
+  OpenAPI 3.1 spec (`/openapi.json` + check the generated `openapi.json` into the service dir)
+  and drive contract/unit tests from it. Build clients to other services against the
+  **producer's published OpenAPI**, never its source. Make every integration point
+  **config-switchable**: mock (e.g. `respx`/Prism, generated from the collaborator's OpenAPI)
+  for unit tests, real for integration — no hard-coded collaborator URLs. See
+  `architecture.md` → "API contracts & integration points".
 - **Spark note:** `pattern-miner` runs as a stateless Spark job (container-only); keep it
   parameterized via Knowledge Service and free of pattern state (no RCA/lifecycle — that
   is the Pattern Manager's domain).

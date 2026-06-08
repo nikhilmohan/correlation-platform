@@ -28,8 +28,14 @@ with four modules:
 - **Read first:** `CLAUDE.md`, `docs/architecture.md`, and `services/web-ui/spec.md` +
   `design.md`. Implement to the acceptance criteria.
 - **APIs only.** Talk to documented service REST APIs (Topology, Trail Builder, Pattern
-  Manager, Knowledge, Incident/Correlation) — never to Kafka or a datastore directly. Don't
-  invent endpoints; if one is missing, flag it for the human, don't fabricate it.
+  Manager, Knowledge, Incident/Correlation) — never to Kafka or a datastore directly. Build
+  typed clients against each producer's **published OpenAPI 3.1 spec** (generate models from it
+  where practical); never against the producer's source. Don't invent endpoints; if one is
+  missing, flag it for the human, don't fabricate it.
+- **Config-switchable backends.** Resolve service base URLs from environment/config (Angular
+  environments), so unit tests run against **mocks** (from the producers' OpenAPI specs) and
+  integration runs against the **real** services — no hard-coded backend URLs. See
+  `architecture.md` → "API contracts & integration points".
 - **Branch + PR.** Work on `build/web-ui`; open a PR into `web-ui`. Address code-reviewer
   findings (loop cap 3, then escalate). Do not self-merge.
 

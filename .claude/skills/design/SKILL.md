@@ -48,7 +48,15 @@ The spec is approved and merged on `<svc>`. If not, stop.
 - **Producers:** <topic → payload type from libs/event-model>
 
 ## API contracts
-<REST/gRPC operations: path/method, request/response shapes.>
+<REST operations: path/method, request/response shapes. State how the **OpenAPI 3.1** spec is
+generated and published (/openapi.json + checked-in openapi.json), and how the service's own
+spec drives its contract/unit tests.>
+
+## Integration points (mock vs. real)
+<For each outbound dependency: the collaborator + operation, the config key(s) that select its
+base URL, and the mock|real toggle. Mock = stub generated from the collaborator's published
+OpenAPI spec (used in unit tests); real = the live service (used in integration). No hard-coded
+URLs — resolution is by env/config.>
 
 ## Key flows
 <Sequence of the main paths (e.g. ingest → process → emit).>
@@ -69,6 +77,9 @@ The spec is approved and merged on `<svc>`. If not, stop.
 ## Gate (must hold before the design PR)
 - **Every acceptance criterion is mapped to a test** in the test plan.
 - Invariants honoured; any contract change is flagged for the human, not designed around.
+- If the service exposes an HTTP API: OpenAPI publication is designed, and **every integration
+  point is config-switchable** (mock from the collaborator's OpenAPI for unit tests / real for
+  integration) — no hard-coded collaborator URLs.
 
 ## Output & process
 Write the file under `services/<svc>/design.md`. Branch `design/<svc>`; open a PR into `<svc>`.

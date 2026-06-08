@@ -27,6 +27,12 @@ design. Report and raise issues only — do not edit source (separation of dutie
   topic/payload/field**; depends on `libs/event-model` + topic contracts, not other services'
   code; **no domain logic leaked into the shared lib**.
 - **Idempotency:** consumers dedupe on `eventId`/`alarmId`.
+- **API contract:** if the service exposes HTTP, it **publishes OpenAPI 3.1** (`/openapi.json`
+  + checked-in `openapi.json`); its own spec drives its contract/unit tests; clients to other
+  services are built against the **producer's published OpenAPI**, not its source.
+- **Integration points:** outbound dependencies are **config-driven and mock|real switchable**
+  (mock from the collaborator's OpenAPI in unit tests; real in integration) — **no hard-coded
+  collaborator URLs**.
 - **DLQ / error handling:** poison messages → `<topic>.dlq`, not dropped.
 - **Observability:** `/health`, `/metrics`, structured logging, config-from-env (no secrets).
 - **Tests:** meaningful and **passing**, coverage at/above the gate; criterion→test traceable.
