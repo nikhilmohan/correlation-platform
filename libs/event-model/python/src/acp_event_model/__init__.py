@@ -20,6 +20,7 @@ from ._generated import (
     CodebookGeneratedEvent,
     CorrelationResultEvent,
     Envelope,
+    KnowledgeUpdatedEvent,
     PatternApprovedEvent,
     PatternDiscoveredEvent,
     PatternMinedEvent,
@@ -52,6 +53,7 @@ __all__ = [
     "PatternDiscoveredEvent",
     "PatternApprovedEvent",
     "CorrelationResultEvent",
+    "KnowledgeUpdatedEvent",
     "Provenance",
     "State",
     # Codec
