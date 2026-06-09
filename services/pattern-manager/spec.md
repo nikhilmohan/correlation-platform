@@ -29,6 +29,7 @@ governed, reviewable, downstream-ready patterns.
   - **Active (approved) patterns for operator visibility:** list the currently-active (approved) patterns with their details (sequence, RCA, metrics, lifecycle), filterable by lifecycle, so the UI can show which patterns are live in correlation.
   - Note: the UI *renders* these (Cytoscape/charts, per §6.11); the Pattern Manager only *serves* the structured data. Real-time pattern-match counts / live correlation stats are produced by the Correlation Engine (`correlation.results`), not here.
 - Accepting a lightweight approval-intent request (patternId + decision approve/reject + reviewer + notes) via the Pattern Manager API; owning the lifecycle transition from `draft` to `approved` in the Pattern Store; recording the transition with a timestamp.
+- Accepting **operator edits of a draft pattern** (placeholder, to be enhanced) via the pattern-edit API — e.g. marking sequence alarms `optional` — and persisting them onto the draft pattern in the Pattern Store before approval. Edit metadata stays internal (Pattern Store + read API); it is not added to the frozen `PatternApprovedEvent`.
 - Emitting `patterns.approved` downstream (one `PatternApprovedEvent`) after each approval transition, for the Correlation Engine to consume. The Pattern Manager is the sole producer of `PatternApprovedEvent`.
 - Supporting deprecation: transitioning a pattern in `draft` or `approved` state to `deprecated` via the pattern management API; recording the transition with a timestamp.
 - Serving approved patterns via the read API to the Correlation Engine (Pattern Store read at startup and on refresh).
@@ -72,9 +73,11 @@ governed, reviewable, downstream-ready patterns.
 
 9. Process human approval intent: receive a lightweight approval-intent request (patternId + decision approve/reject + reviewer + notes) via the Pattern Manager API; validate that the named pattern exists in `draft` state; transition lifecycle to `approved` in the Pattern Store; record the transition with a timestamp.
 
-10. Emit `patterns.approved` downstream: publish one `PatternApprovedEvent` per approval transition, carrying `patternId`, sequence, `rootCauseAlarmType`, support/confidence/lift, timing, `codebookMatchId` (if any), and `lifecycle = approved`, for the Correlation Engine. The Pattern Manager is the sole producer of this event.
+10. Process operator edits (placeholder, to be enhanced): receive a pattern-edit request for a `draft` pattern via the pattern-edit API — for the MVP placeholder, per-alarm `optional` flags on the sequence (plus reviewer/notes) — validate the pattern is in `draft`, persist the edits onto the draft pattern record in the Pattern Store, and return the updated record. The edit metadata is internal (Pattern Store + read API); it is not added to `PatternApprovedEvent`, and its effect on Correlation matching is a post-MVP/design-stage enhancement.
 
-11. Support deprecation: accept a deprecation action (via the pattern management API) for a pattern in `draft` or `approved` state; transition lifecycle to `deprecated` in the Pattern Store; record the transition with a timestamp.
+11. Emit `patterns.approved` downstream: publish one `PatternApprovedEvent` per approval transition, carrying `patternId`, sequence, `rootCauseAlarmType`, support/confidence/lift, timing, `codebookMatchId` (if any), and `lifecycle = approved`, for the Correlation Engine. The Pattern Manager is the sole producer of this event.
+
+12. Support deprecation: accept a deprecation action (via the pattern management API) for a pattern in `draft` or `approved` state; transition lifecycle to `deprecated` in the Pattern Store; record the transition with a timestamp.
 
 ## Phase applicability
 
@@ -97,6 +100,7 @@ governed, reviewable, downstream-ready patterns.
   - `GET /patterns` — list all patterns; supports filter by `lifecycle` (`draft`, `approved`, `deprecated`); returns per pattern: `patternId`, `sequence[]`, `rootCauseAlarmType`, `support`, `confidence`, `lift`, `timing`, `codebookMatchId`, `instanceCount`, `supportingInstances[]`, `lifecycle`. Pagination and sort parameters are a design-stage detail (see Open questions).
   - `GET /patterns/{patternId}` — retrieve a single pattern by `patternId` with full explainability metadata including `supportingInstances[]`.
   - `POST /patterns/{patternId}/approve` — accept a lightweight approval-intent body (`decision: approve|reject`, `reviewer`, `notes`); transition the pattern lifecycle to `approved` (or record the rejection); emit `PatternApprovedEvent`; return the updated pattern record.
+  - `PATCH /patterns/{patternId}` — **operator edit of a draft pattern (placeholder; to be enhanced).** Accept an edit body that adjusts the pattern before approval — for the MVP placeholder, **per-alarm flags on the sequence** (e.g. marking a sequence element `optional`), plus reviewer/notes. Allowed only while the pattern is in `draft` (reject the edit otherwise). Persist the edits onto the draft pattern record in the Pattern Store and return the updated record. The edit metadata (e.g. `optional` markers) is **internal to the Pattern Store + read API for now — it is NOT added to the frozen `PatternApprovedEvent`**; how an edited/optional-alarm pattern is represented to and matched by the Correlation Engine is a **documented post-MVP / design-stage enhancement** (today the Correlation Engine already tolerates missing alarms via its partial-match tolerance). The exact editable fields beyond the optional-alarm placeholder are a design-stage detail.
   - `POST /patterns/{patternId}/deprecate` — transition a pattern to `deprecated` lifecycle state; records the transition timestamp; returns the updated pattern record.
 
 - **APIs/data consumed from other services** (each built against the producer's published OpenAPI spec — never against source code):
@@ -149,6 +153,8 @@ governed, reviewable, downstream-ready patterns.
 12. A `GET /patterns` response validates against the published OpenAPI 3.1 schema; a `GET /patterns/{patternId}` response for an existing pattern validates against the same schema; a `GET /patterns/{patternId}` for a non-existent `patternId` returns HTTP 404.
 
 13. A `GET /patterns?lifecycle=approved` response contains only patterns with `lifecycle = approved`; no `draft` or `deprecated` entries appear in the result set.
+
+14. Given a `PATCH /patterns/{patternId}` edit request marking a sequence alarm `optional` for a pattern in `lifecycle = draft`, the service persists the edit onto the draft pattern (a subsequent `GET /patterns/{patternId}` reflects the `optional` marker) without changing lifecycle; the same edit request for a pattern not in `draft` is rejected (HTTP 409/422).
 
 ## Open questions
 
