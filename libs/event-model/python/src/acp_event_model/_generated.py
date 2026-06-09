@@ -216,6 +216,32 @@ class CorrelationResultEvent(BaseModel):
     trailId: str = Field(..., description="Trail scope of the incident.")
 
 
+class KnowledgeUpdatedEvent(BaseModel):
+    """
+    Carried on knowledge.updated. Minimal refresh trigger emitted by the Knowledge Service so consumers know WHAT changed and re-fetch the specific version via the Knowledge API; the knowledge itself lives in the versioned store/API, not in the event.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    recordType: str = Field(
+        ...,
+        description="Which kind of knowledge record changed; free-form per the domain-template model (e.g. propagationTemplate, faultOriginType, trailPolicy, modelParams).",
+    )
+    recordId: str | None = Field(
+        None,
+        description="Identifier of the specific record that changed; absent implies a broader change of that recordType.",
+    )
+    version: str = Field(
+        ...,
+        description="The new version of the changed knowledge; consumers fetch this version via the Knowledge API.",
+    )
+    domain: str = Field(
+        ...,
+        description="The domain scope (e.g. core-ip), per the platform's domain-extensibility model.",
+    )
+
+
 class Type(Enum):
     """
     Discriminator; maps 1:1 to a payload schema.
@@ -230,6 +256,7 @@ class Type(Enum):
     PatternDiscoveredEvent = "PatternDiscoveredEvent"
     PatternApprovedEvent = "PatternApprovedEvent"
     CorrelationResultEvent = "CorrelationResultEvent"
+    KnowledgeUpdatedEvent = "KnowledgeUpdatedEvent"
 
 
 class Envelope(BaseModel):

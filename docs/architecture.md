@@ -18,11 +18,48 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.enriched.live, patterns.approved, codebook.generated | correlation.results |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
+## Runtime phases (the operating model)
+The deployed system operates in **three runtime phases** (Solution Design §3). These are *runtime
+operating phases* — distinct from the *build roadmap* (skeleton → learning → real-time slice, §9),
+which is the order we build/integrate in. Every service spec and design must state its **role and
+applicability in each phase** (a "Phase applicability" section: per phase, the service's role, an
+**Active / Passive / Idle** classification, and its inputs/outputs in that phase).
+
+- **P1 — Topology onboarding** (offline): ingest topology → build trails → compile codebook →
+  visualize. Establishes the graph + scopes that the learning and real-time phases depend on.
+- **P2 — Pattern learning** (offline): enrich + deterministic-filter historical alarms → DBSCAN
+  noise removal → PrefixSpan mining → RCA + codebook reconciliation + explainability → human
+  approval of patterns.
+- **P3 — Real-time correlation** (online): enrich + filter *live* alarms → stateful match/decode
+  against approved patterns + codebook → score + conflict-resolve → tag RCA + child alarms → stats.
+
+**Classification:** *Active* = performs the phase's core work; *Passive* = serves queries / acts as
+a dependency / refreshes state in that phase but drives no work of its own; *Idle* = not involved.
+
+| Service | P1 Topology onboarding | P2 Pattern learning | P3 Real-time correlation |
+|---|---|---|---|
+| simulator | Active — generate topology file, upload to Topology ingestion API | Active — replay `alarms.history` | Active — replay `alarms.live` (wall-clock paced) |
+| topology | Active — ingest file, lift to AGE, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Passive — serves graph query API |
+| knowledge | Passive — serves trail policy, fault-origin list, propagation templates | Passive — serves DBSCAN / session-window / min-support params | Passive — serves params + approved policy |
+| trail-builder | Active — build trails on `topology.changed`, emit `trails.built` | Passive — serves `getTrailsForObject` / `getTrail` | Passive — serves trails |
+| codebook-generator | Active — compile codebook, emit `codebook.generated` | Passive — serves codebook for reconcile | Passive — serves codebook for match |
+| enrichment | Idle | Active — enrich `alarms.history` → `alarms.enriched` | Active — enrich `alarms.live` → `alarms.enriched.live` |
+| noise-filter | Idle | Active — DBSCAN over `alarms.enriched` → `transactions.clean` | Idle (history path only) |
+| pattern-miner | Idle | Active — PrefixSpan over `transactions.clean` → `patterns.mined` | Idle |
+| pattern-manager | Idle | Active — RCA + reconcile + XAI + lifecycle → `patterns.discovered` / `patterns.approved` | Passive — serves approved patterns |
+| correlation-engine | Idle | Idle | Active — match/score/RCA over `alarms.enriched.live` → `correlation.results` |
+| web-ui | Active — topology & trails visualization | Active — pattern review/approve, config edits | Active — live incidents & correlation stats |
+
+This table is the **canonical phase map**; each service's spec/design restates *its own* row in
+detail (role + Active/Passive/Idle + per-phase I/O) and must stay consistent with it. A change to a
+service's phase applicability updates this table + the service docs.
+
 ## Event model (the contract)
 No schema registry. `libs/event-model` (versioned with the repo) defines the **envelope**
 (`eventId, type, schemaVersion, occurredAt, source, traceId, payload`) and **payloads**
 (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent, CodebookGeneratedEvent, TransactionEvent,
-PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent).
+PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent,
+KnowledgeUpdatedEvent).
 Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Python services).
 Consumers reject unknown major `schemaVersion`.
 
