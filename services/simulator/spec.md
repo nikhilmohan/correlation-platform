@@ -107,6 +107,19 @@ ensuring topology and alarm identities are shared.
    not hard-coded in the engine. Domain business logic must not leak into the shared engine.
 9. Expose `/health` and `/metrics` endpoints and emit structured JSON logs.
 
+## Phase applicability
+
+The Simulator is **Active in all three runtime phases** and serves as the **evaluation oracle
+throughout**: the ground-truth `{rootCause, children}` labels it persists, and the integration
+thresholds it owns (see "Integration thresholds" section), are what the integration test
+harness asserts across the learning and real-time phases.
+
+| Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
+|---|---|---|---|
+| P1 — Topology onboarding | Generates the domain-grounded topology snapshot file and uploads it to the Topology Service ingestion API, establishing the graph that all subsequent phases depend on | Active | Output: topology snapshot file (versioned JSON contract) → Topology ingestion API (HTTP upload, config-switchable mock/real) |
+| P2 — Pattern learning | Replays the labeled historical alarm corpus (batch) onto `alarms.history`, feeding the enrichment → noise-filter → pattern-miner learning pipeline; ground-truth labels serve as the oracle for pattern-quality evaluation | Active | Output: `alarms.history` (`AlarmEvent` payloads, batch) |
+| P3 — Real-time correlation | Replays the labeled live alarm stream (wall-clock paced) onto `alarms.live`, feeding the enrichment → correlation-engine real-time pipeline; ground-truth labels and integration thresholds are the oracle for RCA accuracy and alarm-reduction evaluation | Active | Output: `alarms.live` (`AlarmEvent` payloads, wall-clock paced) |
+
 ## Contract
 
 - **Consumes (Kafka):** — (none; the Simulator is a pure Kafka producer)
