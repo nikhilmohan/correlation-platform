@@ -16,6 +16,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
 | correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.enriched.live, patterns.approved, codebook.generated | correlation.results |
+| alarm-manager | Spring Boot | sole owner of alarm persistence: the operational alarm-lifecycle store (open→correlated→cleared) and the analytical historical-alarm corpus (for mining); serves alarm query APIs | alarms.enriched, alarms.enriched.live, correlation.results | — (serves query APIs) |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -48,6 +49,7 @@ a dependency / refreshes state in that phase but drives no work of its own; *Idl
 | pattern-miner | Idle | Active — PrefixSpan over `transactions.clean` → `patterns.mined` | Idle |
 | pattern-manager | Idle | Active — RCA + reconcile + XAI + lifecycle → `patterns.discovered` / `patterns.approved` | Passive — serves approved patterns |
 | correlation-engine | Idle | Idle | Active — match/score/RCA over `alarms.enriched.live` → `correlation.results` |
+| alarm-manager | Idle | Active — persist enriched historical alarms into the corpus; serve the corpus to Noise Filter / Pattern Miner | Active — persist live enriched alarms; update alarm lifecycle from `correlation.results`; serve the live alarm-lifecycle view to web-ui |
 | web-ui | Active — topology & trails visualization | Active — pattern review/approve, config edits | Active — live incidents & correlation stats |
 
 This table is the **canonical phase map**; each service's spec/design restates *its own* row in
@@ -78,8 +80,27 @@ Producers/consumers per the table. **Adding a topic is a contract change.**
 > this — the raw-vs-lifted distinction and large snapshot payloads suit a file/API hand-off better.)
 
 ## Data stores & ownership
-Apache AGE — topology graph; only via Topology Service. PostgreSQL — alarm / pattern (owned
-by Pattern Manager) / incident / knowledge stores; separation by schema. Kafka — the bus.
+Apache AGE — topology graph; only via Topology Service. PostgreSQL — pattern store (owned by
+Pattern Manager), incident store (owned by Correlation Engine), knowledge store (owned by
+Knowledge Service), and the **alarm stores (owned by the Alarm Manager)**; separation by schema.
+Kafka — the bus. **Single owners:** each store is written by exactly one service; others read via
+that service's API or events, never the store directly.
+
+**Alarm Manager owns two alarm stores** (operational vs. analytical, per their different access
+patterns):
+- **Operational alarm-lifecycle store** — every enriched alarm with its **lifecycle state**
+  (`open` → `correlated` → `cleared`, etc.) and root-cause/child tags. Updated from
+  `correlation.results` when an alarm is correlated into an incident. Serves the **web-ui**'s live
+  alarm view (which alarms are open/correlated, their state and incident membership).
+- **Analytical historical-alarm corpus** — the persisted body of enriched historical alarms that
+  the learning path mines. It is the durable home of historical alarms (Kafka is a bus, not a
+  queryable history), queried by trail/time window. The Noise Filter (DBSCAN) and Pattern Miner
+  (PrefixSpan) operate over this corpus; the exact access mechanism (corpus query API vs. topic
+  consumption) is a design-stage detail to settle when those services are designed.
+
+No new Kafka topic or event payload is introduced — the Alarm Manager consumes the existing
+`alarms.enriched` / `alarms.enriched.live` (the `AlarmEvent` payload) and `correlation.results`
+(the `CorrelationResultEvent` payload), and exposes its stores through query APIs.
 
 ## Invariants
 Identity binding: alarms use the same `managedObjectId` as the graph (defined in event-model).
