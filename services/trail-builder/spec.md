@@ -10,8 +10,9 @@ an SRLG group joined into the same trail. Because a device may participate in mu
 LSP paths and SRLG groups, trails overlap — a single object may belong to many trails.
 The service persists trail definitions (member set + the `snapshotId` they were built
 from), serves trail membership queries to downstream consumers (Enrichment, Noise
-Filter, Pattern Miner, web-ui), and emits `trails.built` (a summary event) on the
-`trails.built` topic so dependent services can react.
+Filter, Pattern Miner, and the web-ui topology/trails module for visualization), and
+emits `trails.built` (a summary event) on the `trails.built` topic so dependent
+services can react.
 
 ## Scope
 
@@ -30,8 +31,10 @@ Filter, Pattern Miner, web-ui), and emits `trails.built` (a summary event) on th
   edges bounded by IGP area; union of SRLG members into a shared trail.
 - Persisting trail definitions — member `managedObjectId` list + the `snapshotId`
   they were built from — in PostgreSQL.
-- Exposing `getTrailsForObject(managedObjectId)` and `getTrail(trailId)` as HTTP
-  endpoints (published as OpenAPI 3.1).
+- Exposing `getTrailsForObject(managedObjectId)`, `getTrail(trailId)`, and
+  `listTrails(snapshotId)` as HTTP endpoints (published as OpenAPI 3.1) to
+  Enrichment, Noise Filter, Pattern Miner, and the web-ui topology/trails module
+  (trail visualization).
 - Emitting `trails.built` on every completed (re)build, carrying the frozen
   `TrailsBuiltEvent` payload (`snapshotId`, `trailIds[]`, `trailCount`). Full
   trail membership is intentionally not in the event; consumers fetch it via the API.
@@ -92,10 +95,28 @@ Filter, Pattern Miner, web-ui), and emits `trails.built` (a summary event) on th
    a new `snapshotId` supersedes prior trails for that snapshot; existing trail
    records for older snapshots are retained until explicitly superseded.
 
-7. **Serve trail membership queries via API.** Expose `getTrailsForObject(managedObjectId)`
-   (returns all trails the object belongs to) and `getTrail(trailId)` (returns the
-   trail's member list and its `snapshotId`). Publish the API as OpenAPI 3.1 at
-   `/openapi.json`; check the generated `openapi.json` into `services/trail-builder/`.
+7. **Serve trail membership queries and trail browse via API.** Expose three query
+   operations:
+   - `getTrailsForObject(managedObjectId)` — returns all trails the given object
+     belongs to.
+   - `getTrail(trailId)` — returns the trail's complete member list (as typed
+     `managedObjectId` values in the `<objectType>:<id>` scheme) and the `snapshotId`
+     it was built from. The response must be sufficient for the web-ui to overlay
+     trail membership on a typed multi-layer topology graph (member identities and
+     types); geometry and graph topology come from the Topology Service — not
+     duplicated here.
+   - `listTrails(snapshotId)` — returns the set of all trail summaries built for the
+     given `snapshotId`. Each summary carries the `trailId`, member count, and the
+     seed/bounds context (e.g. IGP area or SRLG context, where available) — enough
+     for the web-ui to enumerate and render trail clusters for a snapshot without
+     fetching every individual trail's full member list. Supports pagination and/or
+     filtering if natural; exact shape is a design-stage detail.
+   The web-ui topology/trails module (trail visualization) is a first-class consumer
+   of all three operations alongside Enrichment, Noise Filter, and Pattern Miner. The
+   web-ui builds its client against trail-builder's published OpenAPI spec (no source
+   coupling); its integration point is config-switchable (mock/real), identical to
+   every other consumer. Publish the full API as OpenAPI 3.1 at `/openapi.json`; check
+   the generated `openapi.json` into `services/trail-builder/`.
 
 8. **Emit `trails.built`.** After a successful build, produce a `trails.built` event
    with the frozen `TrailsBuiltEvent` payload (`snapshotId`, `trailIds[]`,
@@ -112,7 +133,7 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Builds policy-bounded correlation trails from the topology graph and Knowledge trail policy; persists trail definitions; notifies downstream services | Active | In: `topology.changed` (+ Topology Service graph-closure API, Knowledge Service trail-policy API). Out: `trails.built` |
+| P1 — Topology onboarding | Builds policy-bounded correlation trails from the topology graph and Knowledge trail policy; persists trail definitions; notifies downstream services. Concurrently serves the trail-query API (`listTrails`, `getTrail`, `getTrailsForObject`) to the web-ui topology/trails module so that operators can visualize trail clusters and device membership as the onboarding completes. | Active | In: `topology.changed` (+ Topology Service graph-closure API, Knowledge Service trail-policy API). Out: `trails.built`; serves trail-query API to web-ui and other consumers. |
 | P2 — Pattern learning | Serves trail membership queries to consumers that scope historical alarms and transactions by trail (Enrichment, Noise Filter, Pattern Miner) | Passive | In: —. Out: serves `getTrailsForObject` / `getTrail` API (no topic output of its own) |
 | P3 — Real-time correlation | Serves trail membership queries to real-time consumers (e.g. Enrichment live-path trail-tagging) | Passive | In: —. Out: serves `getTrailsForObject` / `getTrail` API (no topic output of its own) |
 
@@ -140,9 +161,30 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
   contract change):
   - `GET /trails?managedObjectId={managedObjectId}` — returns all trail identifiers
     (and optionally trail summaries) for the given object. Corresponds to
-    `getTrailsForObject(managedObjectId)`.
-  - `GET /trails/{trailId}` — returns the trail's member `managedObjectId` list and
-    `snapshotId`. Corresponds to `getTrail(trailId)`.
+    `getTrailsForObject(managedObjectId)`. Consumers: Enrichment, Noise Filter,
+    Pattern Miner, web-ui (topology/trails module — trail visualization).
+  - `GET /trails/{trailId}` — returns the trail's member `managedObjectId` list
+    (typed `<objectType>:<id>` values) and the `snapshotId` it was built from.
+    Corresponds to `getTrail(trailId)`. The response is visualization-ready: member
+    identities carry type information via the `managedObjectId` prefix so the web-ui
+    can lay members out on the typed multi-layer topology graph. Geometry/adjacency
+    comes from the Topology Service; Trail Builder supplies trail *membership* only.
+    Consumers: Enrichment, Noise Filter, Pattern Miner, web-ui (topology/trails
+    module — trail visualization).
+  - `GET /trails?snapshotId={snapshotId}` — returns the set of all trail summaries
+    built for the given snapshot. Each summary carries at minimum `trailId` and member
+    count; additional seed/bounds context (e.g. IGP area, SRLG group) is included
+    where cheaply available. Supports pagination and/or filtering; exact query
+    parameters and response shape are design-stage details. Corresponds to
+    `listTrails(snapshotId)`. Primary consumer: web-ui (topology/trails module) for
+    enumerating and rendering trail clusters across a full topology onboarding;
+    also available to other consumers. Published as part of the same OpenAPI 3.1 spec.
+
+    > **Note:** `GET /trails?managedObjectId=` and `GET /trails?snapshotId=` are
+    > distinguished by their query parameter. The designer may choose a different path
+    > shape (e.g. `GET /snapshots/{snapshotId}/trails`) — this is a design-stage
+    > decision. The semantic contract (the operation and its consumers) is fixed here.
+
   - `POST /trails/rebuild` — triggers an on-demand trail rebuild (accepts optional
     `snapshotId`; defaults to current snapshot). Returns the resulting `TrailsBuiltEvent`
     summary.
@@ -232,9 +274,12 @@ Each criterion maps to a single `pytest` test.
    to which that object belongs — no more, no fewer. Cross-checked against the
    persisted trail records.
 
-5. **`getTrail` correctness.** `getTrail(trailId)` returns the full member
-   `managedObjectId` list for the trail and the `snapshotId` it was built from, and
-   the returned `snapshotId` matches the one used to trigger the build.
+5. **`getTrail` correctness and visualization readiness.** `getTrail(trailId)` returns
+   the full member `managedObjectId` list for the trail and the `snapshotId` it was
+   built from, and the returned `snapshotId` matches the one used to trigger the build.
+   Every member value in the list conforms to the `<objectType>:<id>` scheme (i.e. the
+   `objectType` prefix is present and non-empty), so that the web-ui can resolve each
+   member's layer without an additional lookup.
 
 6. **`topology.changed` triggers a build and emits `trails.built`.** On consuming a
    `topology.changed` event with a new `snapshotId`, the service (re)builds trails
@@ -271,9 +316,25 @@ Each criterion maps to a single `pytest` test.
     different `snapshotId` creates new trail records tagged with the new `snapshotId`,
     leaving prior snapshot records intact.
 
-13. **OpenAPI contract compliance.** Requests and responses for `GET /trails`,
-    `GET /trails/{trailId}`, and `POST /trails/rebuild` validate against the checked-in
-    `openapi.json` schema (request inputs and response bodies).
+13. **OpenAPI contract compliance.** Requests and responses for `GET /trails`
+    (both `managedObjectId` and `snapshotId` variants), `GET /trails/{trailId}`, and
+    `POST /trails/rebuild` validate against the checked-in `openapi.json` schema
+    (request inputs and response bodies).
+
+14. **`listTrails(snapshotId)` enumerates all trails for a snapshot.** Given a
+    completed trail build for snapshot `S` that produced N trails, `GET
+    /trails?snapshotId=S` (or equivalent) returns exactly N trail summary records, each
+    carrying a `trailId` and member count greater than zero. The union of all `trailId`
+    values in the response equals the `trailIds` array from the corresponding
+    `trails.built` event for snapshot `S`.
+
+15. **`getTrail(trailId)` members are typed `managedObjectId`s sufficient for
+    visualization.** For every `trailId` returned by `listTrails(snapshotId)` or
+    `getTrailsForObject`, `GET /trails/{trailId}` returns a response containing the
+    `snapshotId` and a non-empty member list in which every entry matches the pattern
+    `<objectType>:<id>`. No additional per-member API call to Trail Builder is needed
+    for the web-ui to identify each member's layer type and render it on the
+    topology/trails visualization.
 
 ## Open questions
 
