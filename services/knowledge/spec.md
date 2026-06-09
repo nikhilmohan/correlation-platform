@@ -100,6 +100,20 @@ this service backs it with the API and enforces validation.
    for the MVP). A future domain's records can be authored, validated, and retrieved without
    code change — the template model is domain-parameterized, not Core IP-specific.
 
+## Phase applicability
+
+The Knowledge Service is **Passive in all three runtime phases** (per the canonical phase map
+in `docs/architecture.md`). It serves authored knowledge and parameters on demand via its
+versioned API, and emits `knowledge.updated` (`KnowledgeUpdatedEvent`) whenever a record is
+authored or edited — but it drives none of the phase work itself. Because knowledge records
+are editable at any time via the web-ui config page, `knowledge.updated` can fire in any phase.
+
+| Phase | Role | Active/Passive/Idle | Inputs / Outputs |
+|---|---|---|---|
+| **P1 — Topology onboarding** | Serves the trail policy (to Trail Builder) and the fault-origin list + propagation templates (to Codebook Generator) via the versioned API | **Passive** | In: — (no Kafka consumption). Out: versioned API reads served on request; `knowledge.updated` (`KnowledgeUpdatedEvent`) emitted on `knowledge.updated` topic if any record is authored/edited during this phase. |
+| **P2 — Pattern learning** | Serves the Phase-2 model params (DBSCAN params, session-window gap, PrefixSpan min-support, etc.) to Noise Filter, Pattern Miner, and Pattern Manager via the versioned API | **Passive** | In: — (no Kafka consumption). Out: versioned API reads served on request; `knowledge.updated` (`KnowledgeUpdatedEvent`) emitted on `knowledge.updated` topic if any param record is authored/edited during this phase. |
+| **P3 — Real-time correlation** | Serves params + approved policy to real-time consumers (e.g. Correlation Engine configuration) via the versioned API | **Passive** | In: — (no Kafka consumption). Out: versioned API reads served on request; `knowledge.updated` (`KnowledgeUpdatedEvent`) emitted on `knowledge.updated` topic if any record is authored/edited during this phase. |
+
 ## Contract
 
 - **Consumes (Kafka):** — (none)
