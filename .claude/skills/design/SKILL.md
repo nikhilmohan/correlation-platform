@@ -59,6 +59,20 @@ spec task must appear here. Use a table if it helps traceability.>
 | <spec task 1> | <design detail> |
 …
 
+## Phase applicability (design view)
+<Carry the spec's "Phase applicability" into the technical layer. For each of the three runtime
+phases (architecture.md → "Runtime phases": P1 Topology onboarding, P2 Pattern learning, P3
+Real-time correlation) state, for THIS service: its Active/Passive/Idle role (must match the spec
+and the canonical phase map), WHICH modules/handlers/endpoints/flows are exercised in that phase
+(and which are dormant), and the per-phase I/O (topics/APIs). This makes the per-phase behaviour
+of the implementation explicit and testable.>
+
+| Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
+|---|---|---|---|
+| P1 — Topology onboarding | <A/P/I> | <modules/flows, or "dormant"> | <topics/APIs, or "—"> |
+| P2 — Pattern learning | <A/P/I> | <modules/flows, or "dormant"> | <topics/APIs, or "—"> |
+| P3 — Real-time correlation | <A/P/I> | <modules/flows, or "dormant"> | <topics/APIs, or "—"> |
+
 ## Module breakdown
 <Internal components and responsibilities. Add a Mermaid component/flow diagram if it clarifies
 how modules interact.>
@@ -123,6 +137,9 @@ service-scoped end-to-end paths the integration-test stage exercises.>
 ## Gate (must hold before the design PR)
 - **Every spec task** appears in the **Task breakdown** (full traceability; no dropped/re-scoped
   task).
+- **Phase applicability (design view)** covers all three runtime phases with Active/Passive/Idle +
+  the modules/handlers exercised + I/O per phase, consistent with the spec and the canonical phase
+  map in `architecture.md`.
 - **Every acceptance criterion is mapped to a test** in the test plan, **and E2E scenarios** are
   defined from this design unit's point of view (incl. failure/partial paths).
 - **Design alternatives** are recorded for each non-trivial consideration (or explicitly noted
