@@ -125,12 +125,23 @@ it applies whatever fault-origin types and propagation templates the Knowledge S
 
 ## Contract
 
-- **Consumes (Kafka):** `trails.built`
+- **Consumes (Kafka):** `trails.built` _(primary trigger)_
   - Payload type: `TrailsBuiltEvent` (frozen binding from `libs/event-model`)
   - Fields: `snapshotId` (string), `trailIds` (array of strings), `trailCount` (integer)
   - Envelope: standard envelope — `eventId` (UUID, idempotency / dedup key), `type`,
     `schemaVersion`, `occurredAt`, `source`, `traceId`, `payload`
   - Unprocessable-message fallback: `trails.built.dlq`
+
+- **Optional Kafka input (design-stage decision):** `knowledge.updated`
+  - Payload type: `KnowledgeUpdatedEvent` (frozen binding from `libs/event-model`, added in
+    contract change #34). Fields: `recordType` (string), `recordId` (string, optional),
+    `version` (string), `domain` (string).
+  - Whether the service subscribes to `knowledge.updated` as a cache-invalidation or eager
+    refresh trigger (rather than fetching Knowledge data on each compilation cycle) is a
+    **design decision**. The topic and payload are available and typed; subscribing is not
+    required by this spec. If the designer subscribes, dedup on envelope `eventId` applies
+    and unprocessable messages route to `knowledge.updated.dlq`. No new contract change is
+    needed to use this topic — it is already in `architecture.md` and `libs/event-model`.
 
 - **Produces (Kafka):** `codebook.generated`
   - Payload type: `CodebookGeneratedEvent` (frozen binding from `libs/event-model`)
@@ -228,6 +239,8 @@ Each criterion maps to a single pytest test.
    templates (RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES), the compiled codebook scenario for
    that FiberSpan instance contains the expected ordered symptom set:
    `[FiberSpan-alarm, LinkDown(IPLink), AdjDown(IGPAdjacency), LSPDown(LSP), ReachabilityLoss(VPNService)]`.
+   _(Note: alarm-type identifier strings are illustrative placeholders; replaced with the shared
+   alarm-type vocabulary confirmed at design — see OQ-2.)_
 
 2. **Line-card fault and port fault produce distinguishable signatures.**
    Given mock graph instances for a LineCard (HOSTED_ON edges to two Ports, each with an IPLink)
@@ -235,6 +248,8 @@ Each criterion maps to a single pytest test.
    signatures: the LineCard scenario contains PortDown alarm types absent from the Port scenario,
    and the Port scenario's LOS / port-layer discriminator alarm is absent from the LineCard
    scenario's top-level signature.
+   _(Note: alarm-type identifier strings are illustrative placeholders; replaced with the shared
+   alarm-type vocabulary confirmed at design — see OQ-2.)_
 
 3. **Every scenario is tagged to at least one trail.**
    Given a mock Trail Builder returning at least one `trailId` for any `managedObjectId` queried,
@@ -284,33 +299,43 @@ Each criterion maps to a single pytest test.
 
 ## Open questions
 
-- **OQ-1: Trail Builder API surface for trail tagging.**
+All remaining open questions are **design-stage items** — they are not spec blockers and do
+not require contract changes here. They are resolved when the relevant collaborating service is
+designed and publishes its OpenAPI spec; codebook-generator's designer builds their mock/client
+against that published spec.
+
+- **OQ-1 [DESIGN-STAGE]: Trail Builder API surface for trail tagging.**
   (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/28)
   The spec requires calling `getTrailsForObject(managedObjectId)` on the Trail Builder Service.
-  The Trail Builder's `spec.md` (on the `spec/trail-builder` branch, not yet merged) describes
-  this operation but its OpenAPI surface is not yet frozen. If the Trail Builder API surface
-  changes (different endpoint path, response schema, or `managedObjectId` lookup semantics),
-  this service's integration point contract and acceptance criterion 3 may need revision.
-  Blocked on: Trail Builder spec PR merge and `services/trail-builder/openapi.json` being
-  checked in. No contract change is made here — this is flagged for human resolution.
+  The Trail Builder's published OpenAPI is not yet frozen (its spec PR is open). This resolves
+  when the Trail Builder spec is merged and `services/trail-builder/openapi.json` is checked in;
+  at that point, codebook-generator's designer builds the `trail-builder-trails` integration
+  point mock and client against that spec. The requirement — every scenario is tagged to at
+  least one trail via a Trail Builder API call — is firm; the endpoint path and response schema
+  are confirmed at design. Not a spec blocker.
 
-- **OQ-2: Exact alarm-type string identifiers for predicted symptoms.**
+- **OQ-2 [DESIGN-STAGE]: Shared alarm-type vocabulary for codebook signatures.**
   (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/30)
-  The propagation templates in §5 describe symptom types (e.g. `LinkDown`, `AdjDown`,
-  `LSPDown`, `ReachabilityLoss`, `PortDown`) at a conceptual level. The exact string values
-  that will appear as `probableCause` or `eventType` in an `AlarmEvent` (and therefore in a
-  codebook signature) are not defined in `libs/event-model` or `architecture.md` — they are
-  domain knowledge authored in the Knowledge Service. Acceptance criteria 1 and 2 use
-  illustrative placeholders. The designer must confirm: are alarm-type strings in codebook
-  signatures drawn from the `probableCause` field, `eventType` field, or a composite? Are the
-  canonical values for Core IP defined somewhere in the Knowledge Service's seed data or in a
-  separate contract? Resolution needed before the designer finalizes the signature schema.
+  The codebook signature is built from **alarm-type identifiers drawn from a shared alarm-type
+  vocabulary defined at design**, coordinated with the Knowledge Service (which authors the
+  propagation templates that name these effects). The propagation-template effects referenced in
+  §5 (e.g. `LinkDown`, `AdjDown`, `LSPDown`, `PortDown`, `LOS`, `ReachabilityLoss`) are
+  illustrative; the canonical identifier strings — and whether they map to `eventType`,
+  `probableCause`, or a separate field in `AlarmEvent` — are a **shared design-time decision**
+  between codebook-generator and knowledge (the template author). Acceptance criteria 1 and 2
+  use these strings as illustrative placeholders; the designer replaces them with the vocabulary
+  confirmed at design. This does not require a new topic, payload, or field in `libs/event-model`
+  now; if a new field is ultimately needed that is a contract change at design requiring human
+  approval. Not a spec blocker.
 
-- **OQ-3: Topology Service query API support for "list objects by type" scoped to a snapshotId.**
+- **OQ-3 [DESIGN-STAGE]: Topology Service query API support for snapshotId-scoped object enumeration.**
   (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/31)
   Task 3 requires enumerating all graph instances of each fault-origin type for a specific
-  `snapshotId`. The Topology Service spec (on `spec/topology`) describes `list objects by type`
-  but it is not clear whether the query API accepts `snapshotId` as a filter parameter or
-  always operates on the current snapshot. If the Topology Service only serves the latest
-  snapshot, codebook compilation for a previous `snapshotId` may not be reproducible. No
-  contract change is made here — flagged for human resolution against the Topology Service spec.
+  `snapshotId`. The codebook-generator's requirement — enumerate fault-origin instances scoped
+  to the snapshot identified by the triggering `trails.built` event — must be accounted for in
+  the Topology Service's design. This resolves when the Topology Service is designed and its
+  `list objects by type` endpoint (with or without a `snapshotId` filter) is confirmed in the
+  Topology Service's published OpenAPI; codebook-generator's designer then builds its
+  `topology-query` client and mock against that spec. If the Topology API does not support
+  `snapshotId` scoping, the Topology designer must note the constraint and codebook-generator's
+  designer adapts accordingly. Not a spec blocker.
