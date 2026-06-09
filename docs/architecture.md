@@ -15,7 +15,8 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | noise-filter | Python | DBSCAN noise removal | alarms.enriched | transactions.clean |
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
-| correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.enriched.live, patterns.approved, codebook.generated | correlation.results |
+| correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated | correlation.results |
+| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`; serves the live alarm query API | alarms.enriched.live, correlation.results | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -47,7 +48,8 @@ a dependency / refreshes state in that phase but drives no work of its own; *Idl
 | noise-filter | Idle | Active — DBSCAN over `alarms.enriched` → `transactions.clean` | Idle (history path only) |
 | pattern-miner | Idle | Active — PrefixSpan over `transactions.clean` → `patterns.mined` | Idle |
 | pattern-manager | Idle | Active — RCA + reconcile + XAI + lifecycle → `patterns.discovered` / `patterns.approved` | Passive — serves approved patterns |
-| correlation-engine | Idle | Idle | Active — match/score/RCA over `alarms.enriched.live` → `correlation.results` |
+| correlation-engine | Idle | Idle | Active — match/score/RCA over `alarms.persisted.live` → `correlation.results` |
+| alarm-manager | Idle | Idle | Active — persist live alarms from `alarms.enriched.live`, republish on `alarms.persisted.live`; maintain lifecycle + correlation-group role from `correlation.results`; serve the live alarm view to web-ui |
 | web-ui | Active — topology & trails visualization | Active — pattern review/approve, config edits | Active — live incidents & correlation stats |
 
 This table is the **canonical phase map**; each service's spec/design restates *its own* row in
@@ -65,9 +67,21 @@ Consumers reject unknown major `schemaVersion`.
 
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
-alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, transactions.clean,
-patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq.
-Producers/consumers per the table. **Adding a topic is a contract change.**
+alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
+transactions.clean, patterns.mined, patterns.discovered, patterns.approved, correlation.results,
+*.dlq. Producers/consumers per the table. **Adding a topic is a contract change.**
+
+> **Live alarm path (real-time).** On the live path the Alarm Manager sits **in-line** between
+> Enrichment and the Correlation Engine: Enrichment emits `alarms.enriched.live` → the Alarm
+> Manager persists each live alarm (initial state `open`) and republishes it on
+> **`alarms.persisted.live`** → the **Correlation Engine consumes `alarms.persisted.live`** (not
+> `alarms.enriched.live`). This guarantees every alarm entering correlation has been persisted
+> first, and makes the Alarm Manager the single source of truth for **live alarm state**. The
+> Alarm Manager also consumes `correlation.results` to update each alarm's lifecycle
+> (`open`→`correlated`→`cleared`) and its correlation-group role (root-cause / child) + incident
+> linkage. (The historical/learning path persists nothing here — historical alarms are mined
+> in-flight from Kafka: simulator → enrichment → noise-filter → pattern-miner. No new event
+> payload: `alarms.persisted.live` carries the existing `AlarmEvent`.)
 
 > **Topology ingestion is file/API-based, not a topic.** The raw topology snapshot is **not**
 > a Kafka event. The Simulator generates a domain-grounded topology snapshot **file** and uploads
@@ -78,8 +92,27 @@ Producers/consumers per the table. **Adding a topic is a contract change.**
 > this — the raw-vs-lifted distinction and large snapshot payloads suit a file/API hand-off better.)
 
 ## Data stores & ownership
-Apache AGE — topology graph; only via Topology Service. PostgreSQL — alarm / pattern (owned
-by Pattern Manager) / incident / knowledge stores; separation by schema. Kafka — the bus.
+Apache AGE — topology graph; only via Topology Service. PostgreSQL — pattern store (owned by
+Pattern Manager), incident store (owned by Correlation Engine), knowledge store (owned by
+Knowledge Service), and the **live alarm store (owned by the Alarm Manager)**; separation by
+schema. Kafka — the bus. **Single owners:** each store is written by exactly one service; others
+read via that service's API or events, never the store directly.
+
+**Alarm Manager owns the live alarm store** — the single source of truth for **live alarm state**.
+It holds each live alarm (from `alarms.enriched.live`) with its **lifecycle state** (`open` →
+`correlated` → `cleared`) and, once correlated, its **correlation-group role** (root-cause / child)
+and **incident linkage**, updated from `correlation.results`. It serves the **web-ui**'s live alarm
+view (which alarms are open/correlated, their state, RCA/child role, and incident membership).
+
+**MVP scope — live only, no historical corpus.** Historical/learning-path alarms are **not
+persisted** by the Alarm Manager (or anywhere) for the MVP: they are replayed by the Simulator and
+**mined in-flight** through the Kafka stream (simulator → enrichment → noise-filter → pattern-miner).
+A durable historical-alarm corpus is deferred post-MVP.
+
+**No new event payload** — the Alarm Manager consumes the existing `alarms.enriched.live` (the
+`AlarmEvent` payload) and `correlation.results` (`CorrelationResultEvent`), republishes the
+`AlarmEvent` on the new `alarms.persisted.live` topic, and exposes the live alarm store via a query
+API.
 
 ## Invariants
 Identity binding: alarms use the same `managedObjectId` as the graph (defined in event-model).
