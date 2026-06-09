@@ -13,6 +13,7 @@ from ._generated import (
     AlarmEvent,
     CodebookGeneratedEvent,
     CorrelationResultEvent,
+    KnowledgeUpdatedEvent,
     PatternApprovedEvent,
     PatternDiscoveredEvent,
     PatternMinedEvent,
@@ -32,6 +33,7 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "PatternDiscoveredEvent": PatternDiscoveredEvent,
     "PatternApprovedEvent": PatternApprovedEvent,
     "CorrelationResultEvent": CorrelationResultEvent,
+    "KnowledgeUpdatedEvent": KnowledgeUpdatedEvent,
 }
 
 
