@@ -46,8 +46,8 @@ hard-coded in the service.
   why the service is Idle in P3).
 - **Pattern state and lifecycle** — owned by Pattern Manager (§6.9).
 - **Topology graph access** — graph topology context for feature vectorization is derived from
-  the `managedObjectId` type prefix alone; if richer graph traversal is needed that is an open
-  question (see Open questions).
+  the `managedObjectId` type prefix alone by default; whether richer graph traversal is added
+  is a design-stage modeling decision (see Open questions #1).
 - **Persistent alarm storage** — the service owns no alarm store; it is stateless over the
   window lifecycle.
 - **Codebook reconciliation or RCA** — owned by Pattern Manager.
@@ -174,24 +174,28 @@ Each criterion maps to one pytest test.
 
 ## Open questions
 
-1. **Feature vectorization — richer graph position.** Task 3 derives object-type layer from
-   the `managedObjectId` type prefix only (e.g. `FiberSpan`, `IPLink`). If the designer
-   determines that a richer graph-position feature (e.g. propagation depth, hop count from
-   fault origin) is needed, that would require a synchronous call to the Topology or Trail
-   Builder API at vectorization time — a new contract dependency not currently listed here. A
-   human must decide before design begins. **Blocked on human decision.**
+All three items below are **design-stage** — resolved by human decision on 2026-06-09. None
+is a spec blocker or a contract change. Design may proceed.
 
-2. **`snapshotId` source for `TransactionEvent`.** The `TransactionEvent` schema requires a
-   `snapshotId`. The `AlarmEvent` payload carried on `alarms.enriched` does not include a
-   `snapshotId` field (per `AlarmEvent.schema.json`). The mechanism by which the Noise Filter
-   obtains the `snapshotId` in scope — whether it is stamped on the Kafka envelope by
-   Enrichment, passed in a header, fetched from a side channel, or derived from context — is
-   not specified in `architecture.md` or the event-model. A human must confirm the resolution
-   before design proceeds. **Blocked on human decision.**
+1. **[DESIGN-STAGE] Feature vectorization — richer graph position** (tracked: #48).
+   Task 3 derives object-type layer from the `managedObjectId` type prefix only (e.g.
+   `FiberSpan`, `IPLink`). Whether the designer needs richer graph-position features
+   (e.g. propagation depth, hop count from fault origin) — and thus a Topology/Trail Builder
+   API call at vectorization time — is a modeling decision for the design stage. If richer
+   features are chosen, the designer adds the corresponding integration point in `design.md`
+   as a config-switchable dependency (no spec/contract change required unless a new topic or
+   payload field is introduced).
 
-3. **`knowledge.updated` as an explicit consumed topic.** Refreshing DBSCAN params on
-   `knowledge.updated` means the service consumes two topics: `alarms.enriched` and
-   `knowledge.updated`. The Kafka topic table in `architecture.md` lists `knowledge.updated`
-   consumers as "dependents" without naming noise-filter explicitly. This should be confirmed
-   as a contract entry so the topic-consumer mapping is complete and accurate.
-   **Needs `architecture.md` update if confirmed.**
+2. **[DESIGN-STAGE] `snapshotId` provenance for `TransactionEvent`** (tracked: #51).
+   `TransactionEvent` requires a `snapshotId`; `AlarmEvent` on `alarms.enriched` does not
+   carry it. The exact mechanism for obtaining `snapshotId` is a design decision. The
+   leading candidate is to derive it from the trail context via Trail Builder
+   `getTrail(trailId)`, since the service already scopes processing per trail — but the
+   designer chooses the implementation. No `AlarmEvent` contract change is introduced in
+   this spec.
+
+3. **[DESIGN-STAGE] `knowledge.updated` as explicit consumed topic** (tracked: #52).
+   Whether noise-filter subscribes to `knowledge.updated` to trigger live param refresh, or
+   polls the Knowledge API on its own schedule, is a design-stage wiring choice. DBSCAN
+   params are read from the Knowledge Service API regardless. No `architecture.md` consumer
+   mapping update is required at the spec stage.
