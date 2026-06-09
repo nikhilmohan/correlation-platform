@@ -110,7 +110,7 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
 |---|---|---|---|
 | P1 — Topology onboarding | Ingests the topology snapshot file via its ingestion API, lifts records into AGE, mints `snapshotId`, emits `topology.changed`. This is topology's primary phase. | Active | In: topology snapshot file (via `POST /topology/snapshots` ingestion API). Out: `topology.changed` (Kafka). |
 | P2 — Pattern learning | Serves its graph query API to consumers that need topology context (Trail Builder, Codebook Generator, Enrichment); drives no work of its own. | Passive | In: — . Out: graph query API responses (`GET /topology/nodes/…`, neighbors, traversal, resolve, list). No topic I/O. |
-| P3 — Real-time correlation | Same graph query API serves real-time consumers (e.g. Enrichment, Correlation Engine needing topology/layer lookups); no work of its own. | Passive | In: — . Out: graph query API responses (same endpoints as P2). No topic I/O. |
+| P3 — Real-time correlation | Not involved. No real-time consumer queries the Topology Service: Enrichment (live) tags via Trail Builder `getTrailsForObject`, and Correlation Engine reads patterns + codebook — topology context is already materialized into trails + codebook during P1. The graph query API remains available but is off the real-time critical path. | Idle | In: — . Out: — (no real-time consumer; nothing driven or served on the critical path). |
 
 ---
 
