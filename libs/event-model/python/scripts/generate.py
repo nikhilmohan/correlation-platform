@@ -57,6 +57,7 @@ PAYLOAD_FILES = [
     "PatternDiscoveredEvent.schema.json",
     "PatternApprovedEvent.schema.json",
     "CorrelationResultEvent.schema.json",
+    "KnowledgeUpdatedEvent.schema.json",
 ]
 
 

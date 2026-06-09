@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/KnowledgeUpdatedEvent.schema.json",
+  "title": "KnowledgeUpdatedEvent",
+  "description": "Carried on knowledge.updated. Minimal refresh trigger emitted by the Knowledge Service so consumers know WHAT changed and re-fetch the specific version via the Knowledge API; the knowledge itself lives in the versioned store/API, not in the event.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "recordType": {
+      "type": "string",
+      "description": "Which kind of knowledge record changed; free-form per the domain-template model (e.g. propagationTemplate, faultOriginType, trailPolicy, modelParams)."
+    },
+    "recordId": {
+      "type": "string",
+      "description": "Identifier of the specific record that changed; absent implies a broader change of that recordType."
+    },
+    "version": {
+      "type": "string",
+      "description": "The new version of the changed knowledge; consumers fetch this version via the Knowledge API."
+    },
+    "domain": {
+      "type": "string",
+      "description": "The domain scope (e.g. core-ip), per the platform's domain-extensibility model."
+    }
+  },
+  "required": ["recordType", "version", "domain"]
+}
