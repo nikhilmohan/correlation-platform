@@ -205,12 +205,15 @@ Each criterion maps to a single JUnit 5 test.
 
 ## Open questions
 
-- **OQ-2 (design-stage) — Extensible model-param catalog: exact MVP param set.** The model-
-  param catalog is an open/extensible set (records authored here, not a fixed enum in code).
-  The exact MVP param set (which consumer's params live here, whether enrichment thresholds
-  such as flap-damp window and dedup window are included, and their sane-bounds declarations)
-  is finalized at design stage with cross-consumer visibility. This is not a spec blocker.
-  Tracked: GitHub issue #23.
+- **OQ-2 (design-stage) — Extensible model-param catalog: exact MVP seed param set.**
+  *Resolved (issue #23, closed):* the model-param catalog is an **open, extensible set of
+  records** authored and versioned here — never a fixed enum in code — and every param record
+  is **updatable and retrievable consistently** through the same CRUD + versioned-read API as
+  the other record types (asserted by acceptance criteria 1 and 4). The only design-stage
+  detail remaining is the **exact seed param set** for the MVP (which consumers' params are
+  pre-loaded, whether enrichment thresholds such as flap-damp/dedup windows are included, and
+  their sane-bounds declarations) — finalized at design with cross-consumer visibility. Not a
+  spec blocker.
 
 - **OQ-3 (design-stage) — Propagation-template effect vocabulary and canonical alarm-type
   identifiers.** Propagation templates name the alarm types their effects produce (e.g.
