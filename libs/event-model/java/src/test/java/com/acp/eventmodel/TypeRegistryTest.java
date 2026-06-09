@@ -30,8 +30,8 @@ class TypeRegistryTest {
     }
 
     @Test
-    void allNineTypesRegistered() {
-        assertEquals(9, TypeRegistry.knownTypes().size());
+    void allTenTypesRegistered() {
+        assertEquals(10, TypeRegistry.knownTypes().size());
     }
 
     @Test
