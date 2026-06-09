@@ -24,7 +24,10 @@ governed, reviewable, downstream-ready patterns.
 - Explainability metadata assembly: compile instance count, support/confidence/lift, timing (median inter-arrival, timeframe), codebook overlap reference, and supporting example instances (mined sequence occurrences and their provenance from the Pattern Miner) per pattern.
 - Persisting enriched patterns to the Pattern Store (PostgreSQL) with lifecycle `draft`; assigning a stable `patternId`.
 - Emitting `patterns.discovered` (one `PatternDiscoveredEvent` per newly persisted draft pattern).
-- Exposing a pattern read API (OpenAPI 3.1) for the web-ui: list discovered patterns with full explainability metadata (support/confidence/lift, RCA, timing, codebook overlap, supporting instances, lifecycle) and retrieve a single pattern by `patternId`.
+- Exposing a pattern read API (OpenAPI 3.1) for the web-ui's pattern-review/XAI module. The API serves the data the UI needs to **visualize discovered patterns and support the operator's approve/reject decision**:
+  - **Discovered (draft) patterns for review:** list draft patterns with the full explainability/XAI metadata (support/confidence/lift, `rootCauseAlarmType` (RCA), timing stats, codebook overlap / `codebookMatchId`, supporting example instances, lifecycle) — i.e. everything needed to render an intuitive review-and-decide view — and retrieve a single pattern by `patternId`.
+  - **Active (approved) patterns for operator visibility:** list the currently-active (approved) patterns with their details (sequence, RCA, metrics, lifecycle), filterable by lifecycle, so the UI can show which patterns are live in correlation.
+  - Note: the UI *renders* these (Cytoscape/charts, per §6.11); the Pattern Manager only *serves* the structured data. Real-time pattern-match counts / live correlation stats are produced by the Correlation Engine (`correlation.results`), not here.
 - Accepting a lightweight approval-intent request (patternId + decision approve/reject + reviewer + notes) via the Pattern Manager API; owning the lifecycle transition from `draft` to `approved` in the Pattern Store; recording the transition with a timestamp.
 - Emitting `patterns.approved` downstream (one `PatternApprovedEvent`) after each approval transition, for the Correlation Engine to consume. The Pattern Manager is the sole producer of `PatternApprovedEvent`.
 - Supporting deprecation: transitioning a pattern in `draft` or `approved` state to `deprecated` via the pattern management API; recording the transition with a timestamp.
@@ -65,7 +68,7 @@ governed, reviewable, downstream-ready patterns.
 
 7. Emit `patterns.discovered`: publish one `PatternDiscoveredEvent` per newly persisted draft pattern, carrying `patternId`, sequence, `rootCauseAlarmType`, support/confidence/lift, timing, `codebookMatchId` (if any), and `lifecycle = draft`.
 
-8. Serve the pattern read API (OpenAPI 3.1): expose endpoints for the web-ui to list discovered patterns (filterable by lifecycle) with full explainability metadata, retrieve a single pattern by `patternId`, and serve approved patterns to the Correlation Engine.
+8. Serve the pattern read API (OpenAPI 3.1): expose endpoints for the web-ui to (a) list **discovered (draft) patterns** with full explainability/XAI metadata for the review-and-approve/reject view, (b) retrieve a single pattern by `patternId`, (c) list **active (approved) patterns** with their details for operator visibility — all filterable by lifecycle — and serve approved patterns to the Correlation Engine.
 
 9. Process human approval intent: receive a lightweight approval-intent request (patternId + decision approve/reject + reviewer + notes) via the Pattern Manager API; validate that the named pattern exists in `draft` state; transition lifecycle to `approved` in the Pattern Store; record the transition with a timestamp.
 
