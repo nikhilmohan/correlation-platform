@@ -3,7 +3,7 @@
 ## Purpose
 
 The Correlation Engine is the real-time correlation core of the platform. In Phase 3, it
-consumes live enriched alarms from `alarms.enriched.live`, matches them statefully against
+consumes live persisted alarms from `alarms.persisted.live`, matches them statefully against
 the two upstream knowledge sources — approved patterns (from the Pattern Manager via
 `patterns.approved`) and the model-derived codebook (from the Codebook Generator via
 `codebook.generated`) — and produces correlated incidents. For each winning match it tags
@@ -16,12 +16,20 @@ resolution ensure every incident is attributable to exactly one winning match. T
 is the sole owner of the Incident Store; it does not mine patterns, own pattern lifecycle,
 compile the codebook, or own the topology graph.
 
+> **Why `alarms.persisted.live` and not `alarms.enriched.live`:** the Alarm Manager sits
+> in-line on the live path between Enrichment and the Correlation Engine. It consumes
+> `alarms.enriched.live`, persists each live alarm (initial state `open`) to the live alarm
+> store, and republishes it on `alarms.persisted.live`. The Correlation Engine consumes
+> `alarms.persisted.live`, which guarantees every alarm entering correlation has already been
+> persisted. The payload is the same frozen `AlarmEvent` — no new payload type is introduced
+> (contract #73).
+
 ## Scope
 
 **In scope:**
 - Consuming `patterns.approved` (`PatternApprovedEvent`) at startup and on every new approval event to maintain an in-memory (or local-state) approved-pattern set, scoped by `trailId`.
 - Consuming `codebook.generated` (`CodebookGeneratedEvent`) to receive the codebook version reference; fetching the full scenario signatures from the Codebook Generator API (the event carries a summary only — `codebookId`, `snapshotId`, `scenarioCount`). On each new `codebook.generated` event the engine replaces its in-scope codebook with the **latest** received for the relevant `snapshotId`/trail scope; version alignment is by `snapshotId` + trail scope, not by a `codebookId` field on `PatternApprovedEvent` (no such field is added — no contract change).
-- Consuming `alarms.enriched.live` (`AlarmEvent` with `trailIds[]` populated by Enrichment) as the primary real-time input.
+- Consuming `alarms.persisted.live` (`AlarmEvent` with `trailIds[]` populated by Enrichment and persisted by the Alarm Manager) as the primary real-time input.
 - Maintaining per-trail sliding-window state with timeouts; window duration is aligned to the Phase-2 session-gap parameter obtained from the Knowledge Service (configurable, not hard-coded) so that alarms arriving within one session gap are grouped for joint evaluation.
 - For each active window, evaluating pattern matching: advancing per-pattern sequence state machines over the windowed alarm sequence; firing a match when the match condition is satisfied; partial match (tolerance for dropped alarms within a window) is allowed, with the **partial-match tolerance bound sourced from the Knowledge Service** (no hard-coded thresholds).
 - For each active window, evaluating codebook decoding: scoring the observed symptom set against all trail-scoped codebook scenarios by closest-match (minimum distance: tolerate missing alarms from the expected signature, penalize alarms present in the observation but absent from the scenario); selecting the best-scoring scenario as the codebook match candidate; scoring and conflict-resolution thresholds sourced from the Knowledge Service.
@@ -58,7 +66,7 @@ compile the codebook, or own the topology graph.
 
 2. Load the codebook: on each `codebook.generated` event, record the new `codebookId` and fetch full per-trail scenario signatures (root-cause type, expected symptom set) from the Codebook Generator API. Always maintain the **latest codebook in scope** for each `snapshotId`/trail; when a newer `codebook.generated` event arrives for the same scope, replace the prior codebook. The fetched signatures are the reference for codebook decoding; version alignment is by `snapshotId` + trail scope.
 
-3. Consume and validate `alarms.enriched.live`: validate each `AlarmEvent` against the `libs/event-model` Java binding; deduplicate on `alarmId`; route poison/unparseable messages to `alarms.enriched.live.dlq`; dispatch valid alarms into per-trail window state.
+3. Consume and validate `alarms.persisted.live`: validate each `AlarmEvent` against the `libs/event-model` Java binding; deduplicate on `alarmId`; route poison/unparseable messages to `alarms.persisted.live.dlq`; dispatch valid alarms into per-trail window state.
 
 4. Maintain per-trail sliding-window state: group incoming alarms by each `trailId` in their `trailIds[]` array into per-trail session windows; keep windows open while alarms continue arriving within the session-gap timeout (sourced from Knowledge Service — no hard-coded value); expire windows after silence exceeds the timeout and trigger evaluation for the expired window.
 
@@ -80,12 +88,12 @@ compile the codebook, or own the topology graph.
 |---|---|---|---|
 | P1 — Topology onboarding | Not involved; no live alarms and no approved patterns exist at this phase. | Idle | — |
 | P2 — Pattern learning | Not involved; learning happens entirely upstream (Enrichment → Noise Filter → Pattern Miner → Pattern Manager). The Correlation Engine does not process `alarms.enriched` (history path) and does not participate in pattern discovery or approval. | Idle | — |
-| P3 — Real-time correlation | Core work phase: loads approved patterns + latest-in-scope codebook, consumes `alarms.enriched.live`, matches/scores/conflict-resolves (all thresholds from Knowledge Service), tags root cause + child alarms, persists incidents, emits `correlation.results`; serves the Incident/Stats read API (raw counts) to the web-ui. | Active | In (Kafka): `alarms.enriched.live`, `patterns.approved`, `codebook.generated`; Out (Kafka): `correlation.results`; Calls (API): Pattern Manager (approved patterns), Codebook Generator (scenario signatures), Knowledge Service (session-gap + partial-match tolerance + scoring/conflict thresholds); Serves (API): Incident/Stats read API (web-ui) |
+| P3 — Real-time correlation | Core work phase: loads approved patterns + latest-in-scope codebook, consumes `alarms.persisted.live`, matches/scores/conflict-resolves (all thresholds from Knowledge Service), tags root cause + child alarms, persists incidents, emits `correlation.results`; serves the Incident/Stats read API (raw counts) to the web-ui. | Active | In (Kafka): `alarms.persisted.live`, `patterns.approved`, `codebook.generated`; Out (Kafka): `correlation.results`; Calls (API): Pattern Manager (approved patterns), Codebook Generator (scenario signatures), Knowledge Service (session-gap + partial-match tolerance + scoring/conflict thresholds); Serves (API): Incident/Stats read API (web-ui) |
 
 ## Contract
 
 - **Consumes (Kafka):**
-  - `alarms.enriched.live` — `AlarmEvent` (`alarmId`, `managedObjectId` in `<objectType>:<id>` scheme, `eventType`, `probableCause`, `perceivedSeverity`, `raisedAt`, `state`, `trailIds[]`; `trailIds[]` populated by Enrichment)
+  - `alarms.persisted.live` — `AlarmEvent` (`alarmId`, `managedObjectId` in `<objectType>:<id>` scheme, `eventType`, `probableCause`, `perceivedSeverity`, `raisedAt`, `state`, `trailIds[]`; `trailIds[]` populated by Enrichment, alarm persisted in-line by the Alarm Manager before reaching this topic)
   - `patterns.approved` — `PatternApprovedEvent` (`patternId`, `sequence[]`, `rootCauseAlarmType`, `support`, `confidence`, `lift`, `timing`, `codebookMatchId?`, `lifecycle`). No `codebookId` field is present or required on this event; the engine resolves codebook version by `snapshotId`/trail scope from the latest `codebook.generated` event.
   - `codebook.generated` — `CodebookGeneratedEvent` (`codebookId`, `snapshotId`, `scenarioCount`; full scenario signatures fetched via Codebook Generator API). The engine always uses the **latest** event received for a given `snapshotId`/trail scope as the active codebook.
 
@@ -112,12 +120,12 @@ compile the codebook, or own the topology graph.
 
 ## Non-functional
 
-- **Idempotency key:** `alarmId` for deduplication of `alarms.enriched.live` events; `eventId` for deduplication of `patterns.approved` and `codebook.generated` events; `incidentId` must be stable across reprocessing of the same alarm window (re-evaluating the same set of `alarmId`s within the same `trailId` and window must yield the same `incidentId`).
+- **Idempotency key:** `alarmId` for deduplication of `alarms.persisted.live` events; `eventId` for deduplication of `patterns.approved` and `codebook.generated` events; `incidentId` must be stable across reprocessing of the same alarm window (re-evaluating the same set of `alarmId`s within the same `trailId` and window must yield the same `incidentId`).
 - **Config:** all thresholds and window parameters sourced from the Knowledge Service API — no hard-coded values. Specifically: session-gap (window timeout), partial-match tolerance, scoring threshold floors, conflict-resolution weights are Knowledge Service parameters; all integration base URLs and `INTEGRATION_MODE` are environment variables.
 - **Codebook version alignment:** the engine uses the latest `codebook.generated` event received for the relevant `snapshotId`/trail scope. When a newer codebook arrives for the same scope, it replaces the prior one for all subsequent window evaluations. This requires no additional field on `PatternApprovedEvent` and is not a contract change.
 - **Observability:** `/health` (liveness + readiness), `/metrics` (Prometheus; expose at minimum: `incidents_created_total`, `alarms_processed_total`, `pattern_match_total`, `codebook_match_total`, `window_timeouts_total`, `dlq_routed_total`), structured JSON logs.
 - **API contract:** publishes OpenAPI 3.1 at `/openapi.json`; `openapi.json` checked in to `services/correlation-engine/openapi.json`; the published spec drives contract/unit tests; a surface change is a contract change requiring `architecture.md` update + human approval.
-- **Error handling:** poison/unparseable messages on each consumed topic routed to `<topic>.dlq` (`alarms.enriched.live.dlq`, `patterns.approved.dlq`, `codebook.generated.dlq`); not dropped silently; processing of subsequent valid messages must continue uninterrupted.
+- **Error handling:** poison/unparseable messages on each consumed topic routed to `<topic>.dlq` (`alarms.persisted.live.dlq`, `patterns.approved.dlq`, `codebook.generated.dlq`); not dropped silently; processing of subsequent valid messages must continue uninterrupted.
 
 ## Acceptance criteria
 
@@ -145,7 +153,7 @@ Each criterion maps to a single JUnit 5 test.
 
 11. **Incident read API — root cause and children:** calling `GET /incidents/{incidentId}` returns `rootCauseAlarmId` and `childAlarmIds[]` that match the values emitted in the `CorrelationResultEvent` for the same `incidentId`.
 
-12. **Poison message routing — processing continues:** an unparseable message on `alarms.enriched.live` is routed to `alarms.enriched.live.dlq` and the service continues processing the next valid message without halting.
+12. **Poison message routing — processing continues:** an unparseable message on `alarms.persisted.live` is routed to `alarms.persisted.live.dlq` and the service continues processing the next valid message without halting.
 
 13. **Latest codebook used — newer codebook replaces prior:** given two sequential `codebook.generated` events for the same `snapshotId`/trail scope (V1 then V2), the service uses V2's scenario signatures for all window evaluations that begin after V2 is loaded; a window evaluated before V1 is received still uses the then-latest codebook (none / V1 as applicable). No `codebookId` field is required on `PatternApprovedEvent` to satisfy this criterion.
 
