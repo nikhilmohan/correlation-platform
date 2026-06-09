@@ -50,9 +50,13 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   `patterns.approved` event.
 - Owning or computing domain data: topology graph, trail definitions, patterns, incidents, and
   ML params all live in their owning services; the web-ui is a stateless client.
-- A Backend-for-Frontend (BFF) server layer: the application is a static Angular SPA that
-  calls service APIs directly. If a BFF is introduced it is a design decision to be made at
-  the design stage and would constitute a new API surface requiring a contract-change review.
+- A Backend-for-Frontend (BFF) server layer: **decided — no BFF for MVP.** The application
+  is a static Angular SPA that calls the five collaborating service APIs directly via
+  config-switchable Angular environment configuration (per-service base URL, no hard-coded
+  URLs). CORS is a design-stage concern for each producer service. A BFF introduced post-MVP
+  would be a separate new service requiring its own spec, published OpenAPI, contract-change
+  approval (architecture.md update), Dockerfile, /health, and /metrics. It is not in scope
+  for this service or this spec.
 - Correlation/incident computation: the web-ui displays results from the Correlation Engine; it
   does not implement matching, scoring, or RCA logic.
 - Pattern lifecycle management beyond surfacing the UI action: lifecycle transitions
@@ -158,10 +162,18 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   files (`environment.ts` / `environment.integration.ts`); no URL or threshold is hard-coded
   in application source. Environment files are populated from Docker Compose environment
   variables at build or serve time.
+- **Integration points — direct-to-service (no BFF, MVP decision):** the web-ui calls the
+  five collaborating service APIs (Topology Service, Trail Builder, Pattern Manager, Knowledge
+  Service, Correlation Engine) **directly** from the SPA. There is no Backend-for-Frontend
+  proxy layer. Each integration point is independently configured via Angular environment files
+  (base URL per service + mock/real toggle). The UI builds typed clients against each
+  producer's published OpenAPI 3.1 spec. CORS headers on the collaborating services are a
+  design-stage concern for each producer. A BFF is explicitly out of MVP scope; if introduced
+  post-MVP it would require its own spec and a contract-change review.
 - **Observability:** the served application root path returns HTTP 200 (liveness). Client-side
   structured logging (JSON, configurable log level from environment) for API errors and
-  navigation events. No Prometheus `/metrics` endpoint is required for a static SPA; if a BFF
-  layer is introduced at the design stage, that layer must expose `/health` and `/metrics`.
+  navigation events. No Prometheus `/metrics` endpoint is required for a static SPA (there is
+  no BFF layer for MVP).
 - **API contract:** the web-ui has no published OpenAPI surface. It builds all outbound clients
   against its collaborators' published OpenAPI 3.1 specs; a change to a collaborator's API
   surface is a contract change requiring architecture.md update and human approval before the
@@ -292,68 +304,48 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 
 ## Open questions
 
-1. **Topology Service graph/geometry API shape (P1 blocker for design).** The Topology Service
-   spec is a scaffold stub (STATUS: TBD). The web-ui needs the published OpenAPI for the
-   graph/geometry query API — specifically: the endpoint(s) for listing nodes and edges with
-   geo coordinates, listing objects by site/geo-region, and listing objects by type. The
-   site-grouping field or endpoint is not defined in any merged spec. Cannot finalise the
-   client shape or the mock fixture until the Topology spec and OpenAPI are authored and
-   approved.
-   — Issue to open: `[web-ui] Topology Service graph/geometry OpenAPI needed for web-ui client
-   design` (labels: `question`, `service:web-ui`).
+The items below are **design-stage integration dependencies** — inherent to contract-first
+development. The web-ui integration points are defined and config-switchable; the exact
+OpenAPI shapes for each producer arrive when that producer's spec and design are authored and
+approved. These are tracked dependencies, not spec blockers. Mock clients are generated at
+design time once the producer publishes their OpenAPI 3.1.
 
-2. **Trail Builder trail-viz API shape (P1 blocker for design).** The Trail Builder spec is a
-   scaffold stub. The web-ui needs the published OpenAPI confirming the exact request/response
-   shapes for `listTrails(snapshotId)`, `getTrail(trailId)`, and
-   `getTrailsForObject(managedObjectId)` including pagination, field names, and the trail
-   geometry/member format. Cannot finalise the client contract or mock until the Trail Builder
-   spec and OpenAPI are authored and approved.
-   — Issue to open: `[web-ui] Trail Builder trail-viz API OpenAPI needed for web-ui client
-   design` (labels: `question`, `service:web-ui`).
+1. **[DESIGN-STAGE] Topology Service graph/geometry API shape** (issue #60).
+   The web-ui builds its typed client and mock fixture for the Topology Service graph/geometry
+   integration point (nodes, edges with geo coordinates, site groupings, objects by type)
+   against the Topology Service's published OpenAPI. The exact request/response shapes — site
+   grouping endpoint, geo-coordinate field names, pagination — are determined when the Topology
+   Service spec and design are authored.
 
-3. **Pattern Manager read API and approval-intent API shapes (P2 blocker for design).** The
-   Pattern Manager spec is a scaffold stub. The web-ui needs: (a) the exact response shape for
-   listing discovered and approved patterns (field names, pagination, XAI fields); (b) the
-   exact endpoint and request body for approve/reject (whether a single endpoint with a
-   decision field, two separate endpoints, or another shape). The architecture row states
-   "patterns.approved (via API)" but the API contract is not yet published.
-   — Issue to open: `[web-ui] Pattern Manager read + approval-intent API OpenAPI needed for
-   web-ui client design` (labels: `question`, `service:web-ui`).
+2. **[DESIGN-STAGE] Trail Builder trail-viz API shape** (issue #61).
+   The web-ui builds its typed client and mock for `listTrails(snapshotId)`, `getTrail(trailId)`,
+   and `getTrailsForObject(managedObjectId)` against the Trail Builder's published OpenAPI.
+   Pagination, field names, and trail geometry/member format are determined when the Trail
+   Builder spec and design are authored.
 
-4. **Knowledge Service model-params API shape (P2 blocker for design).** The Knowledge Service
-   spec is a scaffold stub. The web-ui needs the published OpenAPI confirming the endpoint(s)
-   for reading and editing model parameters (DBSCAN params, session-window gap, min-support),
-   including which params are editable, their types, and validation rules.
-   — Issue to open: `[web-ui] Knowledge Service model-params API OpenAPI needed for web-ui
-   client design` (labels: `question`, `service:web-ui`).
+3. **[DESIGN-STAGE] Pattern Manager read API and approval-intent API shapes** (issue #62).
+   The web-ui builds its typed clients for pattern listing (with XAI fields, lifecycle state,
+   pagination) and the approve/reject approval-intent endpoint against the Pattern Manager's
+   published OpenAPI. Whether approve and reject share one endpoint or use two is a Pattern
+   Manager design decision. Also covers the active-patterns filter used by the P3 stats module
+   (previously open question 8 — to be resolved by the Pattern Manager's design, not this
+   spec).
 
-5. **Correlation Engine incident/stats API shape (P3 blocker for design).** The Correlation
-   Engine spec is a scaffold stub. The web-ui needs the published OpenAPI for the incident
-   list endpoint (root-cause alarm + child alarms, pagination) and the stats endpoint
-   (alarm-reduction ratio, RCA accuracy, noise-filter stats, pattern-match stats). Field names
-   must be confirmed before mock fixtures can be written.
-   — Issue to open: `[web-ui] Correlation Engine incident/stats API OpenAPI needed for web-ui
-   client design` (labels: `question`, `service:web-ui`).
+4. **[DESIGN-STAGE] Knowledge Service model-params API shape** (issue #63).
+   The web-ui builds its typed client for reading and editing model parameters (DBSCAN params,
+   session-window gap, min-support) against the Knowledge Service's published OpenAPI. Which
+   params are editable, their types, and validation rules are determined by the Knowledge
+   Service design.
 
-6. **BFF vs. direct-to-service architecture decision.** Solution Design §6.11 says "talks to a
-   thin BFF or directly to service APIs." This spec assumes direct API calls (no BFF) because
-   the architecture row lists no BFF service and the web-ui is marked as having no APIs
-   exposed. If a BFF is introduced it would be a new runtime service requiring its own spec,
-   published OpenAPI, and contract-change approval. A human must decide whether to introduce a
-   BFF before the design stage proceeds. If the BFF decision is deferred past design, it
-   becomes a contract change.
-   — Issue to open: `[web-ui] Confirm BFF vs. direct-to-service architecture before design`
-   (labels: `question`, `service:web-ui`).
+5. **[DESIGN-STAGE] Correlation Engine incident/stats API shape** (issue #64).
+   The web-ui builds its typed client for the incident list (root-cause alarm + child alarms,
+   pagination) and stats endpoint (alarm-reduction ratio, RCA accuracy, noise-filter stats,
+   pattern-match stats) against the Correlation Engine's published OpenAPI. Field names are
+   confirmed at the Correlation Engine design stage.
 
-7. **Geo-coordinate data availability in the Topology Service.** The geo-site view (MapLibre GL
-   / deck.gl) requires lat/long or site coordinates for each topology site. It is not confirmed
-   whether the Topology Service graph API exposes geo-coordinates or whether the Simulator
-   generates them in the topology snapshot file. If coordinates are absent from the API, a
-   fallback layout strategy (force-directed or fixed) must be defined at design stage. The
-   Topology Service spec team should be made aware so coordinates are included in the ingestion
-   API and query API if needed.
-
-8. **Pattern Manager active-patterns API overlap with P3.** The correlation stats module
-   references a Pattern Manager active-patterns list (P3). It is not confirmed whether the
-   same Pattern Manager read API (open question 3) covers an approved/active filter, or whether
-   a separate endpoint is required. To be confirmed when the Pattern Manager spec is authored.
+6. **[DESIGN-STAGE] Geo-coordinate data availability in the Topology Service.** The geo-site
+   view (MapLibre GL / deck.gl) requires lat/long or site coordinates. Whether the Topology
+   Service graph API exposes geo-coordinates or the Simulator generates them in the snapshot
+   file is determined at the Topology Service design stage. If coordinates are absent, a
+   fallback layout strategy (force-directed or fixed) must be defined. The Topology Service
+   designer should ensure coordinates are included in the ingestion and query API if needed.
