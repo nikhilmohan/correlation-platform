@@ -116,7 +116,7 @@ compile the codebook, or own the topology graph.
   - Integration tests: pointed at real collaborating services in Docker Compose.
 
 - **Data owned:**
-  - **PostgreSQL — Incident Store**: incident records (`incidentId`, `rootCauseAlarmId`, `childAlarmIds[]`, `matchedPatternId?`, `matchedCodebookId?`, `confidence`, `trailId`, `createdAt`). No other service reads or writes the Incident Store directly; all external access is through the Correlation Engine's read API.
+  - **PostgreSQL — Incident Store**: incident records (`incidentId`, `rootCauseAlarmId`, `childAlarmIds[]`, `matchedPatternId?`, `matchedCodebookId?`, `confidence`, `trailId`, `createdAt`). No other service reads or writes the Incident Store directly; all external access is through the Correlation Engine's read API. **The Correlation Engine is the system of record for incidents** (the incident-centric view). The Alarm Manager separately consumes `correlation.results` and **denormalizes** each alarm's role (root-cause / child) + `incidentId` onto its live alarm record (the alarm-centric view) — it does not re-own or duplicate the incident itself.
 
 ## Non-functional
 
