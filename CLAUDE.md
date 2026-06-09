@@ -17,7 +17,7 @@ README-workflow.md
 ## Cohorts (language follows the workload)
 Python: simulator, trail-builder, codebook-generator (networkx), noise-filter (scikit-learn),
 pattern-miner (PySpark). Spring Boot: topology, knowledge, enrichment, pattern-manager,
-correlation-engine. Angular 20: web-ui.
+correlation-engine, alarm-manager. Angular 20: web-ui.
 
 ## Golden rules (invariants — do not violate)
 - Contract-first: `libs/event-model` is the single source of truth for the envelope, payloads
