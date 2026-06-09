@@ -23,6 +23,14 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   active/approved patterns with their details. The Pattern Manager, upon receiving the
   approval-intent, is responsible for transitioning lifecycle and emitting `patterns.approved`
   downstream — the web-ui does not emit Kafka events.
+  - **Edit a draft pattern (placeholder, to be enhanced):** alongside approve/reject, provide an
+    **edit** action letting the operator adjust a draft pattern before approving — for the MVP a
+    **placeholder UI** to mark sequence alarms as **optional** (plus reviewer/notes). Edits are
+    submitted to the Pattern Manager's pattern-edit API (`PATCH /patterns/{patternId}`), which
+    persists them on the draft pattern; the edited pattern can then be approved. The web-ui only
+    surfaces the action and renders the edit form — the Pattern Manager owns the edit semantics,
+    validation, and persistence. The richer edit model is a future enhancement; the MVP delivers
+    the action + the optional-alarm placeholder.
 - Config module: read and edit Knowledge Service model parameters (DBSCAN params,
   session-window gap, min-support, etc.) via the Knowledge Service read and edit API; persist
   changes via Knowledge (Knowledge Service is the single owner of these params).
@@ -154,6 +162,9 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   - **Pattern Manager — approval-intent API:** POST approve or reject decision for a given
     `patternId`. Used by the pattern review & XAI module (P2). The Pattern Manager transitions
     the lifecycle and emits `patterns.approved`.
+  - **Pattern Manager — pattern-edit API (placeholder):** `PATCH /patterns/{patternId}` to submit
+    operator edits of a draft pattern (MVP placeholder: mark sequence alarms `optional`). Used by
+    the pattern review & XAI module (P2). The Pattern Manager owns edit validation/persistence.
   - **Knowledge Service — model-params API:** read current ML configuration parameters; submit
     validated edits. Used by the config module (P2).
   - **Correlation Engine — incident/stats API:** list live incidents (root-cause alarm +
@@ -338,6 +349,12 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 26. Given any single backend integration point returns a 5xx error, the affected module
     displays a structured error message identifying the service and does not crash other
     modules. (Vitest/TestBed — error-boundary component test per integration point)
+
+27. Given a draft pattern in the review module, the operator can open the **edit** placeholder,
+    mark a sequence alarm as `optional`, and submit; the application sends a `PATCH /patterns/{id}`
+    edit request to the Pattern Manager (verified against the mock) and reflects the returned
+    edited pattern. The edit action is offered only for `draft` patterns. (Vitest/TestBed — mock
+    Pattern Manager pattern-edit API)
 
 ## Open questions
 
