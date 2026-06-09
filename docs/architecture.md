@@ -39,7 +39,7 @@ a dependency / refreshes state in that phase but drives no work of its own; *Idl
 | Service | P1 Topology onboarding | P2 Pattern learning | P3 Real-time correlation |
 |---|---|---|---|
 | simulator | Active — generate topology file, upload to Topology ingestion API | Active — replay `alarms.history` | Active — replay `alarms.live` (wall-clock paced) |
-| topology | Active — ingest file, lift to AGE, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Passive — serves graph query API |
+| topology | Active — ingest file, lift to AGE, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Idle — no real-time consumer queries it; topology context is already materialized into trails + codebook during P1 |
 | knowledge | Passive — serves trail policy, fault-origin list, propagation templates | Passive — serves DBSCAN / session-window / min-support params | Passive — serves params + approved policy |
 | trail-builder | Active — build trails on `topology.changed`, emit `trails.built` | Passive — serves `getTrailsForObject` / `getTrail` | Passive — serves trails |
 | codebook-generator | Active — compile codebook, emit `codebook.generated` | Passive — serves codebook for reconcile | Passive — serves codebook for match |
