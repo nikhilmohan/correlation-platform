@@ -3,38 +3,52 @@
 ## Purpose
 
 The Knowledge Service is the authoritative, versioned store for all authored domain knowledge
-in the platform: propagation templates, fault-origin types, trail policy, and Phase-2 model
-parameters (DBSCAN params, session-window gap, min-support, etc.). It is the single owner of
-this knowledge — no other service authors templates, policy, or params. Consumers (Trail
-Builder, Codebook Generator, Noise Filter, Pattern Miner, Pattern Manager, Correlation Engine,
-web-ui config page) read from it via a versioned API; changes are broadcast via the
-`knowledge.updated` Kafka topic so dependents can refresh. The web-ui config page provides the
-editing surface; this service backs it with the API and enforces validation.
+in the platform. It stores domain knowledge as an **extensible, domain-scoped template model**:
+propagation templates, fault-origin types, trail policy, and model parameters (DBSCAN params,
+session-window gap, min-support, etc.) are authored as **records belonging to a domain**. Core
+IP is the MVP domain pack; a future domain is onboarded by authoring new template/record sets
+— this is a data operation, not a code change. The Knowledge Service is the single owner of
+this knowledge — no other service authors templates, policy, or params. Downstream consumers
+read directly from it via a versioned API: Trail Builder consumes trail policy records; Codebook
+Generator consumes fault-origin types and propagation templates; Noise Filter and Pattern Miner
+consume model-parameter records; Pattern Manager, Correlation Engine, and the web-ui config
+page also consume via API. Changes are broadcast via the `knowledge.updated` Kafka topic —
+carrying a `KnowledgeUpdatedEvent` refresh trigger — so consumers know what changed and
+re-fetch the specific version via the API. The web-ui config page provides the editing surface;
+this service backs it with the API and enforces validation.
 
 ## Scope
 
 **In scope:**
 
 - Storing, versioning, validating, and serving **propagation templates** (per §5 edge type,
-  e.g. `RIDES_ON`, `HOSTED_ON`, `ADJACENCY_OVER`, `TRAVERSES`, `SERVES`, `MEMBER_OF`).
+  e.g. `RIDES_ON`, `HOSTED_ON`, `ADJACENCY_OVER`, `TRAVERSES`, `SERVES`, `MEMBER_OF`) as
+  domain-scoped template records.
 - Storing, versioning, validating, and serving **fault-origin types** (e.g. `Fiber`,
-  `LineCard`, `Port`, `Node`).
+  `LineCard`, `Port`, `Node`) as domain-scoped records.
 - Storing, versioning, validating, and serving **trail policy** (the authored rule set: trail =
-  transitive closure bounded by IGP area; SRLG fate-sharing).
-- Storing, versioning, validating, and serving **Phase-2 model parameters** (DBSCAN params,
-  session-window gap, PrefixSpan min-support, max pattern length, and related tuning params).
+  transitive closure bounded by IGP area; SRLG fate-sharing) as domain-scoped records,
+  **directly consumable by the Trail Builder** via the versioned API.
+- Storing, versioning, validating, and serving **model parameters** (DBSCAN params,
+  session-window gap, PrefixSpan min-support, max pattern length, and related tuning params)
+  as an **extensible, open set of domain-scoped records** — not a fixed enum; the exact MVP
+  param set is finalized at design with cross-consumer visibility.
 - **CRUD API** for all four knowledge-record types, exposed as OpenAPI 3.1 at `/openapi.json`
   (+ a human-readable UI such as Swagger UI / springdoc) and checked in as `openapi.json`.
 - **Versioned read API**: consumers may fetch the current version or a specific named version
   of any record.
 - **Validation** of every edit before persistence: a template must reference a known §5 edge
   type; a fault-origin type must be a known graph object type; params must be within sane
-  bounds. Invalid edits are rejected with clear, structured error responses.
-- Emitting **`knowledge.updated`** on every successful change so dependent services can
-  refresh their local copies.
-- **Domain-scoped records**: every knowledge record carries a domain identifier (e.g.
-  `coreip` for the MVP domain) so a future domain's templates/policy/params can be authored
-  and served without code change (per `docs/architecture.md` "Domain extensibility").
+  bounds. Invalid edits are rejected with clear, structured error responses. Validation is
+  driven by referenced types in the template model, not by a hard-coded Core IP type list.
+- Emitting **`knowledge.updated`** carrying a `KnowledgeUpdatedEvent` payload (fields:
+  `recordType` (required), `recordId` (optional), `version` (required), `domain` (required))
+  on every successful change so dependent services can re-fetch the specific version via the
+  Knowledge API.
+- **Extensible, domain-scoped template model**: every knowledge record carries a domain
+  identifier (e.g. `core-ip` for the MVP domain) so a future domain's templates/policy/params
+  can be authored and served without code change (per `docs/architecture.md` "Domain
+  extensibility"). The schema is template-driven, not hard-coded per Core IP type.
 - Returning structured JSON error responses for invalid edits (validation failures, unknown
   references, out-of-bounds params).
 
@@ -60,30 +74,42 @@ editing surface; this service backs it with the API and enforces validation.
 
 1. **Store and version knowledge records.** Accept create and update operations for
    propagation templates, fault-origin types, trail policy, and model parameters. Each
-   successful write mints a new immutable version; old versions remain retrievable.
+   successful write mints a new immutable version; old versions remain retrievable. Records are
+   stored as domain-scoped entries in the extensible template model — adding a future domain
+   means authoring new records, not changing code.
 
 2. **Validate edits before persistence.** Before persisting any change, verify: templates
    reference only the known §5 edge types; fault-origin types are known graph object types;
    trail policy is internally consistent; model params are within declared sane bounds. Return
-   structured errors for any violation without persisting the change.
+   structured errors for any violation without persisting the change. Validation is driven by
+   referenced types in the template model, not by a hard-coded Core IP type list.
 
 3. **Serve current and pinned versions via API.** Expose CRUD and versioned-read endpoints for
-   all four record types. A consumer may request the current version or a specific version
-   identifier, enabling version pinning.
+   all four record types. A consumer (Trail Builder for trail policy; Codebook Generator for
+   fault-origin types and propagation templates; Noise Filter and Pattern Miner for model
+   params; others) may request the current version or a specific version identifier, enabling
+   version pinning.
 
 4. **Emit `knowledge.updated` on every successful change.** After a validated write is
-   persisted, publish a `knowledge.updated` event on Kafka so all dependent services can
-   refresh their local cached copies.
+   persisted, publish a `knowledge.updated` event on Kafka carrying a `KnowledgeUpdatedEvent`
+   payload (`recordType`, `recordId`?, `version`, `domain`). Consumers receive the minimal
+   refresh trigger and re-fetch the specific version via the Knowledge API; the knowledge
+   itself stays in the versioned store, not in the event.
 
-5. **Scope knowledge by domain.** Tag every record with a domain identifier. For the MVP all
-   records carry the `coreip` domain tag. A future domain's records can be authored and
-   retrieved without code change.
+5. **Scope knowledge by domain.** Tag every record with a domain identifier (e.g. `core-ip`
+   for the MVP). A future domain's records can be authored, validated, and retrieved without
+   code change — the template model is domain-parameterized, not Core IP-specific.
 
 ## Contract
 
 - **Consumes (Kafka):** — (none)
-- **Produces (Kafka):** `knowledge.updated` (refresh trigger; emitted on every validated,
-  persisted change to any knowledge record)
+- **Produces (Kafka):** `knowledge.updated` — carries a `KnowledgeUpdatedEvent` payload with
+  fields `recordType` (required, string), `recordId` (optional, string — identifier of the
+  specific changed record; absent implies a broader change of that `recordType`), `version`
+  (required, string — the new version; consumers fetch this version via the Knowledge API),
+  and `domain` (required, string — the domain scope, e.g. `core-ip`). Emitted on every
+  validated, persisted change. Consumers re-fetch the specific version via the Knowledge API;
+  the knowledge itself is not embedded in the event.
 - **APIs exposed:** Full CRUD + versioned-read for all four knowledge-record types —
   propagation templates, fault-origin types, trail policy, and model parameters. Published as
   **OpenAPI 3.1** at `/openapi.json` (+ springdoc UI); the generated `openapi.json` is
@@ -141,11 +167,18 @@ Each criterion maps to a single JUnit 5 test.
    (yielding versions v1 and v2), a `GET` request specifying version v1 returns the v1 content
    unchanged; a `GET` without a version specifier returns the current (v2) content.
 
-5. **`knowledge.updated` is emitted on every validated change.** After each successful create
-   or update of any knowledge record, exactly one `knowledge.updated` Kafka message is
-   produced. The message envelope contains a non-null UUID `eventId`, the `source` field set
-   to `knowledge`, and a valid `occurredAt` timestamp. (Full payload binding subject to Open
-   question OQ-1.)
+5. **`knowledge.updated` is emitted on every validated change with a conformant
+   `KnowledgeUpdatedEvent` payload.** After each successful create or update of any knowledge
+   record, exactly one `knowledge.updated` Kafka message is produced. The message envelope
+   contains a non-null UUID `eventId`, `type` set to `KnowledgeUpdatedEvent`, `source` set to
+   `knowledge`, and a valid `occurredAt` timestamp. The payload validates against the frozen
+   `KnowledgeUpdatedEvent` JSON Schema
+   (`libs/event-model/schema/payloads/KnowledgeUpdatedEvent.schema.json`): `recordType`
+   (required, non-empty string), `version` (required, non-empty string matching the new
+   version of the changed record), and `domain` (required, non-empty string) are present;
+   `recordId` is present and equals the changed record's identifier when a specific record is
+   changed. Consumers re-fetch the record via the Knowledge API using `version`; the knowledge
+   data is not embedded in the event.
 
 6. **Published OpenAPI 3.1 is served and matches operations.** `GET /openapi.json` returns a
    valid OpenAPI 3.1 document. The document includes at minimum: `GET`, `POST`, and `PUT`
@@ -154,8 +187,8 @@ Each criterion maps to a single JUnit 5 test.
    in that document (provider-side contract test).
 
 7. **Domain-scoped records: records carry a domain identifier.** A knowledge record created
-   with domain `coreip` is returned with `domain: "coreip"` in all read responses; a query
-   filtered by domain `coreip` returns only that domain's records and not records from another
+   with domain `core-ip` is returned with `domain: "core-ip"` in all read responses; a query
+   filtered by domain `core-ip` returns only that domain's records and not records from another
    domain identifier.
 
 8. **Duplicate `eventId` is idempotent.** If the Kafka producer emits a `knowledge.updated`
@@ -163,23 +196,26 @@ Each criterion maps to a single JUnit 5 test.
    second occurrence is recognised as a duplicate (the `eventId` is a stable UUID tied to the
    specific change, not regenerated on retry).
 
+9. **Extensible domain-template model: a non-Core-IP domain record can be CRUDed and
+   fetched.** A propagation template record authored with `domain: "other-domain"` (a domain
+   that is not `core-ip`) can be created, updated, retrieved (current and pinned version), and
+   filtered by domain without any code change. Validation of that record's edge-type reference
+   is driven by the referenced type in the template model, not by a hard-coded Core IP list;
+   the service does not reject the record solely because the domain is not `core-ip`.
+
 ## Open questions
 
-- **OQ-1 — `knowledge.updated` payload shape (blocks: AC-5, designer's Kafka producer spec,
-  all consumer implementations).** The frozen `libs/event-model` defines exactly nine payload
-  types in its `type` enum (envelope.schema.json). There is no `KnowledgeUpdatedEvent` schema
-  in `libs/event-model/schema/payloads/` and no entry in either the Java or Python type
-  registry. The spec records that `knowledge.updated` is produced and that the envelope fields
-  alone (eventId, occurredAt, source, traceId) may suffice as a refresh trigger, but the
-  frozen binding must be updated before the designer can specify the Kafka producer
-  implementation and before any consumer can be built. This is a contract change requiring
-  `docs/architecture.md` update + human approval. Tracked: GitHub issue #22.
+- **OQ-2 (design-stage) — Extensible model-param catalog: exact MVP param set.** The model-
+  param catalog is an open/extensible set (records authored here, not a fixed enum in code).
+  The exact MVP param set (which consumer's params live here, whether enrichment thresholds
+  such as flap-damp window and dedup window are included, and their sane-bounds declarations)
+  is finalized at design stage with cross-consumer visibility. This is not a spec blocker.
+  Tracked: GitHub issue #23.
 
-- **OQ-2 — Exhaustive enumeration of model parameters (blocks: API schema for params resource,
-  validation rules, consumer specs).** The Solution Design §6.3/§6.7/§6.8 names a subset of
-  parameters (DBSCAN epsilon/minSamples, session-window gap, PrefixSpan min-support,
-  max pattern length, max sequence count) but does not close the list. It is unclear whether
-  enrichment thresholds (flap-damp window, dedup window, self-clear hold-time) are also owned
-  here or are per-service config. The API contract for the params resource and its validation
-  rules cannot be fully specified until the complete MVP parameter set is confirmed. A human
-  with visibility across all consuming services must close this list. Tracked: GitHub issue #23.
+- **OQ-3 (design-stage) — Propagation-template effect vocabulary and canonical alarm-type
+  identifiers.** Propagation templates name the alarm types their effects produce (e.g.
+  `LinkDown`, `AdjDown`, `LSPDown`, `PortDown`, `LOS`, `ReachabilityLoss`). Because Knowledge
+  authors these templates, the canonical alarm-type identifier vocabulary is a design-stage
+  coordination item shared between the Knowledge Service designer and the Codebook Generator
+  designer. This spec does not invent that vocabulary. Tracked: see GitHub issue #30
+  (owned on the codebook side; this note is for cross-service visibility).
