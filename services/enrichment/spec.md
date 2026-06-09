@@ -227,7 +227,7 @@ Each criterion maps to a single JUnit 5 unit test.
    same logical alarm with a different `alarmId`. The exact dedup key definition affects
    acceptance criterion 1 and boundary conditions for the dedup window. Needs human
    resolution before design begins.
-   *(To be tracked as a GH issue — labels: `question`, `service:enrichment`.)*
+   *(GH issue: #39 — labels: `question`, `service:enrichment`.)*
 
 2. **Flap summary alarm shape:** When flap-damping collapses N oscillations into a single
    summary alarm, the shape of the emitted `AlarmEvent` is not specified in §6.6 or the
@@ -236,7 +236,7 @@ Each criterion maps to a single JUnit 5 unit test.
    `state` value (`raised` or `cleared`)? A new convention or field may constitute a
    contract change to `AlarmEvent` requiring `docs/architecture.md` update and human
    approval.
-   *(To be tracked as a GH issue — labels: `question`, `service:enrichment`.)*
+   *(GH issue: #40 — labels: `question`, `service:enrichment`.)*
 
 3. **Trail Builder unavailability behavior:** When the Trail Builder `getTrailsForObject`
    API is unavailable or returns an error for a given `managedObjectId`, the desired
@@ -244,4 +244,4 @@ Each criterion maps to a single JUnit 5 unit test.
    continue, (b) route the alarm to the DLQ, or (c) retry and hold until resolution.
    The choice determines whether downstream consumers (Noise Filter, Correlation Engine)
    can safely receive alarms with empty `trailIds`. Needs human resolution.
-   *(To be tracked as a GH issue — labels: `question`, `service:enrichment`.)*
+   *(GH issue: #42 — labels: `question`, `service:enrichment`.)*
