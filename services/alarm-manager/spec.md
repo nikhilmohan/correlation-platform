@@ -45,8 +45,10 @@ existing `AlarmEvent`.
 - **Alarm correlation and incident creation** — determining which alarms form an incident and
   what the root cause is, and producing `correlation.results`, is owned by the Correlation
   Engine. Alarm-manager only reflects correlation outcomes into live alarm state.
-- **Incident store** — owned by the Correlation Engine; alarm-manager records only the
-  `incidentId` reference and role tag on each alarm record.
+- **Incident store / incidents** — the Correlation Engine is the **system of record for
+  incidents** (incident-centric view) and owns the Incident Store. Alarm-manager does not own or
+  duplicate incidents; it only **denormalizes** the `incidentId` reference + role tag
+  (root-cause / child) onto each live alarm record (the alarm-centric view).
 - **DBSCAN / PrefixSpan mining** — owned by Noise Filter and Pattern Miner respectively;
   alarm-manager has no involvement in the learning path.
 - **Historical-alarm corpus / persisting historical alarms** — explicitly NOT in MVP. Alarms on
