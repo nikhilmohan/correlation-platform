@@ -41,9 +41,16 @@ hard-coded in the service.
 - **Pattern mining** — discovering frequent sequences is the Pattern Miner's responsibility.
 - **Trail building** — the service reads `trailIds[]` already stamped on each `AlarmEvent`
   by Enrichment; it does not call the Trail Builder to resolve trails itself.
-- **Live-path processing** — the service does not consume `alarms.enriched.live`; live alarms
-  flow directly from Enrichment to the Correlation Engine without DBSCAN cleaning (that is
-  why the service is Idle in P3).
+- **Live-path statistical (DBSCAN) cleaning** — the service does not consume
+  `alarms.enriched.live`. **Live alarms are not unfiltered:** Enrichment applies its
+  *deterministic* filters (dedup, self-clear, flap-damping, known-chatter) on the live path in
+  real time before they reach Correlation. What the live path deliberately skips is this
+  service's *statistical* DBSCAN stage, because: (a) DBSCAN's role is to produce clean *training*
+  transactions for the Pattern Miner (a Phase-2 learning concern, per §6.7), and (b) real-time
+  noise rejection is instead achieved by the Correlation Engine's closest-match decode against
+  approved patterns + codebook, which is noise-tolerant by design (tolerates missing alarms,
+  penalizes spurious — §6.10). Hence this service is Idle in P3. (Adding a real-time statistical
+  cleaning stage would be an architecture change, not part of the MVP.)
 - **Pattern state and lifecycle** — owned by Pattern Manager (§6.9).
 - **Topology graph access** — graph topology context for feature vectorization is derived from
   the `managedObjectId` type prefix alone by default; whether richer graph traversal is added
@@ -81,7 +88,7 @@ hard-coded in the service.
 |---|---|---|---|
 | P1 — Topology onboarding | Not involved; topology and trail construction are underway but no alarms are processed by this service. | Idle | — |
 | P2 — Pattern learning | Core worker: statistically cleans the enriched historical alarm stream so the Pattern Miner receives only incident-dense groups. | Active | Consumes: `alarms.enriched`. Produces: `transactions.clean`. Calls: Knowledge Service (DBSCAN params via its published API). |
-| P3 — Real-time correlation | Not involved. Live alarms flow from Enrichment directly to the Correlation Engine via `alarms.enriched.live`; DBSCAN cleaning is not applied on the live path. The Correlation Engine matches against pre-approved patterns that were already derived from DBSCAN-cleaned history, so no live-path noise filtering by DBSCAN is needed or defined. | Idle | — |
+| P3 — Real-time correlation | Not involved. Live alarms are still **deterministically** filtered by Enrichment (dedup/self-clear/flap/chatter) on the live path; only this service's **statistical DBSCAN** stage is skipped live. DBSCAN's job is to clean Phase-2 *training* data for the Miner; real-time noise rejection is handled instead by the Correlation Engine's noise-tolerant pattern/codebook matching (tolerates missing, penalizes spurious). So no live-path DBSCAN is needed or defined. | Idle | — |
 
 ## Contract
 
