@@ -16,7 +16,7 @@ import pytest
 SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "schema"
 FIXTURES_DIR = SCHEMA_DIR / "fixtures"
 
-#: The nine canonical payload type strings (= fixture stems = `type` values).
+#: The canonical payload type strings (= fixture stems = `type` values).
 PAYLOAD_TYPES: list[str] = [
     "AlarmEvent",
     "TopologyChangedEvent",
@@ -27,6 +27,7 @@ PAYLOAD_TYPES: list[str] = [
     "PatternDiscoveredEvent",
     "PatternApprovedEvent",
     "CorrelationResultEvent",
+    "KnowledgeUpdatedEvent",
 ]
 
 

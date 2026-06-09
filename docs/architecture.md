@@ -22,7 +22,8 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 No schema registry. `libs/event-model` (versioned with the repo) defines the **envelope**
 (`eventId, type, schemaVersion, occurredAt, source, traceId, payload`) and **payloads**
 (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent, CodebookGeneratedEvent, TransactionEvent,
-PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent).
+PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent,
+KnowledgeUpdatedEvent).
 Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Python services).
 Consumers reject unknown major `schemaVersion`.
 
