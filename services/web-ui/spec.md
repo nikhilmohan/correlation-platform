@@ -27,8 +27,13 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   session-window gap, min-support, etc.) via the Knowledge Service read and edit API; persist
   changes via Knowledge (Knowledge Service is the single owner of these params).
 - Correlation stats module: display live incidents (root-cause alarm + child alarms), noise-
-  filter stats, alarm-reduction ratio, RCA accuracy, and real-time pattern-match stats. Reads
-  the Correlation Engine incident and stats API and the Pattern Manager active-patterns API.
+  filter stats, alarm-reduction ratio, RCA accuracy, and real-time pattern-match stats, sourced
+  from the Correlation Engine incident/stats API and the Pattern Manager active-patterns API;
+  and display the live alarm-lifecycle view — a list of enriched alarms with their current
+  lifecycle state (open / correlated / cleared), root-cause/child membership, and incident
+  association — sourced from the Alarm Manager alarm-lifecycle query API. The split of
+  responsibilities is: the Correlation Engine provides incident groupings and effectiveness
+  metrics; the Alarm Manager provides the per-alarm lifecycle list and state.
 - Config-switchable backends: all outbound HTTP calls are routed through Angular environment
   configuration (base URL + mock/real toggle); unit/component tests use mocks generated from
   the producer's published OpenAPI spec; integration tests point at the live stack. No backend
@@ -51,7 +56,7 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 - Owning or computing domain data: topology graph, trail definitions, patterns, incidents, and
   ML params all live in their owning services; the web-ui is a stateless client.
 - A Backend-for-Frontend (BFF) server layer: **decided — no BFF for MVP.** The application
-  is a static Angular SPA that calls the five collaborating service APIs directly via
+  is a static Angular SPA that calls the six collaborating service APIs directly via
   config-switchable Angular environment configuration (per-service base URL, no hard-coded
   URLs). CORS is a design-stage concern for each producer service. A BFF introduced post-MVP
   would be a separate new service requiring its own spec, published OpenAPI, contract-change
@@ -99,9 +104,19 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 7. **Display live correlation stats and incidents.** Fetch live incidents (root-cause alarm +
    child alarms), noise-filter stats, alarm-reduction ratio, RCA accuracy, and pattern-match
    stats from the Correlation Engine incident/stats API. Present them as the platform's
-   effectiveness dashboard for a replayed or live scenario.
+   effectiveness dashboard for a replayed or live scenario. The Correlation Engine provides
+   incident groupings and effectiveness metrics only; it does not provide per-alarm lifecycle
+   state.
 
-8. **Provide config-switchable backend integration.** All outbound API calls are resolved from
+8. **Display live alarm lifecycle from the Alarm Manager.** Within the correlation stats
+   module, fetch the list of live alarms and their lifecycle state (open / correlated /
+   cleared) from the Alarm Manager alarm-lifecycle query API. Present each alarm's state,
+   root-cause/child membership, and incident association so operators can see which specific
+   alarms are active, correlated, or cleared during a running or replayed scenario. This view
+   complements the incident summary (task 7): incidents show the grouped correlation result;
+   the alarm-lifecycle view shows the per-alarm state underlying those incidents.
+
+9. **Provide config-switchable backend integration.** All outbound API calls are resolved from
    Angular environment configuration. Each integration point is independently switchable
    between a mock (generated from the collaborator's published OpenAPI spec) for unit/component
    tests and the real service for integration — with no code changes between modes.
@@ -112,7 +127,7 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 |---|---|---|---|
 | P1 — Topology onboarding | Topology & trails visualization: operators view the onboarded topology, toggle layers, and explore trail clusters as they are built | Active | Reads: Topology Service graph/geometry API; Trail Builder `listTrails` / `getTrail` / `getTrailsForObject` API. Writes: — |
 | P2 — Pattern learning | Pattern review/approve (XAI-driven approve/reject) and config edits (Knowledge params): operators review discovered patterns and tune ML parameters | Active | Reads: Pattern Manager pattern read API (discovered + active/approved patterns). Writes: Pattern Manager approval-intent API (approve/reject); Knowledge Service model-params edit API |
-| P3 — Real-time correlation | Live incidents and correlation stats (effectiveness dashboard): operators monitor running correlation, view incidents, and assess platform effectiveness | Active | Reads: Correlation Engine incident/stats API; Pattern Manager active-patterns API. Writes: — |
+| P3 — Real-time correlation | Live incidents, correlation stats (effectiveness dashboard), and per-alarm lifecycle view: operators monitor running correlation, view incidents and effectiveness metrics, and inspect the live state of individual alarms | Active | Reads: Correlation Engine incident/stats API; Pattern Manager active-patterns API; Alarm Manager alarm-lifecycle query API. Writes: — |
 
 ## Contract
 
@@ -143,8 +158,14 @@ collaborating services; it never touches Kafka topics or any datastore directly.
     validated edits. Used by the config module (P2).
   - **Correlation Engine — incident/stats API:** list live incidents (root-cause alarm +
     child alarms), retrieve noise-filter stats, alarm-reduction ratio, RCA accuracy, and
-    pattern-match stats. Used by the correlation stats module (P3).
-- **Integration points (mock vs. real):** each of the six integration points above is
+    pattern-match stats. Used by the correlation stats module (P3). Provides incident
+    groupings and effectiveness metrics; does not provide per-alarm lifecycle state.
+  - **Alarm Manager — alarm-lifecycle query API:** list and query alarms by lifecycle state
+    (open / correlated / cleared), by trail, by time window, or by incident membership;
+    retrieve an individual alarm's lifecycle state and root-cause/child tags. Used by the
+    correlation stats module to display the live alarm-lifecycle view (P3). Config-switchable
+    (mock from Alarm Manager's published OpenAPI / real); no hard-coded URL.
+- **Integration points (mock vs. real):** each of the seven integration points above is
   independently configured via Angular environments (base URL per service + mock/real toggle).
   Unit/component tests use mocks or stubs generated from the collaborator's published OpenAPI
   3.1 spec (no live dependency). Integration tests point at the real service on the Docker
@@ -163,13 +184,14 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   in application source. Environment files are populated from Docker Compose environment
   variables at build or serve time.
 - **Integration points — direct-to-service (no BFF, MVP decision):** the web-ui calls the
-  five collaborating service APIs (Topology Service, Trail Builder, Pattern Manager, Knowledge
-  Service, Correlation Engine) **directly** from the SPA. There is no Backend-for-Frontend
-  proxy layer. Each integration point is independently configured via Angular environment files
-  (base URL per service + mock/real toggle). The UI builds typed clients against each
-  producer's published OpenAPI 3.1 spec. CORS headers on the collaborating services are a
-  design-stage concern for each producer. A BFF is explicitly out of MVP scope; if introduced
-  post-MVP it would require its own spec and a contract-change review.
+  six collaborating service APIs (Topology Service, Trail Builder, Pattern Manager, Knowledge
+  Service, Correlation Engine, Alarm Manager) **directly** from the SPA. There is no
+  Backend-for-Frontend proxy layer. Each integration point is independently configured via
+  Angular environment files (base URL per service + mock/real toggle). The UI builds typed
+  clients against each producer's published OpenAPI 3.1 spec. CORS headers on the
+  collaborating services are a design-stage concern for each producer. A BFF is explicitly out
+  of MVP scope; if introduced post-MVP it would require its own spec and a contract-change
+  review.
 - **Observability:** the served application root path returns HTTP 200 (liveness). Client-side
   structured logging (JSON, configurable log level from environment) for API errors and
   navigation events. No Prometheus `/metrics` endpoint is required for a static SPA (there is
@@ -281,24 +303,39 @@ collaborating services; it never touches Kafka topics or any datastore directly.
     stack, the stats module shows at least one incident with a tagged root-cause alarm and one
     or more child alarms. (Playwright E2E)
 
+20. Given alarms returned by the Alarm Manager alarm-lifecycle query API, the alarm-lifecycle
+    view in the correlation stats module lists each alarm with its lifecycle state
+    (open / correlated / cleared), its root-cause or child designation, and its associated
+    incident identifier (where applicable). (Vitest/TestBed — mock Alarm Manager API fixture
+    containing alarms in all three lifecycle states)
+
+21. Given the Alarm Manager mock returns a mix of open, correlated, and cleared alarms, the
+    alarm-lifecycle view filters correctly when the operator selects a specific lifecycle state.
+    (Vitest/TestBed — filter interaction component test against mock fixture)
+
+22. Given the Playwright E2E suite runs a replayed fiber-cut scenario against the integration
+    stack, the alarm-lifecycle view shows at least one alarm in `correlated` state with a
+    non-empty incident association, sourced from the Alarm Manager API. (Playwright E2E)
+
 ### Cross-cutting
 
-20. Given the application is built with mock environment configuration, all six integration
+23. Given the application is built with mock environment configuration, all seven integration
     points (Topology, Trail Builder, Pattern Manager read, Pattern Manager approval-intent,
-    Knowledge, Correlation Engine) resolve to mock/stub handlers and no real HTTP call is made.
-    (Vitest/TestBed — environment-switch test per integration point)
+    Knowledge, Correlation Engine, Alarm Manager) resolve to mock/stub handlers and no real
+    HTTP call is made. (Vitest/TestBed — environment-switch test per integration point)
 
-21. Given the application is built with integration environment configuration, all six
+24. Given the application is built with integration environment configuration, all seven
     integration point base URLs are resolved from environment variables with no URL literal in
     application source. (Build-time check: no hard-coded http://localhost or service hostname
     appears in non-environment source files)
 
-22. Given the main interactive views (geo-site topology, pattern list, config form, stats
-    dashboard), keyboard navigation cycles through all interactive elements without a mouse,
-    and all graph/map canvas elements carry an ARIA label. (Vitest/TestBed accessibility test
-    using axe-core or equivalent; at least one criterion per view)
+25. Given the main interactive views (geo-site topology, pattern list, config form, stats
+    dashboard, alarm-lifecycle view), keyboard navigation cycles through all interactive
+    elements without a mouse, and all graph/map canvas elements carry an ARIA label.
+    (Vitest/TestBed accessibility test using axe-core or equivalent; at least one criterion
+    per view)
 
-23. Given any single backend integration point returns a 5xx error, the affected module
+26. Given any single backend integration point returns a 5xx error, the affected module
     displays a structured error message identifying the service and does not crash other
     modules. (Vitest/TestBed — error-boundary component test per integration point)
 
@@ -349,3 +386,14 @@ design time once the producer publishes their OpenAPI 3.1.
    file is determined at the Topology Service design stage. If coordinates are absent, a
    fallback layout strategy (force-directed or fixed) must be defined. The Topology Service
    designer should ensure coordinates are included in the ingestion and query API if needed.
+
+7. **[DESIGN-STAGE] Alarm Manager alarm-lifecycle query API shape.**
+   The web-ui builds its typed client and mock fixture for the Alarm Manager alarm-lifecycle
+   integration point against the Alarm Manager's published OpenAPI 3.1 spec. The exact
+   request/response shapes — how alarms are queried by state/trail/time/incident, field names
+   for lifecycle state and root-cause/child tags, pagination, and the incident-membership field
+   — are determined when the Alarm Manager spec and design are authored. The alarm-manager spec
+   is currently a TBD scaffold; this integration point is a design-stage dependency. The web-ui
+   designer generates the typed client and mock from the Alarm Manager's published OpenAPI at
+   design time, consistent with how all other collaborator-API dependencies (issues #60-#64)
+   are handled.
