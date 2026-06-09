@@ -102,6 +102,20 @@ Filter, Pattern Miner, web-ui), and emits `trails.built` (a summary event) on th
    `trailCount`). The `trailCount` must equal the length of `trailIds`. Full trail
    membership is available only via the query API, not in the event payload.
 
+## Phase applicability
+
+Trail-builder's primary work happens in P1. In P2 and P3 it is a passive dependency:
+it serves the trail-query API to any consumer that needs to scope alarms by trail, but
+it drives no work of its own in those phases. A `knowledge.updated` trail-policy change
+or a new `topology.changed` event may trigger a P1-style Active rebuild at any time
+(see Task 1 and Task 2 above); such a rebuild is classified as P1 work — not P2 or P3.
+
+| Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
+|---|---|---|---|
+| P1 — Topology onboarding | Builds policy-bounded correlation trails from the topology graph and Knowledge trail policy; persists trail definitions; notifies downstream services | Active | In: `topology.changed` (+ Topology Service graph-closure API, Knowledge Service trail-policy API). Out: `trails.built` |
+| P2 — Pattern learning | Serves trail membership queries to consumers that scope historical alarms and transactions by trail (Enrichment, Noise Filter, Pattern Miner) | Passive | In: —. Out: serves `getTrailsForObject` / `getTrail` API (no topic output of its own) |
+| P3 — Real-time correlation | Serves trail membership queries to real-time consumers (e.g. Enrichment live-path trail-tagging) | Passive | In: —. Out: serves `getTrailsForObject` / `getTrail` API (no topic output of its own) |
+
 ## Contract
 
 - **Consumes (Kafka):**
