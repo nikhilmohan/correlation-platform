@@ -6,12 +6,14 @@ pattern-miner is the ML execution service for the Pattern Learning phase (P2). I
 trail-scoped, DBSCAN-cleaned alarm groups from `transactions.clean`, applies a session window
 (gap-based, per trail) to finalize transaction boundaries, then runs PrefixSpan (Spark MLlib via
 PySpark) to discover frequent ordered alarm sequences. For each discovered sequence it computes
-support, confidence, lift, and conviction, attaches mining provenance (source trail, window
-reference, topology snapshot, and codebook version in scope), and emits one `PatternMinedEvent`
-on `patterns.mined`. The service owns the mining model and its configuration parameters; it holds
-**no** pattern state — no RCA, no codebook reconciliation, no explainability, no Pattern Store,
-and no lifecycle management. Those responsibilities belong exclusively to the Pattern Manager
-(§6.9).
+support, confidence, and lift — the MVP metrics carried by the frozen `PatternMinedEvent` schema;
+conviction is out of MVP scope and would require a future contract change if ever needed. It
+attaches mining provenance (source trail, window reference, topology snapshot, and codebook
+version in scope — `codebookVersion` is sourced from the Knowledge Service mining-params
+response), and emits one `PatternMinedEvent` on `patterns.mined`. The service owns the mining
+model and its configuration parameters; it holds **no** pattern state — no RCA, no codebook
+reconciliation, no explainability, no Pattern Store, and no lifecycle management. Those
+responsibilities belong exclusively to the Pattern Manager (§6.9).
 
 ## Scope
 
@@ -22,12 +24,14 @@ and no lifecycle management. Those responsibilities belong exclusively to the Pa
   boundary decision, per §6.8).
 - Run PrefixSpan (Spark MLlib) over session-windowed, trail-scoped transactions to discover
   frequent ordered alarm-type sequences.
-- Compute support, confidence, lift, and conviction for each discovered sequence.
+- Compute support, confidence, and lift for each discovered sequence (MVP metrics; conviction
+  is not in scope for MVP and is not carried by the frozen `PatternMinedEvent` schema).
 - Source all mining configuration — minimum support threshold, maximum pattern length,
   session-gap constraint, and maximum sequence count — from the Knowledge Service; no
   hard-coded thresholds.
 - Attach mining provenance to each result: source `trailId`, `sourceWindowId`, `snapshotId`,
-  and `codebookVersion` in scope at mining time.
+  and `codebookVersion` (sourced from the Knowledge Service mining-params response) in scope
+  at mining time.
 - Emit one `PatternMinedEvent` on `patterns.mined` per discovered sequence.
 - Route poison (unprocessable) messages to `transactions.clean.dlq`.
 - Expose `/health` and `/metrics` endpoints and emit structured JSON logs.
@@ -51,23 +55,26 @@ and no lifecycle management. Those responsibilities belong exclusively to the Pa
 - **No real-time correlation.** pattern-miner is idle in P3 — approved patterns are served by
   the Pattern Manager to the Correlation Engine.
 - **No topology graph access.** The Topology Service is the sole owner of the AGE graph.
+- **No `conviction` metric for MVP.** Conviction is not carried by the frozen
+  `PatternMinedEvent` schema; adding it would be a future contract change.
 
 ## Tasks (high-level)
 
 1. Consume `transactions.clean` and deduplicate incoming `TransactionEvent` envelopes on their
    envelope `eventId` to satisfy the at-least-once Kafka delivery guarantee.
 2. Fetch current mining parameters (minimum support, maximum pattern length, session-gap,
-   maximum sequence count) from the Knowledge Service before each mining run, ensuring no
-   mining configuration threshold is hard-coded.
+   maximum sequence count, and `codebookVersion` in scope) from the Knowledge Service before
+   each mining run, ensuring no mining configuration threshold is hard-coded.
 3. Apply a session window (gap-based, per trail) to the consumed transactions to finalize
    session-level sequence boundaries that PrefixSpan will operate over.
 4. Run PrefixSpan (Spark MLlib) over the session-windowed, trail-scoped alarm sequences to
    discover all frequent ordered subsequences meeting the minimum support threshold.
-5. Compute support, confidence, lift, and conviction for every discovered sequence.
+5. Compute support, confidence, and lift for every discovered sequence (the MVP metrics;
+   conviction is out of MVP scope).
 6. Assemble a `PatternMinedEvent` for each discovered sequence, carrying: `sequence`,
    `support`, `confidence`, `lift`, `trailId`, `timing` (inter-arrival statistics), and
-   `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`) — with no RCA or
-   lifecycle fields.
+   `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion` — the last sourced from
+   the Knowledge Service mining-params response) — with no RCA or lifecycle fields.
 7. Emit each `PatternMinedEvent` onto `patterns.mined` (one event per discovered sequence).
 8. Route any unprocessable (poison) message to `transactions.clean.dlq`.
 
@@ -89,8 +96,8 @@ Consistent with the canonical phase map in `docs/architecture.md`.
   `/health` and `/metrics`; no OpenAPI spec is published)
 - **APIs/data consumed from other services:**
   - **Knowledge Service — mining params:** retrieves minimum support, maximum pattern length,
-    session-gap, and maximum sequence count. Built against the Knowledge Service's published
-    OpenAPI 3.1 spec.
+    session-gap, maximum sequence count, and `codebookVersion` in scope. Built against the
+    Knowledge Service's published OpenAPI 3.1 spec.
 - **Integration points (mock vs. real):**
   - **Knowledge Service mining-params endpoint** — config-switchable per environment:
     - Unit tests: mock/stub generated from the Knowledge Service's published OpenAPI spec
@@ -153,9 +160,10 @@ Consistent with the canonical phase map in `docs/architecture.md`.
    raises a `ValidationError` (enforced by the frozen schema's `extra="forbid"`).
 
 6. The `provenance` object on every emitted `PatternMinedEvent` carries all three required
-   sub-fields — `sourceWindowId`, `snapshotId`, and `codebookVersion` — each non-empty; an
-   event missing any provenance sub-field fails schema validation against the frozen
-   `Provenance` model.
+   sub-fields — `sourceWindowId`, `snapshotId`, and `codebookVersion` — each non-empty;
+   `codebookVersion` is the value returned by the Knowledge Service mining-params response for
+   that run; an event missing any provenance sub-field fails schema validation against the
+   frozen `Provenance` model.
 
 7. When the service receives a `TransactionEvent` whose envelope `eventId` has already been
    processed in the current session, no `PatternMinedEvent` is emitted for that duplicate; the
@@ -171,34 +179,28 @@ Consistent with the canonical phase map in `docs/architecture.md`.
 
 ## Open questions
 
-1. **`conviction` metric in the frozen schema.** The Solution Design §6.8 lists "conviction" as
-   a computed metric alongside support/confidence/lift, but the frozen `PatternMinedEvent`
-   schema (`libs/event-model/schema/payloads/PatternMinedEvent.schema.json`) does not include a
-   `conviction` field. Should `conviction` be added to the `PatternMinedEvent` payload (a
-   contract change requiring `architecture.md` update and human approval), surfaced only in the
-   `timing` free-form object, or omitted from the emitted event entirely?
-   _Blocks: Acceptance criterion 4 (schema completeness) and Task 5 (compute metrics)._
+_The following items were open questions blocking the spec. They are resolved or deferred as
+noted below; only design-stage items remain._
 
-2. **Knowledge Service mining-params endpoint path and response shape.** The Knowledge Service
-   OpenAPI spec is not yet available in this repo. The assumed endpoint and its response fields
-   (minSupport, maxPatternLength, sessionGapSeconds, maxSequenceCount) need to be confirmed
-   against the Knowledge Service's published OpenAPI 3.1 spec before the integration point can
-   be implemented or mocked.
-   _Blocks: Task 2, Non-functional Config section, and Acceptance criterion 3._
+1. **[DESIGN-STAGE] Knowledge Service mining-params endpoint path and response shape (#45).**
+   The exact endpoint path and response schema (field names, types, versioning) are resolved
+   when the Knowledge Service publishes its OpenAPI 3.1 spec. The pattern-miner designer builds
+   the client and its unit-test mock against that published OpenAPI — not against assumptions
+   made here. This is not a spec blocker.
 
-3. **`codebookVersion` provenance source.** The `PatternMinedEvent.provenance.codebookVersion`
-   field must be populated at mining time, but `transactions.clean` (`TransactionEvent`) does
-   not carry a `codebookVersion` field (only `snapshotId`). Where should the Miner obtain the
-   current codebook version — from the Knowledge Service params response, from a separate
-   Knowledge endpoint, or from the most-recent `codebook.generated` event the Miner has
-   observed? This is a behavioural contract decision.
-   _Blocks: Task 6 and Acceptance criterion 6._
+2. **[DESIGN-STAGE] Session-window finalize semantics (#50).** Whether the Miner aggregates
+   multiple `TransactionEvent` records per trail into a single session (re-windowing) or treats
+   each `TransactionEvent` as an already-finalized unit is an algorithm and design decision
+   owned by the pattern-miner designer per §6.8. The choice determines how `sourceWindowId` is
+   populated (`transactionId` 1:1 or composite session reference) and is to be decided and
+   documented in `design.md`. This is not a spec blocker.
 
-4. **Session-window boundary ownership vs. `TransactionEvent` windows.** The Noise Filter
-   already sets `windowStart`/`windowEnd` on each `TransactionEvent`, and §6.8 states the
-   Miner owns the final session-window boundary. Clarification is needed on what "finalize"
-   means in practice: does the Miner re-window across multiple consecutive `TransactionEvent`
-   records for the same `trailId` (aggregating them into a session), or does it treat each
-   `TransactionEvent` as an already-finalized unit? The answer determines whether
-   `sourceWindowId` maps 1:1 to a single `transactionId` or to a composite session.
-   _Blocks: Task 3 and Acceptance criterion 6._
+_Closed (human-decided):_
+
+- **#44 — conviction metric:** Omitted for MVP. The frozen `PatternMinedEvent` carries
+  support/confidence/lift, which suffice; conviction is not in the schema and adding it would
+  be a future contract change. No action required at spec or design stage.
+- **#47 — codebookVersion provenance source:** `provenance.codebookVersion` is sourced from
+  the Knowledge Service mining-params response (the codebook version in scope for the run is
+  included in the same call that returns mining thresholds). No new field, no separate
+  endpoint, no Kafka consumer dependency.
