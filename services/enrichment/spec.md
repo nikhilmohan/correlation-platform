@@ -8,8 +8,8 @@ only service that participates as Active in two runtime phases. It consumes raw 
 streams from `alarms.history` (batch/learning) and `alarms.live` (streaming/real-time),
 normalizes each alarm to the canonical `AlarmEvent` (X.733-aligned), deduplicates
 repeated identical alarms within a short window, applies a suite of deterministic noise
-filters (flap-damping, self-clear suppression, maintenance suppression, known-chatter
-removal), and tags every surviving alarm with its `trailIds` via the Trail Builder
+filters (flap-damping, self-clear suppression, known-chatter removal), and tags every
+surviving alarm with its `trailIds` via the Trail Builder
 `getTrailsForObject` API. It emits enriched, trail-tagged alarms onto `alarms.enriched`
 (history path, consumed by the Noise Filter in P2) and `alarms.enriched.live` (live path,
 consumed by the Correlation Engine in P3). The same service instance, same code, and same
@@ -35,10 +35,9 @@ consumed and which output topic is emitted.
     times within a configured window, collapse the oscillation into a single summary alarm
     (using existing `AlarmEvent` fields; exact field mapping is a design-stage decision
     — see Open questions).
-  - **Maintenance suppression:** drop alarms for objects currently within an active
-    maintenance window (maintenance window list from Knowledge Service).
   - **Known-chatter removal:** drop alarms whose (`managedObjectId`, `eventType`) pair
-    appears on the configured known-chatter list from Knowledge Service.
+    appears on the configured known-chatter list from Knowledge Service (an authored,
+    slowly-changing operator list — a correct fit for the versioned Knowledge store).
 - Tag each surviving alarm's `trailIds` field by calling the Trail Builder
   `getTrailsForObject(managedObjectId)` API.
 - Emit normalized, deduped, filtered, trail-tagged `AlarmEvent`s on:
@@ -46,13 +45,20 @@ consumed and which output topic is emitted.
   - `alarms.enriched.live` — live path (consumed by Correlation Engine in P3).
 - Route poison/undeserializable messages to the appropriate dead-letter topic.
 - Consume `knowledge.updated` events and refresh filter parameters (hold-times, flap
-  thresholds, chatter list, maintenance windows) from the Knowledge Service API on each
-  update notification.
+  thresholds, chatter list) from the Knowledge Service API on each update notification.
 - Expose `/health` and `/metrics` endpoints; emit structured JSON logs; configure all
   integration URLs and thresholds via environment variables (no hard-coded values).
 
 ## Out of scope
 
+- **Maintenance suppression (deferred to post-MVP).** Suppressing alarms for objects under
+  an active maintenance window is **not** in the MVP. A maintenance window is transient
+  *operational* state (sourced from a CMDB / change-management / NMS feed) — **not** authored
+  domain knowledge — so it does not belong in the Knowledge Service. The MVP also has no
+  oracle for it: the Simulator generates synthetic alarms and does not model real maintenance
+  windows. When added post-MVP it will integrate a dedicated, config-switchable
+  **maintenance/CMDB feed** as its own integration point (not Knowledge), and gain its own
+  acceptance criterion then.
 - Statistical or ML-based noise removal (DBSCAN/HDBSCAN) — that is the Noise Filter
   Service's responsibility (P2 only, downstream of enrichment).
 - Building or computing trails — the Enrichment Service only reads trails via the Trail
@@ -86,17 +92,14 @@ consumed and which output topic is emitted.
    `AlarmEvent` fields) in place of the burst. The precise field mapping is design-stage
    (see Open questions); if a new `AlarmEvent` field is genuinely required it becomes a
    contract-change PR before design proceeds.
-5. Apply the maintenance suppression filter: drop all alarms for managed objects whose
-   `managedObjectId` is covered by an active maintenance window sourced from Knowledge.
-6. Apply the known-chatter removal filter: drop alarms whose (`managedObjectId`,
+5. Apply the known-chatter removal filter: drop alarms whose (`managedObjectId`,
    `eventType`) pair is on the Knowledge-sourced known-chatter list.
-7. Tag each surviving alarm with its `trailIds` by calling the Trail Builder
+6. Tag each surviving alarm with its `trailIds` by calling the Trail Builder
    `getTrailsForObject(managedObjectId)` API for the alarm's `managedObjectId`.
-8. Emit each surviving, trail-tagged `AlarmEvent` on the correct output topic:
+7. Emit each surviving, trail-tagged `AlarmEvent` on the correct output topic:
    `alarms.enriched` for the history path and `alarms.enriched.live` for the live path.
-9. Consume `knowledge.updated` events and refresh filter parameters (hold-times, flap
-   thresholds, chatter list, maintenance windows) from the Knowledge Service API on each
-   update notification.
+8. Consume `knowledge.updated` events and refresh filter parameters (hold-times, flap
+   thresholds, chatter list) from the Knowledge Service API on each update notification.
 10. Route messages that cannot be deserialized or that violate the `AlarmEvent` schema to
     the dead-letter topic (`alarms.history.dlq` for messages from `alarms.history`;
     `alarms.live.dlq` for messages from `alarms.live`).
@@ -125,7 +128,7 @@ consumed and which output topic is emitted.
     `trailId`s for the given managed object; used to populate `trailIds` on each surviving
     alarm. Client built against Trail Builder's published OpenAPI 3.1 spec.
   - **Knowledge Service filter-params API** — retrieves the current configured values for
-    hold-time, flap N/window thresholds, known-chatter list, and maintenance windows.
+    hold-time, flap N/window thresholds, and the known-chatter list.
     Refreshed on receipt of `knowledge.updated` events. Client built against Knowledge
     Service's published OpenAPI 3.1 spec.
 - **Integration points (mock vs. real):**
@@ -151,7 +154,7 @@ consumed and which output topic is emitted.
   retrieved from the Knowledge Service — **no hard-coded values**. Required env vars
   include (at minimum): `KAFKA_BOOTSTRAP_SERVERS`, `TRAIL_BUILDER_BASE_URL`,
   `TRAIL_BUILDER_MODE`, `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_MODE`. Filter parameters
-  (hold-time, flap N, flap window duration, chatter list, maintenance windows) are fetched
+  (hold-time, flap N, flap window duration, chatter list) are fetched
   from the Knowledge Service API and refreshed on `knowledge.updated`.
 - **Observability:** `/health` (liveness + readiness), `/metrics` (Prometheus), structured
   JSON logs with `traceId` propagated from the consumed event envelope.
@@ -189,45 +192,41 @@ Each criterion maps to a single JUnit 5 unit test.
    within the configured hold-time, the service emits no `AlarmEvent` on the output topic
    for that alarm.
 
-5. **Maintenance suppression removes in-window alarms:** Given a `managedObjectId`
-   covered by an active maintenance window (as returned by the Knowledge Service mock), an
-   alarm for that object is not emitted on the output topic.
-
-6. **Known-chatter removal drops listed alarms:** Given an alarm whose (`managedObjectId`,
+5. **Known-chatter removal drops listed alarms:** Given an alarm whose (`managedObjectId`,
    `eventType`) pair is present on the Knowledge Service's known-chatter list (as returned
    by the Knowledge Service mock), that alarm is not emitted on the output topic.
 
-7. **Every surviving alarm carries correct `trailIds`:** Given a surviving alarm (one that
+6. **Every surviving alarm carries correct `trailIds`:** Given a surviving alarm (one that
    passes all filters), the `trailIds` field in the emitted `AlarmEvent` exactly matches
    the list returned by the Trail Builder mock for the alarm's `managedObjectId`
    (non-empty when the mock returns trails; empty array when the mock returns none).
 
-8. **History path lands on `alarms.enriched`:** Given an alarm consumed from
+7. **History path lands on `alarms.enriched`:** Given an alarm consumed from
    `alarms.history`, the surviving enriched alarm is emitted on `alarms.enriched` and not
    on `alarms.enriched.live`.
 
-9. **Live path lands on `alarms.enriched.live`:** Given an alarm consumed from
+8. **Live path lands on `alarms.enriched.live`:** Given an alarm consumed from
    `alarms.live`, the surviving enriched alarm is emitted on `alarms.enriched.live` and
    not on `alarms.enriched`.
 
-10. **Same service instance handles both paths:** Given that the service is configured to
-    consume both `alarms.history` and `alarms.live`, alarms from both inputs are processed
-    and emitted to their respective output topics within the same running service instance
-    without requiring separate deployments.
+9. **Same service instance handles both paths:** Given that the service is configured to
+   consume both `alarms.history` and `alarms.live`, alarms from both inputs are processed
+   and emitted to their respective output topics within the same running service instance
+   without requiring separate deployments.
 
-11. **Output validates against the frozen `AlarmEvent` binding:** Given any alarm emitted
+10. **Output validates against the frozen `AlarmEvent` binding:** Given any alarm emitted
     on `alarms.enriched` or `alarms.enriched.live`, deserializing it with the
     `libs/event-model` Java `AlarmEvent` binding succeeds without validation errors: all
     required fields are present, `managedObjectId` matches the `<objectType>:<id>` scheme,
     and `trailIds` is a non-null array.
 
-12. **Filter thresholds are read from Knowledge Service, not hard-coded:** Given that the
+11. **Filter thresholds are read from Knowledge Service, not hard-coded:** Given that the
     Knowledge Service mock returns hold-time T and flap threshold N, a transient that
     clears at T+1 seconds is NOT suppressed, and an oscillation of N−1 times is NOT
     flap-damped. Changing the mock's returned values changes the filtering outcome without
     any code modification.
 
-13. **Poison messages routed to DLQ:** Given a message on `alarms.history` that cannot be
+12. **Poison messages routed to DLQ:** Given a message on `alarms.history` that cannot be
     deserialized as a valid `AlarmEvent` (e.g., malformed JSON or unknown major
     `schemaVersion` ≥ 2), the service routes it to `alarms.history.dlq` and continues
     processing subsequent valid messages without crashing.
