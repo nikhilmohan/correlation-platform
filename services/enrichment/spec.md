@@ -24,14 +24,17 @@ consumed and which output topic is emitted.
   fields: `alarmId`, `managedObjectId`, `eventType`, `probableCause`, `perceivedSeverity`,
   `raisedAt`, `clearedAt`, `state`, `vendorRaw`, `trailIds`) using the frozen
   `libs/event-model` Java binding.
-- Deduplicate repeated identical alarms: count-collapse alarms with the same `alarmId`
-  within a short sliding window so only one representative reaches downstream.
+- Deduplicate repeated identical alarms: count-collapse alarms with the same composite
+  key **`(managedObjectId, eventType)`** within a short sliding window so only one
+  representative reaches downstream.
 - Apply deterministic noise filters (all thresholds from Knowledge Service, not
   hard-coded):
   - **Self-clear suppression:** suppress transient alarms that clear within a configured
     hold-time window.
   - **Flap-damping:** when a managed object oscillates (raises and clears) more than N
-    times within a configured window, collapse the oscillation into a single summary alarm.
+    times within a configured window, collapse the oscillation into a single summary alarm
+    (using existing `AlarmEvent` fields; exact field mapping is a design-stage decision
+    — see Open questions).
   - **Maintenance suppression:** drop alarms for objects currently within an active
     maintenance window (maintenance window list from Knowledge Service).
   - **Known-chatter removal:** drop alarms whose (`managedObjectId`, `eventType`) pair
@@ -73,12 +76,16 @@ consumed and which output topic is emitted.
 
 1. Consume raw `AlarmEvent` messages from `alarms.history` and `alarms.live` and
    normalize each to the canonical `AlarmEvent` schema defined in `libs/event-model`.
-2. Deduplicate incoming alarms: count-collapse repeated identical alarms (same `alarmId`)
-   within a short sliding window so only one representative is forwarded downstream.
+2. Deduplicate incoming alarms: count-collapse repeated identical alarms sharing the same
+   composite key **`(managedObjectId, eventType)`** within a short sliding window so only
+   one representative is forwarded downstream.
 3. Apply the self-clear suppression filter: discard transients that raise and clear within
    the configured hold-time, emitting nothing downstream for those alarms.
 4. Apply the flap-damping filter: when an object oscillates more than the configured N
-   times within the configured window, emit a single summary alarm in place of the burst.
+   times within the configured window, emit a single summary `AlarmEvent` (using existing
+   `AlarmEvent` fields) in place of the burst. The precise field mapping is design-stage
+   (see Open questions); if a new `AlarmEvent` field is genuinely required it becomes a
+   contract-change PR before design proceeds.
 5. Apply the maintenance suppression filter: drop all alarms for managed objects whose
    `managedObjectId` is covered by an active maintenance window sourced from Knowledge.
 6. Apply the known-chatter removal filter: drop alarms whose (`managedObjectId`,
@@ -138,8 +145,8 @@ consumed and which output topic is emitted.
 ## Non-functional
 
 - **Idempotency key:** `eventId` (envelope UUID) for general event deduplication;
-  `alarmId` (AlarmEvent payload field) for alarm-specific dedup within the sliding window.
-  Consumers dedupe on both keys per the platform's at-least-once Kafka guarantee.
+  composite `(managedObjectId, eventType)` for alarm-specific dedup within the sliding
+  window. Consumers dedupe on both keys per the platform's at-least-once Kafka guarantee.
 - **Config:** All thresholds and integration URLs are supplied via environment variables or
   retrieved from the Knowledge Service — **no hard-coded values**. Required env vars
   include (at minimum): `KAFKA_BOOTSTRAP_SERVERS`, `TRAIL_BUILDER_BASE_URL`,
@@ -163,85 +170,85 @@ consumed and which output topic is emitted.
 
 Each criterion maps to a single JUnit 5 unit test.
 
-1. **Dedup collapses duplicates:** Given two `AlarmEvent` messages on `alarms.history`
-   with the same `alarmId` arriving within the configured dedup window, the service emits
-   exactly one `AlarmEvent` on `alarms.enriched` and not two.
+1. **Dedup collapses duplicates on composite key:** Given two `AlarmEvent` messages on
+   `alarms.history` with the same `(managedObjectId, eventType)` arriving within the
+   configured dedup window, the service emits exactly one `AlarmEvent` on `alarms.enriched`
+   and not two.
 
-2. **Flap-damping produces a single summary:** Given an alarm for a `managedObjectId`
+2. **Dedup does not collapse distinct composite keys:** Given two `AlarmEvent` messages
+   sharing the same `managedObjectId` but with different `eventType` values arriving within
+   the configured dedup window, the service emits both as separate `AlarmEvent`s on the
+   output topic.
+
+3. **Flap-damping produces a single summary:** Given an alarm for a `managedObjectId`
    that raises and clears more than the configured N times within the configured flap
    window, the service emits exactly one summary `AlarmEvent` on the output topic, not the
    full oscillation sequence.
 
-3. **Self-clear suppression removes transients:** Given an alarm that raises and clears
+4. **Self-clear suppression removes transients:** Given an alarm that raises and clears
    within the configured hold-time, the service emits no `AlarmEvent` on the output topic
    for that alarm.
 
-4. **Maintenance suppression removes in-window alarms:** Given a `managedObjectId`
+5. **Maintenance suppression removes in-window alarms:** Given a `managedObjectId`
    covered by an active maintenance window (as returned by the Knowledge Service mock), an
    alarm for that object is not emitted on the output topic.
 
-5. **Known-chatter removal drops listed alarms:** Given an alarm whose (`managedObjectId`,
+6. **Known-chatter removal drops listed alarms:** Given an alarm whose (`managedObjectId`,
    `eventType`) pair is present on the Knowledge Service's known-chatter list (as returned
    by the Knowledge Service mock), that alarm is not emitted on the output topic.
 
-6. **Every surviving alarm carries correct `trailIds`:** Given a surviving alarm (one that
+7. **Every surviving alarm carries correct `trailIds`:** Given a surviving alarm (one that
    passes all filters), the `trailIds` field in the emitted `AlarmEvent` exactly matches
    the list returned by the Trail Builder mock for the alarm's `managedObjectId`
    (non-empty when the mock returns trails; empty array when the mock returns none).
 
-7. **History path lands on `alarms.enriched`:** Given an alarm consumed from
+8. **History path lands on `alarms.enriched`:** Given an alarm consumed from
    `alarms.history`, the surviving enriched alarm is emitted on `alarms.enriched` and not
    on `alarms.enriched.live`.
 
-8. **Live path lands on `alarms.enriched.live`:** Given an alarm consumed from
+9. **Live path lands on `alarms.enriched.live`:** Given an alarm consumed from
    `alarms.live`, the surviving enriched alarm is emitted on `alarms.enriched.live` and
    not on `alarms.enriched`.
 
-9. **Same service instance handles both paths:** Given that the service is configured to
-   consume both `alarms.history` and `alarms.live`, alarms from both inputs are processed
-   and emitted to their respective output topics within the same running service instance
-   without requiring separate deployments.
+10. **Same service instance handles both paths:** Given that the service is configured to
+    consume both `alarms.history` and `alarms.live`, alarms from both inputs are processed
+    and emitted to their respective output topics within the same running service instance
+    without requiring separate deployments.
 
-10. **Output validates against the frozen `AlarmEvent` binding:** Given any alarm emitted
+11. **Output validates against the frozen `AlarmEvent` binding:** Given any alarm emitted
     on `alarms.enriched` or `alarms.enriched.live`, deserializing it with the
     `libs/event-model` Java `AlarmEvent` binding succeeds without validation errors: all
     required fields are present, `managedObjectId` matches the `<objectType>:<id>` scheme,
     and `trailIds` is a non-null array.
 
-11. **Filter thresholds are read from Knowledge Service, not hard-coded:** Given that the
+12. **Filter thresholds are read from Knowledge Service, not hard-coded:** Given that the
     Knowledge Service mock returns hold-time T and flap threshold N, a transient that
     clears at T+1 seconds is NOT suppressed, and an oscillation of N−1 times is NOT
     flap-damped. Changing the mock's returned values changes the filtering outcome without
     any code modification.
 
-12. **Poison messages routed to DLQ:** Given a message on `alarms.history` that cannot be
+13. **Poison messages routed to DLQ:** Given a message on `alarms.history` that cannot be
     deserialized as a valid `AlarmEvent` (e.g., malformed JSON or unknown major
     `schemaVersion` ≥ 2), the service routes it to `alarms.history.dlq` and continues
     processing subsequent valid messages without crashing.
 
 ## Open questions
 
-1. **Dedup window key definition:** The spec requires deduplication keyed on `alarmId`.
-   It is unclear whether `alarmId` alone is sufficient, or whether the key should be
-   `(managedObjectId, eventType, perceivedSeverity)` for sources that may re-emit the
-   same logical alarm with a different `alarmId`. The exact dedup key definition affects
-   acceptance criterion 1 and boundary conditions for the dedup window. Needs human
-   resolution before design begins.
-   *(GH issue: #39 — labels: `question`, `service:enrichment`.)*
+> All original spec-blocking questions have been resolved or deferred to design-stage.
+> No outstanding blockers. The items below are design-stage decisions to be made during
+> the design phase — they do not block the spec.
 
-2. **Flap summary alarm shape:** When flap-damping collapses N oscillations into a single
-   summary alarm, the shape of the emitted `AlarmEvent` is not specified in §6.6 or the
-   frozen schema. Specifically: which fields carry over from the originals, what is the
-   `alarmId` of the summary (new synthetic ID or first alarm's ID), and what is the
-   `state` value (`raised` or `cleared`)? A new convention or field may constitute a
-   contract change to `AlarmEvent` requiring `docs/architecture.md` update and human
-   approval.
-   *(GH issue: #40 — labels: `question`, `service:enrichment`.)*
+1. **[DESIGN-STAGE] Flap summary alarm field mapping (#40):** When flap-damping collapses
+   N oscillations into a single summary `AlarmEvent`, the precise mapping of fields (which
+   fields carry over from the originals, how the `alarmId` of the summary is derived, and
+   what `state` value it carries) is finalized at design using existing `AlarmEvent` fields
+   only. If a genuinely new `AlarmEvent` field is needed it becomes a contract-change PR
+   before design proceeds — it is not decided in the spec.
+   *(GH issue: #40 — labels: `design-stage`, `service:enrichment`.)*
 
-3. **Trail Builder unavailability behavior:** When the Trail Builder `getTrailsForObject`
-   API is unavailable or returns an error for a given `managedObjectId`, the desired
-   behavior is not specified: (a) emit the alarm with an empty `trailIds` array and
-   continue, (b) route the alarm to the DLQ, or (c) retry and hold until resolution.
-   The choice determines whether downstream consumers (Noise Filter, Correlation Engine)
-   can safely receive alarms with empty `trailIds`. Needs human resolution.
-   *(GH issue: #42 — labels: `question`, `service:enrichment`.)*
+2. **[DESIGN-STAGE] Trail Builder unavailability resilience policy (#42):** When the Trail
+   Builder `getTrailsForObject` API is unavailable or returns an error, the resilience
+   policy (retry-and-hold, degrade with empty `trailIds`, or route to DLQ) is a
+   design-stage decision made with full resilience context. Downstream consumers (Noise
+   Filter, Correlation Engine) must be considered when the designer selects the policy.
+   *(GH issue: #42 — labels: `design-stage`, `service:enrichment`.)*
