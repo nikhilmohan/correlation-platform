@@ -123,6 +123,21 @@ it applies whatever fault-origin types and propagation templates the Knowledge S
 
 ---
 
+## Phase applicability
+
+The codebook-generator's primary work is in **P1** (topology onboarding), where it compiles the
+codebook from the newly built trails. In **P2** and **P3** it drives no work of its own; it
+serves its query API as a dependency for the Pattern Manager (reconciliation) and the Correlation
+Engine (matching) respectively.
+
+| Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
+|---|---|---|---|
+| P1 — Topology onboarding | Compile codebook: on `trails.built`, enumerate fault-origin instances (Topology API + Knowledge fault-origin list), run propagation templates forward over graph closure, tag scenarios to trails, persist codebook, mint `codebookId`, emit `codebook.generated` | **Active** | In: `trails.built` (+ Topology query API, Knowledge fault-origin list API, Knowledge propagation templates API, Trail Builder API reads); Out: `codebook.generated` |
+| P2 — Pattern learning | Serves codebook query API to the Pattern Manager for reconciliation (mined patterns vs. codebook scenarios); drives no work of its own | **Passive** | In: codebook query API requests from Pattern Manager; Out: codebook query API responses (no topic output) |
+| P3 — Real-time correlation | Serves codebook query API to the Correlation Engine for matching (`matchedCodebookId`); drives no work of its own | **Passive** | In: codebook query API requests from Correlation Engine; Out: codebook query API responses (no topic output) |
+
+---
+
 ## Contract
 
 - **Consumes (Kafka):** `trails.built` _(primary trigger)_
