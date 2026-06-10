@@ -1,4 +1,9 @@
-"""Criterion 14 (Python side): TransactionEvent required fields."""
+"""TopologyChangedEvent (Python side): required fields + optional `domain`.
+
+`domain` is the optional snapshot-domain field added alongside `snapshotId`
+(multi-domain consistency). It is OPTIONAL/backward-compatible: present and
+absent are both valid, and when present it round-trips.
+"""
 
 from __future__ import annotations
 
@@ -12,15 +17,13 @@ import acp_event_model as m
 
 from .conftest import load_fixture_dict
 
-REQUIRED = ["transactionId", "trailId", "snapshotId", "alarmIds", "windowStart", "windowEnd"]
-
 
 def _ev() -> dict:
-    return copy.deepcopy(load_fixture_dict("TransactionEvent"))
+    return copy.deepcopy(load_fixture_dict("TopologyChangedEvent"))
 
 
-@pytest.mark.parametrize("field", REQUIRED)
-def test_missing_field_rejected(field: str) -> None:
+@pytest.mark.parametrize("field", ["snapshotId", "changeType", "nodes", "edges"])
+def test_missing_required_field_rejected(field: str) -> None:
     env = _ev()
     del env["payload"][field]
     with pytest.raises(ValidationError):
@@ -29,8 +32,8 @@ def test_missing_field_rejected(field: str) -> None:
 
 def test_valid() -> None:
     env = m.deserialize(_ev())
-    assert env.payload.transactionId == "TXN-0001"
-    assert len(env.payload.alarmIds) == 3
+    assert env.payload.snapshotId == "SNAP-2026-06-08-001"
+    assert env.payload.changeType == "full-load"
 
 
 def test_domain_present_round_trips() -> None:

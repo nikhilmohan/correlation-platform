@@ -7,6 +7,7 @@
   "traceId": "trace-trails-0001",
   "payload": {
     "snapshotId": "SNAP-2026-06-08-001",
+    "domain": "core-ip",
     "trailIds": ["TRAIL-0001", "TRAIL-0002", "TRAIL-0003"],
     "trailCount": 3
   }
