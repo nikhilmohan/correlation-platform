@@ -4,18 +4,21 @@
 
 The Codebook Generator Service compiles the **codebook** — the model-derived matrix of
 candidate root-cause instances to predicted symptom signatures. On receiving a `trails.built`
-event (carrying a `snapshotId`), it enumerates every graph instance whose object type appears
-in the fault-origin list (sourced exclusively from the Knowledge Service), then runs each
-instance's propagation templates forward over the topology graph closure (fetched from the
-Topology Service query API) to collect the predicted symptom set for that root-cause scenario,
-including the origin's own alarm. Each scenario is tagged with the trail(s) its symptoms
-occupy (resolved via the Trail Builder API). The resulting codebook — scenarios, signatures,
-trail tags, and the `snapshotId` it was compiled from — is persisted in PostgreSQL under a
-freshly minted `codebookId`, and a `codebook.generated` event (a summary-only
-`CodebookGeneratedEvent`) is emitted on the `codebook.generated` topic. Full signatures are
-served to downstream consumers (Pattern Manager, Correlation Engine) via the service's own
-query API. The service operates domain-agnostically: it does not hard-code Core IP specifics;
-it applies whatever fault-origin types and propagation templates the Knowledge Service provides.
+event (carrying a `snapshotId`), it resolves the **domain** for that snapshot (see OQ-4),
+fetches the **domain-scoped** fault-origin list and propagation templates from the Knowledge
+Service, enumerates every graph instance whose object type appears in that domain's fault-origin
+list (querying the Topology Service with a domain-scoped request), then runs each instance's
+propagation templates forward over the topology graph closure to collect the predicted symptom
+set for that root-cause scenario, including the origin's own alarm. Each scenario is tagged with
+the trail(s) its symptoms occupy (resolved via the Trail Builder API). The resulting codebook —
+scenarios, signatures, trail tags, `snapshotId`, and the `domain` it was compiled for — is
+persisted in PostgreSQL under a freshly minted `codebookId`, and a `codebook.generated` event
+(a summary-only `CodebookGeneratedEvent`) is emitted on the `codebook.generated` topic. Full
+signatures are served to downstream consumers (Pattern Manager, Correlation Engine) via the
+service's own query API. The service is domain-agnostic: it does not hard-code Core IP
+specifics; it applies whatever fault-origin types and propagation templates the Knowledge Service
+provides for the snapshot's domain — a non-Core-IP domain's codebook is compiled with its own
+fault-origins and templates without code change.
 
 ---
 
@@ -25,24 +28,32 @@ it applies whatever fault-origin types and propagation templates the Knowledge S
 
 - Consume `trails.built` (a `TrailsBuiltEvent` carrying `snapshotId` + `trailIds[]`) and
   use it as the trigger to compile a new codebook for that snapshot.
-- Fetch the **fault-origin list** (the set of graph object types that can be root causes) from
-  the Knowledge Service.
-- Fetch the **propagation templates** (per-edge-type fault cascade rules) from the Knowledge
-  Service.
+- Resolve the **domain** associated with the triggering snapshot (see OQ-4 for resolution
+  mechanism: carried in the event or looked up from Topology via `snapshotId`).
+- Fetch the **domain-scoped fault-origin list** (the set of graph object types that can be root
+  causes for that domain) from the Knowledge Service, passing the resolved `domain` as a
+  parameter. Different domains have different fault-origin type sets, authored in Knowledge.
+- Fetch the **domain-scoped propagation templates** (per-edge-type fault cascade rules for that
+  domain) from the Knowledge Service, passing the resolved `domain` as a parameter.
 - Fetch the **graph closure** for each fault-origin instance from the Topology Service query
-  API (bounded traversal by edge type).
-- **Enumerate** every graph instance whose type is in the fault-origin list.
+  API (bounded traversal by edge type), scoped to the snapshot's domain.
+- **Enumerate** every graph instance whose type is in the domain's fault-origin list, using a
+  domain-scoped query to the Topology Service.
 - For each enumerated instance, **run the propagation templates forward** over the graph
   closure to produce that instance's predicted symptom set (the codebook row), including the
   origin's own alarm type.
 - **Tag each scenario** with the trail(s) whose membership includes the scenario's symptoms,
-  using the Trail Builder API (`getTrailsForObject` / `getTrail`).
-- **Persist** the compiled codebook (scenarios, alarm-type signatures, trail tags, `snapshotId`)
-  in PostgreSQL, keyed by a freshly minted `codebookId`.
+  using the Trail Builder API (`getTrailsForObject` / `getTrail`), scoped to the snapshot's
+  domain-scoped trails.
+- **Persist** the compiled codebook (scenarios, alarm-type signatures, trail tags, `snapshotId`,
+  `domain`) in PostgreSQL, keyed by a freshly minted `codebookId`. The `domain` column is a
+  first-class attribute on every persisted codebook record.
 - **Emit `codebook.generated`** (`CodebookGeneratedEvent`: `snapshotId`, `scenarioCount`,
   `codebookId`) on the `codebook.generated` topic after successful compilation.
 - Expose a **query API** (OpenAPI 3.1) that lets Pattern Manager and Correlation Engine read
-  codebook scenarios, signatures, and trail tags by `codebookId` or `snapshotId`.
+  codebook scenarios, signatures, and trail tags by `codebookId`, `snapshotId`, or `domain`.
+  The query API returns the `domain` on every codebook response; queries can be scoped by
+  `domain` (e.g. `GET /codebooks?domain={domain}`).
 - Publish **OpenAPI 3.1** at `/openapi.json` (plus a human-readable docs UI) and check the
   generated `openapi.json` into `services/codebook-generator/`; this spec is the single source
   of truth for the HTTP surface.
@@ -59,8 +70,9 @@ it applies whatever fault-origin types and propagation templates the Knowledge S
 - **Does not own or query the topology graph directly.** Graph data is obtained exclusively
   through the Topology Service query API. This service never holds AGE credentials or issues
   openCypher queries; all graph access goes through the Topology Service's published API.
-- **Does not author propagation templates, fault-origin types, or trail policy.** Those are
-  the sole responsibility of the Knowledge Service. This service only reads and applies them.
+- **Does not author propagation templates, fault-origin types, trail policy, or domain
+  vocabulary.** Those are the sole responsibility of the Knowledge Service. This service only
+  reads and applies them, domain-scoped.
 - **Does not build trails.** Trail construction belongs to the Trail Builder Service; this
   service only reads trail membership for tagging.
 - **Does not perform Root Cause Analysis (RCA), pattern lifecycle management, or pattern
@@ -78,6 +90,13 @@ it applies whatever fault-origin types and propagation templates the Knowledge S
   assume straight-up propagation; protection-aware extensions are deferred.
 - **Does not own the Pattern Store or incident store.** Those are owned by Pattern Manager and
   Correlation Engine respectively.
+- **Cross-domain codebook scenarios are out of MVP scope.** A cross-domain scenario — one whose
+  predicted symptom signature spans objects from more than one domain via cross-domain edges —
+  is structurally supported (the codebook schema carries `domain` and cross-domain edges may
+  exist in the graph), but is not compiled, served, or tested in the MVP. The MVP compiles
+  and serves single-domain codebooks only (Core IP domain). Cross-domain expansion is deferred
+  and does not require a code change to enable — only Knowledge data (cross-domain relation
+  vocabulary) and a future spec update.
 
 ---
 
@@ -88,53 +107,65 @@ it applies whatever fault-origin types and propagation templates the Knowledge S
    envelope `eventId`, and initiate a new codebook compilation cycle for that snapshot.
    Route unprocessable events to `trails.built.dlq`.
 
-2. **Fetch fault-origin types and propagation templates from Knowledge Service.** Retrieve the
-   current list of fault-origin object types (e.g. Fiber, LineCard, Port, Node) and the set of
-   propagation templates (per-edge-type cascade rules) from the Knowledge Service API. These are
-   read inputs — this service never authors them.
+2. **Resolve the domain for the snapshot.** Determine the `domain` value associated with the
+   triggering `snapshotId` — either from the event payload (if available; see OQ-4) or by
+   querying the Topology Service's snapshot metadata API. The resolved `domain` is the
+   parameter passed to all downstream Knowledge and Topology calls for this compilation cycle.
 
-3. **Enumerate fault-origin instances from the Topology Service.** Query the Topology Service's
-   query API to list every graph object whose type appears in the fault-origin list, scoped to
-   the `snapshotId` received in the trigger event.
+3. **Fetch domain-scoped fault-origin types and propagation templates from Knowledge Service.**
+   Retrieve the domain's fault-origin object type list and propagation templates (per-edge-type
+   cascade rules) from the Knowledge Service API, passing the resolved `domain` as a required
+   parameter. These are read inputs — this service never authors them. A non-Core-IP domain's
+   fault-origin list and templates are fetched identically; no code change is needed per domain.
 
-4. **Propagate templates forward and collect predicted symptom sets.** For each enumerated
+4. **Enumerate domain-scoped fault-origin instances from the Topology Service.** Query the
+   Topology Service's query API to list every graph object whose type appears in the domain's
+   fault-origin list, scoped to the `snapshotId` and `domain` from the trigger event. The
+   Topology Service is domain-isolated; the enumeration query is domain-scoped.
+
+5. **Propagate templates forward and collect predicted symptom sets.** For each enumerated
    fault-origin instance, fetch its graph closure (bounded traversal by relevant edge types)
-   from the Topology Service, then apply the propagation templates forward — traversing each
-   template edge in cascade — to accumulate the full set of predicted alarm types (symptoms),
-   including the origin instance's own alarm type. Each result is one codebook scenario row.
+   from the Topology Service (domain-scoped), then apply the domain's propagation templates
+   forward — traversing each template edge in cascade — to accumulate the full set of predicted
+   alarm types (symptoms), including the origin instance's own alarm type. Each result is one
+   codebook scenario row.
 
-5. **Tag each scenario with its trail(s).** For each scenario, resolve which trail(s) the
+6. **Tag each scenario with its trail(s).** For each scenario, resolve which trail(s) the
    scenario's symptoms occupy by querying the Trail Builder API
-   (`getTrailsForObject` / `getTrail`), and attach the resulting `trailIds[]` to the scenario.
+   (`getTrailsForObject` / `getTrail`) — the trails for this snapshot are domain-scoped — and
+   attach the resulting `trailIds[]` to the scenario.
 
-6. **Persist the codebook.** Store all scenarios (fault-origin instance, predicted symptom
-   signature, trail tags, `snapshotId`) in PostgreSQL under a freshly minted `codebookId`.
-   A new `snapshotId` always produces a new codebook and a new `codebookId`; regeneration does
-   not overwrite a prior codebook for a different snapshot.
+7. **Persist the codebook with domain.** Store all scenarios (fault-origin instance, predicted
+   symptom signature, trail tags, `snapshotId`, `domain`) in PostgreSQL under a freshly minted
+   `codebookId`. The `domain` is a non-nullable column on the codebook record. A new `snapshotId`
+   always produces a new codebook and a new `codebookId`; regeneration does not overwrite a
+   prior codebook for a different snapshot.
 
-7. **Emit `codebook.generated`.** Publish a `CodebookGeneratedEvent` (`snapshotId`,
+8. **Emit `codebook.generated`.** Publish a `CodebookGeneratedEvent` (`snapshotId`,
    `scenarioCount`, `codebookId`) on the `codebook.generated` topic using the frozen
    `libs/event-model` Python/Pydantic binding. Failed-delivery fallback: `codebook.generated.dlq`.
+   See OQ-5 regarding whether `domain` should be added to `CodebookGeneratedEvent`.
 
-8. **Serve the codebook query API.** Answer requests from Pattern Manager and Correlation
-   Engine: retrieve a codebook's full scenario list and signatures by `codebookId`; retrieve
-   scenarios by `snapshotId`; retrieve a single scenario's predicted symptom signature and trail
-   tags by scenario identifier. The published OpenAPI 3.1 spec is the surface contract.
+9. **Serve the domain-scoped codebook query API.** Answer requests from Pattern Manager and
+   Correlation Engine: retrieve a codebook's full scenario list and signatures by `codebookId`;
+   retrieve scenarios by `snapshotId`; retrieve a single scenario's predicted symptom signature
+   and trail tags by scenario identifier; list codebooks filtered by `domain`. Every response
+   includes the codebook's `domain`. The published OpenAPI 3.1 spec is the surface contract.
 
 ---
 
 ## Phase applicability
 
 The codebook-generator's primary work is in **P1** (topology onboarding), where it compiles the
-codebook from the newly built trails. In **P2** and **P3** it drives no work of its own; it
-serves its query API as a dependency for the Pattern Manager (reconciliation) and the Correlation
-Engine (matching) respectively.
+domain-scoped codebook from the newly built trails. In **P2** and **P3** it drives no work of
+its own; it serves its query API as a dependency for the Pattern Manager (reconciliation) and
+the Correlation Engine (matching) respectively.
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Compile codebook: on `trails.built`, enumerate fault-origin instances (Topology API + Knowledge fault-origin list), run propagation templates forward over graph closure, tag scenarios to trails, persist codebook, mint `codebookId`, emit `codebook.generated` | **Active** | In: `trails.built` (+ Topology query API, Knowledge fault-origin list API, Knowledge propagation templates API, Trail Builder API reads); Out: `codebook.generated` |
-| P2 — Pattern learning | Serves the codebook (scenario signatures + trail tags) to the Pattern Manager, which uses it to: (a) **reconcile** mined patterns — confirm those matching a scenario and flag patterns with no model explanation; (b) **supply authoritative RCA** — where a mined pattern overlaps a scenario, the scenario's root cause overrides the Manager's ordering-based RCA; (c) feed **explainability** (codebook-overlap metadata). The codebook is the model-based check on data-mined patterns; it drives no work of its own. | **Passive** | In: codebook query API requests from Pattern Manager; Out: codebook query API responses (scenario signatures, trail tags, RCA per scenario). No topic output. |
-| P3 — Real-time correlation | Serves the codebook to the Correlation Engine as the **model-based correlation/RCA source**, co-equal with approved patterns ("two producers, one consumer" — §3). The engine runs a **closest-match decode** of the live symptom set against trail-scoped scenarios (minimum-distance; tolerates missing alarms, penalizes spurious) to pick a root-cause scenario — enabling RCA even with **no learned pattern** (cold-start / never-mined fault) and under partial signals. The winning scenario's id is recorded as `matchedCodebookId` on the incident. The codebook drives no work of its own; the engine performs the decode. | **Passive** | In: codebook query API requests from Correlation Engine (codebook also delivered via `codebook.generated`); Out: codebook query API responses (scenario signatures + RCA, scoped by trail/snapshot). No topic output. |
+| P1 — Topology onboarding | Compile domain-scoped codebook: on `trails.built`, resolve domain, fetch domain-scoped fault-origin list + propagation templates (Knowledge), enumerate domain-scoped fault-origin instances (Topology), run templates forward over graph closure, tag scenarios to trails, persist codebook (with `domain`), mint `codebookId`, emit `codebook.generated` | **Active** | In: `trails.built` (+ Topology query API domain-scoped, Knowledge fault-origin list API with domain param, Knowledge propagation templates API with domain param, Trail Builder API reads); Out: `codebook.generated` |
+| P2 — Pattern learning | Serves the domain-scoped codebook (scenario signatures + trail tags) to the Pattern Manager, which uses it to: (a) **reconcile** mined patterns — confirm those matching a scenario and flag patterns with no model explanation; (b) **supply authoritative RCA** — where a mined pattern overlaps a scenario, the scenario's root cause overrides the Manager's ordering-based RCA; (c) feed **explainability** (codebook-overlap metadata). The codebook is the model-based check on data-mined patterns; it drives no work of its own. | **Passive** | In: codebook query API requests from Pattern Manager (may include `domain` filter); Out: codebook query API responses (scenario signatures, trail tags, RCA per scenario, `domain`). No topic output. |
+| P3 — Real-time correlation | Serves the domain-scoped codebook to the Correlation Engine as the **model-based correlation/RCA source**, co-equal with approved patterns. The engine runs a **closest-match decode** of the live symptom set against trail-scoped scenarios to pick a root-cause scenario — enabling RCA even with no learned pattern. The winning scenario's id is recorded as `matchedCodebookId` on the incident. The codebook drives no work of its own. | **Passive** | In: codebook query API requests from Correlation Engine (may include `domain` filter; codebook also delivered via `codebook.generated`); Out: codebook query API responses (scenario signatures + RCA, `domain`, scoped by trail/snapshot). No topic output. |
 
 ---
 
@@ -145,18 +176,23 @@ Engine (matching) respectively.
   - Fields: `snapshotId` (string), `trailIds` (array of strings), `trailCount` (integer)
   - Envelope: standard envelope — `eventId` (UUID, idempotency / dedup key), `type`,
     `schemaVersion`, `occurredAt`, `source`, `traceId`, `payload`
+  - Note: `TrailsBuiltEvent` does not currently carry a `domain` field. Domain resolution uses
+    the `snapshotId` to query Topology snapshot metadata, unless the event payload is extended
+    (see OQ-4).
   - Unprocessable-message fallback: `trails.built.dlq`
 
 - **Optional Kafka input (design-stage decision):** `knowledge.updated`
-  - Payload type: `KnowledgeUpdatedEvent` (frozen binding from `libs/event-model`, added in
-    contract change #34). Fields: `recordType` (string), `recordId` (string, optional),
-    `version` (string), `domain` (string).
+  - Payload type: `KnowledgeUpdatedEvent` (frozen binding from `libs/event-model`). Fields:
+    `recordType` (string), `recordId` (string, optional), `version` (string), `domain` (string).
+  - The `domain` field on `KnowledgeUpdatedEvent` (already present in the frozen binding) enables
+    domain-scoped cache invalidation: when a `knowledge.updated` event arrives for a specific
+    `domain`, the service can selectively invalidate or refresh cached fault-origin types and
+    propagation templates for that domain only.
   - Whether the service subscribes to `knowledge.updated` as a cache-invalidation or eager
-    refresh trigger (rather than fetching Knowledge data on each compilation cycle) is a
-    **design decision**. The topic and payload are available and typed; subscribing is not
-    required by this spec. If the designer subscribes, dedup on envelope `eventId` applies
-    and unprocessable messages route to `knowledge.updated.dlq`. No new contract change is
-    needed to use this topic — it is already in `architecture.md` and `libs/event-model`.
+    refresh trigger is a **design decision**. The topic and payload are available and typed;
+    subscribing is not required by this spec. If the designer subscribes, dedup on envelope
+    `eventId` applies and unprocessable messages route to `knowledge.updated.dlq`. No new
+    contract change is needed to use this topic.
 
 - **Produces (Kafka):** `codebook.generated`
   - Payload type: `CodebookGeneratedEvent` (frozen binding from `libs/event-model`)
@@ -164,6 +200,10 @@ Engine (matching) respectively.
   - The `codebookId` minted here is the identity referenced as `matchedCodebookId` in
     `CorrelationResultEvent` and as `codebookMatchId` in `PatternDiscoveredEvent` /
     `PatternApprovedEvent` downstream.
+  - Note: `CodebookGeneratedEvent` does not currently carry a `domain` field. Downstream
+    consumers that need the codebook's domain can derive it from `snapshotId` via the
+    codebook query API or Topology snapshot metadata. If a `domain` field is required on the
+    event itself, that is a contract change — see OQ-5.
   - Note: `CodebookGeneratedEvent` carries a summary only. Full signatures are served via this
     service's query API — not embedded in the event.
   - Failed-delivery fallback: `codebook.generated.dlq`
@@ -171,7 +211,7 @@ Engine (matching) respectively.
 - **APIs exposed** (publish OpenAPI 3.1 at `/openapi.json` + checked-in `openapi.json`; a
   surface change is a contract change):
   - `GET /codebooks/{codebookId}` — return codebook metadata (snapshotId, scenarioCount,
-    codebookId, compiledAt).
+    codebookId, compiledAt, **domain**).
   - `GET /codebooks/{codebookId}/scenarios` — return all scenarios in the codebook (fault-origin
     instance identifier, predicted symptom signature as an ordered list of alarm types,
     trail tags).
@@ -179,20 +219,27 @@ Engine (matching) respectively.
     symptom signature and trail tags.
   - `GET /codebooks?snapshotId={snapshotId}` — return the codebook(s) compiled for a given
     `snapshotId` (typically one; a list for extensibility).
+  - `GET /codebooks?domain={domain}` — return all codebooks compiled for the given domain,
+    ordered by `compiledAt` descending. Supports domain-scoped lookup by Pattern Manager and
+    Correlation Engine.
   - `/health` and `/metrics` (Prometheus-compatible).
 
 - **APIs consumed from other services** (integration points — built against each producer's
   published OpenAPI, never against source code):
-  - **Topology Service — graph query API:** list objects by type (to enumerate fault-origin
-    instances); bounded traversal by edge type (to fetch graph closures for propagation).
+  - **Topology Service — graph query API:** list objects by type scoped to `snapshotId` and
+    `domain` (to enumerate domain-scoped fault-origin instances); bounded traversal by edge
+    type (to fetch graph closures for propagation); snapshot metadata lookup (to resolve
+    `domain` from `snapshotId` — see OQ-4).
     Integration point name: `topology-query`.
-  - **Knowledge Service — fault-origin list:** retrieve the current versioned list of fault-origin
-    object types. Integration point name: `knowledge-fault-origins`.
-  - **Knowledge Service — propagation templates:** retrieve the current versioned set of
-    propagation templates (per-edge-type cascade rules). Integration point name:
-    `knowledge-propagation-templates`.
+  - **Knowledge Service — domain-scoped fault-origin list:** retrieve the versioned list of
+    fault-origin object types for the specified `domain`. Integration point name:
+    `knowledge-fault-origins`.
+  - **Knowledge Service — domain-scoped propagation templates:** retrieve the versioned set of
+    propagation templates (per-edge-type cascade rules) for the specified `domain`. Integration
+    point name: `knowledge-propagation-templates`.
   - **Trail Builder Service — trail membership:** `getTrailsForObject(managedObjectId)` and
-    `getTrail(trailId)` to resolve trail tags for each scenario.
+    `getTrail(trailId)` to resolve trail tags for each scenario (trails are domain-scoped by
+    the Trail Builder).
     Integration point name: `trail-builder-trails`.
 
 - **Integration points (mock vs. real):**
@@ -201,14 +248,16 @@ Engine (matching) respectively.
     variable: a base URL and a `MOCK|REAL` toggle.
   - Unit tests use mocks/stubs generated from the respective producer's published OpenAPI spec
     (e.g. `respx` or `httpx` mock transport for Python) so tests run without live dependencies.
+    Domain-parameterized mock responses (different fault-origin lists / templates per domain)
+    are used to verify domain-scoped behaviour without live services.
   - Integration tests point each integration point at the real service in Docker Compose. The
     same code runs in both modes — no code change, only config.
   - No integration point URL or mock toggle is hard-coded.
 
 - **Data owned:** PostgreSQL — Codebook Store (schema: `codebook`). Owns: codebooks table
-  (codebookId, snapshotId, scenarioCount, compiledAt), scenarios table (scenarioId,
-  codebookId, faultOriginObjectId, faultOriginType, predictedSymptoms as ordered alarm-type
-  list, trailIds). No other service writes to this schema.
+  (codebookId, snapshotId, scenarioCount, compiledAt, **domain** [non-nullable]), scenarios
+  table (scenarioId, codebookId, faultOriginObjectId, faultOriginType, predictedSymptoms as
+  ordered alarm-type list, trailIds). No other service writes to this schema.
 
 ---
 
@@ -220,13 +269,14 @@ Engine (matching) respectively.
   compiled).
 - **Config:** all integration-point base URLs, `MOCK|REAL` toggles, database connection
   parameters, Kafka bootstrap servers, consumer group ID, and log level are provided via
-  environment variables. No thresholds, no URLs, and no topology-domain specifics are
-  hard-coded. Fault-origin types and propagation templates are read from the Knowledge Service
-  at runtime.
+  environment variables. No thresholds, no URLs, no domain names, and no topology-domain
+  specifics are hard-coded. Fault-origin types and propagation templates are read from the
+  Knowledge Service at runtime, parameterized by domain. A new domain requires no code change —
+  only Knowledge data.
 - **Observability:** `/health` (liveness/readiness), `/metrics` (Prometheus-compatible
   counters and gauges — at minimum: events consumed, codebooks compiled, scenarios generated,
-  errors, and integration-point call latencies), structured JSON logs (level, timestamp, traceId,
-  service name, message).
+  errors, and integration-point call latencies — labelled by `domain` where applicable),
+  structured JSON logs (level, timestamp, traceId, service name, message, domain).
 - **API contract:** publishes OpenAPI 3.1 at `/openapi.json` plus a human-readable docs UI;
   the generated `openapi.json` is checked into `services/codebook-generator/openapi.json`.
   Own spec drives contract and unit tests; a change to the HTTP surface is a contract change
@@ -237,7 +287,7 @@ Engine (matching) respectively.
   logged as structured errors and the event is routed to `trails.built.dlq`.
 - **Snapshot alignment:** every codebook is associated with exactly the `snapshotId` carried
   in the triggering `trails.built` event. Consumers (Pattern Manager, Correlation Engine) can
-  always retrieve the codebook's `snapshotId` to verify alignment.
+  always retrieve the codebook's `snapshotId` and `domain` to verify alignment.
 - **Permissive licenses only:** all runtime dependencies must be Apache-2.0, BSD, MIT, or
   PostgreSQL-licensed. No GPL/AGPL/BSL/source-available components.
 
@@ -250,9 +300,9 @@ Each criterion maps to a single pytest test.
 1. **Fiber-cut signature matches expected cascade.**
    Given a mock Topology Service returning a synthetic FiberSpan instance with RIDES_ON edges to
    an IPLink, ADJACENCY_OVER edges to an IGPAdjacency, TRAVERSES edges to an LSP, and SERVES
-   edges to a VPNService, and a mock Knowledge Service returning the standard propagation
-   templates (RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES), the compiled codebook scenario for
-   that FiberSpan instance contains the expected ordered symptom set:
+   edges to a VPNService, and a mock Knowledge Service returning the standard Core IP propagation
+   templates (RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES) for domain `core-ip`, the compiled
+   codebook scenario for that FiberSpan instance contains the expected ordered symptom set:
    `[FiberSpan-alarm, LinkDown(IPLink), AdjDown(IGPAdjacency), LSPDown(LSP), ReachabilityLoss(VPNService)]`.
    _(Note: alarm-type identifier strings are illustrative placeholders; replaced with the shared
    alarm-type vocabulary confirmed at design — see OQ-2.)_
@@ -310,14 +360,43 @@ Each criterion maps to a single pytest test.
     `trails.built.dlq` and not retried indefinitely; the consumer continues processing
     subsequent valid messages.
 
+11. **Compiled codebook record carries the snapshot's domain.**
+    After processing a `trails.built` event for snapshot `snap-X` whose resolved domain is
+    `core-ip`, the persisted codebook record has `domain = "core-ip"` (non-null). The
+    `GET /codebooks/{codebookId}` response includes `"domain": "core-ip"` and validates against
+    the published `openapi.json` schema.
+
+12. **Fault-origin list and propagation templates are fetched with the snapshot's domain parameter.**
+    When compiling a codebook for domain `core-ip`, the Knowledge Service integration point is
+    called with `domain=core-ip` on each request (verified via mock assertion that the outbound
+    request carries the domain parameter). No domain-specific data is hard-coded in the service.
+
+13. **Domain-scoped enumeration query is passed to the Topology Service.**
+    When enumerating fault-origin instances for domain `core-ip` and snapshot `snap-X`, the
+    Topology Service integration point is called with both `snapshotId=snap-X` and
+    `domain=core-ip` as query parameters (verified via mock assertion).
+
+14. **Domain-scoped codebook query API filters by domain.**
+    Given two persisted codebooks — one for domain `core-ip` (codebookId `CB-1`) and one for
+    domain `transport` (codebookId `CB-2`) — `GET /codebooks?domain=core-ip` returns exactly
+    the `core-ip` codebook and not the `transport` codebook; the response validates against the
+    published `openapi.json` schema.
+
+15. **A different domain's codebook compiles using that domain's fault-origins and templates without code change.**
+    Given mock Knowledge Service responses returning a distinct fault-origin list and propagation
+    templates for domain `transport` (different object types and cascade rules from `core-ip`),
+    and mock Topology Service responses for domain `transport`, the service compiles a complete
+    codebook for `transport` using those domain-specific inputs — without any code change or
+    additional configuration beyond pointing to the same Knowledge and Topology service endpoints.
+    The persisted record carries `domain = "transport"`.
+
 ---
 
 ## Open questions
 
-All remaining open questions are **design-stage items** — they are not spec blockers and do
-not require contract changes here. They are resolved when the relevant collaborating service is
-designed and publishes its OpenAPI spec; codebook-generator's designer builds their mock/client
-against that published spec.
+All remaining open questions are **design-stage items** unless marked as spec blockers. They
+are resolved when the relevant collaborating service is designed and publishes its OpenAPI spec;
+codebook-generator's designer builds their mock/client against that published spec.
 
 - **OQ-1 [DESIGN-STAGE]: Trail Builder API surface for trail tagging.**
   (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/28)
@@ -343,14 +422,41 @@ against that published spec.
   now; if a new field is ultimately needed that is a contract change at design requiring human
   approval. Not a spec blocker.
 
-- **OQ-3 [DESIGN-STAGE]: Topology Service query API support for snapshotId-scoped object enumeration.**
+- **OQ-3 [DESIGN-STAGE]: Topology Service query API support for snapshotId-scoped and domain-scoped object enumeration.**
   (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/31)
-  Task 3 requires enumerating all graph instances of each fault-origin type for a specific
-  `snapshotId`. The codebook-generator's requirement — enumerate fault-origin instances scoped
-  to the snapshot identified by the triggering `trails.built` event — must be accounted for in
-  the Topology Service's design. This resolves when the Topology Service is designed and its
-  `list objects by type` endpoint (with or without a `snapshotId` filter) is confirmed in the
+  Task 4 requires enumerating all graph instances of each fault-origin type for a specific
+  `snapshotId` and `domain`. The codebook-generator's requirement — enumerate fault-origin
+  instances scoped to both the snapshot and the domain — must be accounted for in the Topology
+  Service's design. This resolves when the Topology Service is designed and its `list objects
+  by type` endpoint (with `snapshotId` and `domain` filter parameters) is confirmed in the
   Topology Service's published OpenAPI; codebook-generator's designer then builds its
   `topology-query` client and mock against that spec. If the Topology API does not support
-  `snapshotId` scoping, the Topology designer must note the constraint and codebook-generator's
+  domain scoping, the Topology designer must note the constraint and codebook-generator's
   designer adapts accordingly. Not a spec blocker.
+
+- **OQ-4 [SPEC-STAGE, NEEDS HUMAN RESOLUTION]: Domain resolution mechanism for TrailsBuiltEvent.**
+  The current `TrailsBuiltEvent` payload (frozen in `libs/event-model`) carries `snapshotId`,
+  `trailIds`, and `trailCount` — it does **not** carry a `domain` field. This service needs the
+  `domain` to parameterize Knowledge and Topology calls. Two options exist:
+  (a) Look up the domain by querying the Topology Service's snapshot metadata API using the
+  `snapshotId` — no contract change required, but adds a synchronous dependency per compile
+  cycle; or
+  (b) Add `domain` to `TrailsBuiltEvent` — this is a **contract change** requiring an
+  `architecture.md`/`libs/event-model` update and human approval before this spec/design
+  proceeds.
+  Option (a) is preferred to avoid a contract change, but requires the Topology snapshot
+  metadata API to expose the domain (see OQ-3). A human must confirm which option to take.
+  **This is a spec-stage question; the domain resolution mechanism must be decided before
+  design begins.** Linked issue to be filed labeled `question` + `service:codebook-generator`.
+
+- **OQ-5 [DESIGN-STAGE]: Whether `domain` should be added to `CodebookGeneratedEvent`.**
+  The current `CodebookGeneratedEvent` (frozen in `libs/event-model`) carries `snapshotId`,
+  `scenarioCount`, and `codebookId` — no `domain` field. Downstream consumers (Pattern Manager,
+  Correlation Engine) that need the domain can derive it from `snapshotId` via the codebook
+  query API or Topology metadata. If a `domain` field on the event is required for
+  consumer-side routing or filtering without an API lookup, that is a **contract change**
+  requiring an `architecture.md`/`libs/event-model` update and human approval. The preferred
+  stance is that `domain` is derivable from `snapshotId` (via the codebook query API or
+  Topology) and that no contract change is needed; however, if a downstream consumer's designer
+  identifies a blocking need, this becomes a contract change request. Not a spec blocker unless
+  a downstream consumer designer raises the need.
