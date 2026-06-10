@@ -58,6 +58,9 @@ def test_optional_fields_absent() -> None:
 
 def test_managed_object_id_pattern_enforced_on_alarm() -> None:
     env = _alarm()
-    env["payload"]["managedObjectId"] = "Switch:X1"  # unknown objectType
+    # Domain-agnostic objectType (not in Core-IP set) is fine; the pattern is
+    # enforced on shape only, so a malformed value (no colon separator) is
+    # rejected.
+    env["payload"]["managedObjectId"] = "NoColon"
     with pytest.raises(ValidationError):
         m.deserialize(env)
