@@ -15,7 +15,8 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | noise-filter | Python | DBSCAN noise removal | alarms.enriched | transactions.clean |
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
-| correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.enriched.live, patterns.approved, codebook.generated | correlation.results |
+| correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated | correlation.results |
+| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`; serves the live alarm query API | alarms.enriched.live, correlation.results | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -47,7 +48,8 @@ a dependency / refreshes state in that phase but drives no work of its own; *Idl
 | noise-filter | Idle | Active — DBSCAN over `alarms.enriched` → `transactions.clean` | Idle (history path only) |
 | pattern-miner | Idle | Active — PrefixSpan over `transactions.clean` → `patterns.mined` | Idle |
 | pattern-manager | Idle | Active — RCA + reconcile + XAI + lifecycle → `patterns.discovered` / `patterns.approved` | Passive — serves approved patterns |
-| correlation-engine | Idle | Idle | Active — match/score/RCA over `alarms.enriched.live` → `correlation.results` |
+| correlation-engine | Idle | Idle | Active — match/score/RCA over `alarms.persisted.live` → `correlation.results` |
+| alarm-manager | Idle | Idle | Active — persist live alarms from `alarms.enriched.live`, republish on `alarms.persisted.live`; maintain lifecycle + correlation-group role from `correlation.results`; serve the live alarm view to web-ui |
 | web-ui | Active — topology & trails visualization | Active — pattern review/approve, config edits | Active — live incidents & correlation stats |
 
 This table is the **canonical phase map**; each service's spec/design restates *its own* row in
@@ -65,9 +67,21 @@ Consumers reject unknown major `schemaVersion`.
 
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
-alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, transactions.clean,
-patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq.
-Producers/consumers per the table. **Adding a topic is a contract change.**
+alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
+transactions.clean, patterns.mined, patterns.discovered, patterns.approved, correlation.results,
+*.dlq. Producers/consumers per the table. **Adding a topic is a contract change.**
+
+> **Live alarm path (real-time).** On the live path the Alarm Manager sits **in-line** between
+> Enrichment and the Correlation Engine: Enrichment emits `alarms.enriched.live` → the Alarm
+> Manager persists each live alarm (initial state `open`) and republishes it on
+> **`alarms.persisted.live`** → the **Correlation Engine consumes `alarms.persisted.live`** (not
+> `alarms.enriched.live`). This guarantees every alarm entering correlation has been persisted
+> first, and makes the Alarm Manager the single source of truth for **live alarm state**. The
+> Alarm Manager also consumes `correlation.results` to update each alarm's lifecycle
+> (`open`→`correlated`→`cleared`) and its correlation-group role (root-cause / child) + incident
+> linkage. (The historical/learning path persists nothing here — historical alarms are mined
+> in-flight from Kafka: simulator → enrichment → noise-filter → pattern-miner. No new event
+> payload: `alarms.persisted.live` carries the existing `AlarmEvent`.)
 
 > **Topology ingestion is file/API-based, not a topic.** The raw topology snapshot is **not**
 > a Kafka event. The Simulator generates a domain-grounded topology snapshot **file** and uploads
@@ -78,11 +92,37 @@ Producers/consumers per the table. **Adding a topic is a contract change.**
 > this — the raw-vs-lifted distinction and large snapshot payloads suit a file/API hand-off better.)
 
 ## Data stores & ownership
-Apache AGE — topology graph; only via Topology Service. PostgreSQL — alarm / pattern (owned
-by Pattern Manager) / incident / knowledge stores; separation by schema. Kafka — the bus.
+Apache AGE — topology graph; only via Topology Service. PostgreSQL — pattern store (owned by
+Pattern Manager), incident store (owned by Correlation Engine), knowledge store (owned by
+Knowledge Service), and the **live alarm store (owned by the Alarm Manager)**; separation by
+schema. Kafka — the bus. **Single owners:** each store is written by exactly one service; others
+read via that service's API or events, never the store directly.
+
+**Alarm Manager owns the live alarm store** — the single source of truth for **live alarm state**.
+It holds each live alarm (from `alarms.enriched.live`) with its **lifecycle state** (`open` →
+`correlated` → `cleared`) and, once correlated, its **correlation-group role** (root-cause / child)
+and **incident linkage**, updated from `correlation.results`. It serves the **web-ui**'s live alarm
+view (which alarms are open/correlated, their state, RCA/child role, and incident membership).
+
+**MVP scope — live only, no historical corpus.** Historical/learning-path alarms are **not
+persisted** by the Alarm Manager (or anywhere) for the MVP: they are replayed by the Simulator and
+**mined in-flight** through the Kafka stream (simulator → enrichment → noise-filter → pattern-miner).
+A durable historical-alarm corpus is deferred post-MVP.
+
+**No new event payload** — the Alarm Manager consumes the existing `alarms.enriched.live` (the
+`AlarmEvent` payload) and `correlation.results` (`CorrelationResultEvent`), republishes the
+`AlarmEvent` on the new `alarms.persisted.live` topic, and exposes the live alarm store via a query
+API.
 
 ## Invariants
 Identity binding: alarms use the same `managedObjectId` as the graph (defined in event-model).
+The `managedObjectId` scheme is **domain-agnostic**: format `<objectType>:<id>` where `objectType`
+is an alphanumeric token starting with a letter (`^[A-Za-z][A-Za-z0-9]*$`) and `id` is non-empty
+with no colon. The **valid `objectType` set and
+edge-relation vocabulary for a domain are authored in the Knowledge Service** (domain-scoped), not
+frozen in the event-model — so a new domain adds its types without an event-model contract change
+(see "Domain extensibility"). The Topology ingestion API validates an uploaded snapshot's
+objectTypes/relations against the domain's Knowledge-authored vocabulary.
 Snapshot versioning: each topology load mints a `snapshotId`; trails/codebook reference it.
 Idempotency: dedupe on `eventId`/`alarmId`. Observability: JSON logs + `/metrics`, `/health`.
 Errors: poison messages → `<topic>.dlq`. Contract-first: with the library + topic contracts
@@ -128,13 +168,32 @@ and detailed in `design.md` (API contracts + integration points), and is checked
 Topology is loaded by **file upload to an API**, not by a Kafka event:
 
 - **Topology snapshot file (a versioned contract).** A domain-grounded topology snapshot is a
-  structured file (JSON) describing the typed nodes and edges of the graph (per the domain's
-  layer model — for the Core IP domain, the §"Topology Graph Model" types: Node/LineCard/Port/
-  IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG and their edges). Every object carries its
-  `managedObjectId` in the canonical `<objectType>:<id>` scheme. The **file schema is a contract**
-  (versioned; a change to it requires an `architecture.md`/spec update + human approval, like a
-  topic/payload). It is the hand-off between any topology *producer* (the Simulator today) and the
+  structured file (JSON) describing the typed nodes and edges of the graph. It carries a `domain`
+  identifier; the node `objectType`s and edge `relation`s come from **that domain's vocabulary
+  authored in the Knowledge Service** (for the Core IP domain: the §"Topology Graph Model" types
+  Node/LineCard/Port/**Interface**/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG and their
+  edges — note **Interface** is the L3 endpoint on a Port, and IP links/adjacencies are between
+  interfaces; protocol-connectivity layers beyond IGP, e.g. BGP, are a future Knowledge-vocabulary
+  addition, not in MVP). Every
+  object carries its `managedObjectId` in the canonical `<objectType>:<id>` scheme. The **file
+  schema is a contract** (versioned; a change to its *structure* requires an `architecture.md`/spec
+  update + human approval — but adding a new domain's *types/relations* does not, since those are
+  Knowledge data). It is the hand-off between any topology *producer* (the Simulator today) and the
   Topology Service. Where it lives (event-model vs. a `schema/` dir) is a design decision.
+  - **Site entity (domain-agnostic).** `Site` is a first-class object type in every domain,
+    representing a geographic site. Devices are placed in a site via a **`LOCATED_AT`** relation
+    (`<device> LOCATED_AT <Site>`); a Site node carries geo attributes (e.g. name, latitude,
+    longitude, region). The web-ui visualizes topology **by site** and expands into the site's
+    device-level graph; the Topology query API supports listing sites and the objects located at a
+    site. Sites may nest in future (site hierarchy) — out of MVP scope.
+  - **Device & connection attributes (structured, extensible).** Each node and edge carries an
+    `attributes` map for descriptive properties. **Well-known keys** (recommended, extensible per
+    domain): on devices — `vendor`, `model`, `equipmentType`, `role`, `capacity`; on connections —
+    `linkType`, `capacity`, `protectionRole`. The set is open (a domain may add keys) and authored/
+    catalogued per domain in the Knowledge Service. Consumers that may use these: the **Noise
+    Filter** (e.g. `equipmentType` as a clustering feature), **Trail Builder** and **Codebook
+    Generator** (where policy/templates reference equipment characteristics). They are descriptive,
+    not identity — identity remains `managedObjectId`.
 - **Topology ingestion API (owned by the Topology Service).** The Topology Service publishes an
   OpenAPI 3.1 ingestion endpoint that accepts a topology snapshot file, lifts it into AGE, mints a
   `snapshotId`, and emits `topology.changed`. Producers (the Simulator) build their upload client
@@ -143,14 +202,40 @@ Topology is loaded by **file upload to an API**, not by a Kafka event:
   producer (mock from Topology's OpenAPI for unit tests, real Topology in integration).
 
 ## Domain extensibility (Core IP is the MVP domain)
-The platform targets the **Core IP** domain for the MVP, but generation of grounded synthetic data
-is **domain-parameterized by design**: the Simulator separates a reusable generation/replay engine
-from a **domain pack** (the domain's object/edge types, propagation templates, alarm shapes, and
-scenario library). The Core IP domain pack is the only one built for the MVP; a new domain is added
-as a new pack without reworking the engine. Domain-specific business data does **not** leak into the
-shared reusable engine, and the engine is extensible (a new domain pack plugs in). Downstream
-services remain domain-agnostic: they operate on the typed graph, the canonical event model, and
-Knowledge-Service-authored templates/policy — none of which hard-code Core IP specifics.
+The platform targets the **Core IP** domain for the MVP, but is **domain-parameterized by design**
+so it can expand to other network domains (fixed access, RAN, transport, …) and cross-domain cases
+with minimal disruption. It does **not** force one universal schema; each domain defines its own
+object/edge vocabulary while sharing the same engine, event model, and service mechanics.
+
+- **The Simulator** separates a reusable generation/replay engine from a **domain pack** (the
+  domain's object/edge types, propagation templates, alarm shapes, scenario library). The Core IP
+  pack is the only one built for MVP; a new domain is a new pack — no engine rework. Domain business
+  data does not leak into the shared engine.
+- **The Knowledge Service** is the authoritative, domain-scoped home of each domain's **object-type
+  set**, **edge-relation vocabulary**, **propagation templates**, **trail policy**, **model params**,
+  and **device/connection attribute catalogue**. Adding a domain = authoring these records.
+- **The event model** is domain-agnostic: the `managedObjectId` scheme accepts any `<objectType>:<id>`
+  and the `AlarmEvent` (X.733) is domain-neutral — so **no event-model contract change is needed per
+  new domain**.
+- **Downstream services** (Topology, Trail Builder, Codebook Generator, Noise Filter, Pattern Miner,
+  Pattern Manager, Correlation Engine) operate generically on the typed graph + Knowledge-authored
+  templates/policy — none hard-code Core IP specifics.
+
+**To add a new domain (the extension guide):**
+1. Author the domain's **object-type set + edge-relation vocabulary** + **propagation templates** +
+   **trail policy** + **model params** + **attribute catalogue** in the **Knowledge Service**
+   (domain-scoped records). `Site` + `LOCATED_AT` are domain-agnostic and reused.
+2. Build a **Simulator domain pack** (types/edges/templates/alarm-shapes/scenarios) for grounded
+   synthetic data — or feed real topology files for that domain.
+3. Topology ingests that domain's snapshot files (validating types/relations against the domain's
+   Knowledge vocabulary); everything downstream works unchanged.
+No change to the event-model, topic contracts, or service code is required for a new domain — only
+Knowledge data + (for synthetic data) a Simulator pack.
+
+**Cross-domain.** Objects from different domains coexist in the graph under distinct `objectType`
+namespaces and may be linked by cross-domain relations (also authored in Knowledge), enabling
+cross-domain trails/correlation in future. The MVP builds and tests Core IP only; the structure
+does not preclude cross-domain expansion.
 
 ## Test frameworks (standard per cohort)
 The unit/contract test framework is fixed per cohort — do not substitute:
