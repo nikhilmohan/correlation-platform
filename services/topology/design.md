@@ -354,11 +354,11 @@ sequenceDiagram
     SS-->>IC: snapshotId
     IC->>LF: lift(file, snapshotId)
     LF-->>GW: typed vertices[] + edges[]
-    GW->>AGE: BEGIN; CREATE vertices/edges; insert topology_snapshot(current);\n demote prior current->previous; evict old previous; COMMIT
+    GW->>AGE: BEGIN; CREATE vertices/edges; insert topology_snapshot(current); demote prior current to previous; evict old previous; COMMIT
     AGE-->>GW: committed
     GW-->>IC: persisted (nodeCount, edgeCount)
     IC->>EP: publish(snapshotId, changeType, nodes[], edges[])
-    EP->>K: TypedEnvelope<TopologyChangedEvent> (eventId, key=snapshotId)
+    EP->>K: TypedEnvelope of TopologyChangedEvent (eventId, key=snapshotId)
     alt send fails
       EP->>K: route to topology.changed.dlq (+ error headers)
     end
