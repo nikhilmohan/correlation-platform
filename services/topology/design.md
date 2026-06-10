@@ -449,9 +449,9 @@ flowchart TD
   B -- no --> N[404]
   B -- yes --> C{K in 1..maxConfigured?}
   C -- no --> E[400 ApiError]
-  C -- yes --> D[openCypher: MATCH path =\n start -[:R1 or R2 ...*1..K]- m\n RETURN distinct m]
+  C -- yes --> D["openCypher: MATCH path = start -relation*1..K- m, RETURN distinct m"]
   D --> F[map vertices to NodeDto, dedupe by managedObjectId]
-  F --> G[200 TraversalDto reached: NodeDto[]]
+  F --> G["200 TraversalDto reached: NodeDto array"]
 ```
 
 The relation label set is injected into the variable-length pattern (`[:R1|R2*1..K]`), so only the
