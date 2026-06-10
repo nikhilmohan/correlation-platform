@@ -56,6 +56,20 @@ free. The design builds on and details these.>
 2. <Task>
 …
 
+## Phase applicability
+<This service's role in each of the three runtime phases (architecture.md → "Runtime phases":
+P1 Topology onboarding, P2 Pattern learning, P3 Real-time correlation). For each phase give the
+**role** (one line), an **Active / Passive / Idle** classification (Active = does the phase's core
+work; Passive = serves queries / is a dependency / refreshes state; Idle = not involved), and the
+service's **inputs/outputs in that phase** (topics consumed/produced, APIs served/called, or "—").
+Must stay consistent with the canonical phase map in architecture.md.>
+
+| Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
+|---|---|---|---|
+| P1 — Topology onboarding | <role> | <A/P/I> | <topics/APIs, or "—"> |
+| P2 — Pattern learning | <role> | <A/P/I> | <topics/APIs, or "—"> |
+| P3 — Real-time correlation | <role> | <A/P/I> | <topics/APIs, or "—"> |
+
 ## Contract
 - **Consumes (Kafka):** <exact topic names, or "—">
 - **Produces (Kafka):** <exact topic names, or "—">
@@ -87,6 +101,8 @@ free. The design builds on and details these.>
 ## Gate (must hold before the spec PR)
 - Every topic/payload/API reference matches `docs/architecture.md` exactly.
 - **Tasks (high-level)** and **Out of scope** are both populated — the design depends on them.
+- **Phase applicability** covers all three runtime phases (P1/P2/P3) with a role + Active/Passive/
+  Idle + I/O per phase, consistent with the canonical phase map in `architecture.md`.
 - **No silent new topic/payload/field** — any such need is an Open question, not part of the
   contract.
 - If the service exposes an HTTP API, the spec states it **publishes OpenAPI 3.1** and lists

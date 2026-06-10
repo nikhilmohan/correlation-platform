@@ -12,7 +12,7 @@ def test_package_imports() -> None:
     assert hasattr(acp_event_model, "ManagedObjectId")
 
 
-def test_all_nine_payloads_exported() -> None:
+def test_all_payloads_exported() -> None:
     import acp_event_model as m
 
     for name in [
@@ -25,5 +25,6 @@ def test_all_nine_payloads_exported() -> None:
         "PatternDiscoveredEvent",
         "PatternApprovedEvent",
         "CorrelationResultEvent",
+        "KnowledgeUpdatedEvent",
     ]:
         assert hasattr(m, name), f"missing export: {name}"

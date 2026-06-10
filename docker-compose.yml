@@ -74,7 +74,8 @@ services:
 #   Also deferred:
 #     - kafka-init: one-shot container creating the architecture.md topic catalog
 #       (topology.changed, trails.built, codebook.generated, knowledge.updated,
-#        alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, transactions.clean,
+#        alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
+#        transactions.clean,
 #        patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq)
 #     - spark: PySpark runtime for pattern-miner (container-only)
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
