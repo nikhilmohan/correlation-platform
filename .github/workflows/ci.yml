@@ -35,6 +35,7 @@ jobs:
               - 'services/enrichment/**'
               - 'services/pattern-manager/**'
               - 'services/correlation-engine/**'
+              - 'services/alarm-manager/**'
               - 'libs/event-model/**'
             angular:
               - 'services/web-ui/**'
@@ -94,7 +95,7 @@ jobs:
           # The -f gradlew guard makes each entry a no-op until that Gradle project exists,
           # so this loop is safe to land before @java-dev adds the Java binding.
           built=0
-          for d in libs/event-model/java services/topology services/knowledge services/enrichment services/pattern-manager services/correlation-engine; do
+          for d in libs/event-model/java services/topology services/knowledge services/enrichment services/pattern-manager services/correlation-engine services/alarm-manager; do
             if [ -f "$d/gradlew" ]; then built=1; (cd "$d" && ./gradlew --no-daemon clean build); fi
           done
           if [ "$built" = "0" ]; then echo "No Gradle project yet — skipping (scaffold)."; fi
