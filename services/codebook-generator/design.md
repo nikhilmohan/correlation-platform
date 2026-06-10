@@ -311,7 +311,7 @@ sequenceDiagram
   participant CG as Kafka (codebook.generated)
 
   K->>C: TrailsBuiltEvent {snapshotId, trailIds, trailCount}
-  C->>C: deserialize (schemaVersion<2, known type, valid payload)
+  C->>C: deserialize (supported major schemaVersion, known type, valid payload)
   alt malformed / unknown schemaVersion / unknown type
     C-->>K: route to trails.built.dlq; commit; continue
   else valid
