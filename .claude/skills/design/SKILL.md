@@ -42,10 +42,21 @@ The spec is approved and merged on `<svc>`. If not, stop.
        label: `A["do x[]"]`, or drop the inner brackets.
      Fine as-is: `<br/>` inside a `["..."]` node label, ER cardinality `||--o{`, edge syntax
      `-->|x|`, and balanced parens in a node label.
-     - **Validate, don't eyeball.** Before relying on a diagram, parse it with the real Mermaid
-       parser (e.g. `npm i mermaid` then `mermaid.parse(block)` per fenced block — a
-       `DOMPurify.addHook` error in Node means the syntax is fine; a `Parse error on line N` is a
-       real failure to fix). Eyeballing misses these.
+     - **Validate, don't eyeball — and provide a DOM.** Before relying on a diagram, parse every
+       fenced ```mermaid block with the real Mermaid parser **under a DOM**, otherwise a
+       `DOMPurify.addHook` error in bare Node **masks the real `Parse error`** and you get false
+       "clean" results (this has bitten us). Use jsdom:
+       ```js
+       import { JSDOM } from 'jsdom';
+       const dom = new JSDOM('<!DOCTYPE html><body></body>');
+       globalThis.window = dom.window; globalThis.document = dom.window.document;
+       const mermaid = (await import('mermaid')).default;
+       mermaid.initialize({ startOnLoad:false, securityLevel:'loose' });
+       await mermaid.parse(block);   // throws "Parse error on line N" on a real failure
+       ```
+       (`npm i mermaid jsdom`.) A block is clean only when `parse` resolves with no error. Fix
+       every `Parse error` and re-run until all blocks pass. Eyeballing and bare `mermaid.parse`
+       both miss these.
 5. Build the **test plan**: (a) map **every acceptance criterion** from the spec to a specific
    test (name + what it asserts) — the 1:1 mapping is the design-gate condition; (b) define the
    **E2E scenarios** that must be exercised **from this design unit's point of view** — the
