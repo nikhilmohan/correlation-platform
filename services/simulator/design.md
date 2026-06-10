@@ -34,14 +34,14 @@ Every spec Task (1–9) is realized below and traceable to concrete modules/flow
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the object types + layer-construction rules. The pack now also emits **`Site` nodes** (the domain-agnostic Site object type, geo attributes) and places each device in a site via a **`LOCATED_AT`** edge, and populates the well-known **device/connection `attributes`** keys (grounded values). IDs minted via `acp_event_model.ManagedObjectId` → generic `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`; site count / devices-per-site from `SITE_COUNT` / `DEVICES_PER_SITE`. |
+| **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the object types + layer-construction rules. The pack now also emits **`Site` nodes** (the domain-agnostic Site object type, geo attributes) and places each device in a site via a **`LOCATED_AT`** edge, emits **`Interface` nodes** (L3 endpoints) on ports via **`HOSTS`** (Port→Interface) with each interface **`TERMINATES`**-ing its `IPLink` and the IGP adjacency generated **between interfaces** (`ADJACENCY_OVER` Interface→IGPAdjacency, per §5 #91), and populates the well-known **device/connection `attributes`** keys (grounded values). IDs minted via `acp_event_model.ManagedObjectId` → generic `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`; site count / devices-per-site from `SITE_COUNT` / `DEVICES_PER_SITE`; interfaces-per-port from `INTERFACES_PER_PORT` (default 1). |
 | **2. Generate snapshot file (versioned contract) + upload to Topology ingestion API (client from OpenAPI; config-switchable mock/real)** | `engine/snapshot_writer.py` serializes the graph to the snapshot JSON (validated against `schema/topology-snapshot.schema.json`); `integrations/topology_client.py` is an `httpx` client generated from Topology's published OpenAPI, selected by `TOPOLOGY_API_MODE` (`mock`/`real`) + `TOPOLOGY_API_BASE_URL`. |
 | **3. Load fault-scenario configs (local files or Knowledge Service)** | `config/scenario_loader.py` resolves scenario defs, jitter, noise mix from local files (default/mock) or the Knowledge Service (`integrations/knowledge_client.py`), switchable by `KNOWLEDGE_MODE`. Validated at startup. |
 | **4. Inject labeled fault scenarios (root cause → cascade per §5 templates, jitter); record `{rootCause, children}`** | `engine/scenario_runner.py` + `engine/cascade.py` run the pack's propagation templates forward over the graph closure with jitter; `engine/labels.py` records the ground-truth label per scenario. Templates supplied by `domains/coreip/propagation.py`. |
 | **5. Inject background noise (≥3 noise classes), configurable rate/mix** | `engine/noise.py` interleaves noise alarms from the pack's noise generators (`domains/coreip/noise.py`); rate/mix from config. Noise alarms are excluded from every label's `children` set. |
 | **6. Replay in history (batch → `alarms.history`) or live (wall-clock paced → `alarms.live`)** | `engine/replay.py` with two strategies: `BatchReplay` (fire-and-flush) and `LiveReplay` (wall-clock paced via `PACING_MULTIPLIER`). Topic selected by mode. `integrations/kafka_producer.py` emits `TypedEnvelope[AlarmEvent]`. |
 | **7. Make ground-truth labels retrievable for evaluation** | **Decision (OQ-2): both** — labels are written to a **flat JSONL file** at end-of-run (`labels.export_to_file`) **and** served by a small read-only **FastAPI** surface (`api/labels_api.py`). File export is the canonical, no-broker oracle source; REST is convenience. OpenAPI 3.1 published + `openapi.json` checked in. |
-| **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The pack **declares the domain vocabulary** the snapshot is built from: its **object-type set** (the Core-IP layers **plus the domain-agnostic `Site`**), its **edge-relation vocabulary** (the Core-IP relations **plus `LOCATED_AT`**), the **`domain` identifier** (`core-ip`) stamped on the snapshot, and the **well-known `attributes` keys** it populates on devices/connections — the same vocabulary Topology validates against (authored canonically in Knowledge; the pack must align). The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
+| **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The pack **declares the domain vocabulary** the snapshot is built from: its **object-type set** (the Core-IP layers — incl. **`Interface`** — **plus the domain-agnostic `Site`**), its **edge-relation vocabulary** (the Core-IP relations — incl. **`HOSTS`** and **`TERMINATES`** — **plus `LOCATED_AT`**), the **`domain` identifier** (`core-ip`) stamped on the snapshot, and the **well-known `attributes` keys** it populates on devices/connections — the same vocabulary Topology validates against (authored canonically in Knowledge; the pack must align). The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
 | **9. `/health` + `/metrics` + structured JSON logs** | `api/health.py`, `api/metrics.py` (FastAPI routes); `obs/logging.py` JSON formatter; `obs/metrics.py` Prometheus registry. |
 
 ## Phase applicability (design view)
@@ -94,7 +94,7 @@ flowchart TB
     tm["topology_model.py<br/>(9 typed layers + edges)"]
     prop["propagation.py<br/>(§5 templates)"]
     shapes["alarm_shapes.py<br/>(X.733 per alarm type)"]
-    lib["scenario_library.py<br/>(fiber-cut, line-card, port + noise)"]
+    lib["scenario_library.py<br/>(fiber-cut, line-card, port, interface + noise)"]
   end
   subgraph integ["integrations (config-switchable mock/real)"]
     topo["topology_client.py<br/>(from Topology OpenAPI)"]
@@ -126,16 +126,17 @@ flowchart TB
 ```
 
 - **`engine/domain_pack.py`** — the `DomainPack` `Protocol`: `domain_id()` (e.g. `core-ip`),
-  `object_types()` (includes the domain-agnostic `Site`), `edge_relations()` (includes
-  `LOCATED_AT`), `attribute_keys()` (the well-known device/connection keys the pack populates),
+  `object_types()` (includes `Interface` and the domain-agnostic `Site`), `edge_relations()` (includes
+  `HOSTS`, `TERMINATES`, and `LOCATED_AT`), `attribute_keys()` (the well-known device/connection keys the pack populates),
   `build_topology(graph, size, rng)`, `propagation_templates()`, `alarm_shape(alarm_type)`,
   `scenario_library()`, `noise_classes()`. `object_types()`/`edge_relations()`/`attribute_keys()`/
   `domain_id()` are the **domain vocabulary** the snapshot is stamped + validated with; the engine
   depends only on this Protocol.
 - **`engine/topology_builder.py`** — asks the pack to populate a `networkx` `DiGraph` of typed nodes
-  and typed edges (including `Site` nodes and `LOCATED_AT` edges), copying each node/edge's
-  `attributes` map through; mints `managedObjectId`s. Domain-agnostic: it never names a Core-IP type,
-  the `Site` type, or a relation literal — it iterates `pack.object_types()`/`pack.edge_relations()`.
+  and typed edges (including `Site` nodes + `LOCATED_AT` edges and `Interface` nodes + `HOSTS`/
+  `TERMINATES` edges), copying each node/edge's `attributes` map through; mints `managedObjectId`s.
+  Domain-agnostic: it never names a Core-IP type, the `Site`/`Interface` type, or a relation literal
+  — it iterates `pack.object_types()`/`pack.edge_relations()`.
 - **`engine/cascade.py`** — given a root-cause node + the pack's propagation templates, walks the
   graph closure (BFS over the template-relevant edge relations) producing the ordered child alarm
   set. The §5 logic (see Algorithm logical flow) lives in template *data* from the pack; the
@@ -143,12 +144,16 @@ flowchart TB
 - **`engine/labels.py`** — the ground-truth store (see Data model). One record per injected scenario:
   `{scenarioId, scenarioType, rootCause, children, snapshotId}`.
 - **`domains/coreip/`** — the only concrete pack: the typed Core-IP layers + edges **plus `Site`
-  nodes and `LOCATED_AT` edges**, the well-known `attributes` keys on devices (`vendor`, `model`,
+  nodes and `LOCATED_AT` edges and `Interface` nodes + `HOSTS`/`TERMINATES` edges** (Port HOSTS
+  Interface; Interface TERMINATES IPLink; `ADJACENCY_OVER` runs Interface→IGPAdjacency, per §5 #91),
+  the well-known `attributes` keys on devices (`vendor`, `model`,
   `equipmentType`, `role`, `capacity`) and connections (`linkType`, `capacity`, `protectionRole`),
   the §5 propagation templates, the X.733 alarm shapes, the scenario library (fiber-cut,
-  line-card-fault, port-fault + ≥3 noise classes). It declares `domain_id() == "core-ip"` and the
-  full object-type/relation/attribute vocabulary stamped on the snapshot. `Site`/`LOCATED_AT` are
-  domain-agnostic and reused by any future pack; the geo/attribute *values* are Core-IP grounded.
+  line-card-fault, port-fault, **interface-fault** + ≥3 noise classes). It declares
+  `domain_id() == "core-ip"` and the full object-type/relation/attribute vocabulary stamped on the
+  snapshot (Core-IP object types now include `Interface`; relations include `HOSTS`/`TERMINATES`).
+  `Site`/`LOCATED_AT` are domain-agnostic and reused by any future pack; the geo/attribute *values*
+  are Core-IP grounded.
 
 ## Data model / DB schema
 
@@ -193,7 +198,7 @@ classDiagram
   GroundTruthLabel "1" --> "*" EmittedAlarm : rootCause + children
 ```
 
-- `scenarioType` ∈ `{fiber-cut, line-card-fault, port-fault}`; `rootCause` is the root-cause
+- `scenarioType` ∈ `{fiber-cut, line-card-fault, port-fault, interface-fault}`; `rootCause` is the root-cause
   alarm's `alarmId`; `children` is the list of causally-downstream alarm `alarmId`s.
 - `EmittedAlarm.scenarioId` is null for noise; `isNoise=true` ⇒ `noiseClass` set; noise alarms
   (`isNoise=true`) appear in no label's `children`, which is what makes them identifiable as noise
@@ -209,12 +214,16 @@ versioning the contract. The Topology Service consumes the same schema as its in
 any change to it remains a contract change requiring an `architecture.md` update + human approval
 (per spec Contract section).
 
-> **No new contract change here.** `Site`, the `LOCATED_AT` relation, the domain-agnostic
-> `managedObjectId` scheme, and the well-known device/connection `attributes` keys are all already in
-> the **merged multi-domain contract** (event-model #81 + the `architecture.md` "Topology snapshot
-> file" / "Domain extensibility" sections). This design only generates **conforming** data and
-> updates the snapshot schema's enums to match the contract's already-published vocabulary — it adds
-> no topic, payload, field, or OpenAPI surface beyond the merged contract.
+> **No new contract change here.** `Site`, the `LOCATED_AT` relation, the new **`Interface`** object
+> type, the **`HOSTS`/`TERMINATES`** relations (and `ADJACENCY_OVER` running between interfaces), the
+> domain-agnostic `managedObjectId` scheme, and the well-known device/connection `attributes` keys are
+> all already in the **merged multi-domain + Interface contract** (event-model #81 + the §5 Interface
+> model #91 + the `architecture.md` "Topology snapshot file" / "Domain extensibility" sections).
+> `Interface`/`HOSTS`/`TERMINATES` are **domain vocabulary** (authored in Knowledge, validated by
+> Topology), not an event-model surface — the produced `AlarmEvent` and snapshot file stay conforming.
+> This design only generates **conforming** data and updates the snapshot schema's enums to match the
+> contract's already-published vocabulary — it adds no topic, payload, field, or OpenAPI surface
+> beyond the merged contract.
 
 The schema mirrors the structure the Topology Service ingestion API expects:
 
@@ -237,7 +246,7 @@ The schema mirrors the structure the Topology Service ingestion API expects:
         "required": ["managedObjectId", "objectType"],
         "properties": {
           "managedObjectId": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
-          "objectType": { "enum": ["Site","Node","LineCard","Port","IPLink","IGPAdjacency","LSP","VPNService","FiberSpan","SRLG"] },
+          "objectType": { "enum": ["Site","Node","LineCard","Port","Interface","IPLink","IGPAdjacency","LSP","VPNService","FiberSpan","SRLG"] },
           "attributes": { "type": "object" }
         }
       }
@@ -251,7 +260,7 @@ The schema mirrors the structure the Topology Service ingestion API expects:
         "properties": {
           "from": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
           "to": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
-          "relation": { "enum": ["LOCATED_AT","HOSTED_ON","RIDES_ON","ADJACENCY_OVER","TRAVERSES","SERVES","MEMBER_OF"] },
+          "relation": { "enum": ["LOCATED_AT","HOSTED_ON","HOSTS","TERMINATES","RIDES_ON","ADJACENCY_OVER","TRAVERSES","SERVES","MEMBER_OF"] },
           "attributes": { "type": "object" }
         }
       }
@@ -263,14 +272,17 @@ The schema mirrors the structure the Topology Service ingestion API expects:
 The `managedObjectId` pattern now matches the **domain-agnostic** scheme `^[A-Za-z][A-Za-z0-9]*:[^:]+$`
 in the merged event-model `managedObjectId.schema.json` (#81) — the engine reuses
 `acp_event_model.validate` so the two never drift. The `objectType`/`relation` enums (incl. the
-domain-agnostic **`Site`** and **`LOCATED_AT`**) and the well-known `attributes` keys come from the
+domain-agnostic **`Site`** / **`LOCATED_AT`** and the Core-IP **`Interface`** object type with the
+**`HOSTS`**/**`TERMINATES`** relations) and the well-known `attributes` keys come from the
 **domain pack's vocabulary**, which is the same vocabulary Topology validates the upload against
 (authored canonically in Knowledge). **Well-known `attributes` keys** — devices: `vendor`, `model`,
 `equipmentType`, `role`, `capacity`; connections: `linkType`, `capacity`, `protectionRole`; `Site`:
 `name`, `latitude`, `longitude`, `region`. The set is open (extensible per domain), so `attributes`
 stays an open object. Referential integrity (every edge endpoint resolves to a node in `nodes[]`;
-every device has exactly one `LOCATED_AT` edge to a `Site`; no dangling references) is enforced by
-`snapshot_writer` post-build validation (criteria 1, 14, 25, 26).
+every device has exactly one `LOCATED_AT` edge to a `Site`; every `Port` `HOSTS` ≥1 `Interface` and
+each `Interface` `TERMINATES` exactly one `IPLink`; the IGP adjacency is `ADJACENCY_OVER` an
+`Interface`, never a `Port`/`IPLink` directly; no dangling references) is enforced by
+`snapshot_writer` post-build validation (criteria 1, 14, 25, 26, 28).
 
 ## Event handling
 
@@ -340,7 +352,7 @@ sequenceDiagram
 
   CLI->>TB: build_topology(size=N, seed)
   TB->>Pack: build_topology(graph, N, rng)
-  Pack-->>TB: typed nodes plus Site nodes plus edges incl LOCATED_AT plus attributes (managedObjectIds minted)
+  Pack-->>TB: typed nodes plus Site nodes plus Interface nodes plus edges incl LOCATED_AT HOSTS TERMINATES plus attributes (managedObjectIds minted)
   TB-->>CLI: networkx DiGraph
   CLI->>SW: write_snapshot(graph)
   SW->>Val: validate every managedObjectId + schema + refs
@@ -424,20 +436,20 @@ abstraction** boundary.
 
 ### Cascade / scenario generation (forward propagation per §5 templates)
 
-Inputs: a chosen `rootCauseNode` (type ∈ fault-origins `{Fiber, LineCard, Port, Node}` from the
-pack), the pack's per-edge-relation propagation templates, the `networkx` graph, and jitter params
-(from config/Knowledge — never hard-coded). Output: an ordered alarm list + a `{rootCause, children}`
-label.
+Inputs: a chosen `rootCauseNode` (type ∈ fault-origins `{Fiber, LineCard, Port, Interface, Node}`
+from the pack — `Interface` is a first-class fault origin per §5 #91), the pack's per-edge-relation
+propagation templates, the `networkx` graph, and jitter params (from config/Knowledge — never
+hard-coded). Output: an ordered alarm list + a `{rootCause, children}` label.
 
 ```mermaid
 flowchart TD
-  A[Pick scenario from library:<br/>fiber-cut / line-card-fault / port-fault] --> B[Select root-cause object<br/>of the scenario's fault-origin type]
+  A[Pick scenario from library:<br/>fiber-cut / line-card-fault / port-fault / interface-fault] --> B[Select root-cause object<br/>of the scenario fault-origin type]
   B --> C[Emit root-cause alarm<br/>X.733 shape from pack.alarm_shape]
   C --> D[Seed BFS frontier with root-cause node]
   D --> E{Frontier empty?}
   E -- yes --> Z[Return ordered alarms +<br/>label rootCause + children]
   E -- no --> F[Pop node, find outgoing edges<br/>whose relation has a template]
-  F --> G[Apply template per edge relation:<br/>RIDES_ON Fiber to LinkDown IPLink<br/>HOSTED_ON LineCard to PortDown to LinkDown<br/>ADJACENCY_OVER LinkDown to AdjDown<br/>TRAVERSES LinkDown to LSPDown<br/>SERVES LSPDown to ReachabilityLoss VPN]
+  F --> G[Apply template per edge relation:<br/>RIDES_ON Fiber to LinkDown IPLink<br/>HOSTED_ON LineCard to PortDown<br/>HOSTS PortDown to InterfaceDown<br/>TERMINATES InterfaceDown to LinkDown<br/>ADJACENCY_OVER InterfaceDown to AdjDown<br/>TRAVERSES LinkDown to LSPDown<br/>SERVES LSPDown to ReachabilityLoss VPN]
   G --> H[Emit child alarm w/ X.733 shape;<br/>raisedAt = parent.raisedAt + base_delay + jitter]
   H --> I[Add child node to frontier;<br/>append child alarmId to label.children]
   I --> E
@@ -459,7 +471,7 @@ is **bounded by the pack's grounded model** so the §5 propagation grounding is 
 
 | What is randomized | How | Grounding constraint (never violated) |
 |---|---|---|
-| **Fault-origin instance** per scenario | RNG picks uniformly among the **valid fault-origin-type instances** the pack exposes for that scenario (e.g. a `FiberSpan` for fiber-cut, a `LineCard` for line-card-fault, a `Port` for port-fault) | only object instances of the scenario's declared fault-origin type are eligible; cascade then follows the pack templates — no impossible origin |
+| **Fault-origin instance** per scenario | RNG picks uniformly among the **valid fault-origin-type instances** the pack exposes for that scenario (e.g. a `FiberSpan` for fiber-cut, a `LineCard` for line-card-fault, a `Port` for port-fault, an `Interface` for interface-fault) | only object instances of the scenario's declared fault-origin type are eligible; cascade then follows the pack templates — no impossible origin |
 | **Child-alarm timing** | `delay = BASE_INTERVAL_MS + gauss(0, JITTER_STDDEV_MS)` per inter-alarm gap | delay clamped ≥ 0; ordering still respects the causal BFS — a child never precedes its parent |
 | **Noise placement / object / class / timing** | RNG selects noise class per `NOISE_MIX`, the target object, and the time offset; `HARD_NOISE_FRACTION` decides near-cascade vs. clearly-separate placement | noise objects/shapes come from the pack's noise library; a noise alarm is **never** added to any label's `children` (criterion 6) |
 | **Scenario-instance ordering / interleaving** | the `SCENARIO_INSTANCES` copies of each scenario and the background alarms are interleaved on the timeline by the RNG | each instance is an independent cascade with its own ids; interleaving never merges two scenarios' children |
@@ -613,6 +625,7 @@ env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 | Topology size | `TOPOLOGY_NODE_COUNT` | number of `Node`s; line cards/ports/links scale per pack ratios |
 | Site count | `SITE_COUNT` | number of `Site` nodes generated (geo attrs); devices distributed across them via `LOCATED_AT` |
 | Devices per site | `DEVICES_PER_SITE` | target devices placed per site (rounds out as node count varies) |
+| Interfaces per port | `INTERFACES_PER_PORT` | number of `Interface` (L3 endpoint) nodes the pack `HOSTS` on each `Port` (§5 #91); each `TERMINATES` an `IPLink` and carries the IGP adjacency |
 | Random seed | `SIM_SEED` | **OQ-3 decision: deterministic generation supported** — same seed reproduces topology, cascade structure, timing offsets, and all RNG-driven choices; ids still fresh per run. Unset → random seed, logged so the run stays reproducible by re-supplying it |
 | Timing jitter | `JITTER_STDDEV_MS` | std-dev of per-gap delay noise (Gaussian, applied on top of the base interval) |
 | Inter-arrival interval | `BASE_INTERVAL_MS`, `BACKGROUND_INTERVAL_MS` | base inter-event spacing inside a cascade, and mean spacing between background/non-pattern alarms (jitter applied on top) |
@@ -626,8 +639,9 @@ env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 
 `settings` / `scenario_loader` validate (fail-fast, criterion 18): jitter ≥ 0, base/background
 interval > 0, noise rate ∈ [0,1], `BACKGROUND_FRACTION` ∈ [0,1], `HARD_NOISE_FRACTION` ∈ [0,1],
-`SCENARIO_INSTANCES` ≥ 1, scenarios ⊆ pack library, node count ∈ [10,200], `SITE_COUNT` ∈
-[1, node count] (and `DEVICES_PER_SITE` ≥ 1 when set), and (P2)
+`SCENARIO_INSTANCES` ≥ 1, scenarios ⊆ pack library (incl. `interface-fault`), node count ∈
+[10,200], `SITE_COUNT` ∈ [1, node count] (and `DEVICES_PER_SITE` ≥ 1 when set),
+`INTERFACES_PER_PORT` ∈ [1,8], and (P2)
 `HISTORY_START` < `HISTORY_END`. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal
 structured-log error + non-zero exit (`3`) before any emission (criterion 18).
 
@@ -649,6 +663,8 @@ present (ids in the generic `<objectType>:<id>` scheme):
     { "managedObjectId": "LineCard:PE1-LC2",    "objectType": "LineCard",     "attributes": {"vendor": "Acme", "model": "LC-48x100G", "equipmentType": "lineCard", "role": "transport", "capacity": "4.8Tbps"} },
     { "managedObjectId": "Port:PE1-LC2-P3",     "objectType": "Port",         "attributes": {"vendor": "Acme", "model": "QSFP28", "equipmentType": "port", "role": "core", "capacity": "100G"} },
     { "managedObjectId": "Port:P1-LC1-P1",      "objectType": "Port",         "attributes": {"vendor": "Acme", "model": "QSFP28", "equipmentType": "port", "role": "core", "capacity": "100G"} },
+    { "managedObjectId": "Interface:PE1-LC2-P3-if0", "objectType": "Interface", "attributes": {"name": "TenGigE0/2/0/3", "addressFamily": "ipv4", "role": "core"} },
+    { "managedObjectId": "Interface:P1-LC1-P1-if0",  "objectType": "Interface", "attributes": {"name": "TenGigE0/1/0/1", "addressFamily": "ipv4", "role": "core"} },
     { "managedObjectId": "IPLink:PE1_P1",       "objectType": "IPLink" },
     { "managedObjectId": "IGPAdjacency:PE1_P1", "objectType": "IGPAdjacency" },
     { "managedObjectId": "LSP:PE1-PE9-1",       "objectType": "LSP" },
@@ -660,8 +676,12 @@ present (ids in the generic `<objectType>:<id>` scheme):
     { "from": "Node:PE1",           "to": "Site:LON-01",         "relation": "LOCATED_AT" },
     { "from": "Node:P1",            "to": "Site:MAN-01",         "relation": "LOCATED_AT" },
     { "from": "LineCard:PE1-LC2",   "to": "Port:PE1-LC2-P3",     "relation": "HOSTED_ON" },
+    { "from": "Port:PE1-LC2-P3",    "to": "Interface:PE1-LC2-P3-if0", "relation": "HOSTS" },
+    { "from": "Port:P1-LC1-P1",     "to": "Interface:P1-LC1-P1-if0",  "relation": "HOSTS" },
+    { "from": "Interface:PE1-LC2-P3-if0", "to": "IPLink:PE1_P1", "relation": "TERMINATES" },
+    { "from": "Interface:P1-LC1-P1-if0",  "to": "IPLink:PE1_P1", "relation": "TERMINATES" },
     { "from": "FiberSpan:F-PE1-P1", "to": "IPLink:PE1_P1",       "relation": "RIDES_ON",       "attributes": {"linkType": "fiber", "capacity": "100G", "protectionRole": "working"} },
-    { "from": "IPLink:PE1_P1",      "to": "IGPAdjacency:PE1_P1", "relation": "ADJACENCY_OVER" },
+    { "from": "Interface:PE1-LC2-P3-if0", "to": "IGPAdjacency:PE1_P1", "relation": "ADJACENCY_OVER" },
     { "from": "IPLink:PE1_P1",      "to": "LSP:PE1-PE9-1",       "relation": "TRAVERSES" },
     { "from": "LSP:PE1-PE9-1",      "to": "VPNService:CUST-A",   "relation": "SERVES" },
     { "from": "SRLG:SRLG-7",        "to": "IPLink:PE1_P1",       "relation": "MEMBER_OF" }
@@ -676,10 +696,21 @@ placed in a site via a `LOCATED_AT` edge; connection edges carry `linkType`/`cap
 generated and how devices distribute across them; attribute *values* are pack-grounded (a small
 catalogue of realistic vendors/models/regions, config-influenced where useful).
 
+The fragment also shows the §5 #91 **Interface layer**: `Port:PE1-LC2-P3` `HOSTS`
+`Interface:PE1-LC2-P3-if0` (an L3 endpoint, default `INTERFACES_PER_PORT=1`), that interface
+`TERMINATES` `IPLink:PE1_P1`, and the IGP adjacency is `ADJACENCY_OVER` the **interface**
+(`Interface:PE1-LC2-P3-if0 → IGPAdjacency:PE1_P1`), **not** the port or the link directly — IGP/BGP
+sessions run between interfaces. The peer side mirrors it (`Port:P1-LC1-P1` HOSTS
+`Interface:P1-LC1-P1-if0`, which also TERMINATES the same `IPLink`). `INTERFACES_PER_PORT` (default
+1) sets how many interfaces each port hosts; interface `attributes` carry descriptive keys (`name`,
+`addressFamily`, `role`) from the pack catalogue.
+
 ### Worked example — fiber-cut cascade `AlarmEvent` records + ground-truth label
 
-A `fiber-cut` on `FiberSpan:F-PE1-P1` propagates `RIDES_ON → ADJACENCY_OVER → TRAVERSES → SERVES`.
-Each emitted envelope (`source="simulator"`, fresh `eventId`); payload is the frozen `AlarmEvent`:
+A `fiber-cut` on `FiberSpan:F-PE1-P1` propagates `RIDES_ON → TRAVERSES → SERVES` (LinkDown →
+LSPDown → ReachabilityLoss); the interfaces terminating the down link also lose their adjacency
+(`TERMINATES`/`ADJACENCY_OVER` from the affected interfaces drives the `AdjDown`). Each emitted
+envelope (`source="simulator"`, fresh `eventId`); payload is the frozen `AlarmEvent`:
 
 ```json
 { "eventId":"a1...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:00Z","source":"simulator","traceId":"sc-fiber-001",
@@ -712,6 +743,58 @@ and appears in **no** label's `children`, so the oracle classifies it as noise:
 ```json
 { "eventId":"n1...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:00Z","source":"simulator","traceId":"noise-0001",
   "payload":{ "alarmId":"NSE-0001","managedObjectId":"Port:P3-LC1-P7","eventType":"qualityOfServiceAlarm","probableCause":"thresholdCrossed","perceivedSeverity":"warning","raisedAt":"2026-06-10T10:00:00.250Z","state":"raised","trailIds":[] } }
+```
+
+### Worked example — interface-fault cascade `AlarmEvent` records + ground-truth label (§5 #91)
+
+`Interface` is a first-class fault origin. An `interface-fault` on `Interface:PE1-LC2-P3-if0`
+propagates `TERMINATES → ADJACENCY_OVER → TRAVERSES → SERVES` — i.e.
+`InterfaceDown ⇒ LinkDown ⇒ AdjDown` (the adjacency on that interface), with `LinkDown` then
+fanning out to `LSPDown` and `ReachabilityLoss`. The root alarm sits on the `Interface`, not the
+port or link:
+
+```json
+{ "eventId":"i1...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:00Z","source":"simulator","traceId":"sc-iface-001",
+  "payload":{ "alarmId":"ALM-IF-0001","managedObjectId":"Interface:PE1-LC2-P3-if0","eventType":"communicationsAlarm","probableCause":"interfaceDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:00.000Z","state":"raised","trailIds":[] } }
+
+{ "eventId":"i2...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:00Z","source":"simulator","traceId":"sc-iface-001",
+  "payload":{ "alarmId":"ALM-IF-0002","managedObjectId":"IPLink:PE1_P1","eventType":"communicationsAlarm","probableCause":"linkDown","perceivedSeverity":"critical","raisedAt":"2026-06-10T11:00:00.410Z","state":"raised","trailIds":[] } }
+
+{ "eventId":"i3...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:00Z","source":"simulator","traceId":"sc-iface-001",
+  "payload":{ "alarmId":"ALM-IF-0003","managedObjectId":"IGPAdjacency:PE1_P1","eventType":"communicationsAlarm","probableCause":"adjacencyDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:00.880Z","state":"raised","trailIds":[] } }
+
+{ "eventId":"i4...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:01Z","source":"simulator","traceId":"sc-iface-001",
+  "payload":{ "alarmId":"ALM-IF-0004","managedObjectId":"LSP:PE1-PE9-1","eventType":"communicationsAlarm","probableCause":"lspDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:01.300Z","state":"raised","trailIds":[] } }
+
+{ "eventId":"i5...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:01Z","source":"simulator","traceId":"sc-iface-001",
+  "payload":{ "alarmId":"ALM-IF-0005","managedObjectId":"VPNService:CUST-A","eventType":"qualityOfServiceAlarm","probableCause":"reachabilityLoss","perceivedSeverity":"critical","raisedAt":"2026-06-10T11:00:01.760Z","state":"raised","trailIds":[] } }
+```
+
+Ground-truth label (root cause is the `Interface`):
+
+```json
+{ "scenarioId":"sc-iface-001","scenarioType":"interface-fault",
+  "rootCause":"ALM-IF-0001","rootCauseManagedObjectId":"Interface:PE1-LC2-P3-if0",
+  "children":["ALM-IF-0002","ALM-IF-0003","ALM-IF-0004","ALM-IF-0005"] }
+```
+
+**Line-card cascade now traverses the interface step.** A `line-card-fault` on
+`LineCard:PE1-LC2` cascades `HOSTED_ON ⇒ PortDown`, then `HOSTS ⇒ InterfaceDown` (each interface
+on each port), then `TERMINATES ⇒ LinkDown` and `ADJACENCY_OVER ⇒ AdjDown` — i.e. the full
+`PortDown ⇒ InterfaceDown ⇒ LinkDown ⇒ AdjDown` chain — then `TRAVERSES ⇒ LSPDown` and
+`SERVES ⇒ ReachabilityLoss`. The label root is the `LineCard` alarm and `children` includes the
+`PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`, and `ReachabilityLoss` alarms — the
+`InterfaceDown` step is the addition over the pre-#91 chain.
+
+```mermaid
+flowchart TD
+  LC[LineCard fault<br/>line-card-fault root] --> PD[PortDown<br/>via HOSTED_ON]
+  PD --> IFD[InterfaceDown<br/>via HOSTS]
+  IFRoot[Interface fault<br/>interface-fault root] --> IFD
+  IFD --> LD[LinkDown<br/>via TERMINATES]
+  IFD --> AD[AdjDown<br/>via ADJACENCY_OVER]
+  LD --> LSP[LSPDown<br/>via TRAVERSES]
+  LSP --> RL[ReachabilityLoss VPN<br/>via SERVES]
 ```
 
 ### Noise classes (≥3, from the pack's library)
@@ -770,6 +853,8 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | Live pacing clock | (a) `time.sleep` on relative offsets; (b) monotonic-scheduler | **Monotonic-clock scheduler** — drift-aware, degrades gracefully, measurable via `simulator_pacing_drift_ms`. |
 | Site placement (#81) | (a) one global site; (b) random device-to-site; (c) `SITE_COUNT`/`DEVICES_PER_SITE` even spread | **Even spread driven by `SITE_COUNT`/`DEVICES_PER_SITE`** — yields realistic site-level grouping the web-ui can visualize, keeps every device placed (exactly one `LOCATED_AT`), and is config-tunable; single-site is a `SITE_COUNT=1` special case. `Site`/`LOCATED_AT` live in the pack as domain-agnostic types so no engine branch. |
 | Attribute values (#81) | (a) hard-coded constants; (b) fully-random strings; (c) small grounded catalogue | **Grounded catalogue in the pack** — realistic vendor/model/equipmentType/region values (config-influenced) so downstream features (e.g. Noise Filter `equipmentType`) are meaningful, while keeping `attributes` descriptive (never identity). Hard-coded rejected (no variety); random strings rejected (not grounded, breaks feature realism). |
+| Interface layer + adjacency anchoring (#91) | (a) keep `ADJACENCY_OVER` on `IPLink` (pre-#91); (b) interfaces but adjacency still on the link; (c) full §5 Interface layer with adjacency on the interface | **Full §5 Interface layer** — `Port` `HOSTS` `Interface`, `Interface` `TERMINATES` `IPLink`, `ADJACENCY_OVER` runs **between interfaces**; `Interface` is a first-class fault origin. Matches the merged #91 model so the generated topology + cascades exercise the real interface step (PortDown⇒InterfaceDown⇒LinkDown⇒AdjDown) the downstream services learn against. (a)/(b) rejected — they would mis-anchor the adjacency and skip the interface fault origin, drifting from the authored Knowledge vocabulary Topology validates. `Interface`/`HOSTS`/`TERMINATES` live in the pack (domain vocabulary), so the engine stays domain-agnostic. |
+| Interfaces per port (#91) | (a) fixed 1; (b) random; (c) `INTERFACES_PER_PORT` knob (default 1) | **`INTERFACES_PER_PORT` knob, default 1** — one L3 endpoint per port is the realistic Core-IP default and keeps the worked example simple, while the knob lets a run generate multiple sub-interfaces per port for richer cascades without code change. Fixed-1 rejected (no flexibility); fully-random rejected (non-reproducible without a seed and harder to assert). |
 
 ## Test plan
 
@@ -781,7 +866,7 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | 2 | `managedObjectId` shared between snapshot & alarms | `test_alarm_moids_subset_of_snapshot` | every emitted alarm `managedObjectId` ∈ snapshot node ids |
 | 3 | `managedObjectId` conforms to the (now domain-agnostic) scheme | `test_all_moids_pass_event_model_validator` | every snapshot + alarm moid (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme (objectType `^[A-Za-z][A-Za-z0-9]*$`, non-empty colon-free id) |
 | 4 | Fiber-cut cascade correct | `test_fiber_cut_cascade_matches_templates` | root alarm on `FiberSpan`; children include `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`/`VPNloss`(VPNService); label root=FiberSpan alarm, children=all downstream |
-| 5 | Line-card & port faults producible & distinguishable | `test_linecard_and_port_scenarios_distinct` | line-card-fault root objectType=`LineCard` (HOSTED_ON cascade), port-fault root objectType=`Port`; labels differ in rootCause object type |
+| 5 | Line-card & port faults producible & distinguishable | `test_linecard_and_port_scenarios_distinct` | line-card-fault root objectType=`LineCard` (HOSTED_ON⇒HOSTS⇒TERMINATES cascade incl. the `InterfaceDown` step), port-fault root objectType=`Port` (HOSTS⇒TERMINATES cascade); labels differ in rootCause object type; both produce an `InterfaceDown` child |
 | 6 | ≥3 noise classes generated | `test_at_least_three_noise_classes` | with noise enabled, ≥3 distinct noise classes emitted; each noise alarm absent from every label.children |
 | 7 | Emitted alarms validate vs frozen `AlarmEvent` | `test_emitted_alarms_validate_against_event_model` | every payload constructs as `AlarmEvent` w/o ValidationError; required fields present; `state` ∈ {raised,cleared} |
 | 8 | History lands on `alarms.history` | `test_history_mode_targets_history_topic` | history mode → all alarms on `alarms.history`, zero on `alarms.live` |
@@ -810,6 +895,8 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 25 | **Generated topology includes `Site` nodes + `LOCATED_AT` edges (configurable).** The pack emits `Site` nodes (geo attrs) and a `LOCATED_AT` edge per device into a site; counts driven by `SITE_COUNT`/`DEVICES_PER_SITE`. | `test_topology_has_sites_and_located_at` | snapshot has ≥1 `Site` node carrying `name`/`latitude`/`longitude`/`region`; every device node has exactly one `LOCATED_AT` edge whose `to` is a `Site`; `SITE_COUNT=N` → N sites; no device unplaced |
 | 26 | **Devices carry the well-known `attributes` keys (grounded).** Device nodes carry `vendor`/`model`/`equipmentType`/`role`/`capacity`; connection edges carry `linkType`/`capacity`/`protectionRole` where sensible, with pack-grounded values. | `test_device_and_connection_attributes_present` | every device node has the device well-known keys with non-empty pack-catalogue values; connection edges carry the connection keys where the pack populates them; values drawn from the grounded catalogue (not random strings) |
 | 27 | **Snapshot validates against the topology-file schema incl. Site/LOCATED_AT/attributes.** The generated snapshot (with sites, `LOCATED_AT`, attributes) passes the versioned schema and the domain-agnostic `managedObjectId` validator. | `test_snapshot_with_sites_validates` | full snapshot passes `jsonschema` against `topology-snapshot.schema.json` with `Site` in `objectType` enum + `LOCATED_AT` in `relation` enum; every `managedObjectId` (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme; `domain == "core-ip"` |
+| 28 | **Generated topology includes `Interface` nodes + `HOSTS`/`TERMINATES` edges (§5 #91, configurable).** The pack emits `Interface` nodes on ports (`Port` `HOSTS` `Interface`), each `Interface` `TERMINATES` its `IPLink`, and the IGP adjacency runs `ADJACENCY_OVER` an `Interface` (not a `Port`/`IPLink`); count per port driven by `INTERFACES_PER_PORT` (default 1). | `test_topology_has_interfaces_and_hosts_terminates` | snapshot has ≥1 `Interface` node; every `Interface` has exactly one incoming `HOSTS` from a `Port` and ≥1 `TERMINATES` to an existing `IPLink`; every `ADJACENCY_OVER` edge originates at an `Interface` (never a `Port`/`IPLink`); `INTERFACES_PER_PORT=N` → N interfaces per port; passes schema (`Interface` in `objectType` enum, `HOSTS`/`TERMINATES` in `relation` enum) + `acp_event_model.validate` for every `Interface:*` moid; no dangling refs |
+| 29 | **Interface-fault scenario produces the InterfaceDown→LinkDown→AdjDown cascade with ground-truth label (§5 #91).** The pack's scenario library includes `interface-fault`; injecting it yields a cascade rooted on an `Interface` whose `children` follow `TERMINATES ⇒ ADJACENCY_OVER ⇒ TRAVERSES ⇒ SERVES`. | `test_interface_fault_cascade_matches_templates` | `interface-fault` selectable in `SCENARIOS`; root alarm objectType=`Interface` (`interfaceDown`); children include `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`(VPNService) in causal order; label `rootCause`=Interface alarm, `rootCauseManagedObjectId` an `Interface:*`, `children`=all downstream; distinct from fiber-cut/line-card/port labels by root object type |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -828,6 +915,8 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 11 | **Partial path — zero scenarios but background/noise on** | `SCENARIOS=` empty, background/noise > 0 | no labels written; background+noise still emitted; no alarm in any `children`; pattern-quality oracle correctly recovers nothing (no false patterns) |
 | 12 | **P1 snapshot with sites + attributes → Topology** | `--phase p1`, `SITE_COUNT=3`, real/mock Topology | snapshot has 3 `Site` nodes (geo attrs), every device `LOCATED_AT` a site, device/connection well-known `attributes` populated; passes schema; Topology accepts it (validates types/relations incl. `Site`/`LOCATED_AT` against the domain vocabulary) and mints `snapshotId` |
 | 13 | **Partial path — single site** | `--phase p1`, `SITE_COUNT=1` | all devices `LOCATED_AT` the one `Site`; still schema-valid; no unplaced device, no second site |
+| 14 | **P1 snapshot with Interface layer → Topology** | `--phase p1`, `INTERFACES_PER_PORT=1`, real/mock Topology | snapshot has `Interface` nodes (`Port` HOSTS `Interface`, `Interface` TERMINATES `IPLink`, IGP adjacency `ADJACENCY_OVER` the interface); passes schema; Topology accepts the `Interface`/`HOSTS`/`TERMINATES` vocabulary and mints `snapshotId` |
+| 15 | **P2 interface-fault corpus → oracle** | `--phase p2`, `SCENARIOS=interface-fault` (+ optional others) + noise | interface-fault cascades on `alarms.history` rooted on `Interface` with `InterfaceDown→LinkDown→AdjDown→LSPDown→ReachabilityLoss` children; labels file records the `Interface` root cause; RCA/pattern oracle scores it like any other scenario |
 
 ## Config & observability
 
@@ -848,8 +937,9 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | Topology size | `TOPOLOGY_NODE_COUNT` | `20` | `Node` count (range 10–200); other layers scale per pack |
 | Site count | `SITE_COUNT` | `3` | number of `Site` nodes (geo attrs); devices placed via `LOCATED_AT` (range 1–node count) |
 | Devices per site | `DEVICES_PER_SITE` | unset → derived (`ceil(devices / SITE_COUNT)`) | target devices per site; when set, `SITE_COUNT` adjusts to fit |
+| Interfaces per port | `INTERFACES_PER_PORT` | `1` | `Interface` nodes hosted per `Port` (§5 #91; range 1–8); each TERMINATES an IPLink + carries the adjacency |
 | Random seed | `SIM_SEED` | unset → random (logged) | deterministic generation when set; reproducible by re-supplying logged seed |
-| Scenario selection | `SCENARIOS` | `fiber-cut,line-card-fault,port-fault` | which scenarios to inject |
+| Scenario selection | `SCENARIOS` | `fiber-cut,line-card-fault,port-fault,interface-fault` | which scenarios to inject |
 | Scenario-instance count | `SCENARIO_INSTANCES` | `8` (range 5–10) | injections **per** scenario; default guarantees PrefixSpan-minable support |
 | Timing jitter | `JITTER_STDDEV_MS` | `300` | Gaussian std-dev of per-gap delay, on top of base interval |
 | Base interval | `BASE_INTERVAL_MS` | `400` | base inter-alarm spacing inside a cascade |
@@ -866,17 +956,22 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | HTTP port | `HTTP_PORT` | `8080` | `/health`, `/metrics`, `/labels` |
 | Log level | `LOG_LEVEL` | `INFO` | structured-log verbosity |
 
-These defaults make a default P2 run produce 8 instances each of 3 scenarios + ~30% background +
-20% noise (40% of it hard) spread over a 24h window — an evaluation-grade set with no tuning. The
-P1 snapshot generated with defaults has 3 `Site` nodes with every device `LOCATED_AT` one of them
-and the well-known device/connection `attributes` keys populated from the pack's grounded catalogue.
+These defaults make a default P2 run produce 8 instances each of **4** scenarios (fiber-cut,
+line-card-fault, port-fault, interface-fault) + ~30% background + 20% noise (40% of it hard) spread
+over a 24h window — an evaluation-grade set with no tuning. The P1 snapshot generated with defaults
+has 3 `Site` nodes with every device `LOCATED_AT` one of them, one `Interface` per `Port`
+(`INTERFACES_PER_PORT=1`) `HOSTS`-ed by the port and `TERMINATES`-ing its `IPLink` with the IGP
+adjacency `ADJACENCY_OVER` the interface, and the well-known device/connection `attributes` keys
+populated from the pack's grounded catalogue.
 - **`/health`** — 200 when started + Kafka connected; non-200 otherwise.
 - **`/metrics`** — Prometheus exposition incl. `simulator_alarms_emitted_total{topic,scenario}`,
   `simulator_scenarios_injected_total{scenario}` (counts instances per scenario),
   `simulator_background_alarms_total`, `simulator_noise_alarms_total{class}`,
   `simulator_hard_noise_alarms_total`, `simulator_produce_errors_total`,
   `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`, `simulator_snapshot_sites`,
-  `simulator_snapshot_edges{relation}` (incl. `relation="LOCATED_AT"`).
+  `simulator_snapshot_interfaces` (count of `Interface` nodes),
+  `simulator_snapshot_edges{relation}` (incl. `relation="LOCATED_AT"`, `relation="HOSTS"`,
+  `relation="TERMINATES"`).
 - **Logging** — structured JSON on stdout (one object per line): `ts, level, event, runId,
   scenarioId?, msg`.
 
