@@ -18,16 +18,21 @@ builds and operates on the Core IP single domain; the design does not preclude f
 cross-domain trail assembly (via explicit cross-domain edges authored in Knowledge), but
 that is out of MVP scope.
 
-The service persists trail definitions (member set + `snapshotId` + `domain`), serves
-trail membership queries to downstream consumers (Enrichment, Noise Filter, Pattern
-Miner, and the web-ui topology/trails module for visualization), and emits `trails.built`
-(a summary event) on the `trails.built` topic so dependent services can react.
+The service reads `domain` directly from the consumed `topology.changed` event (no
+Topology Service lookup needed) and sets it on the emitted `TrailsBuiltEvent`, so
+downstream consumers (Codebook Generator, etc.) receive the domain directly in the event
+without a follow-up API call. The service persists trail definitions (member set +
+`snapshotId` + `domain`), serves trail membership queries to downstream consumers
+(Enrichment, Noise Filter, Pattern Miner, and the web-ui topology/trails module for
+visualization), and emits `trails.built` (a summary event) on the `trails.built` topic
+so dependent services can react.
 
 ## Scope
 
 **In scope:**
 - Consuming `topology.changed` (carrying `snapshotId` and `domain`) to trigger trail
-  (re)builds.
+  (re)builds. The `domain` value is read directly from the event — no lookup against
+  the Topology Service is needed to determine which domain to build for.
 - Optionally consuming `knowledge.updated` (payload: `KnowledgeUpdatedEvent`) to
   detect when the trail-policy record in the Knowledge Service has changed (i.e.,
   `recordType == "trailPolicy"`) and re-fetch the current policy for the relevant
@@ -37,12 +42,16 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
   Topology Service via its published query API, scoped to the snapshot's domain.
 - Fetching the trail policy for the snapshot's `domain` from the Knowledge Service
   via its published API (domain-parameterized call). The trail policy (IGP-area bound,
-  SRLG-union rule, and any other authored policy parameters) is domain-scoped data;
-  a different domain may have a different policy without any code change.
+  SRLG-union rule, and the set of dependency-edge types over which to compute closure)
+  is domain-scoped data; a different domain may have a different policy without any
+  code change.
 - Computing overlapping, policy-bounded trails per domain: transitive closure over
-  dependency edges bounded by IGP area; union of SRLG members into a shared trail.
-  Trail computation is performed using the trail policy and graph slice for the
-  snapshot's domain.
+  dependency edges (including interface-layer relations `HOSTS` and `TERMINATES` per
+  the §5 Interface model) bounded by IGP area; union of SRLG members into a shared
+  trail. Trail computation is performed using the trail policy and graph slice for the
+  snapshot's domain. Because `HOSTS` (Port→Interface) and `TERMINATES`
+  (Interface→IPLink) are part of the dependency-edge vocabulary, Interface objects are
+  natural members of the connected cluster when the trail traverses a port or link.
 - Persisting trail definitions — member `managedObjectId` list + `snapshotId` +
   `domain` — in PostgreSQL.
 - Exposing `getTrailsForObject(managedObjectId, domain)`, `getTrail(trailId)`, and
@@ -51,8 +60,10 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
   (trail visualization). Trail queries are domain-scoped by default (a trail belongs
   to exactly one domain for MVP; queries operate within a domain).
 - Emitting `trails.built` on every completed (re)build, carrying the frozen
-  `TrailsBuiltEvent` payload (`snapshotId`, `trailIds[]`, `trailCount`). Full
-  trail membership is intentionally not in the event; consumers fetch it via the API.
+  `TrailsBuiltEvent` payload (`snapshotId`, `trailIds[]`, `trailCount`, `domain`).
+  The `domain` is sourced directly from the `topology.changed` event that triggered
+  the build; no Topology Service lookup is needed. Full trail membership is
+  intentionally not in the event; consumers fetch it via the query API.
 - Deduplicating consumed `topology.changed` events on `eventId` (at-least-once
   delivery).
 - Supporting on-demand trail rebuilds (triggered via API call, not only via Kafka).
@@ -63,9 +74,10 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
 - **Graph ownership:** the service never reads Apache AGE directly; it queries the
   Topology Service via its API only. (Single-owner invariant: Topology Service is the
   sole AGE owner.)
-- **Trail policy authoring:** trail policy (IGP-area bounds, SRLG rules, and any future
-  policy parameters) is authored exclusively in the Knowledge Service, domain-scoped.
-  Trail Builder reads it; it does not define, store, or author policy.
+- **Trail policy authoring:** trail policy (IGP-area bounds, SRLG rules, the
+  dependency-edge set including interface-layer relations, and any future policy
+  parameters) is authored exclusively in the Knowledge Service, domain-scoped. Trail
+  Builder reads it; it does not define, store, or author policy.
 - **Alarm enrichment / trail tagging of alarms:** tagging each alarm with its
   `trailIds` is the Enrichment Service's responsibility. Trail Builder only answers
   "which trails contain this object?" queries.
@@ -86,8 +98,9 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
 1. **Consume `topology.changed` and trigger a domain-scoped trail build.** On receipt
    of a `topology.changed` event (carrying a new `snapshotId` and `domain`), check
    idempotency (dedupe on envelope `eventId`) and, if not already processed, initiate
-   a trail build for the new snapshot within its domain. Support on-demand builds
-   triggered via an API call (accepting `snapshotId` and `domain` as inputs).
+   a trail build for the new snapshot within its domain. The `domain` is read directly
+   from the event. Support on-demand builds triggered via an API call (accepting
+   `snapshotId` and `domain` as inputs).
 
 2. **React to `knowledge.updated` for trail-policy changes.** On consuming a
    `knowledge.updated` event where `recordType == "trailPolicy"`, re-fetch the current
@@ -104,16 +117,25 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
 4. **Fetch trail policy from the Knowledge Service (domain-parameterized).** Retrieve
    the current trail policy for the snapshot's `domain` from the Knowledge Service via
    its published API (domain is a parameter of the policy fetch call). The trail policy
-   (IGP-area boundary definition, SRLG-union rule, and any policy-parameterized bounds)
-   is domain-scoped; a different domain's policy is fetched independently. Policy
-   parameters must not be hard-coded.
+   (IGP-area boundary definition, SRLG-union rule, and the set of dependency-edge types
+   to traverse during closure — which for Core IP includes `HOSTS`, `TERMINATES`, and
+   other relations per the §5 graph model) is domain-scoped; a different domain's policy
+   is fetched independently. Policy parameters must not be hard-coded.
 
-5. **Compute trails per domain.** Apply the domain's trail policy to the fetched graph
-   data for that domain's graph slice: transitive closure over dependency edges from
-   each seed object, bounded by IGP area; union all links sharing an SRLG group into
-   the same trail. Trails overlap — a seed object appearing on multiple LSPs and/or in
-   an SRLG group produces membership in multiple trails. Computation stays within the
-   domain; cross-domain graph traversal is not performed in MVP.
+5. **Compute trails per domain, traversing through Interface objects.** Apply the
+   domain's trail policy to the fetched graph data for that domain's graph slice:
+   transitive closure over dependency edges from each seed object, bounded by IGP area;
+   union all links sharing an SRLG group into the same trail. The dependency-edge set
+   used for closure includes the interface-layer relations from the trail policy —
+   for Core IP this includes `HOSTS` (Port→Interface) and `TERMINATES`
+   (Interface→IPLink), so the closure naturally spans through `Interface` objects.
+   A `Port` and the `IPLink` it connects to are therefore in the same trail through
+   the intervening `Interface` node. `Interface` is a first-class, fault-capable object
+   (per §5); including it in the closure means a trail correctly represents the full
+   dependency chain for fault propagation. Trails overlap — a seed object appearing on
+   multiple LSPs and/or in an SRLG group produces membership in multiple trails.
+   Computation stays within the domain; cross-domain graph traversal is not performed
+   in MVP.
 
 6. **Persist trail definitions with domain.** Store each trail as its member set of
    `managedObjectId` values, the `snapshotId` it was built from, and the `domain` it
@@ -130,8 +152,8 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
      `managedObjectId` values in the `<objectType>:<id>` scheme), the `snapshotId`
      it was built from, and the `domain` it belongs to. The response must be
      sufficient for the web-ui to overlay trail membership on a typed multi-layer
-     topology graph; geometry and graph topology come from the Topology Service —
-     not duplicated here.
+     topology graph (including Interface-layer objects); geometry and graph topology
+     come from the Topology Service — not duplicated here.
    - `listTrails(snapshotId, domain)` — returns the set of all trail summaries built
      for the given snapshot within the given domain. Each summary carries the
      `trailId`, member count, `domain`, and the seed/bounds context (e.g. IGP area
@@ -142,9 +164,11 @@ Miner, and the web-ui topology/trails module for visualization), and emits `trai
    Publish the full API as OpenAPI 3.1 at `/openapi.json`; check the generated
    `openapi.json` into `services/trail-builder/`.
 
-8. **Emit `trails.built`.** After a successful build, produce a `trails.built` event
-   with the frozen `TrailsBuiltEvent` payload (`snapshotId`, `trailIds[]`,
-   `trailCount`). The `trailCount` must equal the length of `trailIds`. Full trail
+8. **Emit `trails.built` with `domain`.** After a successful build, produce a
+   `trails.built` event with the frozen `TrailsBuiltEvent` payload (`snapshotId`,
+   `trailIds[]`, `trailCount`, `domain`). The `domain` is sourced directly from the
+   `topology.changed` event that triggered the build — no Topology Service lookup is
+   performed. The `trailCount` must equal the length of `trailIds`. Full trail
    membership is available only via the query API, not in the event payload.
 
 ## Phase applicability
@@ -157,7 +181,7 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Builds domain-scoped, policy-bounded correlation trails from the topology graph and Knowledge domain trail policy; persists trail definitions (with domain); notifies downstream services. Concurrently serves the trail-query API (`listTrails`, `getTrail`, `getTrailsForObject`) to the web-ui topology/trails module. | Active | In: `topology.changed` (+ Topology Service graph-closure API scoped to domain, Knowledge Service domain-parameterized trail-policy API). Out: `trails.built`; serves trail-query API to web-ui and other consumers. |
+| P1 — Topology onboarding | Builds domain-scoped, policy-bounded correlation trails from the topology graph and Knowledge domain trail policy (including Interface-layer traversal); persists trail definitions (with domain); notifies downstream services. Concurrently serves the trail-query API (`listTrails`, `getTrail`, `getTrailsForObject`) to the web-ui topology/trails module. | Active | In: `topology.changed` (domain read directly from event; + Topology Service graph-closure API scoped to domain, Knowledge Service domain-parameterized trail-policy API). Out: `trails.built` (carrying `domain`); serves trail-query API to web-ui and other consumers. |
 | P2 — Pattern learning | Serves domain-scoped trail membership queries to consumers that scope historical alarms and transactions by trail (Enrichment, Noise Filter, Pattern Miner). | Passive | In: —. Out: serves `getTrailsForObject` / `getTrail` API (no topic output of its own). |
 | P3 — Real-time correlation | Serves domain-scoped trail membership queries to real-time consumers (e.g. Enrichment live-path trail-tagging). | Passive | In: —. Out: serves `getTrailsForObject` / `getTrail` API (no topic output of its own). |
 
@@ -167,8 +191,10 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
   - `topology.changed` (payload: `TopologyChangedEvent` — fields `snapshotId`,
     `changeType`, `nodes`, `edges`, **`domain`**; envelope `eventId` is the
     idempotency key). Python/Pydantic binding from `acp_event_model`. Primary trigger
-    for trail builds. The `domain` field scopes the build: trail-builder fetches the
-    trail policy for this domain and computes trails within this domain's graph slice.
+    for trail builds. The `domain` field is read directly from the event and scopes
+    the build: trail-builder fetches the trail policy for this domain and computes
+    trails within this domain's graph slice. No Topology Service lookup is needed to
+    determine the domain.
   - `knowledge.updated` (payload: `KnowledgeUpdatedEvent` — fields `recordType`
     (string), `recordId` (string, optional), `version` (string), `domain` (string);
     Python/Pydantic binding from `acp_event_model`). Used as a refresh trigger: when
@@ -179,9 +205,11 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
 
 - **Produces (Kafka):** `trails.built` (payload: `TrailsBuiltEvent` — fields
   `snapshotId` (string), `trailIds` (array of strings), `trailCount` (integer, must
-  equal `len(trailIds)`); Python/Pydantic binding from `acp_event_model`). Full trail
-  membership is intentionally out of the event; downstream consumers fetch it via the
-  query API.
+  equal `len(trailIds)`), **`domain`** (string, optional per model but set by
+  trail-builder on every emission); Python/Pydantic binding from `acp_event_model`).
+  Trail-builder sets `domain` on the emitted event from the `domain` carried by the
+  triggering `topology.changed` — no lookup required. Full trail membership is
+  intentionally out of the event; downstream consumers fetch it via the query API.
 
 - **APIs exposed** (published as OpenAPI 3.1 at `/openapi.json`; generated
   `openapi.json` checked into `services/trail-builder/`; a surface change is a
@@ -192,11 +220,12 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
     The `domain` parameter scopes the query; it is required for MVP. Consumers:
     Enrichment, Noise Filter, Pattern Miner, web-ui (topology/trails module).
   - `GET /trails/{trailId}` — returns the trail's member `managedObjectId` list
-    (typed `<objectType>:<id>` values), the `snapshotId` it was built from, and the
-    `domain` it belongs to. Corresponds to `getTrail(trailId)`. The response is
-    visualization-ready: member identities carry type information via the
-    `managedObjectId` prefix. Consumers: Enrichment, Noise Filter, Pattern Miner,
-    web-ui (topology/trails module).
+    (typed `<objectType>:<id>` values, including any `Interface:*` members in the
+    trail), the `snapshotId` it was built from, and the `domain` it belongs to.
+    Corresponds to `getTrail(trailId)`. The response is visualization-ready: member
+    identities carry type information via the `managedObjectId` prefix, enabling the
+    web-ui to distinguish Interface-layer objects from Port, IPLink, Node, etc.
+    Consumers: Enrichment, Noise Filter, Pattern Miner, web-ui (topology/trails module).
   - `GET /trails?snapshotId={snapshotId}&domain={domain}` — returns the set of all
     trail summaries built for the given snapshot within the given domain. Each summary
     carries at minimum `trailId`, member count, and `domain`; additional seed/bounds
@@ -224,11 +253,13 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
   source code):
   - **Topology Service query API** — graph closure and traversal endpoints (get
     neighbors, traverse by edge type, resolve `managedObjectId`). Used to fetch graph
-    data for trail computation, scoped to the snapshot's domain.
+    data for trail computation, scoped to the snapshot's domain. The traversal must
+    support the full dependency-edge vocabulary including `HOSTS` and `TERMINATES` so
+    that Interface objects appear in the returned closure.
   - **Knowledge Service trail-policy API** — reads the current trail policy for a
-    given `domain` (IGP-area bound, SRLG-union rule, and any authored policy
-    parameters). The domain is passed as a parameter to the fetch call. Used at build
-    time and on `knowledge.updated` refresh.
+    given `domain` (IGP-area bound, SRLG-union rule, and the set of dependency-edge
+    types to traverse, including interface-layer relations). The domain is passed as a
+    parameter to the fetch call. Used at build time and on `knowledge.updated` refresh.
 
 - **Integration points (mock vs. real):**
   - **Topology Service** — config key: `TOPOLOGY_SERVICE_BASE_URL`; toggle:
@@ -256,10 +287,10 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
 - **Config:** all integration base-URLs, mock/real toggles, database connection
   strings, Kafka broker addresses, and any tuneable parameters come from environment
   variables or the Knowledge Service. No thresholds, URLs, or policy values may be
-  hard-coded in source. Trail policy bounds (IGP-area definition, SRLG rules) are
-  read from the Knowledge Service at build time for the specific domain; they are not
-  duplicated in this service's config. The `domain` is always carried from the
-  triggering event or API request — never defaulted in config.
+  hard-coded in source. Trail policy bounds (IGP-area definition, SRLG rules, the
+  dependency-edge set) are read from the Knowledge Service at build time for the
+  specific domain; they are not duplicated in this service's config. The `domain` is
+  always carried from the triggering event or API request — never defaulted in config.
 
 - **Observability:** `/health` (liveness/readiness), `/metrics` (Prometheus), structured
   JSON logs on all code paths (including error paths). Log entries must include
@@ -279,9 +310,9 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
   build.
 
 - **Snapshot alignment:** every persisted trail and every `trails.built` event carries
-  the `snapshotId` it was built from. Combined with `domain`, this invariant enables
-  downstream services (Codebook Generator, Enrichment) to detect and reject stale or
-  domain-mismatched trail data.
+  the `snapshotId` and `domain` it was built from. This invariant enables downstream
+  services (Codebook Generator, Enrichment) to detect and reject stale or
+  domain-mismatched trail data without a follow-up lookup.
 
 ## Acceptance criteria
 
@@ -312,12 +343,14 @@ Each criterion maps to a single `pytest` test.
    `<objectType>:<id>` scheme so that the web-ui can resolve each member's layer
    without an additional lookup.
 
-6. **`topology.changed` triggers a domain-scoped build and emits `trails.built`.** On
-   consuming a `topology.changed` event with a new `snapshotId` and `domain`, the
-   service (re)builds trails for that domain and emits a `trails.built` event whose
-   payload deserializes without error against the `TrailsBuiltEvent` Pydantic model
-   from `acp_event_model`, with `trailCount == len(trailIds)` and `snapshotId`
-   matching the triggering event.
+6. **`topology.changed` triggers a domain-scoped build and emits `trails.built` with
+   `domain`.** On consuming a `topology.changed` event with a new `snapshotId` and
+   `domain`, the service (re)builds trails for that domain and emits a `trails.built`
+   event whose payload deserializes without error against the `TrailsBuiltEvent`
+   Pydantic model from `acp_event_model`, with `trailCount == len(trailIds)`,
+   `snapshotId` matching the triggering event, and `domain` equal to the `domain`
+   field of the triggering `topology.changed` event. No Topology Service lookup is
+   performed to determine the domain.
 
 7. **Idempotency.** Delivering the same `topology.changed` event (same `eventId`)
    twice produces exactly one `trails.built` emission and does not create duplicate
@@ -394,27 +427,48 @@ Each criterion maps to a single `pytest` test.
     the pattern `<objectType>:<id>`. No additional per-member API call to Trail Builder
     is needed for the web-ui to identify each member's layer type.
 
+19. **Trail closure traverses through Interface objects.** Given a synthetic Core IP
+    topology containing a `Port` connected via `HOSTS` to an `Interface`, and that
+    `Interface` connected via `TERMINATES` to an `IPLink`, the trail built for that
+    path includes the `Interface` object (i.e., `getTrail(trailId)` returns a member
+    list that contains an `Interface:*` entry between the `Port:*` and `IPLink:*`
+    entries). Interfaces are not filtered out of the closure; they are first-class
+    trail members per §5.
+
+20. **`trails.built` domain matches `topology.changed` domain without a lookup.**
+    Given a `topology.changed` event carrying `domain = "core-ip"`, the emitted
+    `trails.built` event carries `domain = "core-ip"`. The Topology Service
+    integration-point mock records zero calls for the purpose of domain resolution
+    (i.e., domain is taken from the event, not fetched).
+
 ## Open questions
 
 The items below are tracked for human resolution. Items 1–4 are pre-existing
-design-stage items (not contract gaps) and do not block the spec. Item 5 is a new
-contract question arising from the domain-scoping update and must be resolved before
-the design stage proceeds.
+design-stage items (not contract gaps) and do not block the spec.
+
+Open question 5 ("`TrailsBuiltEvent` domain field") is **resolved**: `TrailsBuiltEvent`
+now carries an optional `domain` field per contract #90 (`libs/event-model` updated on
+the `trail-builder` branch). Trail-builder reads `domain` from the incoming
+`topology.changed` event and sets it on the emitted `TrailsBuiltEvent`. No Topology
+Service lookup is needed. Issue [#87](https://github.com/nikhilmohan/correlation-platform/issues/87)
+is closed.
 
 1. **[DESIGN-STAGE] Topology Service query API surface for trail computation.**
    The Topology Service query API must expose bounded-traversal and neighbor endpoints
-   sufficient for computing transitive closures. The exact endpoint names, path
-   parameters, and response shapes will be defined in the Topology Service's published
-   `openapi.json`. Trail Builder builds its Topology integration-point mock against
-   that published spec once it is checked in.
+   sufficient for computing transitive closures, including traversal over `HOSTS` and
+   `TERMINATES` edges so that Interface objects appear in the returned closure. The
+   exact endpoint names, path parameters, and response shapes will be defined in the
+   Topology Service's published `openapi.json`. Trail Builder builds its Topology
+   integration-point mock against that published spec once it is checked in.
    _(Tracked: [#24](https://github.com/nikhilmohan/correlation-platform/issues/24))_
 
 2. **[DESIGN-STAGE] Knowledge Service trail-policy API shape (domain-parameterized).**
-   The trail policy fields (IGP-area boundary definition, SRLG-union rule, and authored
-   parameters) that Trail Builder reads from the Knowledge Service will be defined in
-   the Knowledge Service's published `openapi.json`. The endpoint must accept `domain`
-   as a parameter and return the domain-scoped policy. Trail Builder builds its
-   Knowledge integration-point mock against that published spec once checked in.
+   The trail policy fields (IGP-area boundary definition, SRLG-union rule, and the
+   dependency-edge set including interface-layer relations) that Trail Builder reads
+   from the Knowledge Service will be defined in the Knowledge Service's published
+   `openapi.json`. The endpoint must accept `domain` as a parameter and return the
+   domain-scoped policy. Trail Builder builds its Knowledge integration-point mock
+   against that published spec once checked in.
    _(Tracked: [#25](https://github.com/nikhilmohan/correlation-platform/issues/25))_
 
 3. **[DESIGN-STAGE] On-demand rebuild API authentication / authorization.**
@@ -428,16 +482,3 @@ the design stage proceeds.
    (keep N snapshots per domain, TTL, or explicit deletion trigger) is finalized in
    `design.md`.
    _(Tracked: [#29](https://github.com/nikhilmohan/correlation-platform/issues/29))_
-
-5. **[CONTRACT QUESTION] Should `TrailsBuiltEvent` carry a `domain` field?**
-   The `TrailsBuiltEvent` payload currently carries `snapshotId`, `trailIds[]`, and
-   `trailCount`. With domain-scoped trails, downstream consumers of `trails.built`
-   (primarily Codebook Generator) may need to know which domain the trails belong to
-   without a follow-up API call. Adding `domain` to `TrailsBuiltEvent` is a contract
-   change (`libs/event-model` + `docs/architecture.md` update + human approval).
-   Alternatively, `domain` may be derivable from `snapshotId` (if `snapshotId`
-   encodes or references the domain), in which case no event payload change is needed.
-   **Human decision required** before the design stage — do not add `domain` to
-   `TrailsBuiltEvent` without approval. Flagged as an Open question, not resolved here.
-   _(See also: contract-change procedure in `.claude/agents/CONVENTIONS.md`.)_
-   _(Tracked: [#87](https://github.com/nikhilmohan/correlation-platform/issues/87))_
