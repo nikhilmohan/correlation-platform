@@ -343,11 +343,11 @@ sequenceDiagram
   participant P as Producer trails.built
 
   K->>C: TopologyChangedEvent (eventId, snapshotId)
-  C->>C: deserialize via acp_event_model; reject unknown major schemaVersion to DLQ
+  C->>C: deserialize via acp_event_model, reject unknown major schemaVersion to DLQ
   C->>DB: INSERT processed_event(eventId)  (PK dedupe)
   alt duplicate eventId
     DB-->>C: PK violation
-    C->>C: skip build; commit offset (idempotent)
+    C->>C: skip build, commit offset (idempotent)
   else new event
     C->>KS: GET trail policy
     KS-->>C: TrailPolicy {igpAreaBound, srlgUnion, depEdgeTypes, maxDepth}
@@ -355,7 +355,7 @@ sequenceDiagram
     TS-->>C: nodes + edges (typed)
     C->>ALG: compute_trails(DiGraph, policy)
     ALG-->>C: list[Trail] (overlapping, bounded)
-    C->>DB: BEGIN; supersede same snapshotId; INSERT trail + trail_member; prune to KEEP_SNAPSHOTS; COMMIT
+    C->>DB: txn — supersede same snapshotId, INSERT trail + trail_member, prune to KEEP_SNAPSHOTS, COMMIT
     C->>P: emit TrailsBuiltEvent {snapshotId, trailIds, trailCount}
     C->>C: commit Kafka offset
   end
