@@ -343,7 +343,7 @@ sequenceDiagram
   participant P as Producer trails.built
 
   K->>C: TopologyChangedEvent (eventId, snapshotId)
-  C->>C: deserialize via acp_event_model; reject schemaVersion>=2 -> DLQ
+  C->>C: deserialize via acp_event_model; reject unknown major schemaVersion to DLQ
   C->>DB: INSERT processed_event(eventId)  (PK dedupe)
   alt duplicate eventId
     DB-->>C: PK violation
