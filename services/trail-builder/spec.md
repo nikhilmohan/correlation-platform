@@ -440,3 +440,4 @@ the design stage proceeds.
    **Human decision required** before the design stage — do not add `domain` to
    `TrailsBuiltEvent` without approval. Flagged as an Open question, not resolved here.
    _(See also: contract-change procedure in `.claude/agents/CONVENTIONS.md`.)_
+   _(Tracked: [#87](https://github.com/nikhilmohan/correlation-platform/issues/87))_
