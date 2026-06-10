@@ -399,18 +399,18 @@ ordered signature; an object is recorded once per distinct alarm type (dedup on
 
 ```mermaid
 flowchart TD
-  S([seed: origin's own fault alarm]) --> Q[/worklist: (objectId, alarmType)/]
+  S(["seed: the origin own fault alarm"]) --> Q[/"worklist of obj + alarmType"/]
   Q --> POP{worklist empty?}
-  POP -- yes --> DONE([emit ordered signature])
-  POP -- no --> CUR[pop (obj, alarm)]
-  CUR --> REC{(obj,alarm) already recorded?}
+  POP -- yes --> DONE(["emit ordered signature"])
+  POP -- no --> CUR["pop obj + alarm"]
+  CUR --> REC{"obj + alarm already recorded?"}
   REC -- yes --> POP
-  REC -- no --> ADD[append (obj, vocab(alarm)) to signature; mark recorded]
-  ADD --> EDGES[for each out-edge obj-->nbr of type E]
-  EDGES --> RULE{template E fires\non current alarm?}
+  REC -- no --> ADD["append obj + vocab of alarm to signature, mark recorded"]
+  ADD --> EDGES["for each out-edge obj to nbr of type E"]
+  EDGES --> RULE{"template E fires on current alarm?"}
   RULE -- no --> EDGES
-  RULE -- yes --> EFF[effect = template.effectAlarmType\nfor nbr's type]
-  EFF --> PUSH[push (nbr, effect) to worklist]
+  RULE -- yes --> EFF["effect = template.effectAlarmType for nbr type"]
+  EFF --> PUSH["push nbr + effect to worklist"]
   PUSH --> EDGES
   EDGES --> POP
 ```
