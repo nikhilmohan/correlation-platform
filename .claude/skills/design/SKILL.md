@@ -31,6 +31,13 @@ The spec is approved and merged on `<svc>`. If not, stop.
    add **flowcharts** for algorithm logical flow, **ER/classDiagrams** for data models, and
    stateDiagrams for lifecycles where they clarify. Diagrams supplement prose; they don't replace
    the contract/test detail. Don't add diagrams that carry no information.
+   - **Mermaid must render on GitHub (mandatory).** GitHub parses `|`, `<`, `>`, and `->` as
+     diagram syntax, so they **break rendering** when they appear as literal text inside a **node/
+     subgraph label** or a **sequence-message** (the text after `A->>B:`). Avoid them there: use
+     `/` or `, ` instead of `|`; write `(name)` not `<name>`; write "to"/"of" instead of a literal
+     `->`; spell out comparisons ("at least 3", "supported major version") instead of `>=`/`<`.
+     (`<br/>` inside a `["..."]` node label, ER cardinality `||--o{`, and edge syntax `-->|x|` are
+     all fine.) Mentally check each diagram parses before relying on it.
 5. Build the **test plan**: (a) map **every acceptance criterion** from the spec to a specific
    test (name + what it asserts) — the 1:1 mapping is the design-gate condition; (b) define the
    **E2E scenarios** that must be exercised **from this design unit's point of view** — the
