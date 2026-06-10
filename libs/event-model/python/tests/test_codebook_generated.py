@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 from pydantic import ValidationError
@@ -28,3 +29,19 @@ def test_valid() -> None:
     env = m.deserialize(_ev())
     assert env.payload.scenarioCount == 12
     assert env.payload.codebookId == "CODEBOOK-2026-06-08-001"
+
+
+def test_domain_present_round_trips() -> None:
+    """Optional `domain` is accepted and round-trips (fixture carries core-ip)."""
+    env = m.deserialize(_ev())
+    assert env.payload.domain == "core-ip"
+    out = json.loads(m.serialize(env))
+    assert out["payload"]["domain"] == "core-ip"
+
+
+def test_domain_absent_is_optional() -> None:
+    """`domain` is optional (not required) — absence is valid, deserializes to None."""
+    ev = _ev()
+    del ev["payload"]["domain"]
+    env = m.deserialize(ev)
+    assert env.payload.domain is None

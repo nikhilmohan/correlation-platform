@@ -31,6 +31,32 @@ The spec is approved and merged on `<svc>`. If not, stop.
    add **flowcharts** for algorithm logical flow, **ER/classDiagrams** for data models, and
    stateDiagrams for lifecycles where they clarify. Diagrams supplement prose; they don't replace
    the contract/test detail. Don't add diagrams that carry no information.
+   - **Mermaid must render on GitHub (mandatory).** GitHub parses several characters as diagram
+     syntax, so they **break rendering** when used as literal text inside a **node/subgraph label**,
+     a **sequence-message** (text after `A->>B:`), or a **Note**. The breakers and their fixes:
+     - **`|`** (edge-label syntax) → use `/` or `, `.
+     - **`<` / `>` / `->`** (arrow tokens) → write `(name)` not `<name>`; "to"/"of" instead of a
+       literal `->`; spell out comparisons ("at least 3", "supported major version") not `>=`/`<`.
+     - **`;`** (statement separator — breaks sequence messages & Notes) → use `,` or "then".
+     - **nested `[]` / `()`** inside a `[...]` node label (e.g. `A[do x[]]`) → quote the whole
+       label: `A["do x[]"]`, or drop the inner brackets.
+     Fine as-is: `<br/>` inside a `["..."]` node label, ER cardinality `||--o{`, edge syntax
+     `-->|x|`, and balanced parens in a node label.
+     - **Validate, don't eyeball — and provide a DOM.** Before relying on a diagram, parse every
+       fenced ```mermaid block with the real Mermaid parser **under a DOM**, otherwise a
+       `DOMPurify.addHook` error in bare Node **masks the real `Parse error`** and you get false
+       "clean" results (this has bitten us). Use jsdom:
+       ```js
+       import { JSDOM } from 'jsdom';
+       const dom = new JSDOM('<!DOCTYPE html><body></body>');
+       globalThis.window = dom.window; globalThis.document = dom.window.document;
+       const mermaid = (await import('mermaid')).default;
+       mermaid.initialize({ startOnLoad:false, securityLevel:'loose' });
+       await mermaid.parse(block);   // throws "Parse error on line N" on a real failure
+       ```
+       (`npm i mermaid jsdom`.) A block is clean only when `parse` resolves with no error. Fix
+       every `Parse error` and re-run until all blocks pass. Eyeballing and bare `mermaid.parse`
+       both miss these.
 5. Build the **test plan**: (a) map **every acceptance criterion** from the spec to a specific
    test (name + what it asserts) — the 1:1 mapping is the design-gate condition; (b) define the
    **E2E scenarios** that must be exercised **from this design unit's point of view** — the

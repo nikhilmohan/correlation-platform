@@ -45,6 +45,10 @@
           "type": "string",
           "description": "Topology snapshot version in scope when mining ran."
         },
+        "domain": {
+          "type": "string",
+          "description": "the domain this snapshot/event belongs to (e.g. `core-ip`); a snapshot belongs to exactly one domain. Optional for backward-compat; consumers default to the single MVP domain when absent."
+        },
         "codebookVersion": {
           "type": "string",
           "description": "Codebook version in scope when mining ran."
