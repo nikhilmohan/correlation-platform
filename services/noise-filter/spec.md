@@ -18,7 +18,11 @@ hard-coded in the service.
 - Group consumed alarms per `trailId` within a coarse configurable time window.
 - Feature-vectorize each alarm within a trail-window using the alarm's timestamp, position in
   the dependency graph (via `managedObjectId` in the `<objectType>:<id>` scheme), alarm type
-  (`eventType`), and severity (`perceivedSeverity`).
+  (`eventType`), and severity (`perceivedSeverity`). Optionally include device/connection
+  attributes of the alarm's managed object (e.g. `equipmentType`, `vendor`, `model`) obtained
+  from the Topology Service query API; which attributes are included is config-driven
+  (sourced from the Knowledge Service feature config — no attribute set is hard-coded),
+  defaulting to a sensible set (e.g. `equipmentType` enabled, `vendor`/`model` disabled).
 - Run DBSCAN (or HDBSCAN) per trail-window to identify dense clusters and label noise points.
 - Drop noise-labeled points; emit each dense cluster as a `TransactionEvent` on
   `transactions.clean` (fields: `transactionId`, `trailId`, `snapshotId`, `alarmIds[]`,
@@ -52,9 +56,16 @@ hard-coded in the service.
   penalizes spurious — §6.10). Hence this service is Idle in P3. (Adding a real-time statistical
   cleaning stage would be an architecture change, not part of the MVP.)
 - **Pattern state and lifecycle** — owned by Pattern Manager (§6.9).
-- **Topology graph access** — graph topology context for feature vectorization is derived from
-  the `managedObjectId` type prefix alone by default; whether richer graph traversal is added
-  is a design-stage modeling decision (see Open questions #1).
+- **Topology graph traversal** — the service does not traverse the AGE graph directly; it
+  never calls Apache AGE. When attribute features are enabled, it reads node/edge `attributes`
+  from the Topology Service's published query API (not AGE directly). Richer graph-position
+  features (propagation depth, hop count) remain a design-stage modeling decision (see Open
+  questions #1) and are not covered by this update.
+- **Attribute catalogue ownership** — the service does not decide which attributes exist or
+  what their domain semantics are. The Knowledge Service is the authoritative catalogue of
+  device/connection attribute keys per domain (see `architecture.md` → "Domain extensibility").
+  The noise-filter only reads which attribute keys to include in the feature vector from its
+  Knowledge-Service-sourced feature config.
 - **Persistent alarm storage** — the service owns no alarm store; it is stateless over the
   window lifecycle.
 - **Codebook reconciliation or RCA** — owned by Pattern Manager.
@@ -69,7 +80,12 @@ hard-coded in the service.
    `windowSize` parameter.
 3. **Feature-vectorize alarms** — for each alarm within a trail-window, produce a feature
    vector from: arrival timestamp (relative to window start), object-type layer derived from
-   the `managedObjectId` type prefix, `eventType`, and `perceivedSeverity`.
+   the `managedObjectId` type prefix, `eventType`, and `perceivedSeverity`. When enabled by
+   feature config, extend the vector with device/connection attributes (e.g. `equipmentType`,
+   `vendor`, `model`) fetched for the alarm's managed object from the Topology Service query
+   API. The active attribute set is determined solely by the Knowledge-Service-sourced feature
+   config; no attribute key is hard-coded. The Topology query call is skipped when all
+   attribute features are disabled.
 4. **Run DBSCAN per trail-window** — apply DBSCAN (or HDBSCAN) with Knowledge-Service params
    `eps` and `minSamples`; label each alarm as cluster-member or noise.
 5. **Emit cleaned groups** — for each dense cluster in a trail-window, construct a
@@ -100,12 +116,24 @@ hard-coded in the service.
   change.
 - **APIs / data consumed from other services:**
   - **Knowledge Service** — fetch DBSCAN params (`eps`, `minSamples`) and window size at
-    startup and on `knowledge.updated`. Built and tested against the Knowledge Service's
+    startup and on `knowledge.updated`; fetch feature config (which device/connection attribute
+    keys to include in the feature vector). Built and tested against the Knowledge Service's
     published OpenAPI 3.1 spec.
+  - **Topology Service query API** — when one or more attribute features are enabled by feature
+    config, fetch the `attributes` map of a topology node/edge by `managedObjectId`. Built and
+    tested against the Topology Service's published OpenAPI 3.1 spec. Not called when all
+    attribute features are disabled. The exact query operation shape (endpoint, request/response
+    fields) is a design-stage dependency on the Topology Service's published OpenAPI (see Open
+    questions #4).
 - **Integration points (mock vs. real):**
   - **Knowledge Service** — config-switchable: mock (stub generated from the Knowledge
     Service's published OpenAPI 3.1) for unit tests; real Knowledge Service for integration.
     Resolved by `KNOWLEDGE_SERVICE_URL` and `KNOWLEDGE_CLIENT_MODE=mock|real` env vars.
+  - **Topology Service query API** — config-switchable: mock (stub generated from the Topology
+    Service's published OpenAPI 3.1) for unit tests; real Topology Service for integration.
+    Resolved by `TOPOLOGY_SERVICE_URL` and `TOPOLOGY_CLIENT_MODE=mock|real` env vars. The
+    client is only instantiated when at least one attribute feature is enabled in feature
+    config; it is fully bypassed otherwise.
 - **Data owned:** none — the service holds no persistent data store. Window state is
   ephemeral (in-process); alarm records are not persisted beyond the processing window.
 
@@ -114,10 +142,13 @@ hard-coded in the service.
 - **Idempotency key:** `eventId` (envelope field) — duplicates from at-least-once Kafka
   delivery are detected and dropped within the processing window.
 - **Config:** all runtime parameters from environment variables or the Knowledge Service; no
-  hard-coded thresholds. Required env vars: `KAFKA_BOOTSTRAP_SERVERS`,
+  hard-coded thresholds or attribute key lists. Required env vars: `KAFKA_BOOTSTRAP_SERVERS`,
   `KAFKA_CONSUMER_GROUP_ID`, `KNOWLEDGE_SERVICE_URL`, `KNOWLEDGE_CLIENT_MODE` (`mock|real`),
-  `LOG_LEVEL`. DBSCAN `eps`, `minSamples`, and `windowSize` are Knowledge-Service parameters
-  (fetched at startup and refreshed on `knowledge.updated`).
+  `TOPOLOGY_SERVICE_URL`, `TOPOLOGY_CLIENT_MODE` (`mock|real`), `LOG_LEVEL`. DBSCAN `eps`,
+  `minSamples`, and `windowSize` are Knowledge-Service parameters (fetched at startup and
+  refreshed on `knowledge.updated`). The feature config (which device/connection attribute
+  keys to include in the feature vector, and their default on/off state) is also a
+  Knowledge-Service parameter — no attribute key is hard-coded in the service.
 - **Observability:** `/health` (liveness/readiness), `/metrics` (Prometheus exposition
   format), structured JSON logs (no plain-text log lines in production).
 - **API contract:** the service consumes the `acp-event-model` Python/Pydantic binding as its
@@ -179,6 +210,17 @@ Each criterion maps to one pytest test.
    effectiveness metric (% injected noise removed vs. real alarms retained) computable against
    the Simulator oracle.
 
+10. **Attribute feature config-driven — inclusion and exclusion.** Given a trail-window with
+    alarms whose managed objects have `equipmentType` values in the mock Topology Service
+    response, two runs are made: one with `equipmentType` enabled in the mock Knowledge
+    Service feature config, one with `equipmentType` disabled. When enabled, the feature
+    vector for each alarm includes a dimension for `equipmentType` (verified by observing that
+    alarms with distinct `equipmentType` values can be separated into different clusters for a
+    carefully constructed window). When disabled, the feature vector does not include an
+    `equipmentType` dimension and the Topology Service client is not called. Demonstrates that
+    no attribute key is hard-coded and the active feature set is solely determined by the
+    Knowledge-Service feature config.
+
 ## Open questions
 
 All three items below are **design-stage** — resolved by human decision on 2026-06-09. None
@@ -206,3 +248,14 @@ is a spec blocker or a contract change. Design may proceed.
    polls the Knowledge API on its own schedule, is a design-stage wiring choice. DBSCAN
    params are read from the Knowledge Service API regardless. No `architecture.md` consumer
    mapping update is required at the spec stage.
+
+4. **[DESIGN-STAGE] Topology query API shape for node/edge attributes.** The attribute
+   feature integration requires the Topology Service to expose a query operation that returns
+   the `attributes` map for a given `managedObjectId`. The exact endpoint path, request
+   parameters, and response schema (including how it surfaces the `attributes` map and handles
+   unknown `managedObjectId`) is a **design-stage API-shape dependency** on the Topology
+   Service's published OpenAPI 3.1. The noise-filter designer must build the Topology client
+   against that published OpenAPI; if the required operation is absent from the Topology
+   Service's published spec, that is a contract gap requiring human resolution before the
+   noise-filter design can proceed (a Topology Service contract change, not a noise-filter
+   spec change). No new Kafka topic or `AlarmEvent`/`TransactionEvent` field is introduced.
