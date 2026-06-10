@@ -14,9 +14,12 @@ extensibility", and "Runtime phases"). Implements the spec's six Tasks and all a
 > labels are the `objectType`s and the edge labels are the `relation`s **declared in the conforming
 > snapshot file**, **validated at ingest against the snapshot's `domain` vocabulary from Knowledge**.
 > `Site` (geo) and `LOCATED_AT` are **domain-agnostic** object/edge types present in every domain.
-> The Core IP set (Node/LineCard/Port/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG/Site +
-> HOSTED_ON/RIDES_ON/ADJACENCY_OVER/TRAVERSES/SERVES/MEMBER_OF/LOCATED_AT) is the **MVP domain's**
-> vocabulary, **not a frozen global set**.
+> The Core IP set (Node/LineCard/Port/**Interface**/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG/Site +
+> HOSTED_ON/**HOSTS**/**TERMINATES**/RIDES_ON/ADJACENCY_OVER/TRAVERSES/SERVES/MEMBER_OF/LOCATED_AT) is the
+> **MVP domain's** vocabulary, **not a frozen global set**. **`Interface`** (the L3 endpoint on a
+> `Port`) and its relations **`HOSTS`** (Port HOSTS Interface) / **`TERMINATES`** (Interface TERMINATES
+> IPLink) — with `ADJACENCY_OVER` running between Interfaces — are part of that Core-IP Knowledge
+> vocabulary (merged §5 Interface model, #91), **not** a frozen addition to this service.
 
 > **Spec-vs-contract note (no new contract change).** The approved `spec.md` is worded for Core IP
 > and lists a *fixed* nine object types / six relations and a Core-IP-anchored `managedObjectId`
@@ -68,7 +71,7 @@ Every spec Task is realized below; nothing is dropped or re-scoped.
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | **1. Validate and ingest a snapshot file** | `IngestionController.POST /topology/snapshots` → `SnapshotValidationService` (JSON-Schema validation against `snapshot.schema.json` + semantic checks + **`VocabularyValidator`** which checks every node `objectType` and every edge `relation` against the snapshot `domain`'s **Knowledge-authored vocabulary**) → on success `LiftingService` + `GraphWriteService` persist under a minted `snapshotId`. Schema-invalid or unknown-type/relation-for-the-domain ⇒ 422, **no AGE write**. (Key flow A; Error handling EH-1..EH-6, EH-6b.) |
-| **2. Lift flat records into the typed multi-layer graph** | `LiftingService` maps each `nodes[]` record to a typed AGE vertex (label = `objectType`, `managedObjectId` + `domain` + `attributes` preserved as properties) and each `edges[]` record to a typed AGE edge (label = `relation`, `domain` + `attributes` preserved). **`Site` lifts like any typed node** (geo `attributes`: name/latitude/longitude/region); **`LOCATED_AT`** lifts like any typed edge (device LOCATED_AT Site). Fully domain-agnostic: types/relations come from the file and are validated against the domain's Knowledge vocabulary, not hard-coded business logic. (Key flow A; Algorithm flow §A.) |
+| **2. Lift flat records into the typed multi-layer graph** | `LiftingService` maps each `nodes[]` record to a typed AGE vertex (label = `objectType`, `managedObjectId` + `domain` + `attributes` preserved as properties) and each `edges[]` record to a typed AGE edge (label = `relation`, `domain` + `attributes` preserved). **`Site` lifts like any typed node** (geo `attributes`: name/latitude/longitude/region); **`LOCATED_AT`** lifts like any typed edge (device LOCATED_AT Site). **`Interface` lifts like any typed node** (an L3 endpoint with its own `attributes`) and **`HOSTS`/`TERMINATES` lift like any typed edge** (Port HOSTS Interface, Interface TERMINATES IPLink) — no special-casing, exactly the generic typed-node/edge path. Fully domain-agnostic: types/relations come from the file and are validated against the domain's Knowledge vocabulary, not hard-coded business logic. (Key flow A; Algorithm flow §A.) |
 | **3. Maintain snapshot versioning** | `SnapshotService` mints `snapshotId` (honours producer-supplied, else mints UUID-based), tags every vertex/edge with `snapshotId` **and `domain`**, records the snapshot in the `topology_snapshot` side-table (with its `domain`), and enforces **current + previous** retention (evicts older). (Key flow A; Data model.) |
 | **4. Emit `topology.changed`** | `TopologyEventPublisher` builds a `TypedEnvelope<TopologyChangedEvent>` (envelope `eventId` = idempotency key) and produces to `topology.changed` via the idempotent Kafka producer; `changeType` ∈ {`full-load`,`incremental`}; emit failure ⇒ `topology.changed.dlq`. (Key flow A; Event handling.) |
 | **5. Serve the query API** | `QueryController` exposes get-node, get-edge, neighbors, bounded traversal, resolve managedObjectId→object+layer, list-by-type, **list-sites, list-objects-at-site**, list-snapshots, current-snapshot → `GraphReadService` (openCypher reads) → typed DTOs. **All node/neighbor/traversal/list/site queries are domain-scoped** (carry or infer a single `domain`); a traversal crosses into another domain **only** via an explicit cross-domain edge **and** only when the caller opts in. (Key flow B; Algorithm flow §B, §C.) |
@@ -165,6 +168,10 @@ and **`attributes`** (the structured properties map). Every edge carries `relati
 
 ```mermaid
 erDiagram
+  Port ||--o{ Interface : "HOSTS Port to Interface"
+  Interface ||--o{ IPLink : "TERMINATES Interface to IPLink"
+  Interface ||--o{ IGPAdjacency : "ADJACENCY_OVER between Interfaces"
+  Fiber ||--o{ IPLink : "RIDES_ON Fiber to IPLink"
   Device ||--o{ Site : "LOCATED_AT device to Site"
   DeviceLower ||--o{ DeviceUpper : "typed relation eg HOSTED_ON / RIDES_ON"
   DomainA ||--o{ DomainB : "explicit cross-domain edge authored deliberately"
@@ -191,6 +198,24 @@ erDiagram
     string snapshotId
     json   attributes "name latitude longitude region"
   }
+  Interface {
+    string managedObjectId PK "Interface:id"
+    string objectType "Interface"
+    string domain
+    string snapshotId
+    json   attributes "L3 endpoint props eg ifName ipAddress"
+  }
+```
+
+The Core-IP layering the Interface model adds reads **Port HOSTS Interface TERMINATES IPLink**, with
+**ADJACENCY_OVER** running **between Interfaces** (and `Fiber RIDES_ON IPLink` unchanged):
+
+```mermaid
+flowchart TD
+  P[Port] -- HOSTS --> I[Interface]
+  I -- TERMINATES --> L[IPLink]
+  I -- ADJACENCY_OVER --> ADJ[IGPAdjacency]
+  F[Fiber] -- RIDES_ON --> L
 ```
 
 > The diagram is illustrative. The service is **domain-agnostic** — it persists whatever typed
@@ -198,9 +223,14 @@ erDiagram
 > `objectType` and `relation` is in the snapshot `domain`'s Knowledge vocabulary**. It does **not**
 > hard-code which relation may connect which layer, and it does **not** treat any fixed list as the
 > complete vocabulary. The Core IP set
-> (Node/LineCard/Port/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG/**Site** +
-> HOSTED_ON/RIDES_ON/ADJACENCY_OVER/TRAVERSES/SERVES/MEMBER_OF/**LOCATED_AT**) is the **MVP domain's**
-> Knowledge-authored vocabulary, not a frozen global set.
+> (Node/LineCard/Port/**Interface**/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG/**Site** +
+> HOSTED_ON/**HOSTS**/**TERMINATES**/RIDES_ON/ADJACENCY_OVER/TRAVERSES/SERVES/MEMBER_OF/**LOCATED_AT**)
+> is the **MVP domain's** Knowledge-authored vocabulary, not a frozen global set. **`Interface`** and
+> its relations **`HOSTS`** (Port HOSTS Interface) and **`TERMINATES`** (Interface TERMINATES IPLink)
+> are just more members of that Core-IP vocabulary — Topology persists and validates them through the
+> same generic typed-node/edge path, with **no Interface-specific code** (it does not encode that a
+> Port HOSTS an Interface or that an Interface TERMINATES an IPLink; that layering is the file plus the
+> domain vocabulary, not service logic).
 
 **Vertex properties (all labels):** `managedObjectId` (string, unique within a snapshot+domain),
 `objectType` (string, = label), **`domain`** (string), `snapshotId` (string), `name` (string,
@@ -345,6 +375,10 @@ Knowledge-authored object-type + relation vocabulary (semantic). The `managedObj
       "attributes": {                 // optional, structured + extensible; stored verbatim, returned in queries
         "vendor": "acme", "model": "X9", "equipmentType": "router",
         "role": "PE", "capacity": "400G" } },
+    { "managedObjectId": "Interface:PE1-LC2-P3-100",  // Core-IP L3 endpoint hosted on a Port
+      "objectType": "Interface",      // must be in the domain's Knowledge object-type set
+      "name": "ge-0/0/3.100",
+      "attributes": { "ipAddress": "10.0.0.1", "adminState": "up" } },
     { "managedObjectId": "Site:LON-DC1",   // Site is a domain-agnostic object type
       "objectType": "Site",
       "name": "London DC1",
@@ -355,6 +389,12 @@ Knowledge-authored object-type + relation vocabulary (semantic). The `managedObj
       "to": "Node:PE1",               // required, references a node in nodes[]
       "relation": "HOSTED_ON",        // required, must be in the domain's Knowledge relation vocabulary
       "attributes": { "linkType": "internal" } },
+    { "from": "Port:PE1-LC2-P3", "to": "Interface:PE1-LC2-P3-100",
+      "relation": "HOSTS",            // Core-IP: Port HOSTS Interface (L3 endpoint on the port)
+      "attributes": { } },
+    { "from": "Interface:PE1-LC2-P3-100", "to": "IPLink:PE1-PE2-1",
+      "relation": "TERMINATES",       // Core-IP: Interface TERMINATES IPLink (links are between interfaces)
+      "attributes": { } },
     { "from": "Node:PE1", "to": "Site:LON-DC1",
       "relation": "LOCATED_AT",       // domain-agnostic placement relation (device LOCATED_AT Site)
       "attributes": { } }
@@ -396,6 +436,16 @@ which returns the object **and its layer** (`objectType`) **and its `domain`**. 
 the **current** snapshot (`?snapshotId=current|previous`) and to a single `domain` (explicit or
 inferred). The **site** operations back the web-ui's site-level visualization (list sites, then
 expand a site into its device-level graph). `{siteId}` is a `managedObjectId` of `objectType=Site`.
+
+**Interface-aware queries (no new endpoints — Interface is just another typed object).** Because
+`Interface`, `HOSTS` and `TERMINATES` are ordinary typed vertices/edges, the existing operations
+already serve them: `GET /topology/nodes?objectType=Interface&domain=core-ip` lists interfaces;
+`GET /topology/nodes/{Interface:id}` resolves one (returning `objectType=Interface` as its layer);
+`GET /topology/nodes/{Port:id}/neighbors?relation=HOSTS` returns the interfaces on a port;
+`GET /topology/nodes/{Interface:id}/neighbors?relation=TERMINATES` returns the IPLink an interface
+terminates; and a bounded traversal `start=Port:...&relation=HOSTS&relation=TERMINATES&maxDepth=2`
+walks Port→Interface→IPLink. No interface-specific operation is added — these are the generic
+node/neighbor/traversal/list calls with Interface-typed labels.
 
 ---
 
@@ -458,7 +508,7 @@ sequenceDiagram
       VV-->>IC: ok
       IC->>SS: mint or resolve snapshotId producer-supplied or UUID
       SS-->>IC: snapshotId
-      IC->>LF: lift file snapshotId domain incl Site and LOCATED_AT and attributes
+      IC->>LF: lift file snapshotId domain incl Site and Interface and LOCATED_AT and HOSTS and TERMINATES and attributes
       LF-->>GW: typed vertices plus edges tagged domain and snapshotId
       GW->>AGE: txn CREATE vertices/edges insert snapshot current demote prior current evict old previous COMMIT
       AGE-->>GW: committed
@@ -591,10 +641,10 @@ flowchart TD
   A[Structurally-valid file plus domain plus snapshotId] --> V{validate vocab vs Knowledge for domain}
   V -- unknown objectType or relation --> R[422 ApiError no write no event]
   V -- all in domain vocab --> B{for each node record}
-  B --> C[label set to objectType incl Site / props managedObjectId objectType domain snapshotId name attributes]
+  B --> C[label set to objectType incl Site and Interface / props managedObjectId objectType domain snapshotId name attributes]
   C --> D[stage vertex]
   B --> E{for each edge record}
-  E --> F[label set to relation incl LOCATED_AT / props relation domain snapshotId attributes / edgeId sha1 of snapshotId from relation to]
+  E --> F[label set to relation incl LOCATED_AT and HOSTS and TERMINATES / props relation domain snapshotId attributes / edgeId sha1 of snapshotId from relation to]
   F --> G[stage edge from to]
   D --> H[GraphWriteService single Postgres tx]
   G --> H
@@ -616,6 +666,12 @@ Decision rules:
 - **`Site` + `LOCATED_AT` lift identically** to any other typed node/edge — no special-casing in
   code; they are just (domain-agnostic) members of the domain's vocabulary, with `Site` carrying geo
   `attributes` and `LOCATED_AT` connecting a device to its `Site`.
+- **`Interface` + `HOSTS` + `TERMINATES` lift identically** too — an `Interface` is staged as a typed
+  vertex (label `Interface`, its own `attributes`) and `HOSTS`/`TERMINATES` as typed edges, exactly
+  like any other Core-IP type/relation. The Port→Interface→IPLink layering and `ADJACENCY_OVER`
+  between interfaces emerge purely from the file's `from`/`to` plus the domain vocabulary; the lifter
+  encodes **no** Interface semantics. New protocol-adjacency layers (BGP/OSPF) would arrive the same
+  way — added to the Knowledge vocabulary, lifted with no code change.
 - **Attributes stored verbatim:** the node/edge `attributes` map (well-known + extensible keys) is
   persisted unchanged and returned in queries; no attribute-value validation here (AC-20).
 - **All-or-nothing:** validation (schema + vocab) runs to completion *before* any write; the write is
@@ -668,8 +724,10 @@ Out-of-scope). The topology *file* it ingests is produced by the **Simulator** a
 this service's `snapshot.schema.json`. The service ships **test fixtures only** — small conforming
 and deliberately-malformed snapshot files used by the unit/contract tests
 (`src/test/resources/snapshots/*.json`): e.g. `valid-min.json`,
-`valid-all-core-ip-types.json` (the MVP domain's full vocabulary incl. `Site` + `LOCATED_AT`),
-`with-sites.json` (devices LOCATED_AT sites with geo attributes), `with-attributes.json` (well-known
+`valid-all-core-ip-types.json` (the MVP domain's full vocabulary incl. `Site` + `LOCATED_AT` and
+`Interface` + `HOSTS` + `TERMINATES`),
+`with-interfaces.json` (Port HOSTS Interface TERMINATES IPLink with `ADJACENCY_OVER` between
+interfaces), `with-sites.json` (devices LOCATED_AT sites with geo attributes), `with-attributes.json` (well-known
 device/connection attribute keys), `missing-domain.json`, `bad-moid-pattern.json`,
 `objecttype-mismatch.json`, `dangling-edge.json`, `unknown-objecttype-for-domain.json`,
 `unknown-relation-for-domain.json`, `cross-domain-edge.json` (an explicit cross-domain edge, for the
@@ -749,7 +807,7 @@ free-form string.
 | 7b | Reject unknown node `objectType` **for the domain** (de-frozen vocab) | `VocabularyValidatorTest#rejectsObjectTypeNotInDomainVocabulary` (mock Knowledge vocab) | 422 before any write when `objectType` ∉ the domain's Knowledge object-type set; no AGE write, no event; violation cites path + domain. |
 | 8 | Producer-supplied `snapshotId` honoured | `SnapshotServiceTest#usesProducerSuppliedSnapshotId` + `IngestionQueryIT#suppliedIdFlowsToResponseAndEvent` | response + emitted event carry the supplied id. |
 | 9 | Service mints `snapshotId` when absent | `SnapshotServiceTest#mintsUniqueSnapshotIdWhenAbsent` | non-empty, unique id returned in 200. |
-| 10 | Lifting → typed graph (full MVP-domain vocabulary incl. Site) | `LiftingServiceTest#liftsAllCoreIpTypesWithCorrectLabels` + `IngestionQueryIT#allTypesAndRelationsQueryable` | each node (Node…SRLG **and Site**) returns correct `objectType` + `domain`; each edge correct typed relation (incl. **LOCATED_AT**); types/relations come from the file, not hard-coded. |
+| 10 | Lifting → typed graph (full MVP-domain vocabulary incl. Site + Interface) | `LiftingServiceTest#liftsAllCoreIpTypesWithCorrectLabels` + `IngestionQueryIT#allTypesAndRelationsQueryable` | each node (Node…SRLG **and Site and Interface**) returns correct `objectType` + `domain`; each edge correct typed relation (incl. **LOCATED_AT**, **HOSTS**, **TERMINATES**); types/relations come from the file, not hard-coded. |
 | 11 | Bounded traversal by edge type | `GraphReadServiceTest#traversalReturnsOnlyRidesOnReachableWithinDepth` (Testcontainers) | exactly the expected RIDES_ON-reachable set within K; excludes nodes reachable only via other relations. |
 | 12 | `managedObjectId` resolution | `QueryControllerTest#getNodeReturnsObjectAndLayer_404WhenUnknown` | valid id → NodeDto with layer; unknown → 404. |
 | 13 | List by type + neighbors | `QueryControllerTest#listByTypeReturnsOnlyThatType` + `#neighborsReturnsDirectlyConnected` | `?objectType=Port` → only Ports; neighbors returns all directly connected. |
@@ -763,6 +821,7 @@ free-form string.
 | 21 | **Domain-scoped query isolation + explicit cross-domain edge** | `GraphReadServiceTest#traversalStaysWithinDomainByDefault` + `#crossDomainEdgeFollowedOnlyWhenOptIn` (Testcontainers; fixture has two domains joined by one explicit cross-domain edge) | default traversal/neighbors/list never returns another domain's nodes even across an explicit cross-domain edge; with `crossDomain=true` the cross-domain edge is followed and the other-domain node is reached; list/site queries are domain-filtered. |
 | 22 | **Site + LOCATED_AT lift + site query API** | `LiftingServiceTest#liftsSiteAndLocatedAt` + `QueryControllerTest#listSitesAndObjectsAtSite_404WhenUnknownSite` (with `IngestionQueryIT#siteVisualizationPath`) | `Site` nodes + `LOCATED_AT` edges lift like any typed node/edge; `GET /topology/sites` returns the domain's sites with geo attributes; `GET /topology/sites/{siteId}/objects` returns devices LOCATED_AT that site; unknown site → 404; all domain-scoped. |
 | 23 | **objectType/relation validated vs Knowledge vocabulary** (de-frozen) | `VocabularyValidatorTest#acceptsTypesAndRelationsInDomainVocab_rejectsOthers` + `KnowledgeVocabClientTest#fetchesAndCachesVocabFromMock` + `IngestionControllerTest#failsClosedWhenVocabUnavailable` | accepted file uses only domain-vocab types/relations; unknown ones → 422 (cross-refs AC-7/7b); client built/mocked from Knowledge's published OpenAPI, vocab cached with TTL; Knowledge unavailable + no cache → 502, no write, no event (EH-6c). |
+| 24 | **`Interface` + `HOSTS`/`TERMINATES` lift, query + domain-vocab validation** (merged §5 model) | `LiftingServiceTest#liftsInterfaceAndHostsAndTerminates` + `QueryControllerTest#interfacesOnPortAndIpLinkTerminatedByInterface` + `VocabularyValidatorTest#acceptsInterfaceHostsTerminatesInCoreIpVocab` (with `IngestionQueryIT#interfaceLayeringQueryable`, Testcontainers) | a snapshot with `Interface` nodes + `HOSTS`/`TERMINATES` edges lifts via the generic typed path (label `Interface`/`HOSTS`/`TERMINATES`, `domain`+`attributes` preserved, no special-casing); `Interface`/`HOSTS`/`TERMINATES` validate **as members of the `core-ip` Knowledge vocabulary** (an Interface/relation absent from the vocab → 422, cross-refs AC-7/7b); `GET /nodes?objectType=Interface` lists interfaces, `neighbors?relation=HOSTS` from a Port returns its interfaces, `neighbors?relation=TERMINATES` from an Interface returns its IPLink, and a `HOSTS`+`TERMINATES` traversal walks Port→Interface→IPLink — all domain-scoped. Existing criteria (domain isolation, Site, attributes) remain unchanged. |
 
 (Unit tests mock AGE + Kafka **+ the Knowledge vocabulary endpoint (stub from Knowledge's published
 OpenAPI)**; `…IT` and the traversal/cross-domain tests use Testcontainers AGE/Postgres + Kafka.
@@ -784,6 +843,7 @@ domain's authored vocabulary.)
 | E8 | **Site-level visualization path** | After E1, web-ui-style caller: `GET /topology/sites?domain=core-ip` then `GET /topology/sites/{siteId}/objects` | sites returned with geo attributes; objects-at-site returns exactly the devices LOCATED_AT that site (domain-scoped); unknown site → 404. |
 | E9 | **Domain isolation + explicit cross-domain (structure path)** | Ingest a two-domain snapshot joined by one explicit cross-domain edge; traverse from a node default vs `crossDomain=true` | default traversal stays in the start domain (other-domain node **not** reached); `crossDomain=true` reaches the other-domain node only via the explicit cross-domain edge. (MVP data is single-domain; this exercises the isolation structure on the integration stack.) |
 | E10 | **Vocabulary fail-closed (failure path)** | Knowledge domain-vocabulary endpoint made unavailable (no cached vocab), then POST a valid file | ingest rejected **502** `ApiError`; **no** AGE write, **no** event; ERROR logged with domain/`traceId`; succeeds once Knowledge is reachable again. |
+| E11 | **Interface layering path (merged §5 model)** | Ingest `with-interfaces.json` (Port HOSTS Interface TERMINATES IPLink, ADJACENCY_OVER between interfaces) → validate vs `core-ip` vocab → lift → persist; then query the layering | 200 + `snapshotId`; `Interface` nodes and `HOSTS`/`TERMINATES` edges lift like any typed object and validate as Core-IP vocab; `GET /nodes?objectType=Interface` lists them; `neighbors?relation=HOSTS` from a Port returns its interfaces; `neighbors?relation=TERMINATES` from an Interface returns its IPLink; a `HOSTS`+`TERMINATES` traversal walks Port→Interface→IPLink — all domain-scoped, typed DTOs only. |
 
 These run on the `integration` branch against the Compose stack (real AGE/Postgres + Kafka + real
 Knowledge for vocabulary); E2/E5/E6/E10 are the failure/partial paths.
