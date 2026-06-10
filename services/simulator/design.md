@@ -346,7 +346,7 @@ sequenceDiagram
     C-->>SR: ordered [rootCauseAlarm, childAlarm...]
     SR->>L: record {rootCause, children}
   end
-  SR->>N: generate noise (>=3 classes, configured rate)
+  SR->>N: generate noise (at least 3 classes, configured rate)
   N-->>SR: noise alarms (not in any label.children)
   SR->>R: merged, time-ordered alarm stream
   loop each alarm
