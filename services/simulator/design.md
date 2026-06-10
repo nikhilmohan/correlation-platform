@@ -313,7 +313,7 @@ sequenceDiagram
   CLI->>SW: write_snapshot(graph)
   SW->>Val: validate every managedObjectId + schema + refs
   Val-->>SW: ok (no dangling refs)
-  SW-->>CLI: snapshot-<runId>.json
+  SW-->>CLI: snapshot-(runId).json
   CLI->>TC: upload(snapshot file)
   alt TOPOLOGY_API_MODE=mock
     TC-->>CLI: 202 {snapshotId} (stub, no network)
@@ -351,9 +351,9 @@ sequenceDiagram
   SR->>R: merged, time-ordered alarm stream
   loop each alarm
     R->>KP: serialize TypedEnvelope[AlarmEvent]
-    KP->>K: produce -> alarms.history (acks=all, idempotent)
+    KP->>K: produce to alarms.history (acks=all, idempotent)
   end
-  R-->>CLI: counts; L.export_to_file(labels-<runId>.jsonl)
+  R-->>CLI: counts; L.export_to_file(labels-(runId).jsonl)
 ```
 
 ### (c) P3 — live replay to `alarms.live` (wall-clock paced)
@@ -373,7 +373,7 @@ sequenceDiagram
     R->>Clock: sleep(offset_i * PACING_MULTIPLIER + jitter)
     Clock-->>R: elapsed
     R->>KP: serialize TypedEnvelope[AlarmEvent]
-    KP->>K: produce -> alarms.live
+    KP->>K: produce to alarms.live
   end
   Note over R,K: zero events to alarms.history; inter-event delay > 0 for pacing>0
 ```
