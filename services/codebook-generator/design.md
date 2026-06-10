@@ -313,7 +313,7 @@ sequenceDiagram
   K->>C: TrailsBuiltEvent {snapshotId, trailIds, trailCount}
   C->>C: deserialize (supported major schemaVersion, known type, valid payload)
   alt malformed / unknown schemaVersion / unknown type
-    C-->>K: route to trails.built.dlq; commit; continue
+    C-->>K: route to trails.built.dlq, commit, continue
   else valid
     C->>D: seen(eventId)?
     alt duplicate
