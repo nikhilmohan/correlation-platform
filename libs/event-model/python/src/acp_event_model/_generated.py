@@ -34,9 +34,7 @@ class AlarmEvent(BaseModel):
     alarmId: str = Field(
         ..., description="Unique alarm identifier; idempotency key for alarm dedup."
     )
-    managedObjectId: constr(
-        pattern=r"^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$"
-    ) = Field(
+    managedObjectId: constr(pattern=r"^[A-Za-z][A-Za-z0-9]*:[^:]+$") = Field(
         ...,
         description="Must match topology graph identity scheme '<objectType>:<id>'.",
         title="ManagedObjectId",
