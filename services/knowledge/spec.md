@@ -26,10 +26,33 @@ service backs it with the API and enforces validation.
 **In scope:**
 
 - Storing, versioning, validating, and serving **propagation templates** (per §5 edge type,
-  e.g. `RIDES_ON`, `HOSTED_ON`, `ADJACENCY_OVER`, `TRAVERSES`, `SERVES`, `MEMBER_OF`) as
-  domain-scoped template records.
+  e.g. `HOSTED_ON`, `HOSTS`, `TERMINATES`, `RIDES_ON`, `ADJACENCY_OVER`, `TRAVERSES`,
+  `SERVES`, `MEMBER_OF`) as domain-scoped template records. The full Core IP propagation
+  chain authored here is:
+  `HOSTED_ON: fault(LineCard) => PortDown(each Port)`;
+  `HOSTS: PortDown(Port) => InterfaceDown(each Interface on the port)`;
+  `TERMINATES: InterfaceDown(Interface) => LinkDown(its IPLink)`;
+  `RIDES_ON: fault(Fiber) => LinkDown(IPLink)`;
+  `ADJACENCY_OVER: InterfaceDown(Interface) => AdjDown(IGPAdjacency on that interface)`;
+  `TRAVERSES: LinkDown(IPLink) => LSPDown(LSP head-end)`;
+  `SERVES: LSPDown(LSP) => ReachabilityLoss(VPN)`;
+  `MEMBER_OF: co-failure grouping (fate sharing)`.
+  An interface fault originates at `Interface` (`InterfaceDown`); a port or line-card fault
+  cascades down through `HOSTS` into its interfaces. Routing adjacency (`ADJACENCY_OVER`) is
+  driven by interface state, because IGP/BGP sessions run between interfaces.
 - Storing, versioning, validating, and serving **fault-origin types** (e.g. `Fiber`,
-  `LineCard`, `Port`, `Node`) as domain-scoped records.
+  `LineCard`, `Port`, `Interface`, `Node`) as domain-scoped records. `Interface` is a
+  first-class fault origin in the Core IP domain: an interface fault originates at the
+  `Interface` object (`InterfaceDown`) and cascades independently from any upstream port or
+  line-card fault; it is therefore both a structural object type and a fault-origin type.
+- **Protocol-layering note (future extension, no MVP code change):** The MVP models one
+  routing adjacency type, `IGPAdjacency` (IS-IS), via the `ADJACENCY_OVER` relation. Future
+  protocol-connectivity layers (BGP, OSPF, LDP, ...) are accommodated without disruption by
+  authoring additional object-type vocabulary entries (e.g. a `ProtocolAdjacency` type with a
+  `protocol` attribute, or per-protocol types) and corresponding edge-relation vocabulary
+  entries and propagation templates in the Knowledge Service — no event-model or service-code
+  change required. `IGPAdjacency` is simply the MVP instance of this pattern; the Knowledge
+  Service is the designated extension point for protocol-layering additions.
 - Storing, versioning, validating, and serving **trail policy** (the authored rule set: trail =
   transitive closure bounded by IGP area; SRLG fate-sharing) as domain-scoped records,
   **directly consumable by the Trail Builder** via the versioned API.
@@ -39,16 +62,23 @@ service backs it with the API and enforces validation.
   param set is finalized at design with cross-consumer visibility.
 - Storing, versioning, validating, and serving the **object-type vocabulary** for each domain:
   the set of valid `objectType` values that may appear in a topology snapshot's
-  `managedObjectId` (e.g. for Core IP: `Node`, `LineCard`, `Port`, `IPLink`, `IGPAdjacency`,
-  `LSP`, `VPNService`, `FiberSpan`, `SRLG`, plus the domain-agnostic `Site`). The Topology
-  Service fetches this vocabulary to validate an uploaded snapshot before lifting it into the
-  graph. A new domain authors its own set without code change.
-- Storing, versioning, validating, and serving the **edge-relation vocabulary** for each
-  domain: the set of valid `relation` values that may appear in a topology snapshot's edges
-  (e.g. for Core IP: `HOSTED_ON`, `RIDES_ON`, `ADJACENCY_OVER`, `TRAVERSES`, `SERVES`,
-  `MEMBER_OF`, plus the domain-agnostic `LOCATED_AT`). The Topology Service fetches this
+  `managedObjectId` (e.g. for Core IP: `Node`, `LineCard`, `Port`, `Interface`, `IPLink`,
+  `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`, `SRLG`, plus the domain-agnostic `Site`).
+  `Interface` is the logical L3 endpoint configured on a `Port`; IP links and routing
+  adjacencies are between interfaces, not ports directly. The Topology Service fetches this
   vocabulary to validate an uploaded snapshot before lifting it into the graph. A new domain
   authors its own set without code change.
+- Storing, versioning, validating, and serving the **edge-relation vocabulary** for each
+  domain: the set of valid `relation` values that may appear in a topology snapshot's edges
+  (e.g. for Core IP: `HOSTED_ON`, `HOSTS`, `TERMINATES`, `RIDES_ON`, `ADJACENCY_OVER`,
+  `TRAVERSES`, `SERVES`, `MEMBER_OF`, plus the domain-agnostic `LOCATED_AT`). Key additions
+  from the merged §5 Interface model: `HOSTS` (Port→Interface, the structural edge that
+  places an Interface on a Port) and `TERMINATES` (Interface→IPLink, the edge that connects
+  a logical L3 interface to the IP link it terminates). `ADJACENCY_OVER` now runs
+  Interface→IGPAdjacency (not Port→IGPAdjacency), reflecting that routing sessions run
+  between interfaces. The Topology Service fetches this vocabulary to validate an uploaded
+  snapshot before lifting it into the graph. A new domain authors its own set without code
+  change.
 - Storing, versioning, validating, and serving the **device/connection attribute catalogue**
   for each domain: the set of well-known attribute keys and their meaning/allowed forms for
   device nodes (e.g. `vendor`, `model`, `equipmentType`, `role`, `capacity`) and connection
@@ -113,12 +143,13 @@ service backs it with the API and enforces validation.
    changing code.
 
 2. **Validate edits before persistence.** Before persisting any change, verify: templates
-   reference only the known §5 edge types; fault-origin types are known graph object types;
-   trail policy is internally consistent; model params are within declared sane bounds;
-   object-type and edge-relation vocabulary entries conform to the `managedObjectId`
-   token format (`^[A-Za-z][A-Za-z0-9]*$`). Return structured errors for any violation
-   without persisting the change. Validation is driven by referenced types in the record
-   model, not by a hard-coded Core IP type list.
+   reference only the known §5 edge types (including `HOSTS` and `TERMINATES`); fault-origin
+   types are known graph object types (including `Interface`); trail policy is internally
+   consistent; model params are within declared sane bounds; object-type and edge-relation
+   vocabulary entries conform to the `managedObjectId` token format
+   (`^[A-Za-z][A-Za-z0-9]*$`). Return structured errors for any violation without persisting
+   the change. Validation is driven by referenced types in the record model, not by a
+   hard-coded Core IP type list.
 
 3. **Serve current and pinned versions via API.** Expose CRUD and versioned-read endpoints for
    all seven record types. A consumer (Trail Builder for trail policy; Codebook Generator for
@@ -218,17 +249,21 @@ Each criterion maps to a single JUnit 5 test.
    returns an initial version identifier. Updating any record returns a new, incremented
    version identifier while the previous version remains retrievable via the API.
 
-2. **CRUD + versioning for the object-type vocabulary.** Creating an object-type vocabulary
-   record for a domain (e.g. `core-ip` with entries `Node`, `LineCard`, `Port`, `IPLink`,
-   `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`, `SRLG`, `Site`) succeeds and returns an
-   initial version identifier. Updating the record (e.g. adding a new type token) returns a
-   new version identifier while the prior version remains retrievable.
+2. **CRUD + versioning for the object-type vocabulary (including `Interface`).** Creating an
+   object-type vocabulary record for a domain (e.g. `core-ip` with entries `Node`,
+   `LineCard`, `Port`, `Interface`, `IPLink`, `IGPAdjacency`, `LSP`, `VPNService`,
+   `FiberSpan`, `SRLG`, `Site`) succeeds and returns an initial version identifier. Updating
+   the record (e.g. adding a new type token) returns a new version identifier while the prior
+   version remains retrievable. The `Interface` entry is present in the Core IP vocabulary
+   and passes the token-format validation (`^[A-Za-z][A-Za-z0-9]*$`).
 
-3. **CRUD + versioning for the edge-relation vocabulary.** Creating an edge-relation vocabulary
-   record for a domain (e.g. `core-ip` with entries `HOSTED_ON`, `RIDES_ON`,
-   `ADJACENCY_OVER`, `TRAVERSES`, `SERVES`, `MEMBER_OF`, `LOCATED_AT`) succeeds and returns
-   an initial version identifier. Updating the record returns a new version identifier while
-   the prior version remains retrievable.
+3. **CRUD + versioning for the edge-relation vocabulary (including `HOSTS` and
+   `TERMINATES`).** Creating an edge-relation vocabulary record for a domain (e.g. `core-ip`
+   with entries `HOSTED_ON`, `HOSTS`, `TERMINATES`, `RIDES_ON`, `ADJACENCY_OVER`,
+   `TRAVERSES`, `SERVES`, `MEMBER_OF`, `LOCATED_AT`) succeeds and returns an initial version
+   identifier. Updating the record returns a new version identifier while the prior version
+   remains retrievable. `HOSTS` (Port→Interface) and `TERMINATES` (Interface→IPLink) are
+   present in the Core IP edge-relation vocabulary; each passes the token-format validation.
 
 4. **CRUD + versioning for the attribute catalogue.** Creating a device/connection attribute
    catalogue record for a domain (e.g. with device keys `vendor`, `model`, `equipmentType`,
@@ -317,6 +352,27 @@ Each criterion maps to a single JUnit 5 test.
     referenced type in the record model, not by a hard-coded Core IP list; the service does not
     reject the record solely because the domain is not `core-ip`.
 
+18. **`Interface` is present as a fault-origin type in the Core IP vocabulary.** A
+    fault-origin type record authored with `domain: "core-ip"` and `objectType: "Interface"`
+    can be created, retrieved, and updated. The service does not reject `Interface` as an
+    unknown or invalid fault-origin type; it persists and returns it like any other fault-origin
+    type entry.
+
+19. **Core IP propagation templates include the interface cascade steps.** A propagation
+    template record for the `HOSTS` edge type authored with effect
+    `PortDown(Port) => InterfaceDown(each Interface on the port)` (for domain `core-ip`) can
+    be created and retrieved. A propagation template record for the `TERMINATES` edge type
+    authored with effect `InterfaceDown(Interface) => LinkDown(its IPLink)` can be created and
+    retrieved. A propagation template for `ADJACENCY_OVER` authored with cause
+    `InterfaceDown(Interface)` (rather than a Port-originated cause) can be created and
+    retrieved. All three records are returned by a domain-scoped list of propagation templates
+    for `core-ip`.
+
+20. **Vocabulary query endpoint returns `Interface`, `HOSTS`, and `TERMINATES` in the Core IP
+    vocabulary response.** A `GET` to the vocabulary query endpoint for domain `core-ip`
+    returns a response whose object-type set contains `Interface` and whose edge-relation set
+    contains both `HOSTS` and `TERMINATES`.
+
 ## Open questions
 
 - **OQ-2 (design-stage) — Extensible model-param catalog: exact MVP seed param set.**
@@ -331,11 +387,13 @@ Each criterion maps to a single JUnit 5 test.
 
 - **OQ-3 (design-stage) — Propagation-template effect vocabulary and canonical alarm-type
   identifiers.** Propagation templates name the alarm types their effects produce (e.g.
-  `LinkDown`, `AdjDown`, `LSPDown`, `PortDown`, `LOS`, `ReachabilityLoss`). Because Knowledge
-  authors these templates, the canonical alarm-type identifier vocabulary is a design-stage
-  coordination item shared between the Knowledge Service designer and the Codebook Generator
-  designer. This spec does not invent that vocabulary. Tracked: see GitHub issue #30
-  (owned on the codebook side; this note is for cross-service visibility).
+  `LinkDown`, `AdjDown`, `LSPDown`, `PortDown`, `InterfaceDown`, `LOS`, `ReachabilityLoss`).
+  Because Knowledge authors these templates, the canonical alarm-type identifier vocabulary is
+  a design-stage coordination item shared between the Knowledge Service designer and the
+  Codebook Generator designer. This spec does not invent that vocabulary. Tracked: see GitHub
+  issue #30 (owned on the codebook side; this note is for cross-service visibility).
+  `InterfaceDown` is now part of the propagation chain and should be included in that
+  coordination.
 
 - **OQ-4 (design-stage) — Attribute catalogue: descriptive vs. enforced validation rigour.**
   The `architecture.md` describes the attribute catalogue as "descriptive" — the attribute
