@@ -312,24 +312,33 @@ classDiagram
     <pre class="mermaid">
 flowchart BT
   LC["Line card"] -->|"HOSTED_ON"| PORT["Port"]
-  PORT --> IPL["IP link"]
+  PORT -->|"HOSTS"| IFC["Interface"]
+  IFC -->|"TERMINATES"| IPL["IP link"]
   FIB["Fiber span"] -->|"RIDES_ON"| IPL
-  IPL -->|"ADJACENCY_OVER"| IGP["IGP adjacency"]
+  IFC -->|"ADJACENCY_OVER"| IGP["IGP adjacency"]
   IPL -->|"TRAVERSES"| LSP["LSP"]
   LSP -->|"SERVES"| VPN["VPN service"]
   SRLG["SRLG group"] -->|"MEMBER_OF"| IPL
     </pre>
     <figcaption>Typed multi-layer topology.</figcaption>
   </figure>
-  <p><strong>Fault-origin types (authored):</strong> <code>Fiber</code>, <code>LineCard</code>, <code>Port</code>, <code>Node</code>. (<code>IPLink</code>, <code>Adj</code>, <code>LSP</code>, <code>VPN</code> are effects, not origins.)</p>
+  <p><strong>Site &amp; placement (domain-agnostic):</strong> a <code>Site</code> object type represents a geographic site; each device is placed in a site via a <code>LOCATED_AT</code> relation (<code>device LOCATED_AT Site</code>). Sites carry geo attributes (name, latitude, longitude, region). The UI organizes topology by site and expands into the site's device-level graph. <code>Site</code> and <code>LOCATED_AT</code> are reused by every domain.</p>
+  <p><strong>Device &amp; connection attributes:</strong> nodes and edges carry an extensible <code>attributes</code> map of descriptive properties — well-known device keys <code>vendor</code>, <code>model</code>, <code>equipmentType</code>, <code>role</code>, <code>capacity</code>; connection keys <code>linkType</code>, <code>capacity</code>, <code>protectionRole</code>. These are descriptive (not identity) and may feed Noise Filter features / Trail Builder / Codebook policy. The attribute catalogue per domain is authored in the Knowledge Service.</p>
+  <p><strong>Domain-agnostic typing:</strong> the object-type and edge-relation names below are the <em>Core IP</em> domain's vocabulary (authored in Knowledge). Other domains (fixed access, RAN, transport) define their own object-type/relation vocabulary in Knowledge and plug in without changing the event model or services — see <code>architecture.md</code> &rarr; "Domain extensibility". The <code>managedObjectId</code> scheme <code>&lt;objectType&gt;:&lt;id&gt;</code> is generic.</p>
+  <p><strong>Interface (L3 endpoint):</strong> for IP routers, an <code>Interface</code> is the logical L3 endpoint configured on a physical <code>Port</code> — and IP links / routing adjacencies are between <strong>interfaces</strong>, not ports directly. The Core IP model therefore layers <code>Port</code> &rarr; <code>HOSTS</code> &rarr; <code>Interface</code> &rarr; <code>TERMINATES</code> &rarr; <code>IPLink</code>, with <code>ADJACENCY_OVER</code> running <em>between interfaces</em>. <code>Interface</code> is a first-class, <strong>fault-capable</strong> object (an interface-down originates its own cascade), so it is both structural and a fault origin.</p>
+  <p><strong>Logical / protocol-connectivity layering (future extension):</strong> the MVP models one routing adjacency type, <code>IGPAdjacency</code> (IS-IS). Additional logical/protocol layers (BGP, OSPF, LDP, …) are <em>not</em> built now but are accommodated <strong>without disruption</strong>: each is added as new object-type / edge-relation vocabulary authored in the Knowledge Service (e.g. a generic <code>ProtocolAdjacency</code> with a <code>protocol</code> attribute, or per-protocol types, with an <code>ADJACENCY_OVER</code>-style relation between interfaces) — no event-model or service-code change, per "Domain extensibility". IGPAdjacency is simply the MVP instance of this pattern.</p>
+  <p><strong>Fault-origin types (authored, Core IP):</strong> <code>Fiber</code>, <code>LineCard</code>, <code>Port</code>, <code>Interface</code>, <code>Node</code>. (<code>IPLink</code>, <code>Adj</code>, <code>LSP</code>, <code>VPN</code> are effects, not origins.)</p>
 
   <h4>Propagation templates (authored, generic, per edge type):</h4>
-  <pre class="code"><code>RIDES_ON        : fault(Fiber)        =&gt; LinkDown(IPLink)
-HOSTED_ON       : fault(LineCard)     =&gt; PortDown(each Port);  PortDown =&gt; LinkDown(its IPLink)
-ADJACENCY_OVER  : LinkDown(IPLink)    =&gt; AdjDown(IGPAdjacency)
+  <pre class="code"><code>HOSTED_ON       : fault(LineCard)     =&gt; PortDown(each Port)
+HOSTS           : PortDown(Port)      =&gt; InterfaceDown(each Interface on the port)
+TERMINATES      : InterfaceDown(Iface)=&gt; LinkDown(its IPLink)
+RIDES_ON        : fault(Fiber)        =&gt; LinkDown(IPLink)
+ADJACENCY_OVER  : InterfaceDown(Iface)=&gt; AdjDown(IGPAdjacency on that interface)
 TRAVERSES       : LinkDown(IPLink)    =&gt; LSPDown(LSP head-end)
 SERVES          : LSPDown(LSP)        =&gt; ReachabilityLoss(VPN)
 MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
+  <p class="note">An interface fault originates at <code>Interface</code> (<code>InterfaceDown</code>); a port/line-card fault cascades down into its interfaces. Routing adjacency (<code>ADJACENCY_OVER</code>) is driven by the <em>interface</em> state, reflecting that IGP/BGP sessions run between interfaces.</p>
   <p><strong>Trail policy (authored):</strong> trail = transitive closure over the dependency edges from each seed, bounded by IGP area; all links in one SRLG join the same trail. Trails overlap; a device may belong to many.</p>
 
   <hr>

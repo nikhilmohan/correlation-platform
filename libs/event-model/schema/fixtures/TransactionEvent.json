@@ -9,6 +9,7 @@
     "transactionId": "TXN-0001",
     "trailId": "TRAIL-0001",
     "snapshotId": "SNAP-2026-06-08-001",
+    "domain": "core-ip",
     "alarmIds": ["ALM-0001", "ALM-0002", "ALM-0003"],
     "windowStart": "2026-06-08T12:30:00Z",
     "windowEnd": "2026-06-08T12:35:00Z"
