@@ -445,7 +445,7 @@ hops (and no node reachable solely via other relations).
 
 ```mermaid
 flowchart TD
-  A[start, relations[], maxDepth K] --> B{start resolves in current snapshot?}
+  A["start, relations, maxDepth K"] --> B{start resolves in current snapshot?}
   B -- no --> N[404]
   B -- yes --> C{K in 1..maxConfigured?}
   C -- no --> E[400 ApiError]
