@@ -321,7 +321,10 @@ flowchart BT
     </pre>
     <figcaption>Typed multi-layer topology.</figcaption>
   </figure>
-  <p><strong>Fault-origin types (authored):</strong> <code>Fiber</code>, <code>LineCard</code>, <code>Port</code>, <code>Node</code>. (<code>IPLink</code>, <code>Adj</code>, <code>LSP</code>, <code>VPN</code> are effects, not origins.)</p>
+  <p><strong>Site &amp; placement (domain-agnostic):</strong> a <code>Site</code> object type represents a geographic site; each device is placed in a site via a <code>LOCATED_AT</code> relation (<code>device LOCATED_AT Site</code>). Sites carry geo attributes (name, latitude, longitude, region). The UI organizes topology by site and expands into the site's device-level graph. <code>Site</code> and <code>LOCATED_AT</code> are reused by every domain.</p>
+  <p><strong>Device &amp; connection attributes:</strong> nodes and edges carry an extensible <code>attributes</code> map of descriptive properties — well-known device keys <code>vendor</code>, <code>model</code>, <code>equipmentType</code>, <code>role</code>, <code>capacity</code>; connection keys <code>linkType</code>, <code>capacity</code>, <code>protectionRole</code>. These are descriptive (not identity) and may feed Noise Filter features / Trail Builder / Codebook policy. The attribute catalogue per domain is authored in the Knowledge Service.</p>
+  <p><strong>Domain-agnostic typing:</strong> the object-type and edge-relation names below are the <em>Core IP</em> domain's vocabulary (authored in Knowledge). Other domains (fixed access, RAN, transport) define their own object-type/relation vocabulary in Knowledge and plug in without changing the event model or services — see <code>architecture.md</code> &rarr; "Domain extensibility". The <code>managedObjectId</code> scheme <code>&lt;objectType&gt;:&lt;id&gt;</code> is generic.</p>
+  <p><strong>Fault-origin types (authored, Core IP):</strong> <code>Fiber</code>, <code>LineCard</code>, <code>Port</code>, <code>Node</code>. (<code>IPLink</code>, <code>Adj</code>, <code>LSP</code>, <code>VPN</code> are effects, not origins.)</p>
 
   <h4>Propagation templates (authored, generic, per edge type):</h4>
   <pre class="code"><code>RIDES_ON        : fault(Fiber)        =&gt; LinkDown(IPLink)
