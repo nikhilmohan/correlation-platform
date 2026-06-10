@@ -175,12 +175,12 @@ edge `(snapshotId, edgeId)` for get-edge.
 erDiagram
   topology_snapshot {
     text   snapshot_id PK
-    text   change_type "full-load | incremental"
+    text   change_type "full-load / incremental"
     text   domain
     int    file_schema_version
     int    node_count
     int    edge_count
-    text   status "current | previous"
+    text   status "current / previous"
     text   producer_supplied_id "nullable"
     timestamptz ingested_at
     text   event_id "eventId of emitted topology.changed (nullable until emit)"
@@ -418,7 +418,7 @@ flowchart TD
   B --> C[label := objectType\nprops := managedObjectId,objectType,snapshotId,name?,properties]
   C --> D[stage vertex]
   B --> E{for each edge record}
-  E --> F[label := relation\nprops := relation,snapshotId,properties\nedgeId := sha1 snapshotId|from|relation|to]
+  E --> F["label := relation<br/>props := relation, snapshotId, properties<br/>edgeId := sha1(snapshotId + from + relation + to)"]
   F --> G[stage edge from->to]
   D --> H[GraphWriteService: single Postgres tx]
   G --> H
