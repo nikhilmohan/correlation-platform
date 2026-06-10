@@ -48,11 +48,13 @@ source code to access event shapes.
    `source`, `traceId`, `payload`, and generate both Java and Python bindings from it.
 2. Define each of the **nine payload schemas** (see Contract) from one JSON Schema source,
    generating both bindings, such that each `type` string resolves to exactly one payload.
-3. Define and encode the **`managedObjectId` scheme** — format `<objectType>:<id>`, known
-   `objectType` values restricted to the typed graph layers (`Node`, `LineCard`, `Port`,
-   `IPLink`, `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`, `SRLG`), `id` a stable
-   non-empty string — so the Simulator (alarm generation) and Topology Service (graph nodes)
-   use the same identifier format per §4.5.
+3. Define and encode the **`managedObjectId` scheme** — format `<objectType>:<id>`,
+   **domain-agnostic**: `objectType` is any alphanumeric token starting with a letter (the
+   valid object-type set per domain is authored in the Knowledge Service, not enumerated
+   here), `id` a stable non-empty string — so the Simulator (alarm generation) and Topology
+   Service (graph nodes) use the same identifier format per §4.5. (Core IP's MVP set is
+   `Node`, `LineCard`, `Port`, `IPLink`, `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`,
+   `SRLG`, `Site` — an example, not a validation constraint.)
 4. Implement **`schemaVersion` validation** in both bindings: deserialization raises/rejects when
    the event's `schemaVersion` is ≥ 2 (i.e., major exceeds supported major `1`).
 5. Provide **(de)serialization helpers** in both bindings: serialize an envelope+payload to JSON;
@@ -213,12 +215,17 @@ The `managedObjectId` is the shared identity binding for network objects. Format
 <objectType>:<id>
 ```
 
-- `objectType` MUST be one of the nine known typed graph layers (from Solution Design §5):
-  `Node`, `LineCard`, `Port`, `IPLink`, `IGPAdjacency`, `LSP`, `VPNService`, `FiberSpan`, `SRLG`.
+- `objectType` MUST be an **alphanumeric token starting with a letter**. The scheme is
+  **domain-agnostic**: the event-model does not enumerate the valid object types — the valid
+  object-type set **per domain is authored in the Knowledge Service**, not frozen here.
+  (Core IP's MVP set is `Node`, `LineCard`, `Port`, `IPLink`, `IGPAdjacency`, `LSP`,
+  `VPNService`, `FiberSpan`, `SRLG`, `Site` — an example, not a validation constraint.)
 - `id` MUST be a stable, non-empty string (no colon characters permitted in `id`).
-- **Validation rule:** the value matches `<knownObjectType>:<non-empty-id>` where `objectType`
-  is in the known set above. Values that fail this rule are invalid.
-- **Examples:** `Port:PE1-LC2-P3`, `FiberSpan:SPAN-AB-01`, `Node:PE1`, `LineCard:PE1-LC2`.
+- **Validation rule:** the value matches `<objectType>:<non-empty-id>` where `objectType` is
+  an alphanumeric token starting with a letter (regex `^[A-Za-z][A-Za-z0-9]*:[^:]+$`). Values
+  that fail this shape are invalid; the event-model does NOT check `objectType` against any
+  per-domain list (that belongs to the Knowledge Service).
+- **Examples:** `Node:PE1`, `Site:LON-01`, `gNodeB:g-7`, `Port:PE1-LC2-P3`, `FiberSpan:SPAN-AB-01`.
 - This same scheme is used by the Simulator when generating alarms and by the Topology Service
   when persisting graph nodes, per §4.5. It is defined once here and referenced by both cohorts.
 
@@ -326,13 +333,16 @@ The `managedObjectId` is the shared identity binding for network objects. Format
 ### `managedObjectId` scheme
 
 15. **`managedObjectId` valid format accepted:** A `managedObjectId` value of the form
-    `<knownObjectType>:<non-empty-id>` (e.g., `Port:PE1-LC2-P3`, `FiberSpan:SPAN-AB-01`) passes
-    the library's `managedObjectId` validation in both bindings.
+    `<objectType>:<non-empty-id>` passes the library's `managedObjectId` validation in both
+    bindings — for Core-IP types (e.g., `Node:PE1`, `Port:PE1-LC2-P3`, `FiberSpan:SPAN-AB-01`)
+    **and** for domain-agnostic types not enumerated in the event-model (e.g., `Site:LON-01`,
+    `gNodeB:g-7`), since the per-domain object-type set is authored in the Knowledge Service.
 
 16. **`managedObjectId` invalid format rejected:** Each of the following is rejected by the
-    library's `managedObjectId` validation in both bindings: (a) an unknown `objectType`
-    (e.g., `Switch:X1`), (b) an empty `id` component (e.g., `Port:`), (c) a value with no
-    colon separator (e.g., `PE1-LC2-P3`), (d) an empty string. (Four sub-cases; all must fail
+    library's `managedObjectId` validation in both bindings: (a) a value with no colon
+    separator (e.g., `NoColon`), (b) an empty `id` component (e.g., `Node:`), (c) a colon in
+    the `id` (e.g., `Node:a:b`), (d) an empty `objectType` (e.g., `:x`), (e) an `objectType`
+    not starting with a letter (e.g., `9bad:x`), (f) an empty string. (All must fail
     validation.)
 
 ### Build and import
