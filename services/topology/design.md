@@ -354,7 +354,7 @@ sequenceDiagram
     SS-->>IC: snapshotId
     IC->>LF: lift(file, snapshotId)
     LF-->>GW: typed vertices[] + edges[]
-    GW->>AGE: BEGIN; CREATE vertices/edges; insert topology_snapshot(current); demote prior current to previous; evict old previous; COMMIT
+    GW->>AGE: txn — CREATE vertices/edges, insert topology_snapshot(current), demote prior current to previous, evict old previous, COMMIT
     AGE-->>GW: committed
     GW-->>IC: persisted (nodeCount, edgeCount)
     IC->>EP: publish(snapshotId, changeType, nodes[], edges[])
@@ -384,7 +384,7 @@ sequenceDiagram
   AC->>AGE: openCypher (inside graph/ only)
   AGE-->>AC: agtype row
   AC-->>GR: internal vertex
-  GR-->>QC: NodeDto (typed; no AGE detail)
+  GR-->>QC: NodeDto (typed, no AGE detail)
   alt not found
     QC-->>C: 404 ApiError
   else
@@ -392,7 +392,7 @@ sequenceDiagram
   end
 
   C->>QC: GET /topology/traversal?start=Node:PE1&relation=RIDES_ON&maxDepth=3
-  QC->>QC: validate maxDepth in [1..max]; relation in vocab
+  QC->>QC: validate maxDepth in [1..max], relation in vocab
   QC->>GR: traverse(start, {RIDES_ON}, depth)
   GR->>AC: MATCH path = (s)-[:RIDES_ON*1..3]-(m) WHERE s.managedObjectId=... RETURN distinct m
   AC->>AGE: openCypher
