@@ -67,7 +67,7 @@ is the structural realization of spec Task 8 / criterion 19.
 ```mermaid
 flowchart TB
   subgraph cli["entrypoint / CLI"]
-    main["main.py<br/>(orchestrator: P1 upload | P2 history | P3 live)"]
+    main["main.py<br/>(orchestrator: P1 upload / P2 history / P3 live)"]
   end
   subgraph cfg["config"]
     settings["settings.py<br/>(env, validate-at-startup)"]
@@ -81,7 +81,7 @@ flowchart TB
     casc["cascade.py<br/>(forward propagation)"]
     noise["noise.py"]
     labels["labels.py<br/>(ground-truth store)"]
-    replay["replay.py<br/>(Batch | Live)"]
+    replay["replay.py<br/>(Batch / Live)"]
   end
   subgraph pack["domains/coreip (the ONLY pack for MVP)"]
     tm["topology_model.py<br/>(9 typed layers + edges)"]
@@ -89,7 +89,7 @@ flowchart TB
     shapes["alarm_shapes.py<br/>(X.733 per alarm type)"]
     lib["scenario_library.py<br/>(fiber-cut, line-card, port + noise)"]
   end
-  subgraph integ["integrations (config-switchable mock|real)"]
+  subgraph integ["integrations (config-switchable mock/real)"]
     topo["topology_client.py<br/>(from Topology OpenAPI)"]
     kp["kafka_producer.py"]
     kn["knowledge_client.py"]
@@ -303,7 +303,7 @@ sequenceDiagram
   participant Pack as coreip pack
   participant SW as snapshot_writer
   participant Val as jsonschema + event-model validate
-  participant TC as topology_client (mock|real)
+  participant TC as topology_client (mock/real)
   participant Topo as Topology ingestion API
 
   CLI->>TB: build_topology(size=N, seed)
@@ -392,7 +392,7 @@ label.
 
 ```mermaid
 flowchart TD
-  A[Pick scenario from library:<br/>fiber-cut | line-card-fault | port-fault] --> B[Select root-cause object<br/>of the scenario's fault-origin type]
+  A[Pick scenario from library:<br/>fiber-cut / line-card-fault / port-fault] --> B[Select root-cause object<br/>of the scenario's fault-origin type]
   B --> C[Emit root-cause alarm<br/>X.733 shape from pack.alarm_shape]
   C --> D[Seed BFS frontier with root-cause node]
   D --> E{Frontier empty?}
