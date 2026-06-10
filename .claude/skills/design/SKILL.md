@@ -27,10 +27,10 @@ The spec is approved and merged on `<svc>`. If not, stop.
    modules, data, events, and flow that implement it. Every spec task must be traceable into the
    design; do not drop or silently re-scope one (a scope change goes back to the spec/human).
 3. Fill the **template** below.
-4. **Use diagrams as required.** Where a flow, state machine, component interaction, or data
-   model is clearer as a picture, include a **Mermaid** diagram (flowchart, sequence,
-   classDiagram, stateDiagram). Diagrams supplement prose; they don't replace the contract/test
-   detail. Don't add diagrams that carry no information.
+4. **Use diagrams.** **Key flows must include at least one Mermaid sequence/data-flow diagram**;
+   add **flowcharts** for algorithm logical flow, **ER/classDiagrams** for data models, and
+   stateDiagrams for lifecycles where they clarify. Diagrams supplement prose; they don't replace
+   the contract/test detail. Don't add diagrams that carry no information.
 5. Build the **test plan**: (a) map **every acceptance criterion** from the spec to a specific
    test (name + what it asserts) — the 1:1 mapping is the design-gate condition; (b) define the
    **E2E scenarios** that must be exercised **from this design unit's point of view** — the
@@ -77,18 +77,22 @@ of the implementation explicit and testable.>
 <Internal components and responsibilities. Add a Mermaid component/flow diagram if it clarifies
 how modules interact.>
 
-## Data model
-<Owned datastore + schema/entities; snapshotId/version references where relevant. A Mermaid
-classDiagram / ER-style diagram is encouraged for non-trivial models.>
+## Data model / DB schema
+<Owned datastore + entities. **If this service owns a store, give the concrete DB schema:** tables/
+collections, columns with types, keys, indexes, and important constraints (and how `snapshotId`/
+version/`eventId` dedupe is represented). Include a Mermaid **ER diagram** (or classDiagram) for
+non-trivial models. If the service owns no store, state "N/A — no owned store" and why.>
 
 ## Event handling
 - **Consumers:** <topic → handler; idempotency/dedupe key; DLQ routing>
 - **Producers:** <topic → payload type from libs/event-model>
 
-## API contracts
-<REST operations: path/method, request/response shapes. State how the **OpenAPI 3.1** spec is
-generated and published (/openapi.json + checked-in openapi.json), and how the service's own
-spec drives its contract/unit tests.>
+## API contracts / API schema
+<REST operations with **concrete request/response schema** — path + method, request body shape,
+response body shape (field names + types, reusing `libs/event-model` payloads where applicable),
+status codes, and error responses. State how the **OpenAPI 3.1** spec is generated and published
+(/openapi.json + checked-in openapi.json), and how the service's own spec drives its contract/unit
+tests. If the service exposes no HTTP API, state "N/A — no HTTP surface" and why.>
 
 ## Integration points (mock vs. real)
 <For each outbound dependency: the collaborator + operation, the config key(s) that select its
@@ -96,9 +100,43 @@ base URL, and the mock|real toggle. Mock = stub generated from the collaborator'
 OpenAPI spec (used in unit tests); real = the live service (used in integration). No hard-coded
 URLs — resolution is by env/config.>
 
-## Key flows
-<Sequence of the main paths (e.g. ingest → process → emit). Use Mermaid sequence/flow diagrams
-where a picture is clearer than prose.>
+## Key flows (sequence / data-flow diagrams)
+<The main paths through the service (e.g. ingest → process → persist → emit), each as a **Mermaid
+sequence diagram or data-flow diagram** (not just prose) showing the actors/topics/APIs/stores
+involved and the order of interactions. Cover the primary success path and the key cross-service
+hand-offs. At least one diagram is required.>
+
+## Algorithm logical flow
+<**Required when the service implements non-trivial logic / an algorithm** (e.g. trail closure,
+forward-propagation, DBSCAN clustering, PrefixSpan mining, pattern/codebook matching + conflict
+resolution, RCA). Give a clear logical-flow view — a Mermaid **flowchart** or numbered
+decision/step logic — of how the algorithm works: inputs, the core steps/branches, the parameters
+it reads (from Knowledge, never hard-coded), and outputs. Make it concrete enough that a dev can
+implement it. If the service has no non-trivial algorithm, state "N/A" and why.>
+
+## Seed data & examples
+<**Required for the Simulator and any service with seed/fixture/sample data.** Describe the seed/
+generation scripts and include **concrete worked examples** — e.g. for the Simulator: how the
+synthetic topology file + labeled alarm streams are generated, the script/config knobs (size,
+jitter, noise mix, scenarios), and a small **sample of the actual output** (an example topology
+file fragment and example AlarmEvents with values). For other services, show representative sample
+inputs/outputs/fixtures used in tests. If not applicable, state "N/A" and why.>
+
+## UI wireframes
+<**Required for web-ui.** For each module/screen, an ASCII/Mermaid wireframe (or a clear
+structured layout description) of the key views — what's on screen, the components, the user
+actions, and the data each view reads/writes (which integration-point API). Include the primary
+flows (e.g. pattern review/approve/edit, config edit, topology/trail view, stats/alarm view).
+Non-web-ui services: "N/A".>
+
+## Error handling
+<A first-class section (required for all services). Enumerate the failure modes and the defined
+handling for each: poison/invalid messages → which `<topic>.dlq`; unknown major `schemaVersion`
+rejection; a dependency/integration point being unavailable or erroring (retry/backoff, degrade,
+or fail — and what the consumer sees); validation failures (bad request → status + structured
+error); partial/duplicate processing (idempotency); and any algorithm-specific failure (e.g. no
+match, empty result). State what is logged, what is surfaced to callers, and what never silently
+drops.>
 
 ## Design alternatives
 <For each non-trivial design consideration with more than one credible option: the alternatives
@@ -144,6 +182,16 @@ service-scoped end-to-end paths the integration-test stage exercises.>
   defined from this design unit's point of view (incl. failure/partial paths).
 - **Design alternatives** are recorded for each non-trivial consideration (or explicitly noted
   as "no meaningful choice").
+- **Key flows** include at least one **Mermaid sequence/data-flow diagram** (not prose only).
+- **Data model / DB schema**: if the service owns a store, the concrete DB schema (tables/columns/
+  keys/indexes) is given; otherwise "N/A — no owned store".
+- **API contracts / API schema**: if the service exposes HTTP, concrete request/response schemas +
+  status/error codes are given; otherwise "N/A — no HTTP surface".
+- **Error handling** section is present and enumerates failure modes + defined handling (DLQ,
+  schemaVersion rejection, dependency-down, validation, idempotency, algorithm failures).
+- **Conditional sections present where applicable** (else "N/A — why"): **Algorithm logical flow**
+  (services with non-trivial algorithms), **Seed data & examples** (Simulator / seed-data services),
+  **UI wireframes** (web-ui).
 - Invariants honoured; any contract change is flagged for the human, not designed around.
 - If the service exposes an HTTP API: OpenAPI publication is designed, and **every integration
   point is config-switchable** (mock from the collaborator's OpenAPI for unit tests / real for
