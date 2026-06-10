@@ -11,11 +11,27 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 
 ## Scope
 **In scope:**
-- Topology & trails module: geo-site map view (sites); zoom into a site to view site-level
-  topology with togglable logical layers (fiber / IP / IGP / LSP / service); overlay and
-  highlight trail clusters; highlight all trails a selected device belongs to. Reads the
-  Topology Service graph/geometry API and the Trail Builder trail-viz API
-  (`listTrails(snapshotId)`, `getTrail(trailId)`, `getTrailsForObject(managedObjectId)`).
+- Topology & trails module: **site-level topology visualization, backed by the `Site` entity.**
+  The entry view is a **geo map** (MapLibre GL / deck.gl) showing each `Site` returned by the
+  Topology Service **site query API** (`GET /topology/sites`). Expanding a site fetches the
+  objects located at that site via the **objects-at-site query** and renders the site's
+  device-level graph (Cytoscape.js) with togglable logical layers (fiber / IP / IGP / LSP /
+  service). `Site` nodes and `LOCATED_AT` relations are owned by the Topology Service and the
+  graph; the web-ui fetches them from the Topology query API and does not model them
+  independently. (The Topology Service site query API — exact endpoint paths, request/response
+  shapes — is a design-stage dependency; the web-ui builds its client and mock against the
+  Topology Service's published OpenAPI 3.1 spec. See Open question 1.)
+  - **Device/connection attribute display:** when the operator selects a device or connection
+    in the site-level graph, the detail panel displays the node/edge `attributes` returned by
+    the Topology query API. Well-known keys include `vendor`, `model`, `equipmentType`, `role`,
+    `capacity` for devices and `linkType`, `capacity`, `protectionRole` for connections. The
+    attribute set is open (domain-specific keys are rendered as generic key/value pairs); the
+    web-ui does not hard-code or validate the attribute schema — attribute catalogue ownership
+    belongs to the Knowledge Service.
+  - Trail overlays and per-device trail membership are available in the site-level graph view:
+    trail cluster boundaries are overlaid from the Trail Builder trail-viz API
+    (`listTrails(snapshotId)`, `getTrail(trailId)`, `getTrailsForObject(managedObjectId)`);
+    selecting a device highlights all trails it belongs to.
 - Pattern review & XAI module: list discovered patterns from the Pattern Manager (pattern
   read API) with support, confidence, lift, RCA, timing, codebook overlap, and supporting
   instances; present the explainability data to support the operator decision; approve or
@@ -61,8 +77,9 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   topics directly. The architecture row "produces `patterns.approved` (via API)" means the UI
   posts an approval-intent to the Pattern Manager API; the Pattern Manager emits the
   `patterns.approved` event.
-- Owning or computing domain data: topology graph, trail definitions, patterns, incidents, and
-  ML params all live in their owning services; the web-ui is a stateless client.
+- Owning or computing domain data: topology graph, `Site` nodes, `LOCATED_AT` relations, trail
+  definitions, patterns, incidents, and ML params all live in their owning services; the
+  web-ui is a stateless client.
 - A Backend-for-Frontend (BFF) server layer: **decided — no BFF for MVP.** The application
   is a static Angular SPA that calls the six collaborating service APIs directly via
   config-switchable Angular environment configuration (per-service base URL, no hard-coded
@@ -77,63 +94,83 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 - Automated retraining or closed-loop feedback execution (deferred MVP item per §2 non-goals).
 - Multi-tenancy, production-grade HA, real OSS north-bound connectors (deferred non-goals).
 - Other domains beyond Core IP (domain pack extensibility is by design in the backend;
-  web-ui renders whatever the APIs return).
+  web-ui renders whatever the APIs return). Multi-domain scoping (e.g. showing sites/topology
+  per domain filter) is a post-MVP concern; the MVP serves Core IP only.
+- Site hierarchy (nested sites) — out of MVP scope per architecture.md.
+- Device/connection attribute validation or catalogue editing — the Knowledge Service owns
+  the attribute catalogue; the web-ui renders attributes as returned and does not author them.
 - Apache AGE or PostgreSQL direct access.
 
 ## Tasks (high-level)
 
-1. **Render the geo-site topology view.** Fetch topology geometry and site groupings from the
-   Topology Service graph/geometry API and display sites on a geo map. Allow the operator to
-   zoom into a site and view its node/link topology with layer toggles (fiber, IP, IGP, LSP,
-   service layers individually shown or hidden).
+1. **Render the geo-site topology view from the Topology site query API.** Call the Topology
+   Service site query API (`GET /topology/sites`) to list all `Site` objects with their geo
+   attributes (name, latitude, longitude, region) and display each site as a marker or region
+   on a geo map (MapLibre GL / deck.gl). Sites are the top-level navigation unit for topology;
+   the geo map is the entry view of the topology & trails module.
 
-2. **Visualize trail clusters and per-device trail membership.** Fetch trail data from the
+2. **Expand a site into its device-level graph.** When the operator selects a site, call the
+   Topology Service objects-at-site query to retrieve the nodes and edges located at that site
+   (backed by `LOCATED_AT` relations in the graph) and render them as a device-level topology
+   graph (Cytoscape.js) with logical-layer toggles (fiber, IP, IGP, LSP, service layers
+   individually shown or hidden). The site-level graph replaces the flat topology list view
+   from the prior spec iteration.
+
+3. **Display device and connection attributes in the topology detail panel.** When the operator
+   selects a node or edge in the site-level graph, fetch or use the `attributes` returned in
+   the Topology query API node/edge response and display them in a detail panel alongside the
+   `managedObjectId`. Well-known keys (`vendor`, `model`, `equipmentType`, `role`, `capacity`,
+   `linkType`, `protectionRole`) are labelled clearly; additional domain-specific keys are
+   shown as generic key/value pairs.
+
+4. **Visualize trail clusters and per-device trail membership.** Fetch trail data from the
    Trail Builder trail-viz API (`listTrails`, `getTrail`, `getTrailsForObject`) and overlay
-   trail cluster boundaries on the topology graph. When the operator selects a device, highlight
-   all trails that device belongs to (a device may appear in multiple overlapping trails).
+   trail cluster boundaries on the site-level topology graph. When the operator selects a
+   device, highlight all trails that device belongs to (a device may appear in multiple
+   overlapping trails).
 
-3. **List and present discovered patterns with full XAI.** Fetch discovered patterns from the
+5. **List and present discovered patterns with full XAI.** Fetch discovered patterns from the
    Pattern Manager read API. For each pattern, surface the sequence, support/confidence/lift,
    RCA, timing stats, codebook overlap, and supporting instance count in a form that lets the
    operator understand the evidence behind the pattern before acting on it.
 
-4. **Accept approve/reject decisions and post to the Pattern Manager.** Capture the operator's
+6. **Accept approve/reject decisions and post to the Pattern Manager.** Capture the operator's
    approve or reject decision and post a lightweight approval-intent request to the Pattern
    Manager API. Reflect the resulting lifecycle state back in the UI.
 
-5. **List active/approved patterns.** Fetch and display patterns whose lifecycle state is
+7. **List active/approved patterns.** Fetch and display patterns whose lifecycle state is
    `approved` from the Pattern Manager read API, with their details.
 
-6. **Read and edit Knowledge Service model parameters.** Fetch current ML config params
+8. **Read and edit Knowledge Service model parameters.** Fetch current ML config params
    (DBSCAN params, session-window gap, min-support, etc.) from the Knowledge Service API and
    present them for editing. Submit validated edits to the Knowledge Service API and confirm
    persistence to the operator.
 
-7. **Display live correlation stats and incidents.** Fetch live incidents (root-cause alarm +
+9. **Display live correlation stats and incidents.** Fetch live incidents (root-cause alarm +
    child alarms), noise-filter stats, alarm-reduction ratio, RCA accuracy, and pattern-match
    stats from the Correlation Engine incident/stats API. Present them as the platform's
    effectiveness dashboard for a replayed or live scenario. The Correlation Engine provides
    incident groupings and effectiveness metrics only; it does not provide per-alarm lifecycle
    state.
 
-8. **Display live alarm lifecycle from the Alarm Manager.** Within the correlation stats
-   module, fetch the list of live alarms and their lifecycle state (open / correlated /
-   cleared) from the Alarm Manager alarm-lifecycle query API. Present each alarm's state,
-   root-cause/child membership, and incident association so operators can see which specific
-   alarms are active, correlated, or cleared during a running or replayed scenario. This view
-   complements the incident summary (task 7): incidents show the grouped correlation result;
-   the alarm-lifecycle view shows the per-alarm state underlying those incidents.
+10. **Display live alarm lifecycle from the Alarm Manager.** Within the correlation stats
+    module, fetch the list of live alarms and their lifecycle state (open / correlated /
+    cleared) from the Alarm Manager alarm-lifecycle query API. Present each alarm's state,
+    root-cause/child membership, and incident association so operators can see which specific
+    alarms are active, correlated, or cleared during a running or replayed scenario. This view
+    complements the incident summary (task 9): incidents show the grouped correlation result;
+    the alarm-lifecycle view shows the per-alarm state underlying those incidents.
 
-9. **Provide config-switchable backend integration.** All outbound API calls are resolved from
-   Angular environment configuration. Each integration point is independently switchable
-   between a mock (generated from the collaborator's published OpenAPI spec) for unit/component
-   tests and the real service for integration — with no code changes between modes.
+11. **Provide config-switchable backend integration.** All outbound API calls are resolved from
+    Angular environment configuration. Each integration point is independently switchable
+    between a mock (generated from the collaborator's published OpenAPI spec) for unit/component
+    tests and the real service for integration — with no code changes between modes.
 
 ## Phase applicability
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Topology & trails visualization: operators view the onboarded topology, toggle layers, and explore trail clusters as they are built | Active | Reads: Topology Service graph/geometry API; Trail Builder `listTrails` / `getTrail` / `getTrailsForObject` API. Writes: — |
+| P1 — Topology onboarding | Topology & trails visualization: operators view the onboarded topology organized by Site, toggle device-level layers, inspect device/connection attributes, and explore trail clusters as they are built | Active | Reads: Topology Service site query API (list sites, objects-at-site with attributes); Trail Builder `listTrails` / `getTrail` / `getTrailsForObject` API. Writes: — |
 | P2 — Pattern learning | Pattern review/approve (XAI-driven approve/reject) and config edits (Knowledge params): operators review discovered patterns and tune ML parameters | Active | Reads: Pattern Manager pattern read API (discovered + active/approved patterns). Writes: Pattern Manager approval-intent API (approve/reject); Knowledge Service model-params edit API |
 | P3 — Real-time correlation | Live incidents, correlation stats (effectiveness dashboard), and per-alarm lifecycle view: operators monitor running correlation, view incidents and effectiveness metrics, and inspect the live state of individual alarms | Active | Reads: Correlation Engine incident/stats API; Pattern Manager active-patterns API; Alarm Manager alarm-lifecycle query API. Writes: — |
 
@@ -149,9 +186,15 @@ collaborating services; it never touches Kafka topics or any datastore directly.
   OpenAPI document is published.)
 - **APIs consumed (integration points — each config-switchable mock/real, built against the
   producer's published OpenAPI; no hard-coded backend URLs):**
-  - **Topology Service — graph/geometry API:** query nodes and edges with geo coordinates,
-    list objects by type, retrieve neighbours, resolve `managedObjectId` → object + layer,
-    list objects by site. Used by the topology & trails module (P1).
+  - **Topology Service — site query API and graph/geometry API:** list all `Site` objects with
+    geo attributes (`GET /topology/sites`); retrieve nodes and edges located at a given site
+    (objects-at-site query, backed by `LOCATED_AT` relations); node/edge responses include an
+    `attributes` map (well-known keys: `vendor`, `model`, `equipmentType`, `role`, `capacity`
+    for nodes; `linkType`, `capacity`, `protectionRole` for edges). Also: list objects by type,
+    retrieve neighbours, resolve `managedObjectId` → object + layer. Used by the topology &
+    trails module (P1). The exact endpoint paths, response shapes, and pagination are
+    design-stage on the Topology Service side (see Open question 1); the web-ui builds its
+    typed client and mock against the Topology Service's published OpenAPI 3.1 spec.
   - **Trail Builder — trail-viz API:** `listTrails(snapshotId)`, `getTrail(trailId)`,
     `getTrailsForObject(managedObjectId)`. Used by the topology & trails module to overlay
     clusters and highlight per-device trail membership (P1, P2 passive reference).
@@ -176,7 +219,7 @@ collaborating services; it never touches Kafka topics or any datastore directly.
     retrieve an individual alarm's lifecycle state and root-cause/child tags. Used by the
     correlation stats module to display the live alarm-lifecycle view (P3). Config-switchable
     (mock from Alarm Manager's published OpenAPI / real); no hard-coded URL.
-- **Integration points (mock vs. real):** each of the seven integration points above is
+- **Integration points (mock vs. real):** each of the eight integration points above is
   independently configured via Angular environments (base URL per service + mock/real toggle).
   Unit/component tests use mocks or stubs generated from the collaborator's published OpenAPI
   3.1 spec (no live dependency). Integration tests point at the real service on the Docker
@@ -231,126 +274,146 @@ collaborating services; it never touches Kafka topics or any datastore directly.
 
 ### Topology & trails module (P1)
 
-1. Given a topology snapshot loaded into the Topology Service, the geo-site view renders a map
-   marker or region for each site; selecting a site zooms into and displays the site's nodes
-   and links. (Vitest/TestBed — mock Topology API returning a fixture with >= 2 sites)
+1. Given the Topology Service site query API returns a list of `Site` objects (each with a
+   name and geo coordinates), the geo map renders a marker or region for each site; no marker
+   is rendered for a site absent from the API response. (Vitest/TestBed — mock Topology site
+   query API returning a fixture with >= 2 sites)
 
-2. Given a site-level topology view, toggling each logical layer (fiber, IP, IGP, LSP, service)
+2. Given the operator selects a site on the geo map, the application calls the Topology
+   objects-at-site query for that site's identifier and renders the returned nodes and edges
+   as a device-level graph; the geo map view is replaced by (or transitions to) the
+   site-level graph view. (Vitest/TestBed — mock objects-at-site response; verify correct
+   site identifier is passed in the request)
+
+3. Given a site-level topology view, toggling each logical layer (fiber, IP, IGP, LSP, service)
    independently shows or hides the corresponding edges; toggling all off shows only nodes.
    (Vitest/TestBed — mock API; layer-toggle component test)
 
-3. Given trail data returned by the Trail Builder `listTrails(snapshotId)` API, trail cluster
-   boundaries are rendered as visual overlays on the topology graph. (Vitest/TestBed — mock
-   Trail Builder API fixture)
+4. Given the operator selects a node (device) in the site-level graph, the detail panel
+   displays the node's `attributes` as returned by the Topology query API — including at least
+   the `vendor`, `model`, and `equipmentType` keys when present in the fixture; unknown keys
+   are rendered as generic key/value pairs. (Vitest/TestBed — mock Topology API node response
+   with a fixture containing all three well-known device keys plus one extra key)
 
-4. Given a device that belongs to multiple trails (per `getTrailsForObject`), selecting that
+5. Given the operator selects an edge (connection) in the site-level graph, the detail panel
+   displays the edge's `attributes` — including at least `linkType` and `capacity` when present
+   in the fixture; unknown keys are rendered as generic key/value pairs. (Vitest/TestBed —
+   mock Topology API edge response with well-known connection keys)
+
+6. Given trail data returned by the Trail Builder `listTrails(snapshotId)` API, trail cluster
+   boundaries are rendered as visual overlays on the site-level topology graph.
+   (Vitest/TestBed — mock Trail Builder API fixture)
+
+7. Given a device that belongs to multiple trails (per `getTrailsForObject`), selecting that
    device in the topology view highlights all trails it belongs to, visually distinct from
    non-member trails. (Vitest/TestBed — fixture with a device in >= 2 trails)
 
-5. Given the Topology and Trail Builder mocks are replaced with real services in the
-   integration stack, the geo-site and trail views render without errors for the synthetic
-   topology. (Playwright E2E)
+8. Given the Topology and Trail Builder mocks are replaced with real services in the
+   integration stack, the geo-site view lists sites, selecting a site renders its device-level
+   graph with attributes, and trail overlays render without errors for the synthetic topology.
+   (Playwright E2E)
 
 ### Pattern review & XAI module (P2)
 
-6. Given discovered patterns returned by the Pattern Manager read API, the pattern list
+9. Given discovered patterns returned by the Pattern Manager read API, the pattern list
    renders each pattern's sequence, support, confidence, lift, RCA, timing, codebook overlap,
    and supporting instance count. (Vitest/TestBed — mock Pattern Manager API fixture)
 
-7. Given a pattern in the list, the operator can expand it to view the full explainability
-   detail (all XAI fields) before acting. (Vitest/TestBed — component expansion interaction
-   test)
+10. Given a pattern in the list, the operator can expand it to view the full explainability
+    detail (all XAI fields) before acting. (Vitest/TestBed — component expansion interaction
+    test)
 
-8. Given the operator clicks "Approve" on a pattern, the application posts an approval-intent
-   to the Pattern Manager approval-intent API endpoint with the correct `patternId`; the
-   pattern's displayed lifecycle state updates to `approved` after a successful response.
-   (Vitest/TestBed — mock Pattern Manager approval-intent endpoint)
+11. Given the operator clicks "Approve" on a pattern, the application posts an approval-intent
+    to the Pattern Manager approval-intent API endpoint with the correct `patternId`; the
+    pattern's displayed lifecycle state updates to `approved` after a successful response.
+    (Vitest/TestBed — mock Pattern Manager approval-intent endpoint)
 
-9. Given the operator clicks "Reject" on a pattern, the application posts a reject-intent to
-   the Pattern Manager API with the correct `patternId`; the pattern is removed from the
-   discovered list or marked rejected in the UI. (Vitest/TestBed — mock Pattern Manager
-   reject endpoint)
+12. Given the operator clicks "Reject" on a pattern, the application posts a reject-intent to
+    the Pattern Manager API with the correct `patternId`; the pattern is removed from the
+    discovered list or marked rejected in the UI. (Vitest/TestBed — mock Pattern Manager
+    reject endpoint)
 
-10. Given a filter or tab for active/approved patterns, the list displays patterns whose
+13. Given a filter or tab for active/approved patterns, the list displays patterns whose
     lifecycle state is `approved` as returned by the Pattern Manager read API.
     (Vitest/TestBed — mock API fixture with mixed lifecycle states)
 
-11. Given the Playwright E2E suite runs against the integration stack with a replayed scenario,
+14. Given the Playwright E2E suite runs against the integration stack with a replayed scenario,
     the operator can approve a pattern, and the Pattern Manager reflects the `approved` lifecycle
     state on a subsequent read. (Playwright E2E)
 
 ### Config module (P2)
 
-12. Given the config module is loaded, it displays the current model parameters (DBSCAN params,
+15. Given the config module is loaded, it displays the current model parameters (DBSCAN params,
     session-window gap, min-support) fetched from the Knowledge Service API. (Vitest/TestBed —
     mock Knowledge API fixture)
 
-13. Given the operator edits a model parameter and submits, the application sends an edit
+16. Given the operator edits a model parameter and submits, the application sends an edit
     request to the Knowledge Service API with the updated values; a success response is
     confirmed to the operator in the UI. (Vitest/TestBed — mock Knowledge edit endpoint)
 
-14. Given the operator submits an invalid parameter value (e.g. a negative session-window gap),
+17. Given the operator submits an invalid parameter value (e.g. a negative session-window gap),
     the form displays a validation error and does not call the Knowledge Service API.
     (Vitest/TestBed — form validation unit test)
 
-15. Given the Playwright E2E suite runs against the integration stack, a config edit submitted
+18. Given the Playwright E2E suite runs against the integration stack, a config edit submitted
     through the UI is retrievable via the Knowledge Service API on a subsequent read.
     (Playwright E2E)
 
 ### Correlation stats module (P3)
 
-16. Given incidents returned by the Correlation Engine incident/stats API, the stats view
+19. Given incidents returned by the Correlation Engine incident/stats API, the stats view
     renders each incident with its root-cause alarm and the list of child alarms.
     (Vitest/TestBed — mock Correlation Engine fixture)
 
-17. Given stats metrics returned by the Correlation Engine API, the view displays the
+20. Given stats metrics returned by the Correlation Engine API, the view displays the
     alarm-reduction ratio and RCA accuracy as numeric values. (Vitest/TestBed — mock API
     fixture with known ratio/accuracy values)
 
-18. Given noise-filter stats returned by the Correlation Engine API, the view displays the
+21. Given noise-filter stats returned by the Correlation Engine API, the view displays the
     noise-filter effectiveness metric. (Vitest/TestBed — mock API fixture)
 
-19. Given the Playwright E2E suite runs a replayed fiber-cut scenario against the integration
+22. Given the Playwright E2E suite runs a replayed fiber-cut scenario against the integration
     stack, the stats module shows at least one incident with a tagged root-cause alarm and one
     or more child alarms. (Playwright E2E)
 
-20. Given alarms returned by the Alarm Manager alarm-lifecycle query API, the alarm-lifecycle
+23. Given alarms returned by the Alarm Manager alarm-lifecycle query API, the alarm-lifecycle
     view in the correlation stats module lists each alarm with its lifecycle state
     (open / correlated / cleared), its root-cause or child designation, and its associated
     incident identifier (where applicable). (Vitest/TestBed — mock Alarm Manager API fixture
     containing alarms in all three lifecycle states)
 
-21. Given the Alarm Manager mock returns a mix of open, correlated, and cleared alarms, the
+24. Given the Alarm Manager mock returns a mix of open, correlated, and cleared alarms, the
     alarm-lifecycle view filters correctly when the operator selects a specific lifecycle state.
     (Vitest/TestBed — filter interaction component test against mock fixture)
 
-22. Given the Playwright E2E suite runs a replayed fiber-cut scenario against the integration
+25. Given the Playwright E2E suite runs a replayed fiber-cut scenario against the integration
     stack, the alarm-lifecycle view shows at least one alarm in `correlated` state with a
     non-empty incident association, sourced from the Alarm Manager API. (Playwright E2E)
 
 ### Cross-cutting
 
-23. Given the application is built with mock environment configuration, all seven integration
-    points (Topology, Trail Builder, Pattern Manager read, Pattern Manager approval-intent,
-    Knowledge, Correlation Engine, Alarm Manager) resolve to mock/stub handlers and no real
-    HTTP call is made. (Vitest/TestBed — environment-switch test per integration point)
+26. Given the application is built with mock environment configuration, all eight integration
+    points (Topology site query + objects-at-site + graph/geometry, Trail Builder, Pattern
+    Manager read, Pattern Manager approval-intent, Knowledge, Correlation Engine, Alarm Manager)
+    resolve to mock/stub handlers and no real HTTP call is made. (Vitest/TestBed —
+    environment-switch test per integration point)
 
-24. Given the application is built with integration environment configuration, all seven
+27. Given the application is built with integration environment configuration, all eight
     integration point base URLs are resolved from environment variables with no URL literal in
     application source. (Build-time check: no hard-coded http://localhost or service hostname
     appears in non-environment source files)
 
-25. Given the main interactive views (geo-site topology, pattern list, config form, stats
-    dashboard, alarm-lifecycle view), keyboard navigation cycles through all interactive
-    elements without a mouse, and all graph/map canvas elements carry an ARIA label.
+28. Given the main interactive views (geo-site topology, site-level device graph, pattern list,
+    config form, stats dashboard, alarm-lifecycle view), keyboard navigation cycles through all
+    interactive elements without a mouse, and all graph/map canvas elements carry an ARIA label.
     (Vitest/TestBed accessibility test using axe-core or equivalent; at least one criterion
     per view)
 
-26. Given any single backend integration point returns a 5xx error, the affected module
+29. Given any single backend integration point returns a 5xx error, the affected module
     displays a structured error message identifying the service and does not crash other
     modules. (Vitest/TestBed — error-boundary component test per integration point)
 
-27. Given a draft pattern in the review module, the operator can open the **edit** placeholder,
+30. Given a draft pattern in the review module, the operator can open the **edit** placeholder,
     mark a sequence alarm as `optional`, and submit; the application sends a `PATCH /patterns/{id}`
     edit request to the Pattern Manager (verified against the mock) and reflects the returned
     edited pattern. The edit action is offered only for `draft` patterns. (Vitest/TestBed — mock
@@ -364,12 +427,19 @@ OpenAPI shapes for each producer arrive when that producer's spec and design are
 approved. These are tracked dependencies, not spec blockers. Mock clients are generated at
 design time once the producer publishes their OpenAPI 3.1.
 
-1. **[DESIGN-STAGE] Topology Service graph/geometry API shape** (issue #60).
-   The web-ui builds its typed client and mock fixture for the Topology Service graph/geometry
-   integration point (nodes, edges with geo coordinates, site groupings, objects by type)
-   against the Topology Service's published OpenAPI. The exact request/response shapes — site
-   grouping endpoint, geo-coordinate field names, pagination — are determined when the Topology
-   Service spec and design are authored.
+1. **[DESIGN-STAGE] Topology Service site query API and objects-at-site API shape** (see also
+   issue #60 for the graph/geometry API).
+   The web-ui builds its typed client and mock fixture for the Topology Service site-level
+   integration points — `GET /topology/sites` (list sites with geo attributes) and the
+   objects-at-site query (nodes/edges at a site, with `attributes` map) — against the Topology
+   Service's published OpenAPI. The exact endpoint paths, response envelope, geo-coordinate
+   field names, `attributes` map key set, and pagination are determined when the Topology
+   Service spec and design are authored. The Topology Service designer should confirm that:
+   (a) the site listing endpoint returns each site's geo attributes (name, latitude, longitude,
+   region); (b) the objects-at-site endpoint returns node/edge `attributes` alongside
+   `managedObjectId`; (c) the existing graph/geometry API (issue #60) is extended or
+   supplemented to support site-scoped queries. If coordinates are absent from the Site node
+   response, a fallback layout strategy (force-directed or fixed) must be defined.
 
 2. **[DESIGN-STAGE] Trail Builder trail-viz API shape** (issue #61).
    The web-ui builds its typed client and mock for `listTrails(snapshotId)`, `getTrail(trailId)`,
@@ -397,14 +467,7 @@ design time once the producer publishes their OpenAPI 3.1.
    pattern-match stats) against the Correlation Engine's published OpenAPI. Field names are
    confirmed at the Correlation Engine design stage.
 
-6. **[DESIGN-STAGE] Geo-coordinate data availability in the Topology Service.** The geo-site
-   view (MapLibre GL / deck.gl) requires lat/long or site coordinates. Whether the Topology
-   Service graph API exposes geo-coordinates or the Simulator generates them in the snapshot
-   file is determined at the Topology Service design stage. If coordinates are absent, a
-   fallback layout strategy (force-directed or fixed) must be defined. The Topology Service
-   designer should ensure coordinates are included in the ingestion and query API if needed.
-
-7. **[DESIGN-STAGE] Alarm Manager alarm-lifecycle query API shape.**
+6. **[DESIGN-STAGE] Alarm Manager alarm-lifecycle query API shape.**
    The web-ui builds its typed client and mock fixture for the Alarm Manager alarm-lifecycle
    integration point against the Alarm Manager's published OpenAPI 3.1 spec. The exact
    request/response shapes — how alarms are queried by state/trail/time/incident, field names
