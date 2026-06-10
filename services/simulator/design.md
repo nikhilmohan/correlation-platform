@@ -34,14 +34,14 @@ Every spec Task (1–9) is realized below and traceable to concrete modules/flow
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the nine object types + layer-construction rules. IDs minted via `acp_event_model.ManagedObjectId` → `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`. |
+| **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the object types + layer-construction rules. The pack now also emits **`Site` nodes** (the domain-agnostic Site object type, geo attributes) and places each device in a site via a **`LOCATED_AT`** edge, and populates the well-known **device/connection `attributes`** keys (grounded values). IDs minted via `acp_event_model.ManagedObjectId` → generic `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`; site count / devices-per-site from `SITE_COUNT` / `DEVICES_PER_SITE`. |
 | **2. Generate snapshot file (versioned contract) + upload to Topology ingestion API (client from OpenAPI; config-switchable mock/real)** | `engine/snapshot_writer.py` serializes the graph to the snapshot JSON (validated against `schema/topology-snapshot.schema.json`); `integrations/topology_client.py` is an `httpx` client generated from Topology's published OpenAPI, selected by `TOPOLOGY_API_MODE` (`mock`/`real`) + `TOPOLOGY_API_BASE_URL`. |
 | **3. Load fault-scenario configs (local files or Knowledge Service)** | `config/scenario_loader.py` resolves scenario defs, jitter, noise mix from local files (default/mock) or the Knowledge Service (`integrations/knowledge_client.py`), switchable by `KNOWLEDGE_MODE`. Validated at startup. |
 | **4. Inject labeled fault scenarios (root cause → cascade per §5 templates, jitter); record `{rootCause, children}`** | `engine/scenario_runner.py` + `engine/cascade.py` run the pack's propagation templates forward over the graph closure with jitter; `engine/labels.py` records the ground-truth label per scenario. Templates supplied by `domains/coreip/propagation.py`. |
 | **5. Inject background noise (≥3 noise classes), configurable rate/mix** | `engine/noise.py` interleaves noise alarms from the pack's noise generators (`domains/coreip/noise.py`); rate/mix from config. Noise alarms are excluded from every label's `children` set. |
 | **6. Replay in history (batch → `alarms.history`) or live (wall-clock paced → `alarms.live`)** | `engine/replay.py` with two strategies: `BatchReplay` (fire-and-flush) and `LiveReplay` (wall-clock paced via `PACING_MULTIPLIER`). Topic selected by mode. `integrations/kafka_producer.py` emits `TypedEnvelope[AlarmEvent]`. |
 | **7. Make ground-truth labels retrievable for evaluation** | **Decision (OQ-2): both** — labels are written to a **flat JSONL file** at end-of-run (`labels.export_to_file`) **and** served by a small read-only **FastAPI** surface (`api/labels_api.py`). File export is the canonical, no-broker oracle source; REST is convenience. OpenAPI 3.1 published + `openapi.json` checked in. |
-| **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
+| **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The pack **declares the domain vocabulary** the snapshot is built from: its **object-type set** (the Core-IP layers **plus the domain-agnostic `Site`**), its **edge-relation vocabulary** (the Core-IP relations **plus `LOCATED_AT`**), the **`domain` identifier** (`core-ip`) stamped on the snapshot, and the **well-known `attributes` keys** it populates on devices/connections — the same vocabulary Topology validates against (authored canonically in Knowledge; the pack must align). The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
 | **9. `/health` + `/metrics` + structured JSON logs** | `api/health.py`, `api/metrics.py` (FastAPI routes); `obs/logging.py` JSON formatter; `obs/metrics.py` Prometheus registry. |
 
 ## Phase applicability (design view)
@@ -125,20 +125,30 @@ flowchart TB
   engine -.imports only.-> dp
 ```
 
-- **`engine/domain_pack.py`** — the `DomainPack` `Protocol`: `object_types()`, `edge_relations()`,
+- **`engine/domain_pack.py`** — the `DomainPack` `Protocol`: `domain_id()` (e.g. `core-ip`),
+  `object_types()` (includes the domain-agnostic `Site`), `edge_relations()` (includes
+  `LOCATED_AT`), `attribute_keys()` (the well-known device/connection keys the pack populates),
   `build_topology(graph, size, rng)`, `propagation_templates()`, `alarm_shape(alarm_type)`,
-  `scenario_library()`, `noise_classes()`. The engine depends only on this Protocol.
+  `scenario_library()`, `noise_classes()`. `object_types()`/`edge_relations()`/`attribute_keys()`/
+  `domain_id()` are the **domain vocabulary** the snapshot is stamped + validated with; the engine
+  depends only on this Protocol.
 - **`engine/topology_builder.py`** — asks the pack to populate a `networkx` `DiGraph` of typed nodes
-  and typed edges; mints `managedObjectId`s. Domain-agnostic: it never names a Core-IP type.
+  and typed edges (including `Site` nodes and `LOCATED_AT` edges), copying each node/edge's
+  `attributes` map through; mints `managedObjectId`s. Domain-agnostic: it never names a Core-IP type,
+  the `Site` type, or a relation literal — it iterates `pack.object_types()`/`pack.edge_relations()`.
 - **`engine/cascade.py`** — given a root-cause node + the pack's propagation templates, walks the
   graph closure (BFS over the template-relevant edge relations) producing the ordered child alarm
   set. The §5 logic (see Algorithm logical flow) lives in template *data* from the pack; the
   traversal is generic.
 - **`engine/labels.py`** — the ground-truth store (see Data model). One record per injected scenario:
   `{scenarioId, scenarioType, rootCause, children, snapshotId}`.
-- **`domains/coreip/`** — the only concrete pack: the nine typed layers + edges, the §5 propagation
-  templates, the X.733 alarm shapes, the scenario library (fiber-cut, line-card-fault, port-fault +
-  ≥3 noise classes).
+- **`domains/coreip/`** — the only concrete pack: the typed Core-IP layers + edges **plus `Site`
+  nodes and `LOCATED_AT` edges**, the well-known `attributes` keys on devices (`vendor`, `model`,
+  `equipmentType`, `role`, `capacity`) and connections (`linkType`, `capacity`, `protectionRole`),
+  the §5 propagation templates, the X.733 alarm shapes, the scenario library (fiber-cut,
+  line-card-fault, port-fault + ≥3 noise classes). It declares `domain_id() == "core-ip"` and the
+  full object-type/relation/attribute vocabulary stamped on the snapshot. `Site`/`LOCATED_AT` are
+  domain-agnostic and reused by any future pack; the geo/attribute *values* are Core-IP grounded.
 
 ## Data model / DB schema
 
@@ -199,6 +209,13 @@ versioning the contract. The Topology Service consumes the same schema as its in
 any change to it remains a contract change requiring an `architecture.md` update + human approval
 (per spec Contract section).
 
+> **No new contract change here.** `Site`, the `LOCATED_AT` relation, the domain-agnostic
+> `managedObjectId` scheme, and the well-known device/connection `attributes` keys are all already in
+> the **merged multi-domain contract** (event-model #81 + the `architecture.md` "Topology snapshot
+> file" / "Domain extensibility" sections). This design only generates **conforming** data and
+> updates the snapshot schema's enums to match the contract's already-published vocabulary — it adds
+> no topic, payload, field, or OpenAPI surface beyond the merged contract.
+
 The schema mirrors the structure the Topology Service ingestion API expects:
 
 ```json
@@ -219,8 +236,8 @@ The schema mirrors the structure the Topology Service ingestion API expects:
         "additionalProperties": false,
         "required": ["managedObjectId", "objectType"],
         "properties": {
-          "managedObjectId": { "type": "string", "pattern": "^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$" },
-          "objectType": { "enum": ["Node","LineCard","Port","IPLink","IGPAdjacency","LSP","VPNService","FiberSpan","SRLG"] },
+          "managedObjectId": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
+          "objectType": { "enum": ["Site","Node","LineCard","Port","IPLink","IGPAdjacency","LSP","VPNService","FiberSpan","SRLG"] },
           "attributes": { "type": "object" }
         }
       }
@@ -232,9 +249,10 @@ The schema mirrors the structure the Topology Service ingestion API expects:
         "additionalProperties": false,
         "required": ["from", "to", "relation"],
         "properties": {
-          "from": { "type": "string", "pattern": "^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$" },
-          "to": { "type": "string", "pattern": "^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$" },
-          "relation": { "enum": ["HOSTED_ON","RIDES_ON","ADJACENCY_OVER","TRAVERSES","SERVES","MEMBER_OF"] }
+          "from": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
+          "to": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
+          "relation": { "enum": ["LOCATED_AT","HOSTED_ON","RIDES_ON","ADJACENCY_OVER","TRAVERSES","SERVES","MEMBER_OF"] },
+          "attributes": { "type": "object" }
         }
       }
     }
@@ -242,10 +260,17 @@ The schema mirrors the structure the Topology Service ingestion API expects:
 }
 ```
 
-The `managedObjectId` pattern is identical to the frozen event-model `managedObjectId.schema.json`;
-the engine reuses `acp_event_model.validate` so the two never drift. Referential integrity (every
-edge endpoint resolves to a node in `nodes[]`; no dangling references) is enforced by
-`snapshot_writer` post-build validation (criteria 1, 14).
+The `managedObjectId` pattern now matches the **domain-agnostic** scheme `^[A-Za-z][A-Za-z0-9]*:[^:]+$`
+in the merged event-model `managedObjectId.schema.json` (#81) — the engine reuses
+`acp_event_model.validate` so the two never drift. The `objectType`/`relation` enums (incl. the
+domain-agnostic **`Site`** and **`LOCATED_AT`**) and the well-known `attributes` keys come from the
+**domain pack's vocabulary**, which is the same vocabulary Topology validates the upload against
+(authored canonically in Knowledge). **Well-known `attributes` keys** — devices: `vendor`, `model`,
+`equipmentType`, `role`, `capacity`; connections: `linkType`, `capacity`, `protectionRole`; `Site`:
+`name`, `latitude`, `longitude`, `region`. The set is open (extensible per domain), so `attributes`
+stays an open object. Referential integrity (every edge endpoint resolves to a node in `nodes[]`;
+every device has exactly one `LOCATED_AT` edge to a `Site`; no dangling references) is enforced by
+`snapshot_writer` post-build validation (criteria 1, 14, 25, 26).
 
 ## Event handling
 
@@ -315,7 +340,7 @@ sequenceDiagram
 
   CLI->>TB: build_topology(size=N, seed)
   TB->>Pack: build_topology(graph, N, rng)
-  Pack-->>TB: typed nodes + edges (managedObjectIds minted)
+  Pack-->>TB: typed nodes plus Site nodes plus edges incl LOCATED_AT plus attributes (managedObjectIds minted)
   TB-->>CLI: networkx DiGraph
   CLI->>SW: write_snapshot(graph)
   SW->>Val: validate every managedObjectId + schema + refs
@@ -586,6 +611,8 @@ env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 | Knob group | Env var(s) | Effect |
 |---|---|---|
 | Topology size | `TOPOLOGY_NODE_COUNT` | number of `Node`s; line cards/ports/links scale per pack ratios |
+| Site count | `SITE_COUNT` | number of `Site` nodes generated (geo attrs); devices distributed across them via `LOCATED_AT` |
+| Devices per site | `DEVICES_PER_SITE` | target devices placed per site (rounds out as node count varies) |
 | Random seed | `SIM_SEED` | **OQ-3 decision: deterministic generation supported** — same seed reproduces topology, cascade structure, timing offsets, and all RNG-driven choices; ids still fresh per run. Unset → random seed, logged so the run stays reproducible by re-supplying it |
 | Timing jitter | `JITTER_STDDEV_MS` | std-dev of per-gap delay noise (Gaussian, applied on top of the base interval) |
 | Inter-arrival interval | `BASE_INTERVAL_MS`, `BACKGROUND_INTERVAL_MS` | base inter-event spacing inside a cascade, and mean spacing between background/non-pattern alarms (jitter applied on top) |
@@ -599,24 +626,29 @@ env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 
 `settings` / `scenario_loader` validate (fail-fast, criterion 18): jitter ≥ 0, base/background
 interval > 0, noise rate ∈ [0,1], `BACKGROUND_FRACTION` ∈ [0,1], `HARD_NOISE_FRACTION` ∈ [0,1],
-`SCENARIO_INSTANCES` ≥ 1, scenarios ⊆ pack library, node count ∈ [10,200], and (P2)
+`SCENARIO_INSTANCES` ≥ 1, scenarios ⊆ pack library, node count ∈ [10,200], `SITE_COUNT` ∈
+[1, node count] (and `DEVICES_PER_SITE` ≥ 1 when set), and (P2)
 `HISTORY_START` < `HISTORY_END`. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal
 structured-log error + non-zero exit (`3`) before any emission (criterion 18).
 
 ### Worked example — topology snapshot file fragment (small N, fiber-cut-ready)
 
-`snapshot-run42.json` (excerpt; ids minted via the `<objectType>:<id>` scheme):
+`snapshot-run42.json` carries the `domain` identifier; **`Site` nodes** with geo attributes,
+**devices LOCATED_AT a site**, and the well-known device/connection `attributes` keys are all
+present (ids in the generic `<objectType>:<id>` scheme):
 
 ```json
 {
   "schemaVersion": 1,
   "domain": "core-ip",
   "nodes": [
-    { "managedObjectId": "Node:PE1",            "objectType": "Node",         "attributes": {"role": "PE"} },
-    { "managedObjectId": "Node:P1",             "objectType": "Node",         "attributes": {"role": "P"} },
-    { "managedObjectId": "LineCard:PE1-LC2",    "objectType": "LineCard" },
-    { "managedObjectId": "Port:PE1-LC2-P3",     "objectType": "Port" },
-    { "managedObjectId": "Port:P1-LC1-P1",      "objectType": "Port" },
+    { "managedObjectId": "Site:LON-01",         "objectType": "Site",         "attributes": {"name": "London Docklands", "latitude": 51.5033, "longitude": -0.0195, "region": "UK-South"} },
+    { "managedObjectId": "Site:MAN-01",         "objectType": "Site",         "attributes": {"name": "Manchester Central", "latitude": 53.4779, "longitude": -2.2426, "region": "UK-North"} },
+    { "managedObjectId": "Node:PE1",            "objectType": "Node",         "attributes": {"vendor": "Acme", "model": "XR-9000", "equipmentType": "router", "role": "PE", "capacity": "1.6Tbps"} },
+    { "managedObjectId": "Node:P1",             "objectType": "Node",         "attributes": {"vendor": "Acme", "model": "XR-9000", "equipmentType": "router", "role": "P", "capacity": "1.6Tbps"} },
+    { "managedObjectId": "LineCard:PE1-LC2",    "objectType": "LineCard",     "attributes": {"vendor": "Acme", "model": "LC-48x100G", "equipmentType": "lineCard", "role": "transport", "capacity": "4.8Tbps"} },
+    { "managedObjectId": "Port:PE1-LC2-P3",     "objectType": "Port",         "attributes": {"vendor": "Acme", "model": "QSFP28", "equipmentType": "port", "role": "core", "capacity": "100G"} },
+    { "managedObjectId": "Port:P1-LC1-P1",      "objectType": "Port",         "attributes": {"vendor": "Acme", "model": "QSFP28", "equipmentType": "port", "role": "core", "capacity": "100G"} },
     { "managedObjectId": "IPLink:PE1_P1",       "objectType": "IPLink" },
     { "managedObjectId": "IGPAdjacency:PE1_P1", "objectType": "IGPAdjacency" },
     { "managedObjectId": "LSP:PE1-PE9-1",       "objectType": "LSP" },
@@ -625,8 +657,10 @@ structured-log error + non-zero exit (`3`) before any emission (criterion 18).
     { "managedObjectId": "SRLG:SRLG-7",         "objectType": "SRLG" }
   ],
   "edges": [
+    { "from": "Node:PE1",           "to": "Site:LON-01",         "relation": "LOCATED_AT" },
+    { "from": "Node:P1",            "to": "Site:MAN-01",         "relation": "LOCATED_AT" },
     { "from": "LineCard:PE1-LC2",   "to": "Port:PE1-LC2-P3",     "relation": "HOSTED_ON" },
-    { "from": "FiberSpan:F-PE1-P1", "to": "IPLink:PE1_P1",       "relation": "RIDES_ON" },
+    { "from": "FiberSpan:F-PE1-P1", "to": "IPLink:PE1_P1",       "relation": "RIDES_ON",       "attributes": {"linkType": "fiber", "capacity": "100G", "protectionRole": "working"} },
     { "from": "IPLink:PE1_P1",      "to": "IGPAdjacency:PE1_P1", "relation": "ADJACENCY_OVER" },
     { "from": "IPLink:PE1_P1",      "to": "LSP:PE1-PE9-1",       "relation": "TRAVERSES" },
     { "from": "LSP:PE1-PE9-1",      "to": "VPNService:CUST-A",   "relation": "SERVES" },
@@ -634,6 +668,13 @@ structured-log error + non-zero exit (`3`) before any emission (criterion 18).
   ]
 }
 ```
+
+`Site:LON-01` carries geo attributes (`name`/`latitude`/`longitude`/`region`); each device node
+carries the well-known device keys (`vendor`/`model`/`equipmentType`/`role`/`capacity`) and is
+placed in a site via a `LOCATED_AT` edge; connection edges carry `linkType`/`capacity`/
+`protectionRole` where sensible. `SITE_COUNT`/`DEVICES_PER_SITE` control how many sites are
+generated and how devices distribute across them; attribute *values* are pack-grounded (a small
+catalogue of realistic vendors/models/regions, config-influenced where useful).
 
 ### Worked example — fiber-cut cascade `AlarmEvent` records + ground-truth label
 
@@ -727,6 +768,8 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | Kafka client | (a) `kafka-python`; (b) `confluent-kafka` | **`confluent-kafka`** for first-class `enable.idempotence`/`acks=all` and delivery callbacks (librdkafka); `kafka-python` retained as a lighter test double option. |
 | Cascade traversal | (a) recursive per-template; (b) generic BFS over template-relevant edges | **Generic BFS** — single domain-agnostic walker driven by pack template data; supports SRLG fate-sharing and avoids per-template engine code. |
 | Live pacing clock | (a) `time.sleep` on relative offsets; (b) monotonic-scheduler | **Monotonic-clock scheduler** — drift-aware, degrades gracefully, measurable via `simulator_pacing_drift_ms`. |
+| Site placement (#81) | (a) one global site; (b) random device-to-site; (c) `SITE_COUNT`/`DEVICES_PER_SITE` even spread | **Even spread driven by `SITE_COUNT`/`DEVICES_PER_SITE`** — yields realistic site-level grouping the web-ui can visualize, keeps every device placed (exactly one `LOCATED_AT`), and is config-tunable; single-site is a `SITE_COUNT=1` special case. `Site`/`LOCATED_AT` live in the pack as domain-agnostic types so no engine branch. |
+| Attribute values (#81) | (a) hard-coded constants; (b) fully-random strings; (c) small grounded catalogue | **Grounded catalogue in the pack** — realistic vendor/model/equipmentType/region values (config-influenced) so downstream features (e.g. Noise Filter `equipmentType`) are meaningful, while keeping `attributes` descriptive (never identity). Hard-coded rejected (no variety); random strings rejected (not grounded, breaks feature realism). |
 
 ## Test plan
 
@@ -734,9 +777,9 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
-| 1 | Topology snapshot valid & internally consistent | `test_snapshot_internally_consistent` | N=20 build → every Node id `Node:<id>`; every LineCard→existing Node, Port→existing LineCard, IPLink→two existing Ports, SRLG→existing IPLinks; no dangling refs |
+| 1 | Topology snapshot valid & internally consistent | `test_snapshot_internally_consistent` | N=20 build → every Node id `Node:<id>`; every LineCard→existing Node, Port→existing LineCard, IPLink→two existing Ports, SRLG→existing IPLinks; every device has one `LOCATED_AT`→existing `Site`; no dangling refs |
 | 2 | `managedObjectId` shared between snapshot & alarms | `test_alarm_moids_subset_of_snapshot` | every emitted alarm `managedObjectId` ∈ snapshot node ids |
-| 3 | `managedObjectId` conforms to frozen scheme | `test_all_moids_pass_event_model_validator` | every snapshot + alarm moid passes `acp_event_model.validate` (objectType ∈ KNOWN_OBJECT_TYPES, non-empty id) |
+| 3 | `managedObjectId` conforms to the (now domain-agnostic) scheme | `test_all_moids_pass_event_model_validator` | every snapshot + alarm moid (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme (objectType `^[A-Za-z][A-Za-z0-9]*$`, non-empty colon-free id) |
 | 4 | Fiber-cut cascade correct | `test_fiber_cut_cascade_matches_templates` | root alarm on `FiberSpan`; children include `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`/`VPNloss`(VPNService); label root=FiberSpan alarm, children=all downstream |
 | 5 | Line-card & port faults producible & distinguishable | `test_linecard_and_port_scenarios_distinct` | line-card-fault root objectType=`LineCard` (HOSTED_ON cascade), port-fault root objectType=`Port`; labels differ in rootCause object type |
 | 6 | ≥3 noise classes generated | `test_at_least_three_noise_classes` | with noise enabled, ≥3 distinct noise classes emitted; each noise alarm absent from every label.children |
@@ -747,7 +790,7 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | 11 | Topology size configurable, no hard-coded count | `test_topology_size_configurable` | runs N=10 and N=50 → ~10 and ~50 nodes; no default count compiled in (config-driven) |
 | 12 | Timing jitter configurable, no hard-coded value | `test_jitter_configurable` | `jitter_stddev_ms=0` → deterministic intervals; `=500` → varied intervals; distributions differ measurably |
 | 13 | Noise mix configurable, no hard-coded rate | `test_noise_mix_configurable` | rate 0 → zero noise; non-zero → noise present; two mixes → statistically different noise:scenario ratios |
-| 14 | Snapshot validates vs topology-file schema | `test_snapshot_validates_against_schema` | any-run snapshot passes `jsonschema` validation against `topology-snapshot.schema.json`; all required fields + refs well-formed |
+| 14 | Snapshot validates vs topology-file schema | `test_snapshot_validates_against_schema` | any-run snapshot passes `jsonschema` validation against `topology-snapshot.schema.json` (incl. `Site`/`LOCATED_AT`/`attributes`); all required fields + refs well-formed (criterion 27 adds the Site-specific assertions) |
 | 15 | Topology ingestion config-switchable | `test_topology_api_mode_switch` | `TOPOLOGY_API_MODE=mock` → stub used, no real call; `=real` → contacts `TOPOLOGY_API_BASE_URL`; switch needs no code change |
 | 16 | `/health` 200 when running | `test_health_endpoint` | GET `/health` → 200 when started+Kafka up; non-200 before startup / on lost Kafka |
 | 17 | `/metrics` Prometheus format | `test_metrics_endpoint` | GET `/metrics` → 200, `text/plain`, ≥1 metric incl. `simulator_alarms_emitted_total` |
@@ -764,6 +807,9 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 22 | **Background fraction configurable; background alarms are non-pattern.** A configurable fraction of emitted alarms belong to no injected pattern and appear in no label's `children`. | `test_background_fraction_configurable` | `BACKGROUND_FRACTION=0` → no background alarms; `=0.3` → ~30% of emitted alarms in no label.children; vary fraction → measurably different background:signal ratio |
 | 23 | **Hard noise is placed near cascades for DBSCAN stress.** A configurable fraction of noise is placed near a cascade in time and/or on a topology-adjacent object; the rest is clearly separate. | `test_hard_noise_fraction_near_cascade` | `HARD_NOISE_FRACTION=0.4` → ~40% of noise alarms within a near-cascade time/object window of a scenario; remainder clearly separated; still in no label.children |
 | 24 | **History timestamps fall inside the configured window.** P2 alarms' `raisedAt` lie within `[HISTORY_START, HISTORY_END]`. | `test_history_timestamps_within_window` | with a set window, every emitted P2 alarm `raisedAt` ∈ window; invalid window (`START ≥ END`) fails fast (exit 3) |
+| 25 | **Generated topology includes `Site` nodes + `LOCATED_AT` edges (configurable).** The pack emits `Site` nodes (geo attrs) and a `LOCATED_AT` edge per device into a site; counts driven by `SITE_COUNT`/`DEVICES_PER_SITE`. | `test_topology_has_sites_and_located_at` | snapshot has ≥1 `Site` node carrying `name`/`latitude`/`longitude`/`region`; every device node has exactly one `LOCATED_AT` edge whose `to` is a `Site`; `SITE_COUNT=N` → N sites; no device unplaced |
+| 26 | **Devices carry the well-known `attributes` keys (grounded).** Device nodes carry `vendor`/`model`/`equipmentType`/`role`/`capacity`; connection edges carry `linkType`/`capacity`/`protectionRole` where sensible, with pack-grounded values. | `test_device_and_connection_attributes_present` | every device node has the device well-known keys with non-empty pack-catalogue values; connection edges carry the connection keys where the pack populates them; values drawn from the grounded catalogue (not random strings) |
+| 27 | **Snapshot validates against the topology-file schema incl. Site/LOCATED_AT/attributes.** The generated snapshot (with sites, `LOCATED_AT`, attributes) passes the versioned schema and the domain-agnostic `managedObjectId` validator. | `test_snapshot_with_sites_validates` | full snapshot passes `jsonschema` against `topology-snapshot.schema.json` with `Site` in `objectType` enum + `LOCATED_AT` in `relation` enum; every `managedObjectId` (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme; `domain == "core-ip"` |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -780,6 +826,8 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 9 | **Noise-only / scenario-only edges** | `NOISE_RATE=0` then high noise | rate 0 → zero noise alarms; high → labels still pure (noise never in `children`) |
 | 10 | **Evaluation-grade default corpus** | `--phase p2` with only `KAFKA_BOOTSTRAP_SERVERS` (all defaults) | corpus has ≥5 instances per scenario (minable), ~30% background, ~20% noise (~40% hard) over a 24h window; sufficient to compute all five §10 thresholds against the labels |
 | 11 | **Partial path — zero scenarios but background/noise on** | `SCENARIOS=` empty, background/noise > 0 | no labels written; background+noise still emitted; no alarm in any `children`; pattern-quality oracle correctly recovers nothing (no false patterns) |
+| 12 | **P1 snapshot with sites + attributes → Topology** | `--phase p1`, `SITE_COUNT=3`, real/mock Topology | snapshot has 3 `Site` nodes (geo attrs), every device `LOCATED_AT` a site, device/connection well-known `attributes` populated; passes schema; Topology accepts it (validates types/relations incl. `Site`/`LOCATED_AT` against the domain vocabulary) and mints `snapshotId` |
+| 13 | **Partial path — single site** | `--phase p1`, `SITE_COUNT=1` | all devices `LOCATED_AT` the one `Site`; still schema-valid; no unplaced device, no second site |
 
 ## Config & observability
 
@@ -798,6 +846,8 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | Knowledge mode | `KNOWLEDGE_MODE` | `local` | scenario config from local file vs Knowledge Service |
 | Knowledge API base URL | `KNOWLEDGE_API_BASE_URL` | unset (required only when mode=`real`) | Knowledge Service endpoint |
 | Topology size | `TOPOLOGY_NODE_COUNT` | `20` | `Node` count (range 10–200); other layers scale per pack |
+| Site count | `SITE_COUNT` | `3` | number of `Site` nodes (geo attrs); devices placed via `LOCATED_AT` (range 1–node count) |
+| Devices per site | `DEVICES_PER_SITE` | unset → derived (`ceil(devices / SITE_COUNT)`) | target devices per site; when set, `SITE_COUNT` adjusts to fit |
 | Random seed | `SIM_SEED` | unset → random (logged) | deterministic generation when set; reproducible by re-supplying logged seed |
 | Scenario selection | `SCENARIOS` | `fiber-cut,line-card-fault,port-fault` | which scenarios to inject |
 | Scenario-instance count | `SCENARIO_INSTANCES` | `8` (range 5–10) | injections **per** scenario; default guarantees PrefixSpan-minable support |
@@ -817,13 +867,16 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | Log level | `LOG_LEVEL` | `INFO` | structured-log verbosity |
 
 These defaults make a default P2 run produce 8 instances each of 3 scenarios + ~30% background +
-20% noise (40% of it hard) spread over a 24h window — an evaluation-grade set with no tuning.
+20% noise (40% of it hard) spread over a 24h window — an evaluation-grade set with no tuning. The
+P1 snapshot generated with defaults has 3 `Site` nodes with every device `LOCATED_AT` one of them
+and the well-known device/connection `attributes` keys populated from the pack's grounded catalogue.
 - **`/health`** — 200 when started + Kafka connected; non-200 otherwise.
 - **`/metrics`** — Prometheus exposition incl. `simulator_alarms_emitted_total{topic,scenario}`,
   `simulator_scenarios_injected_total{scenario}` (counts instances per scenario),
   `simulator_background_alarms_total`, `simulator_noise_alarms_total{class}`,
   `simulator_hard_noise_alarms_total`, `simulator_produce_errors_total`,
-  `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`.
+  `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`, `simulator_snapshot_sites`,
+  `simulator_snapshot_edges{relation}` (incl. `relation="LOCATED_AT"`).
 - **Logging** — structured JSON on stdout (one object per line): `ts, level, event, runId,
   scenarioId?, msg`.
 
