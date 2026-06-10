@@ -353,7 +353,7 @@ sequenceDiagram
     R->>KP: serialize TypedEnvelope[AlarmEvent]
     KP->>K: produce to alarms.history (acks=all, idempotent)
   end
-  R-->>CLI: counts; L.export_to_file(labels-(runId).jsonl)
+  R-->>CLI: counts, then L.export_to_file writes labels-runId.jsonl
 ```
 
 ### (c) P3 — live replay to `alarms.live` (wall-clock paced)
@@ -375,7 +375,7 @@ sequenceDiagram
     R->>KP: serialize TypedEnvelope[AlarmEvent]
     KP->>K: produce to alarms.live
   end
-  Note over R,K: zero events to alarms.history; inter-event delay > 0 for pacing>0
+  Note over R,K: zero events to alarms.history, inter-event delay above 0 for pacing above 0
 ```
 
 ## Algorithm logical flow
