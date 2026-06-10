@@ -117,7 +117,8 @@ API.
 ## Invariants
 Identity binding: alarms use the same `managedObjectId` as the graph (defined in event-model).
 The `managedObjectId` scheme is **domain-agnostic**: format `<objectType>:<id>` where `objectType`
-is any alphanumeric token and `id` is non-empty with no colon. The **valid `objectType` set and
+is an alphanumeric token starting with a letter (`^[A-Za-z][A-Za-z0-9]*$`) and `id` is non-empty
+with no colon. The **valid `objectType` set and
 edge-relation vocabulary for a domain are authored in the Knowledge Service** (domain-scoped), not
 frozen in the event-model — so a new domain adds its types without an event-model contract change
 (see "Domain extensibility"). The Topology ingestion API validates an uploaded snapshot's
