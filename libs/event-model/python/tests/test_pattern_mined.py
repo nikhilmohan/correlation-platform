@@ -72,3 +72,19 @@ def test_provenance_is_nested_object() -> None:
     assert env.payload.provenance.sourceWindowId == "TXN-0001"
     assert env.payload.provenance.snapshotId == "SNAP-2026-06-08-001"
     assert env.payload.provenance.codebookVersion == "CODEBOOK-2026-06-08-001"
+
+
+def test_provenance_domain_present_round_trips() -> None:
+    """Optional `domain` lives in provenance and round-trips (fixture carries core-ip)."""
+    env = m.deserialize(_mined())
+    assert env.payload.provenance.domain == "core-ip"
+    out = json.loads(m.serialize(env))
+    assert out["payload"]["provenance"]["domain"] == "core-ip"
+
+
+def test_provenance_domain_absent_is_optional() -> None:
+    """`domain` is optional in provenance (not required) — absence is valid -> None."""
+    env = _mined()
+    del env["payload"]["provenance"]["domain"]
+    typed = m.deserialize(env)
+    assert typed.payload.provenance.domain is None
