@@ -171,7 +171,10 @@ Topology is loaded by **file upload to an API**, not by a Kafka event:
   structured file (JSON) describing the typed nodes and edges of the graph. It carries a `domain`
   identifier; the node `objectType`s and edge `relation`s come from **that domain's vocabulary
   authored in the Knowledge Service** (for the Core IP domain: the §"Topology Graph Model" types
-  Node/LineCard/Port/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG and their edges). Every
+  Node/LineCard/Port/**Interface**/IPLink/IGPAdjacency/LSP/VPNService/FiberSpan/SRLG and their
+  edges — note **Interface** is the L3 endpoint on a Port, and IP links/adjacencies are between
+  interfaces; protocol-connectivity layers beyond IGP, e.g. BGP, are a future Knowledge-vocabulary
+  addition, not in MVP). Every
   object carries its `managedObjectId` in the canonical `<objectType>:<id>` scheme. The **file
   schema is a contract** (versioned; a change to its *structure* requires an `architecture.md`/spec
   update + human approval — but adding a new domain's *types/relations* does not, since those are
