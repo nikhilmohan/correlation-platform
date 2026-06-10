@@ -7,6 +7,7 @@
   "traceId": "trace-topo-0001",
   "payload": {
     "snapshotId": "SNAP-2026-06-08-001",
+    "domain": "core-ip",
     "changeType": "full-load",
     "nodes": [
       { "managedObjectId": "Node:PE1", "objectType": "Node" },
