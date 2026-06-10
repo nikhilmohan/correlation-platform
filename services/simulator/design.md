@@ -64,6 +64,13 @@ the `integration-test` harness asserts across all phases.
 The codebase is split into a **domain-agnostic engine** and a **swappable domain pack**. This split
 is the structural realization of spec Task 8 / criterion 19.
 
+> **The synthesizer.** The engine modules `topology_builder`, `cascade`, `scenario_runner`,
+> `noise`, and `labels` collectively form the **synthesizer** — the component that turns *config +
+> the domain pack* into the topology snapshot and the labeled, evaluation-grade alarm corpus.
+> Everywhere this design says "the synthesizer", it means these engine modules acting together
+> (driven by the seeded RNG and the pack's grounded model). `replay` then ships what the
+> synthesizer produced; `integrations` move it onto Kafka / the Topology API.
+
 ```mermaid
 flowchart TB
   subgraph cli["entrypoint / CLI"]
@@ -339,22 +346,29 @@ sequenceDiagram
   participant KP as kafka_producer
   participant K as Kafka alarms.history
 
-  CLI->>SL: load(scenarios, jitter, noiseMix)
-  SL-->>CLI: scenario defs + params
-  loop each scenario
-    SR->>C: propagate(rootCauseNode, templates, graph, jitter)
+  CLI->>SL: load(scenarios, instances, jitter, intervals, noiseMix, background, window)
+  SL-->>CLI: scenario defs + synthesis params
+  loop each scenario x SCENARIO_INSTANCES
+    SR->>C: propagate(randomFaultOrigin, templates, graph, baseInterval+jitter)
     C-->>SR: ordered [rootCauseAlarm, childAlarm...]
     SR->>L: record {rootCause, children}
   end
-  SR->>N: generate noise (at least 3 classes, configured rate)
+  SR->>N: generate noise (3plus classes, NOISE_RATE, HARD_NOISE_FRACTION near cascades)
   N-->>SR: noise alarms (not in any label.children)
-  SR->>R: merged, time-ordered alarm stream
+  SR->>SR: add BACKGROUND_FRACTION non-pattern alarms (in no label.children)
+  SR->>R: merge + spread over [HISTORY_START, HISTORY_END]
   loop each alarm
     R->>KP: serialize TypedEnvelope[AlarmEvent]
     KP->>K: produce to alarms.history (acks=all, idempotent)
   end
   R-->>CLI: counts, then L.export_to_file writes labels-runId.jsonl
 ```
+
+P2 batch timing: relative inter-event gaps (`BASE_INTERVAL_MS`/`BACKGROUND_INTERVAL_MS` + jitter)
+are computed first, then the whole ordered stream is **mapped onto the `[HISTORY_START,
+HISTORY_END]` wall-clock window** so each alarm's `raisedAt`/`occurredAt` falls inside the
+configured historical window (batch emit is still fire-and-flush — the window sets the timestamps,
+not the emit rate). P3 instead uses live wall-clock + `PACING_MULTIPLIER` (below).
 
 ### (c) P3 — live replay to `alarms.live` (wall-clock paced)
 
@@ -367,7 +381,7 @@ sequenceDiagram
   participant KP as kafka_producer
   participant K as Kafka alarms.live
 
-  CLI->>SR: build labeled+noise stream (same as P2)
+  CLI->>SR: build labeled+noise+background stream (same synthesis as P2)
   SR-->>R: time-ordered alarms with relative offsets
   loop each alarm i
     R->>Clock: sleep(offset_i * PACING_MULTIPLIER + jitter)
@@ -411,6 +425,80 @@ Notes:
 - All template data and alarm X.733 shapes come from the pack; `cascade.py` only walks edges and
   applies whatever template the pack provides → engine stays domain-agnostic (criterion 19).
 
+### Randomization scope (what is random, how it stays grounded)
+
+Everything stochastic in the synthesizer is driven by **one seeded RNG** (`SIM_SEED` → a single
+`random.Random`/`numpy.random.Generator` threaded through `topology_builder`, `scenario_runner`,
+`cascade`, and `noise`). Same seed → identical run (criterion 12 determinism). Every random choice
+is **bounded by the pack's grounded model** so the §5 propagation grounding is never violated.
+
+| What is randomized | How | Grounding constraint (never violated) |
+|---|---|---|
+| **Fault-origin instance** per scenario | RNG picks uniformly among the **valid fault-origin-type instances** the pack exposes for that scenario (e.g. a `FiberSpan` for fiber-cut, a `LineCard` for line-card-fault, a `Port` for port-fault) | only object instances of the scenario's declared fault-origin type are eligible; cascade then follows the pack templates — no impossible origin |
+| **Child-alarm timing** | `delay = BASE_INTERVAL_MS + gauss(0, JITTER_STDDEV_MS)` per inter-alarm gap | delay clamped ≥ 0; ordering still respects the causal BFS — a child never precedes its parent |
+| **Noise placement / object / class / timing** | RNG selects noise class per `NOISE_MIX`, the target object, and the time offset; `HARD_NOISE_FRACTION` decides near-cascade vs. clearly-separate placement | noise objects/shapes come from the pack's noise library; a noise alarm is **never** added to any label's `children` (criterion 6) |
+| **Scenario-instance ordering / interleaving** | the `SCENARIO_INSTANCES` copies of each scenario and the background alarms are interleaved on the timeline by the RNG | each instance is an independent cascade with its own ids; interleaving never merges two scenarios' children |
+| **Background-alarm objects / timing** | RNG places `BACKGROUND_FRACTION` of alarms on random in-topology objects at `BACKGROUND_INTERVAL_MS` spacing | background alarms are valid X.733 alarms on real objects but belong to no scenario → in no label's `children` |
+
+Because every choice is constrained to pack-valid instances and the cascade always replays the §5
+templates over the real graph closure, **randomization produces variety, never an impossible
+cascade or an off-contract alarm shape**. The chosen fault-origin instances, child timing, noise,
+and interleaving differ run-to-run only when the seed differs.
+
+### Synthesis strategy / evaluation-grade data (P2 / P3)
+
+The synthesizer does **not** emit an arbitrary alarm soup — it deliberately produces a corpus that
+**strongly exercises the downstream learning + noise services** and is **sufficient to compute the
+§10 thresholds meaningfully**. Three properties are engineered in, all config-driven with smart
+defaults (a default run is evaluation-grade without tuning):
+
+1. **Repeated pattern instances (minable support).** Each selected scenario is injected
+   `SCENARIO_INSTANCES` times (**default 8**, range 5–10). The **Pattern Miner uses PrefixSpan**,
+   which only mines a sequence whose support clears a minimum-support threshold — a *single*
+   instance of a cascade can never be mined. Injecting N≈8 grounded repetitions of each scenario
+   signature **guarantees minable support** for every injected pattern, so pattern quality
+   (recovered ÷ injected, §10 ≥ 0.80) is measurable rather than vacuously zero. Each instance is an
+   independent cascade (fresh ids, possibly different fault-origin instance) but the **same ordered
+   probable-cause signature**, which is exactly what PrefixSpan recovers.
+
+2. **Fair share of non-pattern / background alarms.** `BACKGROUND_FRACTION` (**default 0.3**) of
+   emitted alarms belong to **no injected pattern** — valid alarms on real objects that appear in
+   **no** label's `children`. This forces pattern learning to *discriminate signal from background*
+   (a corpus of pure cascades would let any miner "win" trivially) and makes the alarm-reduction
+   metric (§10 ≥ 5×) meaningful: there is genuine volume to reduce. This extends the existing noise
+   mechanism (label-absence ⇒ not signal) into a deliberate, tunable background fraction.
+
+3. **Evaluation-grade noise for DBSCAN (hard cases).** The **Noise Filter clusters with DBSCAN**
+   (dense incident clusters vs. sparse outliers). Easy, clearly-separate noise is trivially
+   filtered and would over-state effectiveness. So `HARD_NOISE_FRACTION` (**default 0.4**) of noise
+   is placed **near a cascade in time and/or on a topology-adjacent object** — sitting close to a
+   dense incident cluster so DBSCAN must separate it under stress — while the remainder is
+   clearly-separate easy noise. This stresses both removal (§10 ≥ 0.90) and retention (real alarms
+   kept, §10 ≥ 0.95): a filter that just deletes everything near a cluster fails retention; one
+   that keeps everything fails removal.
+
+**Sufficiency for the §10 thresholds.** Putting the three together, a default P2/P3 run yields:
+enough *repeated* pattern instances to recover (pattern quality), enough *labeled* scenarios to
+score root-cause matches (RCA accuracy), enough *background volume* to reduce (alarm-reduction),
+and enough *hard+easy noise* to remove while retaining signal (noise-filter removal/retention). The
+ground-truth labels (§ Data model) and the per-class noise tagging are the oracle that lets the
+integration harness compute each metric.
+
+```mermaid
+flowchart TD
+  CFG[Config + domain pack] --> SYN[Synthesizer]
+  SYN --> P[Repeated pattern instances<br/>SCENARIO_INSTANCES default 8 per scenario]
+  SYN --> B[Background / non-pattern alarms<br/>BACKGROUND_FRACTION default 0.3]
+  SYN --> NH[Hard noise near cascades<br/>HARD_NOISE_FRACTION default 0.4]
+  SYN --> NE[Easy / clearly-separate noise]
+  P --> MINE[Pattern Miner / PrefixSpan<br/>minable support, pattern quality]
+  B --> MINE
+  B --> RED[Alarm-reduction ratio, volume to reduce]
+  NH --> DB[Noise Filter / DBSCAN<br/>removal under stress + retention]
+  NE --> DB
+  P --> RCA[Labeled root causes, RCA accuracy]
+```
+
 ### Domain-pack abstraction (engine vs. Core-IP pack)
 
 ```mermaid
@@ -430,23 +518,90 @@ domain = adding a new `DomainPack` implementation, no engine edit.
 
 The simulator's heart: generation/seed scripts + config knobs + concrete worked output.
 
+### CLI usage (the uniform interface)
+
+There is **one CLI** — `python -m simulator.main` — with a **phase/mode selector**. The phase
+chooses *what the run does*; everything else is env config (see the authoritative defaults table in
+*Config & observability*). `--help` prints exactly this usage and exits `0`.
+
+```text
+usage: python -m simulator.main --phase {p1,p2,p3} [--mode {upload,history,live}]
+                                [--config PATH] [--dry-run] [--help]
+
+One simulator, three phases (the phase selects which generation/replay flow runs):
+
+  --phase p1   Ingest topology  : build the typed Core-IP topology, write the
+                                  versioned snapshot file, and upload it to the
+                                  Topology ingestion API (mock or real per env).
+                                  No Kafka emission.
+  --phase p2   Historical alarms: synthesize the labeled corpus (scenarios x N
+                                  instances + background + noise) and BATCH-replay
+                                  it to alarms.history, spread over the configured
+                                  history time window. Writes the label export.
+  --phase p3   Live alarms      : synthesize the same labeled stream and replay it
+                                  to alarms.live wall-clock paced (PACING_MULTIPLIER).
+                                  Writes the label export.
+
+Options:
+  --mode {upload,history,live}  Optional explicit alias for the phase action
+                                (upload=p1, history=p2, live=p3). If both --phase
+                                and --mode are given they must agree, else exit 2.
+  --config PATH                 Path to a scenario/config file (overrides the
+                                KNOWLEDGE_MODE=local default file location).
+  --dry-run                     Build + validate + log the planned run (counts,
+                                time window, target topic) WITHOUT emitting or
+                                uploading. Verifies config; exits 0 on valid config.
+  --help                        Print this usage and exit 0.
+
+Exit codes:
+  0   success (run completed, or --help, or --dry-run on valid config)
+  2   invalid CLI usage (bad/missing --phase, conflicting --phase/--mode)
+  3   invalid or missing required config (validated at startup; structured-log
+      error, ZERO events emitted) — see criterion 18
+  4   dependency failure (Topology ingestion API unreachable after bounded retry,
+      or Kafka broker unreachable / persistent produce failure) — run fails loudly
+```
+
+Every exit path emits a structured JSON log line. Any non-zero exit before emission guarantees
+zero events were produced (criterion 18). Runnable straight from this doc:
+
+```bash
+# P1 — build + upload topology against a mock Topology (no broker needed)
+TOPOLOGY_API_MODE=mock python -m simulator.main --phase p1
+
+# P2 — evaluation-grade history corpus to alarms.history (all defaults; minimal env)
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --phase p2
+
+# P3 — live paced stream to alarms.live
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --phase p3
+```
+
 ### Generation scripts & knobs
 
-- **Entry point:** `python -m simulator.main --phase {p1|p2|p3}` (or `--mode {upload|history|live}`).
-  All knobs are env/config (no hard-coded values):
+All knobs are env/config (no hard-coded values). The authoritative **DEFAULTS table** is in
+*Config & observability* below — every knob has a default, and **defaults apply when a var is not
+provided**, so `python -m simulator.main --phase p2` runs an evaluation-grade demo with minimal
+env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 
-| Knob | Env var | Example | Effect |
-|---|---|---|---|
-| Topology size | `TOPOLOGY_NODE_COUNT` | `20` (range 10–200) | number of `Node`s; line cards/ports/links scale per pack ratios |
-| Random seed | `SIM_SEED` | `42` | **OQ-3 decision: deterministic generation supported** — same seed → same topology + cascade structure + timing offsets; ids still fresh per run |
-| Timing jitter | `JITTER_STDDEV_MS` | `0` or `500` | std-dev of per-gap delay noise |
-| Noise rate/mix | `NOISE_RATE`, `NOISE_MIX` | `0.0`..`0.4`, `flapping:0.4,transient:0.3,chatty:0.2,coincidental:0.1` | fraction of total alarms that are noise + class weights |
-| Scenario selection | `SCENARIOS` | `fiber-cut,line-card-fault,port-fault` | which scenarios to inject |
-| Replay pacing | `PACING_MULTIPLIER` | `1.0` (live only) | wall-clock scale of inter-event delays |
+| Knob group | Env var(s) | Effect |
+|---|---|---|
+| Topology size | `TOPOLOGY_NODE_COUNT` | number of `Node`s; line cards/ports/links scale per pack ratios |
+| Random seed | `SIM_SEED` | **OQ-3 decision: deterministic generation supported** — same seed reproduces topology, cascade structure, timing offsets, and all RNG-driven choices; ids still fresh per run. Unset → random seed, logged so the run stays reproducible by re-supplying it |
+| Timing jitter | `JITTER_STDDEV_MS` | std-dev of per-gap delay noise (Gaussian, applied on top of the base interval) |
+| Inter-arrival interval | `BASE_INTERVAL_MS`, `BACKGROUND_INTERVAL_MS` | base inter-event spacing inside a cascade, and mean spacing between background/non-pattern alarms (jitter applied on top) |
+| Noise rate/mix | `NOISE_RATE`, `NOISE_MIX` | fraction of total alarms that are noise + class weights |
+| Background fraction | `BACKGROUND_FRACTION` | fraction of emitted alarms belonging to no injected pattern (signal-vs-background discrimination) |
+| Scenario selection | `SCENARIOS` | which scenarios to inject |
+| Scenario-instance count | `SCENARIO_INSTANCES` | how many times **each** selected scenario is injected (drives minable pattern support) |
+| History time window | `HISTORY_START`, `HISTORY_END` (or `HISTORY_DURATION`) | P2 wall-clock window the historical alarms are spread over |
+| Replay pacing | `PACING_MULTIPLIER` | wall-clock scale of inter-event delays (live only) |
+| Hard-noise fraction | `HARD_NOISE_FRACTION` | fraction of noise placed *near* a cascade in time/object (DBSCAN stress) vs. clearly-separate easy noise |
 
-`scenario_loader` validates: jitter ≥ 0, noise rate ∈ [0,1], scenarios ⊆ pack library, node count ∈
-[10,200]. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal structured-log error +
-non-zero exit before any emission (criterion 18).
+`settings` / `scenario_loader` validate (fail-fast, criterion 18): jitter ≥ 0, base/background
+interval > 0, noise rate ∈ [0,1], `BACKGROUND_FRACTION` ∈ [0,1], `HARD_NOISE_FRACTION` ∈ [0,1],
+`SCENARIO_INSTANCES` ≥ 1, scenarios ⊆ pack library, node count ∈ [10,200], and (P2)
+`HISTORY_START` < `HISTORY_END`. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal
+structured-log error + non-zero exit (`3`) before any emission (criterion 18).
 
 ### Worked example — topology snapshot file fragment (small N, fiber-cut-ready)
 
@@ -600,6 +755,16 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | 19 | Domain-pack separation — no Core-IP literals in engine | `test_engine_has_no_coreip_literals` | `DomainPack` Protocol exists; engine source contains no Core-IP object-type/template/alarm/scenario literals (static scan of `engine/`) |
 | 20 | Integration thresholds owned by spec, from config | `test_thresholds_sourced_from_config` | the five thresholds present in harness config (0.80/5/0.90/0.95/0.80), not hard-coded literals in service code |
 
+**Design-added criteria (synthesis strategy — not new contract, internal generation behaviour).**
+These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping above is unchanged.
+
+| # | Acceptance criterion (design-added) | Test | Asserts |
+|---|---|---|---|
+| 21 | **Scenario-instance count drives minable support — configurable, default minable.** Each selected scenario is injected `SCENARIO_INSTANCES` times; default (8) yields ≥ minimum-support repetitions of each scenario signature. | `test_scenario_instances_repeats_signature` | `SCENARIO_INSTANCES=N` → exactly N labels per scenario type; each instance shares the same ordered probable-cause signature with fresh ids; default ≥ 5 (PrefixSpan-minable) |
+| 22 | **Background fraction configurable; background alarms are non-pattern.** A configurable fraction of emitted alarms belong to no injected pattern and appear in no label's `children`. | `test_background_fraction_configurable` | `BACKGROUND_FRACTION=0` → no background alarms; `=0.3` → ~30% of emitted alarms in no label.children; vary fraction → measurably different background:signal ratio |
+| 23 | **Hard noise is placed near cascades for DBSCAN stress.** A configurable fraction of noise is placed near a cascade in time and/or on a topology-adjacent object; the rest is clearly separate. | `test_hard_noise_fraction_near_cascade` | `HARD_NOISE_FRACTION=0.4` → ~40% of noise alarms within a near-cascade time/object window of a scenario; remainder clearly separated; still in no label.children |
+| 24 | **History timestamps fall inside the configured window.** P2 alarms' `raisedAt` lie within `[HISTORY_START, HISTORY_END]`. | `test_history_timestamps_within_window` | with a set window, every emitted P2 alarm `raisedAt` ∈ window; invalid window (`START ≥ END`) fails fast (exit 3) |
+
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
@@ -613,18 +778,52 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | 7 | **Failure — broker unavailable** | `--phase p2`, bad `KAFKA_BOOTSTRAP_SERVERS` | produce errors logged + counted; `/health` non-200; run fails non-zero; no silent drop |
 | 8 | **Failure — invalid scenario config** | unknown scenario / negative jitter | startup validation aborts run with structured error, zero events emitted |
 | 9 | **Noise-only / scenario-only edges** | `NOISE_RATE=0` then high noise | rate 0 → zero noise alarms; high → labels still pure (noise never in `children`) |
+| 10 | **Evaluation-grade default corpus** | `--phase p2` with only `KAFKA_BOOTSTRAP_SERVERS` (all defaults) | corpus has ≥5 instances per scenario (minable), ~30% background, ~20% noise (~40% hard) over a 24h window; sufficient to compute all five §10 thresholds against the labels |
+| 11 | **Partial path — zero scenarios but background/noise on** | `SCENARIOS=` empty, background/noise > 0 | no labels written; background+noise still emitted; no alarm in any `children`; pattern-quality oracle correctly recovers nothing (no false patterns) |
 
 ## Config & observability
 
-- **Env config (validated at startup; no hard-coded values):** `KAFKA_BOOTSTRAP_SERVERS`,
-  `TOPOLOGY_API_MODE`, `TOPOLOGY_API_BASE_URL`, `KNOWLEDGE_MODE`, `KNOWLEDGE_API_BASE_URL`,
-  `TOPOLOGY_NODE_COUNT`, `SCENARIOS`, `JITTER_STDDEV_MS`, `NOISE_RATE`, `NOISE_MIX`,
-  `PACING_MULTIPLIER`, `SIM_SEED`, `SIM_OUTPUT_DIR`, `INTEGRATION_THRESHOLDS`, `HTTP_PORT`,
-  `LOG_LEVEL`. Missing required → structured error + non-zero exit.
+#### Authoritative DEFAULTS table (config knob → env var → default → effect)
+
+Every knob has a default. **Defaults apply when the var is not provided** and are chosen so a small
+demo run is **evaluation-grade out of the box** — `python -m simulator.main --phase p2` runs with
+only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fast if missing
+(criterion 18, exit 3).
+
+| Knob | Env var | Default | Effect |
+|---|---|---|---|
+| Kafka brokers | `KAFKA_BOOTSTRAP_SERVERS` | **required** (P2/P3) | broker list; missing in P2/P3 → fail fast |
+| Topology API mode | `TOPOLOGY_API_MODE` | `mock` | `mock` stub vs `real` Topology ingestion |
+| Topology API base URL | `TOPOLOGY_API_BASE_URL` | unset (required only when mode=`real`) | real ingestion endpoint |
+| Knowledge mode | `KNOWLEDGE_MODE` | `local` | scenario config from local file vs Knowledge Service |
+| Knowledge API base URL | `KNOWLEDGE_API_BASE_URL` | unset (required only when mode=`real`) | Knowledge Service endpoint |
+| Topology size | `TOPOLOGY_NODE_COUNT` | `20` | `Node` count (range 10–200); other layers scale per pack |
+| Random seed | `SIM_SEED` | unset → random (logged) | deterministic generation when set; reproducible by re-supplying logged seed |
+| Scenario selection | `SCENARIOS` | `fiber-cut,line-card-fault,port-fault` | which scenarios to inject |
+| Scenario-instance count | `SCENARIO_INSTANCES` | `8` (range 5–10) | injections **per** scenario; default guarantees PrefixSpan-minable support |
+| Timing jitter | `JITTER_STDDEV_MS` | `300` | Gaussian std-dev of per-gap delay, on top of base interval |
+| Base interval | `BASE_INTERVAL_MS` | `400` | base inter-alarm spacing inside a cascade |
+| Background interval | `BACKGROUND_INTERVAL_MS` | `2000` | mean spacing between background/non-pattern alarms |
+| Background fraction | `BACKGROUND_FRACTION` | `0.3` | fraction of emitted alarms in no injected pattern (signal-vs-background) |
+| Noise rate | `NOISE_RATE` | `0.2` | fraction of total alarms that are noise |
+| Noise mix | `NOISE_MIX` | `flapping:0.4,transient:0.3,chatty:0.2,coincidental:0.1` | noise class weights (≥3 classes) |
+| Hard-noise fraction | `HARD_NOISE_FRACTION` | `0.4` | fraction of noise placed near a cascade (DBSCAN stress) vs easy/separate |
+| History window start | `HISTORY_START` | `now − 24h` | P2 historical window start (`raisedAt` lower bound) |
+| History window end | `HISTORY_END` | `now` | P2 historical window end (or set `HISTORY_DURATION` instead) |
+| Replay pacing | `PACING_MULTIPLIER` | `1.0` | P3 wall-clock scale of inter-event delays |
+| Output dir | `SIM_OUTPUT_DIR` | `/data/sim` | snapshot + label export location |
+| Integration thresholds | `INTEGRATION_THRESHOLDS` | checked-in `integration-thresholds.yaml` | §10 targets (harness reads; not asserted here) |
+| HTTP port | `HTTP_PORT` | `8080` | `/health`, `/metrics`, `/labels` |
+| Log level | `LOG_LEVEL` | `INFO` | structured-log verbosity |
+
+These defaults make a default P2 run produce 8 instances each of 3 scenarios + ~30% background +
+20% noise (40% of it hard) spread over a 24h window — an evaluation-grade set with no tuning.
 - **`/health`** — 200 when started + Kafka connected; non-200 otherwise.
 - **`/metrics`** — Prometheus exposition incl. `simulator_alarms_emitted_total{topic,scenario}`,
-  `simulator_scenarios_injected_total`, `simulator_noise_alarms_total{class}`,
-  `simulator_produce_errors_total`, `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`.
+  `simulator_scenarios_injected_total{scenario}` (counts instances per scenario),
+  `simulator_background_alarms_total`, `simulator_noise_alarms_total{class}`,
+  `simulator_hard_noise_alarms_total`, `simulator_produce_errors_total`,
+  `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`.
 - **Logging** — structured JSON on stdout (one object per line): `ts, level, event, runId,
   scenarioId?, msg`.
 
@@ -637,8 +836,8 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 - **Dockerfile:** `python:3.13-slim` base (per CI pins); installs `acp-event-model` from
   `libs/event-model/python`; `CMD` runs `python -m simulator.main`. Compose entry wires
   `KAFKA_BOOTSTRAP_SERVERS` + `TOPOLOGY_API_BASE_URL` to the integration stack.
-- **Local run:** `TOPOLOGY_API_MODE=mock KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-  TOPOLOGY_NODE_COUNT=20 python -m simulator.main --phase p2`.
+- **Local run (minimal — all defaults apply):** `KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+  python -m simulator.main --phase p2` produces an evaluation-grade corpus with no further env.
 
 ## UI wireframes
 
