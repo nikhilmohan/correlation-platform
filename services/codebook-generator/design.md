@@ -155,7 +155,7 @@ erDiagram
     uuid    scenario_id PK
     uuid    codebook_id FK
     text    fault_origin_object_id  "managedObjectId <objectType>:<id>"
-    text    fault_origin_type       "Fiber|LineCard|Port|Node (from Knowledge list)"
+    text    fault_origin_type       "Fiber / LineCard / Port / Node (from Knowledge list)"
     jsonb   predicted_symptoms      "ORDERED list of {objectId, alarmType} — the signature"
     jsonb   trail_ids               "string[] from Trail Builder"
   }
