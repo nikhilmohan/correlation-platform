@@ -1,13 +1,17 @@
 # Integration environment for the AI/ML Alarm Correlation Platform (Core IP MVP).
 #
-# Starter scope: infrastructure only — Apache Kafka (KRaft, single broker) and Apache AGE
-# (PostgreSQL + graph extension). Per-service app containers, Kafka topic creation, and the
-# Spark runtime for pattern-miner are DEFERRED (see the commented block at the bottom) and
-# added as each service is built.
+# Starter scope: infrastructure only — Apache Kafka (KRaft, single broker), NebulaGraph
+# (the topology graph: metad + storaged + graphd), and PostgreSQL (topology snapshot metadata +
+# the relational stores owned by other services). Per-service app containers, Kafka topic
+# creation, and the Spark runtime for pattern-miner are DEFERRED (see the commented block at the
+# bottom) and added as each service is built.
 #
-# Permissive images only: apache/kafka (Apache-2.0) and apache/age (PostgreSQL license).
-# Explicitly NOT Confluent, NOT Redpanda, NOT ZooKeeper. No Schema Registry — event-model's
-# in-repo JSON Schema is the contract.
+# Permissive images only: apache/kafka (Apache-2.0), vesoft/nebula-* (Apache-2.0), and
+# postgres (PostgreSQL license). Explicitly NOT Confluent, NOT Redpanda, NOT ZooKeeper. No
+# Schema Registry — event-model's in-repo JSON Schema is the contract.
+#
+# Only the Topology Service connects to NebulaGraph (nGQL, abstracted behind its API); no other
+# service receives graph credentials or endpoints.
 
 name: correlation-platform
 
@@ -44,9 +48,9 @@ services:
     networks:
       - cp-net
 
-  postgres-age:
-    image: apache/age:latest
-    container_name: cp-postgres-age
+  postgres:
+    image: postgres:16
+    container_name: cp-postgres
     ports:
       - "5432:5432"
     environment:
@@ -55,10 +59,77 @@ services:
       POSTGRES_DB: correlation
     volumes:
       - pg-data:/var/lib/postgresql/data
-      # Place *.sql here to bootstrap schemas / `CREATE EXTENSION age;` on first start.
+      # Place *.sql here to bootstrap per-service schemas (topology snapshot metadata, pattern
+      # store, incident store, knowledge store, live alarm store) on first start.
       - ./infra/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U correlation -d correlation"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
+  # --- NebulaGraph (topology graph) — metad + storaged + graphd. Only the Topology Service
+  #     connects (port 9669, nGQL). All three daemons are Apache-2.0 (vesoft/nebula-*). ---
+  nebula-metad:
+    image: vesoft/nebula-metad:v3.8.0
+    container_name: cp-nebula-metad
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-metad
+      - --ws_ip=nebula-metad
+      - --port=9559
+      - --data_path=/data/meta
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://nebula-metad:19559/status >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - nebula-meta:/data/meta
+    networks:
+      - cp-net
+
+  nebula-storaged:
+    image: vesoft/nebula-storaged:v3.8.0
+    container_name: cp-nebula-storaged
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-storaged
+      - --ws_ip=nebula-storaged
+      - --port=9779
+      - --data_path=/data/storage
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://nebula-storaged:19779/status >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - nebula-storage:/data/storage
+    networks:
+      - cp-net
+
+  nebula-graphd:
+    image: vesoft/nebula-graphd:v3.8.0
+    container_name: cp-nebula-graphd
+    ports:
+      - "9669:9669"      # nGQL endpoint — Topology Service only
+    command:
+      - --meta_server_addrs=nebula-metad:9559
+      - --local_ip=nebula-graphd
+      - --ws_ip=nebula-graphd
+      - --port=9669
+    depends_on:
+      nebula-metad:
+        condition: service_healthy
+      nebula-storaged:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://nebula-graphd:19669/status >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -79,11 +150,17 @@ services:
 #        patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq)
 #     - spark: PySpark runtime for pattern-miner (container-only)
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
+#     - nebula-init: one-shot container that runs `ADD HOSTS "nebula-storaged":9779;` against
+#       nebula-graphd (port 9669) after first boot — NebulaGraph requires storaged hosts to be
+#       registered with metad before a graph space can be used. (Owned by the Topology Service's
+#       bootstrap once it is built.)
 # -----------------------------------------------------------------------------------------
 
 volumes:
   kafka-data:
   pg-data:
+  nebula-meta:
+  nebula-storage:
 
 networks:
   cp-net:
