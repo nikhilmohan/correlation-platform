@@ -11,6 +11,12 @@ the Pattern Miner's session-window and PrefixSpan stages. All DBSCAN parameters 
 minSamples, window size) are sourced from the Knowledge Service — no thresholds are
 hard-coded in the service.
 
+Previously the service was fire-and-forget with respect to operational visibility: clustering
+decisions were only metric-counted and debug-logged, nothing was persisted, and there was no
+UI presence. This spec adds lightweight operational visibility: the service now persists one
+aggregate stats record per finalized trail-window clustering execution and exposes a read API
+so the web-ui can present run history in its correlation-stats module.
+
 ## Scope
 
 **In scope:**
@@ -33,6 +39,21 @@ hard-coded in the service.
 - Deduplicate consumed events on `eventId` (at-least-once Kafka delivery).
 - Expose `/health` and `/metrics` (Prometheus); emit structured JSON logs.
 - Package as a Docker container with a Compose entry.
+- **[NEW] Record one aggregate run-stats row per finalized trail-window execution** in the
+  service's owned PostgreSQL run-stats table. Each row captures the identity of the run
+  (`runId`, `runTimestamp`, `trailId`, `snapshotId`, `domain` if available, `windowStart`,
+  `windowEnd`), the DBSCAN/HDBSCAN params actually used (`eps`, `minSamples`, `windowSize`,
+  `algorithm`), and the aggregate counts of that execution (`alarmsIn`, `clustersFormed`,
+  `alarmsKept`, `alarmsDropped`, `noiseRatio`). The stats write is best-effort and
+  non-blocking: a write failure must not prevent the clustering pipeline from emitting
+  `TransactionEvent`s; failures are logged as structured entries and counted in `/metrics`.
+- **[NEW] Expose a read API** (the service's first HTTP business surface beyond `/health` and
+  `/metrics`) for querying run-stats records: list recent runs with optional filtering by
+  `trailId` and/or time range; return the aggregate stats fields listed above. The API is
+  read-only. It is published as an OpenAPI 3.1 document at `/openapi.json` and checked into
+  `services/noise-filter/`, per the `architecture.md` API-contract convention. Exact endpoint
+  paths, query-parameter names, and response schema are a design-stage decision (see Open
+  questions #5).
 
 ## Out of scope
 
@@ -56,19 +77,31 @@ hard-coded in the service.
   penalizes spurious — §6.10). Hence this service is Idle in P3. (Adding a real-time statistical
   cleaning stage would be an architecture change, not part of the MVP.)
 - **Pattern state and lifecycle** — owned by Pattern Manager (§6.9).
-- **Topology graph traversal** — the service does not traverse the AGE graph directly; it
-  never calls Apache AGE. When attribute features are enabled, it reads node/edge `attributes`
-  from the Topology Service's published query API (not AGE directly). Richer graph-position
-  features (propagation depth, hop count) remain a design-stage modeling decision (see Open
-  questions #1) and are not covered by this update.
+- **Topology graph traversal** — the service does not traverse the NebulaGraph graph directly.
+  When attribute features are enabled, it reads node/edge `attributes` from the Topology
+  Service's published query API. Richer graph-position features (propagation depth, hop count)
+  remain a design-stage modeling decision (see Open questions #1) and are not covered by this
+  update.
 - **Attribute catalogue ownership** — the service does not decide which attributes exist or
   what their domain semantics are. The Knowledge Service is the authoritative catalogue of
   device/connection attribute keys per domain (see `architecture.md` → "Domain extensibility").
   The noise-filter only reads which attribute keys to include in the feature vector from its
   Knowledge-Service-sourced feature config.
-- **Persistent alarm storage** — the service owns no alarm store; it is stateless over the
-  window lifecycle.
+- **Per-alarm persistence** — the service does not persist individual alarm records, feature
+  vectors, or the IDs of dropped alarms. The run-stats table stores aggregate counts only.
+  This is lightweight operational telemetry, not a historical alarm corpus, and does not
+  violate the architecture's "live-only, no historical corpus" rule (the table stores no
+  alarms — only aggregate run counts).
+- **Write API / mutation of run-stats** — the exposed API is read-only. Run-stats rows are
+  written exclusively by the service's own pipeline; no external caller may create, update, or
+  delete them.
+- **New Kafka topics or event-model changes** — the run-stats capability adds a service-owned
+  store and a read API. It introduces no new Kafka topic and no change to `AlarmEvent`,
+  `TransactionEvent`, or any other `acp-event-model` payload.
 - **Codebook reconciliation or RCA** — owned by Pattern Manager.
+- **UI implementation** — the web-ui presents NF run stats in its existing correlation-stats
+  module; that module's implementation is a web-ui spec/design concern. This spec only states
+  the backend contract the web-ui consumes.
 
 ## Tasks (high-level)
 
@@ -92,28 +125,49 @@ hard-coded in the service.
    `TransactionEvent` (with a fresh `transactionId`, the `trailId`, the `snapshotId` in
    scope, the `alarmIds[]` of cluster members, and `windowStart`/`windowEnd`) and publish it
    to `transactions.clean`.
-6. **Refresh Knowledge parameters** — on receipt of `knowledge.updated`, re-fetch DBSCAN
+6. **Record run-stats** — after finalizing each trail-window execution, write one aggregate
+   row to the owned PostgreSQL run-stats table capturing: `runId` (unique), `runTimestamp`,
+   `trailId`, `snapshotId`, `domain` (if available), `windowStart`, `windowEnd`, the params
+   used (`eps`, `minSamples`, `windowSize`, `algorithm`), and the counts `alarmsIn`,
+   `clustersFormed`, `alarmsKept`, `alarmsDropped`, and `noiseRatio` (`alarmsDropped /
+   alarmsIn`). This write is best-effort: if it fails, the pipeline has already emitted
+   the `TransactionEvent`(s) and processing continues; the failure is logged and counted.
+7. **Refresh Knowledge parameters** — on receipt of `knowledge.updated`, re-fetch DBSCAN
    params and window size from the Knowledge Service so subsequent windows use updated values
    without requiring a service restart.
-7. **Handle errors** — route poison/unparseable messages to `alarms.enriched.dlq`; log drops
+8. **Handle errors** — route poison/unparseable messages to `alarms.enriched.dlq`; log drops
    with sufficient context for ops.
+9. **Serve run-stats read API** — respond to read requests for run-stats records, supporting
+   optional filtering by `trailId` and/or time range (`runTimestamp`). Return aggregate stats
+   rows from the owned PostgreSQL table. Validate responses against the service's published
+   OpenAPI 3.1 spec.
 
 ## Phase applicability
 
 | Phase | Role | Active/Passive/Idle | Inputs / Outputs in this phase |
 |---|---|---|---|
 | P1 — Topology onboarding | Not involved; topology and trail construction are underway but no alarms are processed by this service. | Idle | — |
-| P2 — Pattern learning | Core worker: statistically cleans the enriched historical alarm stream so the Pattern Miner receives only incident-dense groups. | Active | Consumes: `alarms.enriched`. Produces: `transactions.clean`. Calls: Knowledge Service (DBSCAN params via its published API). |
-| P3 — Real-time correlation | Not involved. Live alarms are still **deterministically** filtered by Enrichment (dedup/self-clear/flap/chatter) on the live path; only this service's **statistical DBSCAN** stage is skipped live. DBSCAN's job is to clean Phase-2 *training* data for the Miner; real-time noise rejection is handled instead by the Correlation Engine's noise-tolerant pattern/codebook matching (tolerates missing, penalizes spurious). So no live-path DBSCAN is needed or defined. | Idle | — |
+| P2 — Pattern learning | Core worker: statistically cleans the enriched historical alarm stream so the Pattern Miner receives only incident-dense groups; records aggregate run-stats per execution for operational visibility. | Active | Consumes: `alarms.enriched`. Produces: `transactions.clean`. Calls: Knowledge Service (DBSCAN params via its published API). Writes: run-stats table (best-effort). |
+| P3 — Real-time correlation | Not involved in the clustering pipeline. Live alarms are still **deterministically** filtered by Enrichment (dedup/self-clear/flap/chatter) on the live path; only this service's **statistical DBSCAN** stage is skipped live. DBSCAN's job is to clean Phase-2 *training* data for the Miner; real-time noise rejection is handled instead by the Correlation Engine's noise-tolerant pattern/codebook matching (tolerates missing, penalizes spurious). The run-stats read API remains available for web-ui queries. | Idle (pipeline); Passive (read API) | Serves: run-stats read API (queried by web-ui). |
 
 ## Contract
 
 - **Consumes (Kafka):** `alarms.enriched` (payload: `AlarmEvent` from `acp-event-model`)
 - **Produces (Kafka):** `transactions.clean` (payload: `TransactionEvent` from `acp-event-model`)
-- **APIs exposed:** none beyond `/health` and `/metrics`. The service exposes no REST business
-  API of its own (it is a pure Kafka consumer/producer pipeline). No OpenAPI 3.1 document is
-  published for a business surface. Adding an operational query endpoint in future is a contract
-  change.
+- **APIs exposed:**
+  - `/health` (liveness/readiness) and `/metrics` (Prometheus exposition format) — unchanged.
+  - **[NEW] Run-stats read API** — the service's first HTTP business surface. A read-only API
+    for listing and querying run-stats records (filter by `trailId`, time range). Published as
+    OpenAPI 3.1 at `/openapi.json`; the generated `openapi.json` is checked into
+    `services/noise-filter/` and serves as the single source of truth for this surface. Used
+    for the service's own contract/unit tests and consumed by the web-ui (which builds its
+    client against this published spec). Exact endpoint paths, query-parameter names, and
+    response schema are a **design-stage decision** (see Open questions #5). Fields exposed per
+    row: `runId`, `runTimestamp`, `trailId`, `snapshotId`, `domain`, `windowStart`,
+    `windowEnd`, `eps`, `minSamples`, `windowSize`, `algorithm`, `alarmsIn`,
+    `clustersFormed`, `alarmsKept`, `alarmsDropped`, `noiseRatio`.
+  - A change to this API surface is a contract change requiring an `architecture.md`/spec
+    update and human approval, per the architecture convention.
 - **APIs / data consumed from other services:**
   - **Knowledge Service** — fetch DBSCAN params (`eps`, `minSamples`) and window size at
     startup and on `knowledge.updated`; fetch feature config (which device/connection attribute
@@ -134,8 +188,17 @@ hard-coded in the service.
     Resolved by `TOPOLOGY_SERVICE_URL` and `TOPOLOGY_CLIENT_MODE=mock|real` env vars. The
     client is only instantiated when at least one attribute feature is enabled in feature
     config; it is fully bypassed otherwise.
-- **Data owned:** none — the service holds no persistent data store. Window state is
-  ephemeral (in-process); alarm records are not persisted beyond the processing window.
+  - **[NEW] PostgreSQL run-stats store** — configured via `NOISE_FILTER_DB_URL` env var. In
+    unit tests the store may be backed by an in-memory or containerized PostgreSQL instance
+    (designer's choice); in integration it is the shared PostgreSQL service. The run-stats
+    write path is always best-effort; the read API depends on the store being reachable.
+- **Data owned:**
+  - **[NEW] PostgreSQL run-stats schema** (NF-owned, internal, single-owner per the
+    architecture convention) — one lightweight execution-stats table. Each row corresponds to
+    one finalized trail-window clustering execution and stores only aggregate counts and params
+    (no individual alarm records, no feature vectors, no dropped-alarm IDs). The ephemeral
+    in-process window/dedupe state is separate and unchanged. This is lightweight operational
+    telemetry; it stores no alarm payloads and does not constitute a historical alarm corpus.
 
 ## Non-functional
 
@@ -144,19 +207,28 @@ hard-coded in the service.
 - **Config:** all runtime parameters from environment variables or the Knowledge Service; no
   hard-coded thresholds or attribute key lists. Required env vars: `KAFKA_BOOTSTRAP_SERVERS`,
   `KAFKA_CONSUMER_GROUP_ID`, `KNOWLEDGE_SERVICE_URL`, `KNOWLEDGE_CLIENT_MODE` (`mock|real`),
-  `TOPOLOGY_SERVICE_URL`, `TOPOLOGY_CLIENT_MODE` (`mock|real`), `LOG_LEVEL`. DBSCAN `eps`,
+  `TOPOLOGY_SERVICE_URL`, `TOPOLOGY_CLIENT_MODE` (`mock|real`), `LOG_LEVEL`,
+  **`NOISE_FILTER_DB_URL`** (PostgreSQL connection URL for the run-stats store). DBSCAN `eps`,
   `minSamples`, and `windowSize` are Knowledge-Service parameters (fetched at startup and
   refreshed on `knowledge.updated`). The feature config (which device/connection attribute
   keys to include in the feature vector, and their default on/off state) is also a
   Knowledge-Service parameter — no attribute key is hard-coded in the service.
 - **Observability:** `/health` (liveness/readiness), `/metrics` (Prometheus exposition
-  format), structured JSON logs (no plain-text log lines in production).
-- **API contract:** the service consumes the `acp-event-model` Python/Pydantic binding as its
-  sole wire contract. No HTTP business surface is published; if one is added it must follow
-  the OpenAPI 3.1 + checked-in spec convention from `architecture.md`.
+  format), structured JSON logs (no plain-text log lines in production). Stats-write failures
+  must be counted in a dedicated `/metrics` counter and logged as structured entries.
+- **API contract:** the service publishes an OpenAPI 3.1 spec at `/openapi.json` (checked into
+  `services/noise-filter/`) covering the run-stats read API. The published spec is the single
+  source of truth for the HTTP business surface; the service's own contract/unit tests validate
+  against it, and collaborators (web-ui) build their client against it. A surface change is a
+  contract change.
+- **Stats write resilience:** the run-stats persistence step is best-effort and non-blocking.
+  A failure to write a stats row must not prevent the clustering pipeline from emitting
+  `TransactionEvent`s to `transactions.clean`. The failure is logged (structured) and counted
+  in `/metrics`; the pipeline continues with the next window.
 - **Error handling:** poison / unparseable messages → `alarms.enriched.dlq`. Unknown major
   `schemaVersion` → `alarms.enriched.dlq` with a structured log entry. Transient Knowledge
   Service failures → retry with backoff; the service does not start if params cannot be loaded.
+  Stats-write failures → log + metric; pipeline continues.
 - **Reproducibility:** for the same input window and the same Knowledge-Service params, DBSCAN
   must produce the same cluster labeling deterministically (required for regression tests).
 
@@ -221,10 +293,36 @@ Each criterion maps to one pytest test.
     no attribute key is hard-coded and the active feature set is solely determined by the
     Knowledge-Service feature config.
 
+11. **Run-stats row correctness.** Given a trail-window execution that processes `alarmsIn`
+    alarms and produces `clustersFormed` dense clusters containing a total of `alarmsKept`
+    cluster-member alarms, the service writes exactly one run-stats row with: `alarmsIn` equal
+    to the total alarms in the window, `alarmsDropped` equal to `alarmsIn - alarmsKept`,
+    `alarmsKept` matching the count of alarms emitted across all `TransactionEvent`s for that
+    window, `clustersFormed` matching the number of dense clusters identified, `noiseRatio`
+    equal to `alarmsDropped / alarmsIn` (to a reasonable floating-point tolerance), and the
+    `eps`, `minSamples`, `windowSize`, and `algorithm` values matching the params actually
+    used for that execution.
+
+12. **Run-stats read API returns recorded rows and validates against OpenAPI.** Given one or
+    more completed trail-window executions that have written run-stats rows, a GET request to
+    the run-stats list endpoint returns those rows with field values matching what was recorded,
+    and each response validates against the service's published OpenAPI 3.1 spec (all required
+    fields present and correctly typed).
+
+13. **Stats-write failure does not block TransactionEvent emission.** Given a trail-window
+    execution where the PostgreSQL run-stats write is configured to fail (e.g. DB unavailable
+    or simulated write error), the service still emits the expected `TransactionEvent`(s) to
+    `transactions.clean`, logs a structured error entry, and increments the stats-write-failure
+    metric counter. The pipeline does not raise an unhandled exception or stall.
+
+14. **Run-stats query by trailId returns matching subset.** Given run-stats rows recorded for
+    two distinct `trailId` values, a GET request to the run-stats endpoint filtered by one
+    `trailId` returns only the rows for that trail and excludes rows for the other `trailId`.
+
 ## Open questions
 
-All three items below are **design-stage** — resolved by human decision on 2026-06-09. None
-is a spec blocker or a contract change. Design may proceed.
+Items 1–4 are carried forward from the prior spec revision (design-stage, not blockers).
+Items 5–6 are new, added with the run-stats capability.
 
 1. **[DESIGN-STAGE] Feature vectorization — richer graph position** (tracked: #48).
    Task 3 derives object-type layer from the `managedObjectId` type prefix only (e.g.
@@ -259,3 +357,19 @@ is a spec blocker or a contract change. Design may proceed.
    Service's published spec, that is a contract gap requiring human resolution before the
    noise-filter design can proceed (a Topology Service contract change, not a noise-filter
    spec change). No new Kafka topic or `AlarmEvent`/`TransactionEvent` field is introduced.
+
+5. **[DESIGN-STAGE] Run-stats read API — exact endpoint shape.** The spec states the
+   requirement (list/query recent runs; filter by `trailId` / time range; return aggregate
+   stats rows) and the fields to expose, but the exact endpoint path(s), query-parameter
+   names, pagination strategy, sort order, and maximum result set are a **design-stage
+   decision**. The designer defines these in `design.md` and publishes the resulting
+   `openapi.json` as the service's HTTP contract. If the designer determines that any
+   required field is absent from the run-stats table (e.g. `domain` is optional and may be
+   null), the handling of absent/null fields is also a design decision — not a spec change.
+
+6. **[DESIGN-STAGE] Run-stats DB schema column finalization.** The spec enumerates the
+   required columns and their logical types. Final column names, SQL types (e.g. `NUMERIC`
+   vs. `FLOAT` for `noiseRatio`), indices (e.g. index on `trailId` and `runTimestamp` for
+   query performance), and the schema migration strategy are a **design-stage decision** for
+   the designer to specify in `design.md`. No new Kafka topic or event-model change is
+   required for any of these decisions.
