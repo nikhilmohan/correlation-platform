@@ -2,16 +2,17 @@
 
 ## Purpose
 
-The Topology Service is the **sole owner of the network topology graph** stored in Apache AGE.
-It accepts a topology snapshot file submitted via its published ingestion API, lifts the flat
-records into a typed multi-layer graph (per the §5 layer and edge model), versions every load
-with a unique `snapshotId`, and exposes a query API for all callers. Apache AGE is fully
-abstracted behind this service — no other service touches the graph store directly. On every
-successful ingest the service emits a `topology.changed` event (carrying the new `snapshotId`)
-on the `topology.changed` topic so downstream consumers (Trail Builder, Codebook Generator,
-Enrichment, Web UI) can react. The service operates domain-agnostically: it processes whatever
-typed nodes and edges appear in the snapshot file; it does not hard-code Core-IP-specific
-business logic.
+The Topology Service is the **sole owner of the network topology graph** stored in NebulaGraph
+(a standalone distributed graph DB). It accepts a topology snapshot file submitted via its
+published ingestion API, lifts the flat records into a typed multi-layer graph (per the §5 layer
+and edge model), versions every load with a unique `snapshotId` (snapshot version metadata
+persisted in PostgreSQL), and exposes a query API for all callers. NebulaGraph is fully abstracted
+behind this service — no other service touches the graph store directly, and nGQL is an internal
+implementation detail invisible to callers. On every successful ingest the service emits a
+`topology.changed` event (carrying the new `snapshotId`) on the `topology.changed` topic so
+downstream consumers (Trail Builder, Codebook Generator, Enrichment, Web UI) can react. The
+service operates domain-agnostically: it processes whatever typed nodes and edges appear in the
+snapshot file; it does not hard-code Core-IP-specific business logic.
 
 ---
 
@@ -22,7 +23,7 @@ business logic.
 - Publish and enforce the **topology ingestion API** (OpenAPI 3.1): accept a topology snapshot
   file, validate it against the versioned topology-file schema, and reject non-conforming files
   with a clear error.
-- **Lift** flat snapshot records into the typed multi-layer graph in Apache AGE, applying the
+- **Lift** flat snapshot records into the typed multi-layer graph in NebulaGraph, applying the
   node-type and edge-type rules derived from the §5 layer model
   (Node / LineCard / Port / IPLink / IGPAdjacency / LSP / VPNService / FiberSpan / SRLG and
   their typed edges: HOSTED_ON, RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES, MEMBER_OF).
@@ -55,9 +56,9 @@ business logic.
   via this service's query API and the `topology.changed` event.
 - **Does not enrich, filter, or correlate alarms.** That belongs to the Enrichment, Noise
   Filter, and Correlation Engine services.
-- **Does not expose or share the Apache AGE store.** No other service receives AGE credentials
-  or issues openCypher queries directly; graph data is available only through this service's
-  published API.
+- **Does not expose or share the NebulaGraph store.** No other service receives NebulaGraph
+  credentials or issues nGQL queries directly; graph data is available only through this
+  service's published API.
 - **Does not subscribe to any Kafka topic.** Ingestion is exclusively via the file-upload API.
 - **Does not own `topology.raw`.** That topic was removed; ingestion is file/API-based.
 - **Does not persist alarm or incident data.** All alarm-domain persistence belongs to the
@@ -75,16 +76,16 @@ business logic.
 1. **Validate and ingest a topology snapshot file.** Accept a file upload via the ingestion
    API, validate it against the topology-file schema at
    `services/topology/schema/snapshot.schema.json` (reject non-conforming files with a
-   structured error), and persist the lifted graph into Apache AGE under a freshly minted
+   structured error), and persist the lifted graph into NebulaGraph under a freshly minted
    `snapshotId`.
 
 2. **Lift flat records into the typed multi-layer graph.** Transform snapshot node and edge
    records into the typed graph nodes and edges defined by the §5 layer model, preserving
    `managedObjectId` on every node.
 
-3. **Maintain snapshot versioning.** Track the current and previous `snapshotId`; make both
-   available for query. A re-ingest always mints a new `snapshotId`, even if the content is
-   identical.
+3. **Maintain snapshot versioning.** Track the current and previous `snapshotId` in PostgreSQL;
+   make both available for query. A re-ingest always mints a new `snapshotId`, even if the
+   content is identical.
 
 4. **Emit `topology.changed`.** After every successful ingest, publish a `TopologyChangedEvent`
    (envelope + payload per the frozen event-model) on `topology.changed` carrying the new
@@ -94,10 +95,10 @@ business logic.
 5. **Serve the query API.** Answer caller requests: get a node by `managedObjectId`, get an
    edge, get the direct neighbors of a node, perform bounded traversal by one or more edge
    types, resolve a `managedObjectId` to its object and layer, and list all objects of a given
-   type. Callers never see AGE internals.
+   type. Callers never see NebulaGraph internals.
 
-6. **Manage the AGE abstraction boundary.** Ensure all graph reads and writes go through
-   internal service logic; no AGE credentials, endpoints, or openCypher query syntax are
+6. **Manage the NebulaGraph abstraction boundary.** Ensure all graph reads and writes go through
+   internal service logic; no NebulaGraph credentials, endpoints, or nGQL query syntax are
    externally reachable.
 
 ---
@@ -108,7 +109,7 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Ingests the topology snapshot file via its ingestion API, lifts records into AGE, mints `snapshotId`, emits `topology.changed`. This is topology's primary phase. | Active | In: topology snapshot file (via `POST /topology/snapshots` ingestion API). Out: `topology.changed` (Kafka). |
+| P1 — Topology onboarding | Ingests the topology snapshot file via its ingestion API, lifts records into NebulaGraph, mints `snapshotId`, emits `topology.changed`. This is topology's primary phase. | Active | In: topology snapshot file (via `POST /topology/snapshots` ingestion API). Out: `topology.changed` (Kafka). |
 | P2 — Pattern learning | Serves its graph query API to consumers that need topology context (Trail Builder, Codebook Generator, Enrichment); drives no work of its own. | Passive | In: — . Out: graph query API responses (`GET /topology/nodes/…`, neighbors, traversal, resolve, list). No topic I/O. |
 | P3 — Real-time correlation | Not involved. No real-time consumer queries the Topology Service: Enrichment (live) tags via Trail Builder `getTrailsForObject`, and Correlation Engine reads patterns + codebook — topology context is already materialized into trails + codebook during P1. The graph query API remains available but is off the real-time critical path. | Idle | In: — . Out: — (no real-time consumer; nothing driven or served on the critical path). |
 
@@ -167,7 +168,13 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
     must be settable via environment variable.
 
 - **Data owned:**
-  - **Apache AGE topology graph** — the sole owner; internal only; never shared as a store.
+  - **NebulaGraph topology graph** — the typed multi-layer topology graph; sole owner; internal
+    only; never shared as a store. All graph reads and writes go through this service's API; no
+    other service receives NebulaGraph connection details or issues nGQL queries directly.
+  - **PostgreSQL snapshot version metadata** — snapshot bookkeeping records (`snapshotId`,
+    `domain`, timestamps, ingest audit); owned by this service's PostgreSQL schema; internal
+    only; never shared as a store. Graph data lives in NebulaGraph; this store holds only the
+    versioning and audit metadata that tracks each snapshot.
   - **Topology-snapshot file schema** — owned by this service at
     `services/topology/schema/snapshot.schema.json`. This file is a versioned contract; it is
     NOT a Kafka payload and does NOT reside in `libs/event-model`. Schema changes are a
@@ -207,11 +214,13 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
   still mints a new `snapshotId` and emits a new event with a new `eventId`; the deduplication
   guarantee applies to delivery of a given event, not to the ingest operation itself.
 
-- **Config:** all integration URLs, Kafka bootstrap addresses, AGE/PostgreSQL connection
-  details, and any tunable limits (e.g., max snapshot file size, snapshot retention count) must
-  be supplied via environment variables. No hard-coded URLs, credentials, or thresholds.
-  Knowledge-Service parameters (if used) are fetched at startup or refresh and must have a
-  default for isolated testing.
+- **Config:** all integration URLs, Kafka bootstrap addresses, NebulaGraph connection details
+  (host, port, space, credentials), PostgreSQL connection details (JDBC URL, credentials), and
+  any tunable limits (e.g., max snapshot file size, snapshot retention count) must be supplied
+  via environment variables. No hard-coded URLs, credentials, or thresholds. Both the
+  NebulaGraph and PostgreSQL connection configs are internal-only and must never be forwarded to
+  callers. Knowledge-Service parameters (if used) are fetched at startup or refresh and must
+  have a default for isolated testing.
 
 - **Observability:** `/health` (liveness + readiness), `/metrics` (Prometheus), structured JSON
   logs on every significant operation (ingest received, validation result, snapshot minted,
@@ -229,14 +238,14 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
 
 - **Error handling:**
   - Invalid or non-conforming snapshot file → HTTP 422 with a structured validation error body;
-    no partial write to AGE; no `topology.changed` emitted.
+    no partial write to NebulaGraph; no `topology.changed` emitted.
   - `topology.changed` delivery failure → route to `topology.changed.dlq`.
   - Unknown `schemaVersion` (major >= 2) in any consumed event binding → reject per event-model
     policy.
 
 - **Test framework:** JUnit 5 (unit/contract tests); Testcontainers for integration tests
-  (AGE/PostgreSQL + Kafka). Unit tests use mocked/stubbed AGE and Kafka; contract tests validate
-  against the checked-in `openapi.json`.
+  (NebulaGraph + PostgreSQL + Kafka). Unit tests use mocked/stubbed NebulaGraph and Kafka;
+  contract tests validate against the checked-in `openapi.json`.
 
 - **Domain-agnostic operation:** the service must not hard-code Core IP object types or edge
   types in business logic; typed layers are driven by the snapshot file and the versioned
@@ -251,35 +260,36 @@ Each criterion maps to a single unit test (JUnit 5).
 1. **Snapshot load and queryability.** Given a valid topology snapshot file with N nodes and M
    edges submitted to `POST /topology/snapshots`, the service returns HTTP 200 with a
    `snapshotId`, and subsequent calls to the query API return the correct node and edge data.
-   AGE credentials and openCypher endpoints are not reachable from outside the service process.
+   NebulaGraph credentials and nGQL endpoints are not reachable from outside the service process.
 
 2. **Schema validation — accept conforming file.** A snapshot file fully conforming to
    `services/topology/schema/snapshot.schema.json` (all required fields present: `schemaVersion`,
    `domain`, `nodes[]`, `edges[]`; each node has a valid `managedObjectId` matching the pattern
    and a consistent `objectType`; each edge has `from`, `to`, `relation` referencing known
-   vocabulary) is accepted with HTTP 200 and the payload is persisted to AGE.
+   vocabulary) is accepted with HTTP 200 and the payload is persisted to NebulaGraph.
 
 3. **Schema validation — reject missing required field.** A snapshot file missing a top-level
    required field (e.g., absent `domain`, absent `schemaVersion`, or absent `nodes`) is rejected
-   with HTTP 422 and a structured error body; no partial write is made to AGE; no
+   with HTTP 422 and a structured error body; no partial write is made to NebulaGraph; no
    `topology.changed` event is emitted.
 
 4. **Schema validation — reject invalid `managedObjectId` scheme.** A snapshot file containing
    a node whose `managedObjectId` does not match the pattern
    `^(Node|LineCard|Port|IPLink|IGPAdjacency|LSP|VPNService|FiberSpan|SRLG):[^:]+$` is
-   rejected with HTTP 422 before any write to AGE.
+   rejected with HTTP 422 before any write to NebulaGraph.
 
 5. **Schema validation — reject inconsistent `objectType`.** A snapshot file where a node's
    `objectType` is inconsistent with its `managedObjectId` prefix (e.g., `managedObjectId` is
-   `Port:p1` but `objectType` is `Node`) is rejected with HTTP 422 before any write to AGE.
+   `Port:p1` but `objectType` is `Node`) is rejected with HTTP 422 before any write to
+   NebulaGraph.
 
 6. **Schema validation — reject dangling edge reference.** A snapshot file containing an edge
    whose `from` or `to` `managedObjectId` is not present in the `nodes` array is rejected with
-   HTTP 422 before any write to AGE.
+   HTTP 422 before any write to NebulaGraph.
 
 7. **Schema validation — reject unknown edge relation.** A snapshot file containing an edge
    whose `relation` is not one of `HOSTED_ON`, `RIDES_ON`, `ADJACENCY_OVER`, `TRAVERSES`,
-   `SERVES`, `MEMBER_OF` is rejected with HTTP 422 before any write to AGE.
+   `SERVES`, `MEMBER_OF` is rejected with HTTP 422 before any write to NebulaGraph.
 
 8. **Producer-supplied `snapshotId` is honoured.** When a snapshot file includes a `snapshotId`
    field, the ingestion API uses that value as the `snapshotId` returned in the 200 response and
@@ -332,9 +342,10 @@ Each criterion maps to a single unit test (JUnit 5).
     endpoints; a contract test confirms that the live service response for each operation
     matches the schema declared in the checked-in `openapi.json`.
 
-19. **AGE abstraction boundary.** No HTTP endpoint, environment variable, log line, or response
-    body exposes an AGE connection string, AGE port, or raw openCypher query result structure.
-    All graph data is returned through the service's typed API response shapes.
+19. **NebulaGraph abstraction boundary.** No HTTP endpoint, environment variable, log line, or
+    response body exposes a NebulaGraph connection string, NebulaGraph endpoint, or raw nGQL
+    query result structure. All graph data is returned through the service's typed API response
+    shapes.
 
 ---
 
@@ -343,5 +354,5 @@ Each criterion maps to a single unit test (JUnit 5).
 None. All open questions from the spec phase have been resolved and folded into the spec above
 (schema file location and field definition — issues #18 and #19; `changeType` vocabulary
 convention — issue #20). Any remaining decisions about internal design (e.g., how the designer
-structures AGE queries, Spring module layout, lifting algorithm) are design-stage decisions and
+structures nGQL queries, Spring module layout, lifting algorithm) are design-stage decisions and
 belong in `design.md`.
