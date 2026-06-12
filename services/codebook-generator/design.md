@@ -5,6 +5,14 @@
 > `CodebookGeneratedEvent` both carry optional `domain`), the multi-domain contract, and the
 > §5 Interface fault-origin model. This is a fresh design; the earlier skeleton PR #79 was
 > closed as stale (predated multi-domain / Interface).
+>
+> **Revision (data-integration fix, P1-G5 / P3-G2):** adds a Correlation-Engine-oriented
+> scenario-signature **projection endpoint** `GET /codebooks/{codebookId}/trail-signatures`
+> (frozen `TrailScenarioSignature` shape) alongside the native `/scenarios` endpoint, freezes the
+> read-API in the published `openapi.json`, and aligns the signature/`rootCauseAlarmType` value
+> space to the merged canonical **`alarmType`** vocabulary (Knowledge `alarmTypeVocabulary`, same
+> as `AlarmEvent.alarmType`). This is a service-owned read-API addition only — no Kafka topic /
+> event-model change (`alarmType` already merged; `CodebookGeneratedEvent` unchanged).
 
 The codebook is a **precomputed model** — a matrix of *candidate-root-cause instance to
 predicted-symptom signature*, tagged to trails. It is **not** RCA on real data: matching a live
@@ -53,7 +61,7 @@ and flow.
 | **6. Tag each scenario with its trail(s)** | `tagging.py` — for each symptom `managedObjectId`, call `clients/trail_builder.py::get_trails_for_object(...)`; union the `trailIds`; attach to the scenario. Integration point `trail-builder-trails`. |
 | **7. Persist codebook with domain** | `store.py` — inserts one `codebooks` row (fresh `codebookId`, `snapshotId`, `domain` non-null, `scenarioCount`) and N `scenarios` rows in one transaction. New `snapshotId` mints a new `codebookId`; never overwrites a prior snapshot's codebook. |
 | **8. Emit `codebook.generated` with domain** | `producer.py` builds a `CodebookGeneratedEvent` (`snapshotId`, `scenarioCount`, `codebookId`, `domain`) via the Pydantic binding, wraps in the envelope, publishes to `codebook.generated`. Failed publish routes to `codebook.generated.dlq`. |
-| **9. Serve the domain-scoped query API** | `api.py` (FastAPI) — `GET /codebooks/{codebookId}`, `/codebooks/{codebookId}/scenarios`, `/codebooks/{codebookId}/scenarios/{scenarioId}`, `/codebooks?snapshotId=`, `/codebooks?domain=`, plus `/health` and `/metrics`. Reads the Codebook Store; every response carries `domain`. OpenAPI 3.1 published + checked in. |
+| **9. Serve the domain-scoped query API** | `api.py` (FastAPI) — `GET /codebooks/{codebookId}`, `/codebooks/{codebookId}/scenarios`, `/codebooks/{codebookId}/scenarios/{scenarioId}`, **`/codebooks/{codebookId}/trail-signatures` (CE projection)**, `/codebooks?snapshotId=`, `/codebooks?domain=`, `/codebooks/active?domain=&snapshotId=`, plus `/health` and `/metrics`. `projection.py` builds the CE-oriented `TrailScenarioSignature` from stored scenarios (derive `rootCauseAlarmType`, alias `expectedSymptoms`, fan out per `trailId`). Reads the Codebook Store; every response carries `domain`. OpenAPI 3.1 published + checked in (both `/scenarios` and `/trail-signatures` in it). |
 
 ---
 
@@ -66,7 +74,7 @@ Consistent with the canonical phase map (`architecture.md`) and the spec's Phase
 |---|---|---|---|
 | P1 — Topology onboarding | **Active** | `consumer.py` (trails.built), `domain.py`, `clients/knowledge.py`, `clients/topology.py`, `propagation.py`, `tagging.py`, `clients/trail_builder.py`, `store.py` (write), `producer.py` | In: `trails.built` (snapshotId, trailIds, domain), Topology query API (domain-scoped enumerate + closure), Knowledge fault-origins API, Knowledge templates API, Trail Builder API reads. Out: `codebook.generated` (snapshotId, scenarioCount, codebookId, domain); Codebook Store writes |
 | P2 — Pattern learning | **Passive** | `api.py` read endpoints, `store.py` (read). Compilation pipeline dormant unless a new `trails.built` arrives | In: codebook query API requests from Pattern Manager (reconcile; may filter by domain). Out: codebook query API responses (scenario signatures, trail tags, RCA-per-scenario, domain). No topic output |
-| P3 — Real-time correlation | **Passive** | `api.py` read endpoints (esp. full-signature fetch for closest-match decode), `store.py` (read). Compilation pipeline dormant | In: codebook query API requests from Correlation Engine (match; may filter by domain; codebook id also delivered via `codebook.generated`). Out: codebook query API responses (scenario signatures + RCA, domain, scoped by trail/snapshot). No topic output |
+| P3 — Real-time correlation | **Passive** | `api.py` read endpoints (esp. the CE `trail-signatures` projection + `projection.py` for closest-match decode), `store.py` (read). Compilation pipeline dormant | In: codebook query API requests from Correlation Engine (`GET /codebooks/{id}/trail-signatures` indexed by `trailId`; may filter by domain; codebook id also delivered via `codebook.generated`). Out: `TrailScenarioSignature` responses (`trailId`, `rootCauseAlarmType` vocab token, `expectedSymptoms`), domain, scoped by trail/snapshot. No topic output |
 
 ---
 
@@ -102,7 +110,12 @@ flowchart TD
 - **`tagging.py`** — trail-tag resolution per scenario.
 - **`store.py`** — Codebook Store reader/writer (SQLAlchemy Core).
 - **`producer.py`** — `codebook.generated` producer + DLQ fallback.
-- **`api.py`** — FastAPI app, query endpoints, `/health`, `/metrics`, `/openapi.json`.
+- **`api.py`** — FastAPI app, query endpoints (incl. the CE `trail-signatures` projection),
+  `/health`, `/metrics`, `/openapi.json`.
+- **`projection.py`** — pure read-time transform: stored `Scenario` to
+  `TrailScenarioSignature[]` (derive `rootCauseAlarmType` from the origin's own alarm, alias
+  `predictedSymptoms` as `expectedSymptoms`, fan out per `trailId`). No I/O; unit-testable in
+  isolation.
 - **`vocabulary.py`** — the shared alarm-type vocabulary mapping (see OQ-2 note below).
 - **`config.py`** — env-only config; fails fast on missing integration-point URLs.
 
@@ -162,7 +175,7 @@ Indexes (lead with domain): `idx_codebooks_domain_compiled (domain, compiled_at 
 | `codebook_id` | `text` NOT NULL FK to `codebooks` | ON DELETE CASCADE |
 | `fault_origin_object_id` | `text` NOT NULL | the candidate-root-cause `managedObjectId` |
 | `fault_origin_type` | `text` NOT NULL | e.g. `Fiber`, `LineCard`, `Port`, `Interface`, `Node` |
-| `predicted_symptoms` | `jsonb` NOT NULL | ordered list of objects with `alarmType` and `managedObjectId` (the signature; ordering preserved for cascade depth) |
+| `predicted_symptoms` | `jsonb` NOT NULL | ordered list of objects with `alarmType` and `managedObjectId` (the signature; ordering preserved for cascade depth). The **origin's own symptom is first** (`managedObjectId == fault_origin_object_id`). Each `alarmType` is an `alarmType`-**vocabulary token** (see alarm-type value-space note) |
 | `trail_ids` | `text[]` NOT NULL | the tagged trails; non-empty when Trail Builder returns trails |
 
 Indexes: `idx_scenarios_codebook (codebook_id)`,
@@ -175,6 +188,20 @@ and the prior `codebook.generated` is re-emitted (idempotent producer key = `eve
 The signature stores both the `alarmType` (from the shared vocabulary) and the
 `managedObjectId` of the symptom-bearing object, so Correlation/Pattern Manager can match either
 by alarm-type alone (decode) or by object identity, and trail-tagging can resolve each object.
+
+**Two read views over one stored truth.** `predicted_symptoms` is the single persisted symptom
+set. The two read APIs surface it under two names for their two consumers:
+
+- The native `GET /codebooks/{codebookId}/scenarios` exposes it as `predictedSymptoms`, keyed by
+  `faultOriginObjectId` and carrying `faultOriginType` + `trailIds[]` (for Pattern Manager and
+  any object-identity consumer).
+- The CE projection `GET /codebooks/{codebookId}/trail-signatures` exposes the **same** list under
+  the CE-facing alias **`expectedSymptoms`** (item shape `{ alarmType, managedObjectId }`,
+  unchanged), and surfaces a derived **`rootCauseAlarmType`** (the `alarmType` of the
+  origin's-own/first `predicted_symptoms` entry — `managedObjectId == fault_origin_object_id` —
+  **not** the object-type `fault_origin_type`), fanned out per `trailId`. `expectedSymptoms` is a
+  pure rename/projection, not a second stored copy; `rootCauseAlarmType` is derived at read time.
+  This is the producer half of the P1-G5 / P3-G2 resolution.
 
 ---
 
@@ -212,8 +239,10 @@ Domain-scoped. All read-only (this service is the sole writer, via the Kafka pip
 | `GET /codebooks/{codebookId}` | path `codebookId` | `Codebook` metadata with `codebookId, snapshotId, domain, scenarioCount, knowledgeVersion, compiledAt` | `404` structured `error, detail` when unknown |
 | `GET /codebooks/{codebookId}/scenarios` | path `codebookId`; optional query `faultOriginType` | object with `codebookId, domain, scenarios` where each `Scenario` has `scenarioId, faultOriginObjectId, faultOriginType, predictedSymptoms` (list of `alarmType, managedObjectId`), `trailIds` | `404` |
 | `GET /codebooks/{codebookId}/scenarios/{scenarioId}` | path | single `Scenario` (incl. `predictedSymptoms` + `trailIds`) | `404` |
+| `GET /codebooks/{codebookId}/trail-signatures` _(CE projection)_ | path `codebookId`; optional query `trailId` | object with `codebookId, domain, trailSignatures` — a list of `TrailScenarioSignature` (frozen shape below). With `trailId` set, only signatures whose source scenario's `trailIds[]` contains that `trailId` (fanned out to that single `trailId`); without it, every scenario fanned out across each of its `trailIds[]` | `404` if `codebookId` unknown; `200` empty list if `trailId` matches no scenario |
 | `GET /codebooks?snapshotId={snapshotId}` | query `snapshotId` | object with `snapshotId, codebooks` (list for extensibility; typically one) | `200` empty list when none |
 | `GET /codebooks?domain={domain}` | query `domain` | object with `domain, codebooks` ordered by `compiledAt` desc | `400` if neither `snapshotId` nor `domain` given on `/codebooks` |
+| `GET /codebooks/active?domain={domain}&snapshotId={snapshotId}` | query `domain`, `snapshotId` | the single active `Codebook` metadata for the `(domain, snapshotId)` key | `404` if no codebook for that key |
 | `GET /health` | — | `status ok` (readiness checks DB + Kafka) | `503` if not ready |
 | `GET /metrics` | — | Prometheus text exposition | — |
 
@@ -221,6 +250,68 @@ Domain-scoped. All read-only (this service is the sole writer, via the Kafka pip
 `predictedSymptoms` shape from the store; the `CodebookGeneratedEvent` summary fields
 (`snapshotId`, `scenarioCount`, `codebookId`, `domain`) map 1:1 to the `Codebook` metadata
 object so consumers can correlate the event with the API.
+
+### Correlation-Engine projection — `GET /codebooks/{codebookId}/trail-signatures` (frozen)
+
+The Correlation Engine's codebook-decode fallback (CE design Flow 4 / its `CodebookGeneratorClient`)
+consumes per-trail scenario **signatures indexed by `trailId`**, in the shape
+`{ trailId, rootCauseAlarmType, expectedSymptoms[] }` (CE Open Q4). The native
+`GET /codebooks/{codebookId}/scenarios` shape (keyed by `faultOriginObjectId`, carrying
+`faultOriginType` + `predictedSymptoms` + `trailIds[]`) does not match that consumer shape — this
+is the divergence flagged as data-integration Blockers **P1-G5** and **P3-G2**. The fix
+(product-owner decision) is to **keep the native scenario model and add this CE-oriented
+projection endpoint**. It is a **pure read projection over already-persisted scenario data** — no
+change to how codebooks are compiled or stored, and the native `/scenarios` endpoint stays for
+other consumers (e.g. Pattern Manager reconcile). The frozen response item:
+
+```jsonc
+// TrailScenarioSignature
+{
+  "trailId": "TRAIL-1",                  // single trailId (fan-out — see below)
+  "scenarioId": "cb-...:Interface:i1",   // source scenario id (provenance, cross-ref to /scenarios)
+  "rootCauseAlarmType": "InterfaceDown", // alarmType-vocabulary token (NOT faultOriginType)
+  "expectedSymptoms": [                   // == the scenario's predictedSymptoms (CE-facing alias)
+    { "alarmType": "InterfaceDown",   "managedObjectId": "Interface:i1" },
+    { "alarmType": "LinkDown",        "managedObjectId": "IPLink:l1" },
+    { "alarmType": "AdjDown",         "managedObjectId": "IGPAdjacency:a1" },
+    { "alarmType": "LSPDown",         "managedObjectId": "LSP:s1" },
+    { "alarmType": "ReachabilityLoss","managedObjectId": "VPN:v1" }
+  ]
+}
+```
+
+Frozen projection rules (these resolve the read-API-shape open questions OQ-1/OQ-3 **for the CE
+consumer**; CE-side client wiring is owned by the correlation-engine's own fix, not here):
+
+- **`expectedSymptoms` == the scenario's `predictedSymptoms`** — same underlying data, renamed for
+  the consumer. There is **one underlying truth** (`scenarios.predicted_symptoms`); this endpoint
+  emits it under the CE-facing name `expectedSymptoms`, each item unchanged as
+  `{ alarmType, managedObjectId }`. No second copy is stored or compiled. (The native `/scenarios`
+  endpoint continues to call the same field `predictedSymptoms`.)
+- **`rootCauseAlarmType` is an `alarmType`-vocabulary token, derived from the scenario** — NOT the
+  object-type `faultOriginType`. By the forward-propagation algorithm the **origin's own alarm is
+  emitted first** (the seed of the signature), so the projection derives `rootCauseAlarmType` as
+  the `alarmType` of the `predictedSymptoms` entry whose `managedObjectId == faultOriginObjectId`
+  (the origin's own symptom, which is first/seed). For a `FiberSpan` origin this yields the
+  vocabulary token `FiberFault` (not the object type `FiberSpan`); for an `Interface` origin,
+  `InterfaceDown`. It is therefore the **same token space** as `AlarmEvent.alarmType` and the
+  Pattern Manager's `rootCauseAlarmType`, so codebook-vs-pattern reconciliation and CE matching
+  share one join key. (Derivation is deterministic and pure-read; should the origin's own symptom
+  be absent, the projection falls back to `predictedSymptoms[0].alarmType`, which is the seed.)
+- **Per-trail fan-out** — the native scenario carries `trailIds[]` (a scenario's symptoms may span
+  multiple trails). The projection **fans out per trail**: one `TrailScenarioSignature` is emitted
+  per `(scenario, trailId)` pair. `GET .../trail-signatures?trailId=T` returns every scenario
+  whose `trailIds[]` contains `T`, each surfaced with that single `trailId = T`; the list form
+  (no `trailId`) returns every scenario fanned across each of its `trailIds[]`. This is exactly
+  the per-`trailId` index the CE wants.
+
+**OpenAPI publication.** The service publishes `openapi.json` (OpenAPI 3.1) at `/openapi.json`,
+checked in at `services/codebook-generator/openapi.json`; a CI check asserts the checked-in file
+equals the live document. **Both** the native `GET /codebooks/{codebookId}/scenarios` endpoint
+**and** this new `GET /codebooks/{codebookId}/trail-signatures` projection (with the frozen
+`TrailScenarioSignature` schema above) are in it. The Correlation Engine builds its codebook
+client against this published spec — that freezes the **producer** side of CE Open Q4; the
+CE-side client wiring is handled in the correlation-engine's own fix.
 
 ---
 
@@ -303,10 +394,33 @@ sequenceDiagram
   API->>DB: select scenarios
   DB-->>API: signatures plus trailIds
   API-->>PM: scenario signatures for reconcile
-  CE->>API: GET codebook scenarios by codebookId, full signatures
+  CE->>API: GET codebook trail-signatures by codebookId, optional trailId
   API->>DB: select scenarios
-  DB-->>API: signatures
-  API-->>CE: full signatures for closest-match decode
+  DB-->>API: scenarios with predictedSymptoms and trailIds
+  API->>API: project per scenario, derive rootCauseAlarmType from origin own alarm, alias expectedSymptoms, fan out per trailId
+  API-->>CE: TrailScenarioSignature list indexed by trailId for closest-match decode
+```
+
+### Flow C — Trail-signatures projection (CE-oriented, read-time)
+
+How one persisted scenario becomes one-or-more `TrailScenarioSignature` items. Pure read
+transform; no compile/store change.
+
+```mermaid
+flowchart TD
+  REQ["GET trail-signatures, codebookId, optional trailId"] --> LOAD["load scenarios for codebookId"]
+  LOAD --> FILT{"trailId given"}
+  FILT -- yes --> SEL["keep scenarios whose trailIds contains trailId"]
+  FILT -- no --> ALL["keep all scenarios"]
+  SEL --> PROJ
+  ALL --> PROJ["for each kept scenario"]
+  PROJ --> RC["derive rootCauseAlarmType, alarmType of predictedSymptoms entry where managedObjectId equals faultOriginObjectId, the first or seed"]
+  RC --> ALIAS["expectedSymptoms equals predictedSymptoms, same items alarmType plus managedObjectId"]
+  ALIAS --> FAN{"trailId given"}
+  FAN -- yes --> ONE["emit one signature with that single trailId"]
+  FAN -- no --> MANY["emit one signature per trailId in scenario trailIds"]
+  ONE --> OUT["TrailScenarioSignature list"]
+  MANY --> OUT
 ```
 
 ---
@@ -333,12 +447,14 @@ flowchart TD
   ADD --> CHK
 ```
 
-**Per-fault-origin cascade specifics** (Core IP templates from §5; vocabulary per OQ-2 note):
+**Per-fault-origin cascade specifics** (Core IP templates from §5; all alarm-type identifiers
+below are `alarmType`-vocabulary tokens per the value-space note):
 
-- **Fiber (fiber-cut):** origin alarm on Fiber, then `RIDES_ON` gives `LinkDown(IPLink)`, then
-  `TRAVERSES` gives `LSPDown(LSP)`, then `SERVES` gives `ReachabilityLoss(VPN)`. Signature:
-  `[Fiber-alarm, LinkDown, LSPDown, ReachabilityLoss]`. **No `InterfaceDown`** (distinguishes it
-  from interface/port faults).
+- **Fiber (fiber-cut):** origin `FiberFault` on the FiberSpan, then `RIDES_ON` gives
+  `LinkDown(IPLink)`, then `TRAVERSES` gives `LSPDown(LSP)`, then `SERVES` gives
+  `ReachabilityLoss(VPN)`. Signature: `[FiberFault, LinkDown, LSPDown, ReachabilityLoss]`
+  (so the projected `rootCauseAlarmType` for a FiberSpan origin is `FiberFault`).
+  **No `InterfaceDown`** (distinguishes it from interface/port faults).
 - **Interface (interface-fault):** origin `InterfaceDown`, then `TERMINATES` gives
   `LinkDown(IPLink)`; `ADJACENCY_OVER` gives `AdjDown(IGPAdjacency)`; then `TRAVERSES` gives
   `LSPDown`, `SERVES` gives `ReachabilityLoss`. Signature:
@@ -360,14 +476,27 @@ vs. interface vs. line-card), and the `PortDown` count (line-card vs. port) yiel
 signatures. `MEMBER_OF` (SRLG fate-sharing) groups co-failing origins but is co-failure grouping,
 not a forward cascade edge in MVP (protection-aware FRR/ECMP is out of scope per spec).
 
-**Alarm-type vocabulary (OQ-2, design-stage):** signatures use the **shared alarm-type
-vocabulary** coordinated with Knowledge (the template author) — the effect identifiers
-`InterfaceDown, LinkDown, AdjDown, LSPDown, PortDown, LOS, ReachabilityLoss` map to the
-`AlarmEvent.eventType` field (per the OQ-2 resolution comment). They are **read from the
-propagation-template effect names returned by Knowledge** at runtime — `vocabulary.py` holds only
-the *mapping convention* (effect name to which `AlarmEvent` field), not a hard-coded Core IP list.
-No new `libs/event-model` field is introduced (no contract change); if a future domain needs a
-new alarm-type field that is escalated as a contract change.
+**Alarm-type value space (OQ-2 resolved — canonical `alarmType`).** Signature alarm-type tokens
+are drawn from the canonical **`alarmType` vocabulary**: the Knowledge-authored, domain-scoped
+`alarmTypeVocabulary` (e.g. `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`,
+`ReachabilityLoss`, `LOS`, `FiberFault`). This is the **same value space as `AlarmEvent.alarmType`**
+— the merged canonical join key (`AlarmEvent.schema.json`; `architecture.md` Invariants). It is
+**distinct from** `eventType` (X.733 category, e.g. `communicationsAlarm`) and `probableCause`
+(X.733 probable cause, e.g. `lossOfSignal`); the earlier OQ-2 note that effects mapped to
+`eventType` is superseded by the merged `alarmType` contract and no longer applies.
+
+The propagation templates Codebook fetches from Knowledge already carry their
+`trigger.alarmType` / `effect.alarmType` as `alarmTypeVocabulary` tokens (the same set the
+templates author against per the architecture invariant), so the `predicted_symptoms[].alarmType`
+the engine accumulates **are** vocabulary tokens by construction — `vocabulary.py` holds only the
+convention that an effect/trigger name is read straight through as the `alarmType` token (no
+remapping to `eventType`/`probableCause`). Consequently the projected `rootCauseAlarmType` (the
+origin's own `alarmType`) is a vocabulary token too — e.g. `FiberFault` for a `FiberSpan` origin,
+`InterfaceDown` for an `Interface` origin — and matches `AlarmEvent.alarmType`, the Pattern
+Manager's `rootCauseAlarmType`, and the mined sequence tokens, so codebook-vs-pattern
+reconciliation and CE codebook decode share one token space. No new `libs/event-model` field is
+introduced (no contract change — `alarmType` is already merged); a future domain needing a new
+alarm-type field would be a contract change requiring human approval.
 
 ---
 
@@ -417,6 +546,9 @@ and logged with `traceId`, `domain`, and `snapshotId`.
 | Regeneration semantics | (a) upsert by `snapshotId`; (b) always mint a new `codebookId` | (b). Spec requires a new `snapshotId` to mint a new `codebookId` and never overwrite a prior snapshot's codebook; supports historical query and `matchedCodebookId` stability downstream |
 | Postgres driver | (a) `psycopg` (LGPL); (b) `pg8000` (BSD) | (b) default — keeps the permissive-only invariant strict (LGPL excluded). `psycopg` selectable only if licence policy is relaxed |
 | Trail tagging granularity | (a) tag by origin object only; (b) union trails across all symptom objects | (b). A scenario's symptoms span multiple objects/trails; tagging by the full symptom set yields correct trail membership for decode |
+| CE scenario read shape (resolves P1-G5 / P3-G2) | (a) keep only native `/scenarios` and make CE adapt (rename + derive client-side); (b) rename the native field to `expectedSymptoms` and add `rootCauseAlarmType` on the stored scenario; (c) keep the native model and add a separate CE-oriented **projection endpoint** `/trail-signatures` | (c) — the product-owner decision. (a) leaves two contradictory expectations and no checked-in producer contract. (b) churns the native model and the Pattern Manager consumer, and duplicates a derivable field into storage. (c) keeps **one stored truth** (`predicted_symptoms`), serves Pattern Manager unchanged, and gives the CE exactly its `{trailId, rootCauseAlarmType, expectedSymptoms[]}` shape via a pure read projection — both endpoints frozen in one `openapi.json` |
+| `rootCauseAlarmType` source | (a) use `faultOriginType` (object type, e.g. `FiberSpan`); (b) add a separate stored root-cause alarm field; (c) derive the origin's own `alarmType` from the signature (the `predictedSymptoms` entry at the origin object, which is the first/seed) | (c). (a) is wrong value space — `faultOriginType` is an object type, not an `alarmType` token, so it would never match `AlarmEvent.alarmType` / pattern `rootCauseAlarmType`. (b) duplicates derivable data. (c) yields a true `alarmTypeVocabulary` token (e.g. `FiberFault`) from data already in the signature, deterministically, with no storage change |
+| `expectedSymptoms` materialization | (a) store a second `expectedSymptoms` copy at compile time; (b) project/rename `predictedSymptoms` at read time | (b). One underlying truth avoids drift; the CE-facing name is a thin read-time alias, so there is never a second symptom set to keep in sync |
 
 ---
 
@@ -430,7 +562,7 @@ ephemeral DB). Every acceptance criterion maps 1:1 to a named test.
 
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
-| 1 | Fiber-cut signature matches expected cascade | `test_fiber_cut_signature_matches_expected_cascade` | Scenario for `Fiber:f1` has ordered symptoms `[Fiber-alarm, LinkDown(IPLink), LSPDown(LSP), ReachabilityLoss(VPN)]` (no `InterfaceDown`) |
+| 1 | Fiber-cut signature matches expected cascade | `test_fiber_cut_signature_matches_expected_cascade` | Scenario for `FiberSpan:f1` has ordered symptoms `[FiberFault, LinkDown(IPLink), LSPDown(LSP), ReachabilityLoss(VPN)]` (no `InterfaceDown`); all alarm tokens are `alarmTypeVocabulary` members |
 | 2 | Line-card vs port faults produce distinguishable signatures | `test_linecard_and_port_signatures_distinguishable` | LineCard scenario has multiple `PortDown` entries absent from the Port scenario; Port scenario has its port-layer discriminator absent from the LineCard top-level signature |
 | 3 | Interface fault-origin scenario matches the interface cascade | `test_interface_fault_signature_matches_expected_cascade` | Scenario for `Interface:i1` has `faultOriginType` of `Interface` and ordered symptoms `[InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss]`; differs from fiber-cut (no InterfaceDown) and port-fault (PortDown precedes InterfaceDown there) |
 | 4 | Every scenario tagged to at least one trail | `test_every_scenario_has_nonempty_trailids` | With a mock Trail Builder returning at least one trailId per object, every scenario has non-empty `trailIds` |
@@ -447,6 +579,23 @@ ephemeral DB). Every acceptance criterion maps 1:1 to a named test.
 | 15 | Domain-scoped enumeration to Topology | `test_topology_enumeration_includes_snapshot_and_domain` | Topology `list objects` called with `snapshotId=snap-X` AND `domain=core-ip` (mock assertion) |
 | 16 | Domain-scoped query API filters by domain | `test_codebooks_query_filters_by_domain` | Two codebooks (`core-ip` CB-1, `transport` CB-2); `GET /codebooks?domain=core-ip` returns only CB-1; validates against `openapi.json` |
 | 17 | Different domain compiles without code change | `test_transport_domain_compiles_with_its_inputs` | With `transport` mock fault-origins/templates/topology, a full `transport` codebook compiles with no code change; persisted `domain` of `transport` |
+| 18 | ONE-ACTIVE: one active codebook per `(domain, snapshotId)` | `test_one_active_codebook_per_domain_snapshot` | After compile for `(core-ip, snap-X)`, exactly one active record; `GET /codebooks/active?domain=core-ip&snapshotId=snap-X` returns `200` with the emitted `codebookId`; validates against `openapi.json` |
+| 19 | SUPERSEDE: recompiling same key activates the new codebook | `test_recompile_supersedes_prior_active` | `CB-OLD` then `CB-NEW` for the same key: `/codebooks/active` returns `CB-NEW`; exactly one active; both retrievable by `codebookId` |
+| 20 | DETERMINISTIC-RETRIEVAL: two active reads return the same codebook | `test_active_retrieval_deterministic` | Two sequential `/codebooks/active` calls return identical `codebookId`; both `200` |
+
+### Acceptance criterion → test — CE trail-signatures projection (P1-G5 / P3-G2 fix)
+
+These new criteria cover the CE-oriented projection endpoint and the alarm-type value-space
+alignment. Each maps 1:1 to a named test; `projection.py` is also unit-tested in isolation.
+
+| # | Acceptance criterion | Test | Asserts |
+|---|---|---|---|
+| 21 | `trail-signatures` returns the frozen shape | `test_trail_signatures_returns_frozen_shape` | `GET /codebooks/{id}/trail-signatures` returns `200` with items shaped `{trailId, scenarioId, rootCauseAlarmType, expectedSymptoms:[{alarmType, managedObjectId}]}`; validates against the published `openapi.json` `TrailScenarioSignature` schema |
+| 22 | `rootCauseAlarmType` is the origin's own `alarmType` vocab token | `test_root_cause_alarm_type_is_origin_vocab_token` | For a `FiberSpan:f1` origin, `rootCauseAlarmType == "FiberFault"` (the `alarmType` of the `predictedSymptoms` entry whose `managedObjectId == faultOriginObjectId`); it is NOT `faultOriginType` (`FiberSpan`) and is a member of the domain's `alarmTypeVocabulary` |
+| 23 | `expectedSymptoms` equals the scenario's `predictedSymptoms` | `test_expected_symptoms_equals_predicted_symptoms` | For each projected signature, `expectedSymptoms` is item-for-item equal to the source scenario's `predictedSymptoms` (same `alarmType` + `managedObjectId` list, same order) returned by `GET .../scenarios/{scenarioId}` — one underlying truth, just renamed |
+| 24 | Per-trail fan-out from `trailIds[]` | `test_trail_signatures_fan_out_per_trail` | A scenario with `trailIds = [T1, T2]` yields two signatures (one with `trailId=T1`, one `T2`); `?trailId=T1` returns only the `T1` signature; `?trailId=T_none` returns `200` empty list |
+| 25 | Signature `alarmType` tokens are `alarmTypeVocabulary` members (not eventType/probableCause) | `test_signature_alarm_types_are_vocabulary_tokens` | Every `predictedSymptoms[].alarmType` and projected `rootCauseAlarmType` is a member of the mock domain's `alarmTypeVocabulary`; none equals an X.733 `eventType` (e.g. `communicationsAlarm`) or `probableCause` (e.g. `lossOfSignal`) value |
+| 26 | Both endpoints published in `openapi.json` | `test_openapi_publishes_both_scenarios_and_trail_signatures` | The checked-in `services/codebook-generator/openapi.json` equals the live `/openapi.json` and contains BOTH `/codebooks/{codebookId}/scenarios` and `/codebooks/{codebookId}/trail-signatures` paths with their frozen response schemas |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -462,6 +611,8 @@ collaborators in Docker Compose), including failure/partial paths.
 | 5 | Collaborator down (partial path) | Knowledge unavailable during compile | Retries with backoff; on exhaustion the trigger to `trails.built.dlq`, no partial codebook persisted, structured error logged; service stays up |
 | 6 | Domain pass-through to downstream | compile `core-ip`, inspect `codebook.generated` | Event carries `domain=core-ip` so Pattern Manager/Correlation get domain without an API lookup |
 | 7 | Query serving for P2/P3 | compile, then `GET /codebooks?domain=core-ip`, `/codebooks/{id}/scenarios` | API returns codebook metadata + full signatures + trail tags for reconcile/match |
+| 8 | CE trail-signatures projection (P3 decode source) | compile `core-ip`, then `GET /codebooks/{id}/trail-signatures?trailId=T` against the real `codebook-generator` in the integration stack | Returns `TrailScenarioSignature[]` indexed by `trailId`, each `{trailId, scenarioId, rootCauseAlarmType (vocab token), expectedSymptoms[{alarmType, managedObjectId}]}`; `expectedSymptoms` matches the same codebook's `/scenarios` `predictedSymptoms`; the Correlation Engine's codebook client (built from the published `openapi.json`) decodes against it. Resolves P1-G5 / P3-G2 end to end |
+| 9 | Active-codebook supersede serving | compile `(core-ip, snap-X)` twice, query `/codebooks/active` between and after | First compile active, then second supersedes; `/codebooks/active` deterministically returns the latest; prior still retrievable by `codebookId` |
 
 ---
 
@@ -488,7 +639,10 @@ DLQ topic names; `DATABASE_URL` (Postgres); `DEFAULT_DOMAIN` (default `core-ip`)
 - **Build:** `pip install -e services/codebook-generator` (or `uv pip install`); lint
   `ruff check` + `black --check`; test `pytest services/codebook-generator/tests`.
 - **OpenAPI:** generated at `/openapi.json`; `scripts/dump_openapi.py` writes
-  `services/codebook-generator/openapi.json` (CI asserts it matches the live spec).
+  `services/codebook-generator/openapi.json` (CI asserts it matches the live spec). The
+  checked-in document includes BOTH the native `/codebooks/{codebookId}/scenarios` endpoint and
+  the CE `/codebooks/{codebookId}/trail-signatures` projection (frozen `TrailScenarioSignature`
+  schema); the Correlation Engine builds its codebook client against this file.
 - **Dockerfile:** base `python:3.13-slim` (pinned per CLAUDE.md); installs the service +
   `libs/event-model` Python binding; entrypoint runs the consumer loop + Uvicorn API.
 - **Compose:** entry `codebook-generator` depends on `kafka`, `postgres`; integration-point URLs

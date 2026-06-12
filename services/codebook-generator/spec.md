@@ -276,6 +276,21 @@ the Correlation Engine (matching) respectively.
     alarm types, trail tags).
   - `GET /codebooks/{codebookId}/scenarios/{scenarioId}` — return a single scenario's predicted
     symptom signature and trail tags.
+  - `GET /codebooks/{codebookId}/trail-signatures?trailId={trailId}` — **Correlation-Engine
+    projection.** Return per-trail scenario signatures for the codebook in the shape the
+    Correlation Engine consumes for codebook decode: a list of `TrailScenarioSignature`, each
+    `{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[{ alarmType, managedObjectId }] }`.
+    With `trailId` set, return only the signatures whose source scenario's `trailIds[]` contains
+    that `trailId`; without it, return every scenario fanned out across each of its `trailIds[]`.
+    This is a **pure read projection** over the already-persisted scenario data (it does not change
+    how codebooks are compiled or stored): `expectedSymptoms` is the **Correlation-Engine-facing
+    alias of the scenario's `predictedSymptoms`** (same `{alarmType, managedObjectId}` items — one
+    underlying truth), and `rootCauseAlarmType` is the origin's own `alarmType`-vocabulary token
+    (the `alarmType` of the predicted symptom whose `managedObjectId` is the scenario's
+    `faultOriginObjectId`, i.e. the first/seed symptom — **not** the object-type `faultOriginType`),
+    drawn from the same Knowledge `alarmTypeVocabulary` value space as `AlarmEvent.alarmType`. The
+    native `GET /codebooks/{codebookId}/scenarios` endpoint is retained for other consumers (e.g.
+    Pattern Manager reconcile). Both endpoints are published in the checked-in `openapi.json`.
   - `GET /codebooks?snapshotId={snapshotId}` — return the codebook(s) compiled for a given
     `snapshotId` (typically one; a list for extensibility).
   - `GET /codebooks?domain={domain}` — return all codebooks compiled for the given domain,
@@ -325,7 +340,13 @@ the Correlation Engine (matching) respectively.
   [boolean, non-nullable — true for the single active codebook per `(domain, snapshotId)` key,
   false/absent for superseded codebooks]), scenarios table (scenarioId, codebookId,
   faultOriginObjectId, faultOriginType, predictedSymptoms as ordered alarm-type list, trailIds).
-  The `(domain, snapshotId, active=true)` combination is unique — enforced at the store level.
+  Each `predictedSymptoms[].alarmType` is a canonical **`alarmType`-vocabulary token** drawn from
+  the domain's Knowledge `alarmTypeVocabulary` — the same value space as `AlarmEvent.alarmType`
+  (the canonical correlation join key), **distinct from** `eventType` (X.733 category) and
+  `probableCause`. The origin's own symptom is first/seed in `predictedSymptoms` (its
+  `managedObjectId` equals `faultOriginObjectId`); its `alarmType` is the scenario's root-cause
+  alarm-type token, surfaced by the `trail-signatures` projection as `rootCauseAlarmType`. The
+  `(domain, snapshotId, active=true)` combination is unique — enforced at the store level.
   No other service writes to this schema.
 
 ---
@@ -509,6 +530,35 @@ Each criterion maps to a single pytest test.
     Pattern Manager in P2 and Correlation Engine in P3) both return `200` responses with
     identical `codebookId` values; no interleaving compilation occurs between the two calls.
 
+21. **CE-PROJECTION-SHAPE: the `trail-signatures` projection returns the frozen
+    Correlation-Engine shape.**
+    `GET /codebooks/{codebookId}/trail-signatures` returns a `200` list of `TrailScenarioSignature`
+    items, each shaped `{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[{ alarmType,
+    managedObjectId }] }`, validating against the published `openapi.json`. The native
+    `GET /codebooks/{codebookId}/scenarios` endpoint remains available and unchanged.
+
+22. **CE-PROJECTION-ROOTCAUSE: `rootCauseAlarmType` is the origin's own `alarmType` vocabulary
+    token (not the object type).**
+    For a scenario with `faultOriginObjectId="FiberSpan:f1"` and `faultOriginType="FiberSpan"`,
+    the projected `rootCauseAlarmType` equals the `alarmType` of the predicted symptom whose
+    `managedObjectId == faultOriginObjectId` (the first/seed symptom) — e.g. `"FiberFault"` — and
+    is a member of the domain's Knowledge `alarmTypeVocabulary` (the same value space as
+    `AlarmEvent.alarmType`). It is **not** the object-type value `"FiberSpan"` and is **not** an
+    X.733 `eventType` or `probableCause` value.
+
+23. **CE-PROJECTION-ALIAS: `expectedSymptoms` equals the scenario's `predictedSymptoms`.**
+    For every projected signature, `expectedSymptoms` is item-for-item identical (same `alarmType`
+    + `managedObjectId`, same order) to the source scenario's `predictedSymptoms` returned by
+    `GET /codebooks/{codebookId}/scenarios/{scenarioId}` — confirming `expectedSymptoms` is a
+    Correlation-Engine-facing alias of one underlying truth, not a separately stored copy.
+
+24. **CE-PROJECTION-FANOUT: signatures fan out per trail from `trailIds[]`.**
+    Given a scenario whose `trailIds = ["T1","T2"]`, the projection returns two
+    `TrailScenarioSignature` items — one with `trailId="T1"` and one with `trailId="T2"` —
+    surfacing the same `scenarioId`, `rootCauseAlarmType`, and `expectedSymptoms`. A request with
+    `?trailId=T1` returns only the `T1` signature; a `trailId` matching no scenario returns a
+    `200` empty list.
+
 ---
 
 ## Open questions
@@ -525,19 +575,22 @@ All remaining open questions are **design-stage items**.
   least one trail via a Trail Builder API call — is firm; the endpoint path and response schema
   are confirmed at design. Not a spec blocker.
 
-- **OQ-2 [DESIGN-STAGE]: Shared alarm-type vocabulary for codebook signatures.**
-  (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/30)
-  The codebook signature is built from **alarm-type identifiers drawn from a shared alarm-type
-  vocabulary defined at design**, coordinated with the Knowledge Service (which authors the
-  propagation templates that name these effects). The propagation-template effects referenced in
-  §5 (e.g. `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`, `PortDown`, `LOS`,
-  `ReachabilityLoss`) are illustrative; the canonical identifier strings — and whether they map
-  to `eventType`, `probableCause`, or a separate field in `AlarmEvent` — are a **shared
-  design-time decision** between codebook-generator and knowledge (the template author).
-  Acceptance criteria 1, 2, and 3 use these strings as illustrative placeholders; the designer
-  replaces them with the vocabulary confirmed at design. This does not require a new topic,
-  payload, or field in `libs/event-model` now; if a new field is ultimately needed that is a
-  contract change at design requiring human approval. Not a spec blocker.
+- ~~**OQ-2: Shared alarm-type vocabulary for codebook signatures.**~~ **Resolved by the merged
+  canonical `alarmType` contract.** (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/30)
+  The codebook signature alarm-type identifiers (`predictedSymptoms[].alarmType`) and the
+  projected `rootCauseAlarmType` are drawn from the canonical **`alarmType` vocabulary** — the
+  Knowledge-authored, domain-scoped `alarmTypeVocabulary` (e.g. `PortDown`, `InterfaceDown`,
+  `LinkDown`, `AdjDown`, `LSPDown`, `ReachabilityLoss`, `LOS`, `FiberFault`) — which is the **same
+  value space as `AlarmEvent.alarmType`**, the merged canonical correlation join key
+  (`libs/event-model/schema/payloads/AlarmEvent.schema.json`; `docs/architecture.md` Invariants).
+  This is **distinct from** `eventType` (X.733 category) and `probableCause` (X.733 probable
+  cause); the earlier open question of whether effects map to `eventType`/`probableCause`/a new
+  field is settled — they are the `alarmType` token. The propagation templates Knowledge returns
+  already carry `trigger.alarmType`/`effect.alarmType` as vocabulary tokens, so the codebook reads
+  them straight through. The illustrative §5 effect strings in acceptance criteria 1–3 are the
+  vocabulary tokens (e.g. `FiberFault` for a FiberSpan origin). No new `libs/event-model` field is
+  introduced (`alarmType` already merged); a future new alarm-type field would be a contract change
+  requiring human approval. Not a spec blocker.
 
 - **OQ-3 [DESIGN-STAGE]: Topology Service query API support for snapshotId-scoped and domain-scoped object enumeration.**
   (Tracked: https://github.com/nikhilmohan/correlation-platform/issues/31)
