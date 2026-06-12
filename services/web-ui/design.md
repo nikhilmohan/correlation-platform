@@ -37,20 +37,22 @@
 >   limit, offset }` envelope; `PatternView` carries `trailId`, `rootCauseAlarmType` (vocab token),
 >   `sessionWindow`, `structurallyValidated`/`structuralValidationReason`; `PATCH /patterns/{id}` to
 >   `PatternEdit { sequenceFlags:[{index, optional}], reviewer, notes? }`.
-> - **Correlation Engine** (P3-G3/G4): `GET /incidents` to the paginated envelope
->   `{ items, page, size, total }`; `GET /incidents/{id}` to a single `IncidentVM`;
+> - **Correlation Engine** (P3-G3/G4): `GET /incidents` to the canonical paginated envelope
+>   `{ items, total, limit, offset }`; `GET /incidents/{id}` to a single `IncidentVM`;
 >   `matchedCodebookId` is the codebook artifact id.
-> - **Alarm Manager** (P3-G3): `GET /alarms` to the paginated envelope
->   `{ items, page, size, totalElements, totalPages }` with `page`/`size` params.
+> - **Alarm Manager** (P3-G3): `GET /alarms` to the canonical paginated envelope
+>   `{ items, total, limit, offset }` with `limit`/`offset` params.
 >
-> **Note on the CE/AM page envelope** (consumer alignment to the producers' SSoT): the
-> Correlation Engine and Alarm Manager froze a **`page`/`size`** pagination envelope (CE
-> `{ items, page, size, total }`, AM `{ items, page, size, totalElements, totalPages }`), **not**
-> `limit`/`offset`. web-ui aligns to the producers' frozen `page`/`size` envelopes (the consumer
-> adapts to the published producer contract). The streaming/list views read **`.items`** from both
-> uniformly, pagination request params are `page`/`size`. The Noise Filter and Pattern Manager
-> envelopes keep their own published forms (Noise Filter `{items,total,limit,offset}`, Pattern
-> Manager `PatternPage {items,total,limit,offset}`), each read uniformly via `.items`.
+> **Note on the canonical list envelope** (consumer alignment to the producers' SSoT): the
+> Correlation Engine and Alarm Manager froze the **platform-canonical** pagination envelope
+> `{ items, total, limit, offset }` with `limit`/`offset` request params — the **same** envelope
+> as Pattern Manager's `PatternPage` and the Noise Filter run-stats page (CE's `IncidentPage` and
+> AM's `AlarmPage` share this exact key set, **not** a `page`/`size` envelope). web-ui aligns to
+> the producers' frozen canonical envelope (the consumer adapts to the published producer
+> contract). All of the platform's list APIs therefore use **one** envelope; the streaming/list
+> views read **`.items`** (plus `.total`/`.limit`/`.offset`) from CE `/incidents`, AM `/alarms`,
+> Pattern Manager `/patterns`, and Noise Filter run-stats uniformly, and page with `limit`/`offset`
+> everywhere.
 
 ## Stack
 
@@ -95,7 +97,7 @@ License posture: Angular (MIT), MapLibre GL (BSD-3), deck.gl (MIT), Cytoscape.js
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | 1. Render the landing dashboard (home/default route) | `DashboardModule` to `DashboardComponent` + `KpiCardComponent` + `RecentIncidentsComponent` + `QuickLinksComponent`; `DashboardStore` (signals) fans out parallel reads to `CorrelationEngineClient.getStats()` + `listIncidents()`, `PatternManagerClient.listPatterns({lifecycle:'approved'})`, and `AlarmManagerClient.listAlarms()` (count). Default route `''` redirects to `/dashboard`. |
-| 2. Real-time streaming view via configurable client polling | `StreamingModule` to `StreamingViewComponent` + `LivePollingService`; `LivePollingService` runs a signal-driven timer at `STREAMING_REFRESH_INTERVAL_MS`, polling `AlarmManagerClient.listAlarms()` + `CorrelationEngineClient.listIncidents()` — **both return the same-shaped `{ items, page, size, ... }` page envelope**; `DeltaDiffService` diffs previous-vs-new over the **`.items`** arrays keyed by `alarmId`/`incidentId`; new/changed rows get transient highlight classes; pause/resume toggle + interval control + live/last-updated indicator. |
+| 2. Real-time streaming view via configurable client polling | `StreamingModule` to `StreamingViewComponent` + `LivePollingService`; `LivePollingService` runs a signal-driven timer at `STREAMING_REFRESH_INTERVAL_MS`, polling `AlarmManagerClient.listAlarms()` + `CorrelationEngineClient.listIncidents()` — **both return the same canonical `{ items, total, limit, offset }` page envelope**; `DeltaDiffService` diffs previous-vs-new over the **`.items`** arrays keyed by `alarmId`/`incidentId`; new/changed rows get transient highlight classes; pause/resume toggle + interval control + live/last-updated indicator. |
 | 3. Render the incident-detail drill-down page | `IncidentDetailModule` to `IncidentDetailComponent`; route `/incidents/:incidentId`; reads `CorrelationEngineClient.getIncident(incidentId)` (`GET /incidents/{id}` → a single `IncidentVM` with `rootCauseAlarmId`, `childAlarmIds[]`, `matchedPatternId?`/`matchedCodebookId?`, `confidence`, `trailId`) then `AlarmManagerClient.getAlarm(alarmId)` per member (root-cause + children) via parallel `forkJoin`/`Promise.all`; renders root cause, children, matched pattern/codebook (`matchedCodebookId` = codebook artifact id) + confidence, trail, per-member links into the streaming/alarm view. |
 | 4. Render the noise-filter run-stats view | `CorrelationStatsModule` to `NoiseStatsComponent` (learning sub-view); reads `NoiseFilterClient.listRunStats({trailId, from, to, limit, offset})` (`GET /api/v1/run-stats`); renders one row per run with derived storm-reduction ratio; filterable by `trailId` and time range. |
 | 5. Provide logical cross-navigation with deep-linkable routes | `NavigationService` builds `RouterLink`/`navigate` targets for every cross-link (pattern→`/topology?trailId=`, incident→`/incidents/:id`, member alarm→`/streaming?alarmId=`, site→`/streaming?siteId=` filtered, KPI→underlying view). All entity pages carry the ID in the URL (route param or query param) so links are shareable/bookmarkable. The **navigation map** below is the required deliverable. |
@@ -107,8 +109,8 @@ License posture: Angular (MIT), MapLibre GL (BSD-3), deck.gl (MIT), Cytoscape.js
 | 11. Accept approve/reject decisions | `PatternDecisionService.approve/reject(patternId)` posts `POST /patterns/{id}/approve` with `{decision}`; `PatternStore` updates the pattern lifecycle signal from the response. |
 | 12. List active/approved patterns | `ActivePatternsComponent` reads `listPatterns({lifecycle:'approved'})`; tab/filter in `PatternReviewModule` (reused by the dashboard active-pattern count and the stats module). |
 | 13. Read & edit Knowledge model params | `ConfigModule` to `ModelParamsFormComponent` (typed reactive form) reads `KnowledgeClient.getModelParams(domain, recordId)` (`GET /domains/{domain}/model-params/{recordId}`) and submits `KnowledgeClient.updateModelParams(domain, recordId, payload)` (`PUT /domains/{domain}/model-params/{recordId}`). The form maps the **versioned record payload** `{ domain, recordType, recordId, version, isCurrent, payload:{ paramSet, params:[{key, type, value, min, max, unit?}] } }` — real dotted keys (`dbscan.epsilon`, `dbscan.minSamples`, `window.sizeSeconds`, `prefixspan.minSupport`, ...); validates each param against its `min`/`max` client-side, submits the versioned record payload, and handles the new-version/`isCurrent` write semantics (P2-GAP-07). Confirmation toast. |
-| 14. Display live correlation stats & incidents | `CorrelationStatsModule` to `IncidentListComponent` + `StatsDashboardComponent` read `CorrelationEngineClient.listIncidents()` (returns the **`{ items:[IncidentVM], page, size, total }` envelope** — render `items[]`, P3-G3/G4) and `getStats()`; ratio derived client-side. |
-| 15. Display live alarm lifecycle | `AlarmLifecycleComponent` reads `AlarmManagerClient.listAlarms({state, page, size})` (returns the **`{ items:[AlarmSummary], page, size, totalElements, totalPages }` envelope** — render `items[]`, P3-G3); each `AlarmSummary` shows `lifecycleState` (`open`/`in-progress`/`correlated`/`cleared`; `reverted-open` is modelled as a transition back to `open`, surfaced from the detail's `transitions`), `role`, `incidentId`; filter by lifecycle state. |
+| 14. Display live correlation stats & incidents | `CorrelationStatsModule` to `IncidentListComponent` + `StatsDashboardComponent` read `CorrelationEngineClient.listIncidents()` (returns the canonical **`{ items:[IncidentVM], total, limit, offset }` envelope** — render `items[]`, P3-G3/G4) and `getStats()`; ratio derived client-side. |
+| 15. Display live alarm lifecycle | `AlarmLifecycleComponent` reads `AlarmManagerClient.listAlarms({state, limit, offset})` (returns the canonical **`{ items:[AlarmSummary], total, limit, offset }` envelope** — render `items[]`, P3-G3); each `AlarmSummary` shows `lifecycleState` (`open`/`in-progress`/`correlated`/`cleared`; `reverted-open` is modelled as a transition back to `open`, surfaced from the detail's `transitions`), `role`, `incidentId`; filter by lifecycle state. |
 | 16. Config-switchable backend integration | `ApiConfigService` resolves each base URL + `mock|real` toggle from `environment.ts`; `MockBackendProvider` (MSW) wired only when toggle is `mock`. Nine integration points (now +Noise Filter). |
 
 Every spec task above maps to a named module/component; none dropped or re-scoped.
@@ -125,7 +127,7 @@ the operator works in.
 |---|---|---|---|
 | P1 — Topology onboarding | Active | `DashboardModule` (topology KPIs available at this phase; incident/pattern KPIs show empty/N-A). `TopologyTrailsModule`: `GeoSiteMapComponent`, `SiteGraphComponent`, `AttributeDetailPanelComponent`, `LayerToggleComponent`, `TrailOverlayService`. Streaming/stats modules dormant (lazy, not loaded). | Reads: Topology site query API (`listSites` → `SiteListDto`, `objectsAtSite` → `SiteObjectsDto` with nodes+edges, neighbours, resolve `NodeDto` with `layer == objectType`); Trail Builder (`listTrails`, `getTrail` → `TrailDetail`, `getTrailsForObject` at `GET /trails/by-object`). Writes: none |
 | P2 — Pattern learning | Active | `DashboardModule` (active-pattern count, learning KPIs). `PatternReviewModule`: `PatternListComponent`, `PatternXaiDetailComponent`, `PatternEditDialogComponent`, `PatternDecisionService`. `ConfigModule`: `ModelParamsFormComponent`. `CorrelationStatsModule` → `NoiseStatsComponent` (noise-filter run-stats / learning sub-view). | Reads: Pattern Manager read API (`GET /patterns` → `PatternPage` envelope, `GET /patterns/{id}` → `PatternView`); Knowledge model-params read API (`GET /domains/{domain}/model-params/{recordId}` → versioned record); Noise Filter run-stats read API (`GET /api/v1/run-stats`). Writes: Pattern Manager approval-intent (`POST /patterns/{id}/approve`), pattern-edit (`PATCH /patterns/{id}` → `PatternEdit` with `sequenceFlags`); Knowledge model-params edit API (`PUT /domains/{domain}/model-params/{recordId}`, versioned write). |
-| P3 — Real-time correlation | Active | `DashboardModule` (live KPIs). `StreamingModule`: `StreamingViewComponent`, `LivePollingService`, `DeltaDiffService`. `IncidentDetailModule`: `IncidentDetailComponent`. `CorrelationStatsModule`: `IncidentListComponent`, `StatsDashboardComponent`, `AlarmLifecycleComponent`; `ActivePatternsComponent` (reused). | Reads: Correlation Engine (`GET /incidents` → `{items,page,size,total}`, `GET /incidents/{id}` → `IncidentVM`, `GET /stats`); Pattern Manager active-patterns (`GET /patterns?lifecycle=approved` → `PatternPage`); Alarm Manager (`GET /alarms` → `{items,page,size,totalElements,totalPages}`, `GET /alarms/{id}` → `AlarmDetail`). Writes: none |
+| P3 — Real-time correlation | Active | `DashboardModule` (live KPIs). `StreamingModule`: `StreamingViewComponent`, `LivePollingService`, `DeltaDiffService`. `IncidentDetailModule`: `IncidentDetailComponent`. `CorrelationStatsModule`: `IncidentListComponent`, `StatsDashboardComponent`, `AlarmLifecycleComponent`; `ActivePatternsComponent` (reused). | Reads: Correlation Engine (`GET /incidents` → `{items,total,limit,offset}`, `GET /incidents/{id}` → `IncidentVM`, `GET /stats`); Pattern Manager active-patterns (`GET /patterns?lifecycle=approved` → `PatternPage`); Alarm Manager (`GET /alarms` → `{items,total,limit,offset}`, `GET /alarms/{id}` → `AlarmDetail`). Writes: none |
 
 ## Module breakdown
 
@@ -330,9 +332,9 @@ classDiagram
   }
   class IncidentPageVM {
     IncidentArray items
-    number page
-    number size
     number total
+    number limit
+    number offset
   }
   class StatsVM {
     number totalAlarmsProcessed
@@ -363,10 +365,9 @@ classDiagram
   }
   class AlarmPageVM {
     AlarmSummaryArray items
-    number page
-    number size
-    number totalElements
-    number totalPages
+    number total
+    number limit
+    number offset
   }
   class ModelParamsRecordVM {
     string domain
@@ -457,9 +458,9 @@ classDiagram
 ```
 
 Notes:
-- The diff runs over the **`.items`** array of each frozen page envelope: `AlarmManager` returns
-  `{ items:[AlarmSummary], page, size, totalElements, totalPages }`, `CorrelationEngine` returns
-  `{ items:[IncidentVM], page, size, total }`. `DeltaDiffService` reads `.items` from both and keys
+- The diff runs over the **`.items`** array of each frozen canonical page envelope: `AlarmManager`
+  returns `{ items:[AlarmSummary], total, limit, offset }`, `CorrelationEngine` returns
+  `{ items:[IncidentVM], total, limit, offset }`. `DeltaDiffService` reads `.items` from both and keys
   by `alarmId`/`incidentId` (it never assumes a bare array).
 - `DeltaKind` for alarms: `NEW` (alarmId absent from previous snapshot), `CHANGED` (alarmId
   present in both but **`lifecycleState`** differs — covers `open` to `in-progress`, `in-progress`
@@ -574,9 +575,10 @@ producer's frozen `openapi.json`** — the producer is the single source of trut
   `min`/`max` client-side before submit.
 
 ### Correlation Engine (P3 + dashboard + streaming + incident-detail) — FROZEN (P3-G3/G4)
-- `GET /incidents?trailId=X&from=Y&to=Z&matchType=W&page=&size=` (`listIncidents`) returns `200`
-  the **paginated envelope `{ items: IncidentVM[], page, size, total }`** (P3-G3/G4; `page`/`size`,
-  not `limit`/`offset`). web-ui renders `items[]`. `IncidentVM = { incidentId, rootCauseAlarmId,
+- `GET /incidents?trailId=X&from=Y&to=Z&matchType=W&limit=&offset=` (`listIncidents`) returns `200`
+  the **canonical paginated envelope `{ items: IncidentVM[], total, limit, offset }`** (P3-G3/G4;
+  `limit` default 50 max 500, `offset` default 0 — the platform-canonical envelope, **not**
+  `page`/`size`). web-ui renders `items[]`. `IncidentVM = { incidentId, rootCauseAlarmId,
   childAlarmIds[], matchedPatternId|null, matchedCodebookId|null, confidence, trailId, createdAt }`.
   Used by dashboard, streaming view, and stats module.
 - `GET /incidents/{incidentId}` (`getIncident`) returns `200` a **single `IncidentVM`** (same shape
@@ -590,9 +592,10 @@ producer's frozen `openapi.json`** — the producer is the single source of trut
   is not returned (evaluated offline) — UI surfaces a note.
 
 ### Alarm Manager (P3 + streaming + incident-detail) — FROZEN (P3-G3)
-- `GET /alarms?state=open|in-progress|correlated|cleared&trailId=X&incidentId=Y&from=A&to=B&page=&size=`
-  (`listAlarms`) returns `200` the **paginated envelope `{ items: AlarmSummary[], page, size,
-  totalElements, totalPages }`** (P3-G3; `page`/`size` request params). web-ui renders `items[]`.
+- `GET /alarms?state=open|in-progress|correlated|cleared&trailId=X&incidentId=Y&from=A&to=B&limit=&offset=`
+  (`listAlarms`) returns `200` the **canonical paginated envelope `{ items: AlarmSummary[], total,
+  limit, offset }`** (P3-G3; `limit` default 50 max 500, `offset` default 0 request params — the
+  platform-canonical envelope, **not** `page`/`size`). web-ui renders `items[]`.
   `AlarmSummary = { alarmId, managedObjectId, eventType, perceivedSeverity, raisedAt, lifecycleState
   (open/in-progress/correlated/cleared; `reverted-open` modelled as a transition back to `open`),
   role (root-cause/child/none), incidentId, trailIds }`. Used by the streaming view and the
@@ -666,8 +669,8 @@ The streaming poll loop is the only timer in the app. Design:
   `intervalMs` changes: when `autoRefresh()` is `false` (paused) the loop is torn down; when it
   flips back to `true` (resume) the loop restarts at the configured interval.
 - **Per tick:** call `AlarmManagerClient.listAlarms()` and `CorrelationEngineClient.listIncidents()`
-  in parallel. **Both return the frozen page envelope** (AM `{items, page, size, totalElements,
-  totalPages}`, CE `{items, page, size, total}`); the service takes each response's **`.items`**
+  in parallel. **Both return the frozen canonical page envelope** (AM `{items, total, limit,
+  offset}`, CE `{items, total, limit, offset}`); the service takes each response's **`.items`**
   array as the snapshot. On success: pass `(previousSnapshot.items, newSnapshot.items)` to
   `DeltaDiffService`, write the resulting `alarmDeltas`/`incidentDeltas` signals and the new
   snapshots, and set `lastUpdated = now`. On failure: set `pollError` (stale-data indicator), keep
@@ -682,7 +685,7 @@ The streaming poll loop is the only timer in the app. Design:
 ### DeltaDiffService
 
 Pure function, no I/O. It receives the **`.items`** arrays (already unwrapped from the
-`{items, page, size, ...}` page envelopes by `LivePollingService`), keys the previous and new
+`{items, total, limit, offset}` page envelopes by `LivePollingService`), keys the previous and new
 arrays by `alarmId`/`incidentId` into `Map`s, then for each current item computes a `DeltaKind`
 (alarm change keyed off `lifecycleState`; see Algorithm logical flow). It produces a new array of
 delta view-models; only the changed/new rows carry a non-expired `highlightUntilEpochMs`. This
@@ -716,8 +719,8 @@ sequenceDiagram
   loop every intervalMs while autoRefresh is on
     LPS->>AMC: listAlarms
     LPS->>CEC: listIncidents
-    AMC-->>LPS: page envelope items page size totalElements
-    CEC-->>LPS: page envelope items page size total
+    AMC-->>LPS: canonical envelope items total limit offset
+    CEC-->>LPS: canonical envelope items total limit offset
     LPS->>LPS: take dot items from each envelope
     LPS->>Diff: diff previous items and current items keyed by id
     Diff-->>LPS: alarmDeltas and incidentDeltas with kind new or changed or grew
@@ -751,9 +754,9 @@ sequenceDiagram
     Store->>AMC: listAlarms count
   end
   CEC-->>Store: raw counts
-  CEC-->>Store: incidents page envelope items
+  CEC-->>Store: incidents canonical envelope items total limit offset
   PMC-->>Store: PatternPage items approved
-  AMC-->>Store: alarms page envelope totalElements for count
+  AMC-->>Store: alarms canonical envelope total for count
   Store->>Store: compute alarm reduction ratio and N-A when zero incidents
   Store->>Dash: render KPI cards plus recent incidents plus quick links
   Operator->>Dash: click live incident count KPI
@@ -893,10 +896,10 @@ sequenceDiagram
   Dash->>Dash: compute alarm reduction ratio
   Dash->>Inc: render incidents
   Inc->>CEC: listIncidents
-  CEC-->>Inc: page envelope items IncidentVM root cause and children
+  CEC-->>Inc: canonical envelope items IncidentVM root cause and children
   Operator->>ALC: view alarm lifecycle
-  ALC->>AMC: listAlarms state filter page size
-  AMC-->>ALC: page envelope items AlarmSummary lifecycleState role incidentId
+  ALC->>AMC: listAlarms state filter limit offset
+  AMC-->>ALC: canonical envelope items AlarmSummary lifecycleState role incidentId
   Operator->>NS: open noise run-stats sub-view
   NS->>NFC: listRunStats trailId filter
   NFC-->>NS: run-stats rows
@@ -979,16 +982,16 @@ published OpenAPI, used by Vitest/TestBed. Representative fixtures:
 - `fixtures/correlation/stats.json` — known `totalAlarmsProcessed`/`totalIncidentsCreated` so the
   reduction ratio is a known value (AC 1, 45); a variant with `totalIncidentsCreated=0` for the
   N/A case (AC 1).
-- `fixtures/correlation/incidents.json` (a **`{items:[IncidentVM], page, size, total}`** envelope)
+- `fixtures/correlation/incidents.json` (a canonical **`{items:[IncidentVM], total, limit, offset}`** envelope)
   + `incident-detail.json` (a single `IncidentVM`) — incidents with root-cause plus children,
   `matchedPatternId`/`matchedCodebookId`, `confidence`, `trailId` (AC 14, 44).
-- `fixtures/alarms/lifecycle.json` — an **`{items:[AlarmSummary], page, size, totalElements,
-  totalPages}`** envelope with alarms across `lifecycleState` open/in-progress/correlated/cleared
+- `fixtures/alarms/lifecycle.json` — a canonical **`{items:[AlarmSummary], total, limit,
+  offset}`** envelope with alarms across `lifecycleState` open/in-progress/correlated/cleared
   (plus a member whose detail `transitions` show a revert back to `open`, i.e. reverted-open) with
   role plus `incidentId` (AC 47, 48).
-- `fixtures/streaming/poll-a.json` + `poll-b.json` — two successive poll snapshots, **each a page
-  envelope** (`{items, page, size, totalElements, totalPages}` for alarms, `{items, page, size,
-  total}` for incidents): `poll-b.items` adds one new alarm (AC 7), changes one alarm
+- `fixtures/streaming/poll-a.json` + `poll-b.json` — two successive poll snapshots, **each a
+  canonical page envelope** (`{items, total, limit, offset}` for both alarms and incidents):
+  `poll-b.items` adds one new alarm (AC 7), changes one alarm
   `lifecycleState` `open` to `in-progress` (AC 8), changes one `in-progress` to `correlated` and
   one back to `open` (the reverted-open case, AC 9), and grows one incident's `childAlarmIds`.
 - `fixtures/alarms/alarm-{id}.json` — per-member single-alarm **`AlarmDetail`** records (with
@@ -1003,7 +1006,7 @@ poll-a .items lifecycleState: a-1 open,  a-2 open,        a-3 in-progress
 poll-b .items lifecycleState: a-1 open,  a-2 in-progress, a-3 correlated, a-4 open, a-5 open(reverted)
 delta: a-2 CHANGED (open to in-progress), a-3 CHANGED (in-progress to correlated),
        a-4 NEW, a-5 CHANGED (reverted back to open), a-1 UNCHANGED
-(diff keys on lifecycleState over the .items array of the page envelope)
+(diff keys on lifecycleState over the .items array of the canonical {items,total,limit,offset} envelope)
 ```
 
 ## UI wireframes
@@ -1056,8 +1059,8 @@ Alarm Manager `listAlarms` (count). Each KPI card + recent-incident row is a dee
 |   respects prefers-reduced-motion: no animation, static badge instead)  |
 +-------------------------------------------------------------------------+
 ```
-Reads (polled every interval): Alarm Manager `GET /alarms` (`{items,page,size,totalElements,
-totalPages}`), Correlation Engine `GET /incidents` (`{items,page,size,total}`); the view diffs over
+Reads (polled every interval): Alarm Manager `GET /alarms` (`{items,total,limit,offset}`),
+Correlation Engine `GET /incidents` (`{items,total,limit,offset}`); the view diffs over
 each response's `.items`. No backend streaming. Pause stops all polling. Clicking deep-links out.
 
 ### New page — Incident-detail drill-down (`/incidents/:incidentId`)
@@ -1284,8 +1287,8 @@ independently.
 |---|---|---|
 | Real-time delivery | WebSocket/SSE push vs. client-side polling vs. backend stream API | **Client-side polling** — fixed by the spec (no backend streaming, no new API surface). Polls existing `GET /alarms` + `GET /incidents` at a configurable interval. No contract change; works against the already-published REST APIs and the same mock/real toggle. |
 | Streaming timer | rxjs `interval`/`timer` bridged to signals vs. self-rescheduling `setTimeout` in an `effect` vs. Angular `resource` polling | **Signal-driven timer (rxjs `timer` bridged, or `setTimeout` loop) keyed off `intervalMs`/`autoRefresh` signals.** Restartable on interval change, tearable on pause, testable with `vi.useFakeTimers`. `resource` re-fetch is less ergonomic for pause/resume + delta-diff. |
-| Delta diffing | Full-list re-render each poll vs. keyed Map diff with per-row tracking vs. server-provided diffs | **Keyed Map diff over the page envelope's `.items`** keyed by `alarmId`/`incidentId` (alarm change keyed on `lifecycleState`), template `@for` tracked by id — only changed rows re-render (spec performance). The diff unwraps `.items` from the frozen CE/AM `{items, page, size, ...}` envelopes (never assumes a bare array). Server diffs are unavailable (no new API). Full re-render violates the perf requirement and loses highlight state. |
-| CE/AM pagination envelope | Align to a `limit`/`offset` envelope vs. align to the producers' frozen `page`/`size` envelope | **Align to the producers' frozen `page`/`size` envelope** (CE `{items, page, size, total}`, AM `{items, page, size, totalElements, totalPages}`). web-ui is the consumer and adapts to the published producer contract (the producer is the SSoT); both list/streaming views read `.items` uniformly and page with `page`/`size`. |
+| Delta diffing | Full-list re-render each poll vs. keyed Map diff with per-row tracking vs. server-provided diffs | **Keyed Map diff over the page envelope's `.items`** keyed by `alarmId`/`incidentId` (alarm change keyed on `lifecycleState`), template `@for` tracked by id — only changed rows re-render (spec performance). The diff unwraps `.items` from the frozen CE/AM canonical `{items, total, limit, offset}` envelopes (never assumes a bare array). Server diffs are unavailable (no new API). Full re-render violates the perf requirement and loses highlight state. |
+| CE/AM pagination envelope | Align to a `page`/`size` envelope vs. align to the producers' frozen canonical `{items, total, limit, offset}` envelope | **Align to the producers' frozen canonical `{items, total, limit, offset}` envelope** (CE `IncidentPage` and AM `AlarmPage` both froze this exact key set — the same envelope as Pattern Manager's `PatternPage` and the Noise Filter run-stats page, **not** `page`/`size`). web-ui is the consumer and adapts to the published producer contract (the producer is the SSoT). One canonical envelope platform-wide means all list/streaming views read `.items` (plus `.total`/`.limit`/`.offset`) uniformly and page with `limit`/`offset` (default 50, max 500 / offset 0) everywhere — no per-service special-casing. |
 | Topology node layer | A separate `layer` field on `NodeDto` vs. derive `layer` from `objectType` | **Derive from `objectType`** — the frozen `NodeDto` has no `layer` field (`layer == objectType`). web-ui maps `objectType` to the logical layer via a pure `LayerMapper` (fallback `other`), avoiding a duplicated field and matching the producer's single source of truth (P1-G9). |
 | New-row animation | CSS keyframe animation vs. CSS class toggle with timed expiry vs. no animation | **Timed CSS class toggle** (`highlightUntilEpochMs`) — cheap, OnPush-friendly, and trivially disabled under `prefers-reduced-motion` (static badge instead of motion). Keyframe-only would not respect reduced motion without extra work. |
 | Incident-detail member fetch | Sequential per-alarm vs. parallel fan-out vs. a single batch endpoint | **Parallel fan-out** (`forkJoin`/`Promise.all`) over `GET /alarms/{id}` — there is no batch endpoint (no new API), and parallel keeps the page responsive. Sequential is slow for large incidents. |
@@ -1314,7 +1317,7 @@ integration stack (E2E only). All 54 acceptance criteria are mapped 1:1 to a nam
 | 4 | Clicking incident-count KPI navigates to stats/incidents | `dashboard-kpi-nav.spec.ts` (router) | activating the KPI navigates to the stats/incidents view |
 | 5 | E2E dashboard non-zero count + ratio after fiber-cut replay | `dashboard.e2e.ts` (Playwright) | integration stack: dashboard shows non-zero incident count and non-zero ratio from stats API |
 | 6 | Streaming polls `GET /alarms` every T ms; no extra calls between | `streaming-cadence.spec.ts` (fake timers) | one call per interval at configured T; no call between ticks |
-| 7 | New alarm between polls gets "new" indicator; unchanged none; diff over .items | `streaming-new-alarm.spec.ts` | fixture A then B page envelopes (one added alarm in `.items`) then added row has NEW indicator; unchanged row none |
+| 7 | New alarm between polls gets "new" indicator; unchanged none; diff over .items | `streaming-new-alarm.spec.ts` | fixture A then B canonical `{items,total,limit,offset}` envelopes (one added alarm in `.items`) then added row has NEW indicator; unchanged row none |
 | 8 | open to in-progress between polls updates row + "changed" indicator | `streaming-state-change.spec.ts` | second poll `items[].lifecycleState=in-progress` then row updates + CHANGED indicator |
 | 9 | in-progress to correlated and reverted-back-to-open reflected without reload | `streaming-transitions.spec.ts` | all transition cases (keyed on `lifecycleState`) reflected; no page reload |
 | 10 | Pause stops all polling to Alarm Manager + Correlation Engine | `streaming-pause.spec.ts` (fake timers) | after pause, no further calls to either client |
@@ -1351,10 +1354,10 @@ integration stack (E2E only). All 54 acceptance criteria are mapped 1:1 to a nam
 | 41 | Valid edit submits the versioned record via PUT; new version confirmed | `config-save.spec.ts` | `PUT /domains/{domain}/model-params/{recordId}` sent with the versioned record payload (dotted keys, updated value); success toast reflects new `version` |
 | 42 | Out-of-bounds value shows validation error, no API call | `config-validation.spec.ts` | value outside a param's declared `min`/`max` → inline error; Knowledge client not called |
 | 43 | E2E config edit retrievable via Knowledge on re-read | `config-edit.e2e.ts` (Playwright) | integration stack: submitted versioned edit returned as the new current version on re-read |
-| 44 | Incidents render with root-cause + child alarms from the page envelope | `incident-list.spec.ts` | `listIncidents` returns `{items,page,size,total}`; each `items[]` incident shows `rootCauseAlarmId` + `childAlarmIds` |
+| 44 | Incidents render with root-cause + child alarms from the page envelope | `incident-list.spec.ts` | `listIncidents` returns the canonical `{items,total,limit,offset}` envelope (request params `limit`/`offset`, not `page`/`size`); each `items[]` incident shows `rootCauseAlarmId` + `childAlarmIds` |
 | 45 | Alarm-reduction ratio from stats shown as numeric | `stats-metrics.spec.ts` | computed ratio = `totalAlarmsProcessed/totalIncidentsCreated`, numeric |
 | 46 | E2E fiber-cut: stats shows incident with root cause + children | `stats.e2e.ts` (Playwright) | integration stack: incident with tagged root cause + at least 1 child |
-| 47 | Alarm-lifecycle lists lifecycleState + role + incidentId from the page envelope | `alarm-lifecycle.spec.ts` | `listAlarms` returns `{items,page,size,totalElements,totalPages}`; `items[]` show `lifecycleState` (open/in-progress/correlated/cleared) + role + incidentId; the reverted-open case shows via the detail `transitions` |
+| 47 | Alarm-lifecycle lists lifecycleState + role + incidentId from the page envelope | `alarm-lifecycle.spec.ts` | `listAlarms` returns the canonical `{items,total,limit,offset}` envelope (request params `limit`/`offset`, not `page`/`size`); `items[]` show `lifecycleState` (open/in-progress/correlated/cleared) + role + incidentId; the reverted-open case shows via the detail `transitions` |
 | 48 | Lifecycle filter filters by selected lifecycleState incl. in-progress | `alarm-filter.spec.ts` | filter on `lifecycleState` over `.items` shows only that state, incl. in-progress; reverted-open shown as a return to `open` |
 | 49 | E2E fiber-cut: correlated alarm with incident association | `alarm-lifecycle.e2e.ts` (Playwright) | integration stack: correlated alarm with non-empty incidentId from Alarm Manager |
 | 50 | Mock config: all nine integration points resolve to mocks, no real HTTP; MSW handlers serve the frozen shapes | `env-mock-switch.spec.ts` | each of 9 clients hits MSW handlers (generated from the producers' frozen `openapi.json`); responses match the frozen envelopes/DTOs; no outbound real request |
