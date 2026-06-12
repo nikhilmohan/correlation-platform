@@ -218,6 +218,22 @@ object/edge vocabulary while sharing the same engine, event model, and service m
 - **The Knowledge Service** is the authoritative, domain-scoped home of each domain's **object-type
   set**, **edge-relation vocabulary**, **propagation templates**, **trail policy**, **model params**,
   and **device/connection attribute catalogue**. Adding a domain = authoring these records.
+
+> **Invariant — rules & ontology, never operational data.** The Knowledge Service stores only the
+> **abstract domain model**: the ontology (object-type / edge-relation vocabularies, fault-origin
+> types, the canonical alarm-**type** vocabulary), the **rules** (propagation templates, trail policy),
+> and **parameter bounds** (model-param sets) — *what kinds of things exist in a domain and how faults
+> propagate*. It must **never** hold **runtime or source-specific operational data**: no concrete alarm
+> instances (`alarmId`, `raisedAt`, severities of actual alarms), no device/topology inventory, no
+> concrete `managedObjectId` **values** (only the `<objectType>:<id>` token-format rule), and nothing
+> tied to a particular alarm **source** (a specific NMS/OSS/vendor feed or the Simulator). That
+> operational data originates from the **source** (the Simulator in the MVP; a real NMS/OSS in
+> production), is **adapted per-source by the Enrichment Service** (per-source rulesets → canonical
+> `AlarmEvent`), materialized in **Topology** (graph instances) and the live stores — never authored
+> into Knowledge. Knowledge content is identical across deployments of the same domain; only the
+> source data varies by context. (The Simulator's **domain pack** carries a *generation-side copy* of a
+> domain's types/templates/alarm-shapes to synthesize data — but the **authoritative** rules consumed
+> for correlation live in Knowledge, and concrete generated alarms never flow back into it.)
 - **The event model** is domain-agnostic: the `managedObjectId` scheme accepts any `<objectType>:<id>`
   and the `AlarmEvent` (X.733) is domain-neutral — so **no event-model contract change is needed per
   new domain**.
