@@ -46,12 +46,12 @@ Every spec **Tasks (high-level)** item is realized below and traceable to module
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | 1. Select the matching per-source ruleset for each incoming alarm, or the default when no source-specific match is found | `RulesetSelector` reads the envelope `source` field, looks it up in `RulesetRegistry`; on miss returns the `default` ruleset. Selection happens before any other stage. |
-| 2. Apply the field-mapping portion of the matched ruleset to translate raw fields into the canonical `AlarmEvent` | `NormalizeStep` applies `Ruleset.fieldMapping` (severity-code map, eventType map, managedObjectId construction template, probableCause map, vendorRaw pass-through) and emits a canonical `AlarmEvent` validated against the frozen `event-model` binding |
+| 2. Apply the field-mapping portion of the matched ruleset to translate raw fields into the canonical `AlarmEvent` | `NormalizeStep` applies `Ruleset.fieldMapping` (severity-code map, eventType map, **alarmType map**, managedObjectId construction template, probableCause map, vendorRaw pass-through) and emits a canonical `AlarmEvent` validated against the frozen `event-model` binding. The required canonical `alarmType` join token is set from the source's `alarmTypeMap` (see NormalizeStep and Config model). |
 | 3. Deduplicate: count-collapse repeated identical alarms on `(managedObjectId, eventType)` within the per-source dedup window | `DedupStep` over `DedupWindowStore` keyed `(source, managedObjectId, eventType)`; window size from `Ruleset.filterParams.dedupWindow` |
 | 4. Self-clear suppression using the per-source hold-time | `SelfClearStep` over `SelfClearStore`; hold-time from `Ruleset.filterParams.selfClearHoldTime` |
 | 5. Flap-damping using per-source N/window then one summary `AlarmEvent` (existing fields only) | `FlapDampStep` over `FlapWindowStore`; N and window from `Ruleset.filterParams.flapN` / `flapWindow`; summary shape per resolved Open question #40 below |
 | 6. Known-chatter removal using the per-source chatter list | `ChatterStep` consulting `Ruleset.filterParams.chatterList` for the resolved source |
-| 7. Trail-tag each survivor with `trailIds` via Trail Builder `getTrailsForObject(managedObjectId)` | `TrailTagStep` calling `TrailBuilderClient.getTrailsForObject` (Resilience4j-wrapped); sets `AlarmEvent.trailIds` |
+| 7. Trail-tag each survivor with `trailIds` via Trail Builder `getTrailsForObject(managedObjectId)` | `TrailTagStep` calling `TrailBuilderClient.getTrailsForObject(managedObjectId, domain)` against the **frozen** `GET /trails/by-object?managedObjectId={moId}&domain={domain}` contract (Resilience4j-wrapped); sets `AlarmEvent.trailIds` from the response `trailIds[]` |
 | 8. Emit each survivor on the correct output topic (`alarms.enriched` for history, `alarms.enriched.live` for live) | `EnrichedAlarmProducer` — the `Path` (HISTORY/LIVE) the alarm entered on selects the output topic |
 | 9. Route undeserializable / schema-violating messages to the per-topic DLQ | `DlqRouter` — on `CodecException` from `EventCodec`, send raw bytes to `alarms.history.dlq` or `alarms.live.dlq` (matching the source topic) and continue |
 
@@ -112,9 +112,32 @@ flowchart TD
   source-specific ruleset matches (criterion 13). Always returns exactly one `Ruleset`.
 - **`NormalizeStep`** — the single place per-source field mapping is applied. Takes the raw alarm
   payload plus the resolved `Ruleset.fieldMapping` and produces a canonical `AlarmEvent`
-  (severity/eventType/probableCause translation, `managedObjectId` construction, `vendorRaw`
-  pass-through). All downstream stages and the output operate only on this canonical form
-  (canonical-output invariant).
+  (severity/eventType/probableCause translation, **canonical `alarmType` translation via
+  `alarmTypeMap`**, `managedObjectId` construction, `vendorRaw` pass-through). **It sets the
+  REQUIRED canonical `AlarmEvent.alarmType` join token** from the source's `alarmTypeMap`
+  (raw-alarm-type to `alarmTypeVocabulary` token); see the `alarmType` population rule below. All
+  downstream stages and the output operate only on this canonical form (canonical-output
+  invariant). `alarmType` is the canonical join token used by mining, codebook signatures,
+  `rootCauseAlarmType`, and correlation matching — **distinct from** `eventType` (the X.733
+  category) and `probableCause` (the X.733 probable cause).
+
+  **`alarmType` population rule (REQUIRED field).** Each per-source `fieldMapping.alarmTypeMap`
+  maps that source's raw alarm-type identifier to a canonical token from the domain's Knowledge
+  `alarmTypeVocabulary` (`FiberFault`, `LOS`, `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`,
+  `LSPDown`, `ReachabilityLoss`). `NormalizeStep` reads the raw alarm-type value from the field
+  named by `alarmTypeMap.rawField` (e.g. `rawEventType`/`rawAlarmType`), looks it up in the
+  source's `alarmTypeMap.values`, and sets `AlarmEvent.alarmType` to the mapped token. Behaviour
+  when the raw alarm-type is **unmapped** is governed by `alarmTypeMap.onUnmapped`:
+  - `default` (recommended, the configured `alarmTypeMap.fallback` token, e.g. a domain-sensible
+    catch-all) — set `alarmType` to the fallback vocabulary token and increment
+    `alarmtype_fallback_total{source}`. Guarantees every emitted alarm carries a valid token.
+  - `dlq` — route the alarm to the input topic's DLQ with reason `alarmtype_unmapped` (used by
+    deployments that prefer to surface gaps rather than mask them). Never emit an alarm without
+    `alarmType`.
+  In **all** cases an emitted `AlarmEvent` carries a non-null `alarmType` that is a member of the
+  domain's `alarmTypeVocabulary`; the codec re-validates `alarmType` is present on serialize
+  (canonical-output invariant). The fallback token itself MUST be a valid vocabulary token, and
+  config validation rejects an `alarmTypeMap` whose values/fallback are not vocabulary tokens.
 - **`EnrichmentPipeline`** — ordered composition of `DedupStep`, `SelfClearStep`, `FlapDampStep`,
   `ChatterStep`, `TrailTagStep`. Each step reads the resolved `Ruleset.filterParams`. Each returns
   one of: pass-through, drop (emit nothing), or replace (a summary alarm). One shared bean used by
@@ -122,8 +145,12 @@ flowchart TD
 - **`*WindowStore`** beans — bounded, time-expiring per-key state (Caffeine). Keys are
   `(source, managedObjectId, eventType)` plus the originating `Path`, so history/live state never
   mix and per-source windows are independent (criterion 11).
-- **`TrailBuilderClient`** — Resilience4j-wrapped HTTP client built from Trail Builder's published
-  OpenAPI; base URL plus `mock|real` toggle from config.
+- **`TrailBuilderClient`** — Resilience4j-wrapped HTTP client against Trail Builder's **frozen**
+  `getTrailsForObject` contract: `GET /trails/by-object?managedObjectId={moId}&domain={domain}` →
+  `{ managedObjectId, domain, trailIds: string[] }`. Enrichment passes the alarm's
+  `managedObjectId` and its `domain`, and sets `AlarmEvent.trailIds` from the response `trailIds[]`
+  (empty `[]` when none). Base URL plus `mock|real` toggle from config; the mock stub is generated
+  from Trail Builder's checked-in `openapi.json`.
 - **`EnrichedAlarmProducer`** — serializes the enriched canonical `AlarmEvent` via the codec and
   sends to the topic chosen by `Path`. Idempotent producer config.
 - **`DlqRouter`** — sends offending raw bytes (plus failure metadata headers) to the matching
@@ -158,9 +185,16 @@ classDiagram
     +Map severityMap
     +Map eventTypeMap
     +Map probableCauseMap
+    +AlarmTypeMap alarmTypeMap
     +String managedObjectIdTemplate
     +String defaultObjectType
     +List vendorRawPassthrough
+  }
+  class AlarmTypeMap {
+    +String rawField
+    +Map values
+    +String fallback
+    +String onUnmapped
   }
   class FilterParams {
     +Duration dedupWindow
@@ -176,6 +210,7 @@ classDiagram
   RulesetRegistry o-- Ruleset
   Ruleset *-- FieldMapping
   Ruleset *-- FilterParams
+  FieldMapping *-- AlarmTypeMap
 ```
 
 State is ephemeral by design: on restart the windows reset; the next duplicate/transient/flap is
@@ -232,6 +267,15 @@ rulesets:
       severityMap: { "1": CRITICAL, "2": MAJOR, "3": MINOR, "4": WARNING, "5": CLEARED }
       eventTypeMap: {}         # identity passthrough when empty
       probableCauseMap: {}
+      # canonical alarmType (REQUIRED on every AlarmEvent) -- raw alarm-type to vocab token
+      alarmTypeMap:
+        rawField: rawAlarmType          # raw payload field carrying the source alarm-type id
+        fallback: ReachabilityLoss      # vocab token used when a raw value is unmapped
+        onUnmapped: default             # default | dlq
+        values:
+          "1": ReachabilityLoss
+          "2": LinkDown
+          "3": InterfaceDown
       vendorRawPassthrough: ["*"]  # carry the whole raw payload into vendorRaw
     filterParams:
       dedupWindow: 30s
@@ -244,8 +288,18 @@ rulesets:
       defaultObjectType: Interface
       managedObjectIdTemplate: "Interface:{ne}-{ifIndex}"
       severityMap: { CRIT: CRITICAL, MAJ: MAJOR, MIN: MINOR, WARN: WARNING, CLR: CLEARED }
-      eventTypeMap: { LINK_DOWN: linkDown, LOS: lossOfSignal }
-      probableCauseMap: { LINK_DOWN: cableTamper, LOS: lossOfSignal }
+      eventTypeMap: { LINK_DOWN: communicationsAlarm, LOS: communicationsAlarm }
+      probableCauseMap: { LINK_DOWN: linkDown, LOS: lossOfSignal }
+      # nms-alpha raw alarm-type tokens to canonical alarmTypeVocabulary tokens
+      alarmTypeMap:
+        rawField: rawEventType
+        fallback: ReachabilityLoss
+        onUnmapped: default
+        values:
+          LINK_DOWN: LinkDown
+          LOS: LOS
+          PORT_DOWN: PortDown
+          IF_DOWN: InterfaceDown
       vendorRawPassthrough: ["ne", "ifIndex", "rawSeverity", "vendorCode"]
     filterParams:
       dedupWindow: 20s
@@ -259,8 +313,17 @@ rulesets:
       defaultObjectType: Port
       managedObjectIdTemplate: "Port:{chassis}-{slot}-{port}"
       severityMap: { P1: CRITICAL, P2: MAJOR, P3: MINOR, P4: WARNING, OK: CLEARED }
-      eventTypeMap: { "port-fault": portFault, "card-fault": lineCardFault }
+      eventTypeMap: { "port-fault": equipmentAlarm, "card-fault": equipmentAlarm }
       probableCauseMap: { "port-fault": equipmentMalfunction }
+      # vendor-beta raw alarm-type tokens to canonical alarmTypeVocabulary tokens
+      alarmTypeMap:
+        rawField: rawAlarmType
+        fallback: ReachabilityLoss
+        onUnmapped: default
+        values:
+          "port-fault": PortDown
+          "card-fault": FiberFault
+          "los": LOS
       vendorRawPassthrough: ["chassis", "slot", "port", "code"]
     filterParams:
       dedupWindow: 60s
@@ -272,8 +335,17 @@ rulesets:
 
 - **`fieldMapping`** translates raw source fields into canonical `AlarmEvent` fields:
   - `severityMap` — raw severity code to canonical `perceivedSeverity` (X.733 value).
-  - `eventTypeMap` / `probableCauseMap` — raw strings to canonical `eventType` / `probableCause`
-    (empty map = identity passthrough).
+  - `eventTypeMap` / `probableCauseMap` — raw strings to canonical `eventType` (X.733 category) /
+    `probableCause` (X.733 probable cause) (empty map = identity passthrough).
+  - `alarmTypeMap` — **the canonical alarm-type join-key mapping (drives the REQUIRED
+    `AlarmEvent.alarmType` field).** Fields: `rawField` (the raw payload field that carries the
+    source's alarm-type id), `values` (raw-alarm-type to canonical `alarmTypeVocabulary` token —
+    `FiberFault`/`LOS`/`PortDown`/`InterfaceDown`/`LinkDown`/`AdjDown`/`LSPDown`/`ReachabilityLoss`),
+    `fallback` (the vocab token used for unmapped raw values), and `onUnmapped` (`default` = use
+    `fallback`; `dlq` = route the alarm to the input DLQ with reason `alarmtype_unmapped`). Every
+    emitted alarm carries a valid vocab token in `alarmType`. This is **distinct from**
+    `eventTypeMap` (X.733 category) and `probableCauseMap` (X.733 probable cause) — `alarmType` is
+    the single token mining, codebook signatures, and correlation join on.
   - `managedObjectIdTemplate` — builds the canonical `objectType:id` from raw fields referenced by
     `{name}` placeholders, resolved from the raw payload; `defaultObjectType` used when the
     template references `{objectType}` and the raw payload omits it.
@@ -323,9 +395,10 @@ and `alarmId` (payload) per the platform invariant.
 > identity, if needed, is preserved in `vendorRaw` via `vendorRawPassthrough`.
 
 The producer always emits a schema-valid canonical `AlarmEvent` (re-validated by the codec on
-serialize): all required fields present, `managedObjectId` matching `<objectType>:<id>`,
-`trailIds` a non-null array (empty `[]` allowed). This holds regardless of source
-(canonical-output invariant).
+serialize): all required fields present — including a non-null **`alarmType`** drawn from the
+domain's `alarmTypeVocabulary` (set by `NormalizeStep` from the source's `alarmTypeMap`) —
+`managedObjectId` matching `<objectType>:<id>`, `trailIds` a non-null array (empty `[]` allowed).
+This holds regardless of source (canonical-output invariant).
 
 ## API contracts / API schema
 
@@ -350,11 +423,26 @@ No hard-coded URLs — the one outbound dependency resolves by env/config with a
 
 | Collaborator plus operation | Config keys | mock (unit) | real (integration) |
 |---|---|---|---|
-| **Trail Builder `getTrailsForObject(managedObjectId)`** returning a `trailId` list | `TRAIL_BUILDER_BASE_URL`, `TRAIL_BUILDER_MODE` | WireMock/MockWebServer stub generated from Trail Builder's published OpenAPI 3.1 spec | real Trail Builder at its Docker Compose address on the integration branch |
+| **Trail Builder `getTrailsForObject(managedObjectId, domain)`** — frozen `GET /trails/by-object?managedObjectId={moId}&domain={domain}` returning `{ managedObjectId, domain, trailIds: string[] }` | `TRAIL_BUILDER_BASE_URL`, `TRAIL_BUILDER_MODE` | WireMock/MockWebServer stub generated from Trail Builder's checked-in `openapi.json` | real Trail Builder at its Docker Compose address on the integration branch |
 
-Enrichment is **agnostic to trail composition** — it attaches whatever `trailId` list the API
-returns to `AlarmEvent.trailIds` and makes no assumption about trail member object types. This
-keeps enrichment domain-agnostic.
+**Frozen Trail Builder `getTrailsForObject` contract (no TBD).** Enrichment calls the now-frozen
+sub-resource path and shape exactly:
+
+- **Request:** `GET /trails/by-object?managedObjectId={moId}&domain={domain}` — **both** query
+  params required. Enrichment passes the survivor alarm's `managedObjectId` and its `domain`.
+- **Response:** `{ managedObjectId: string, domain: string, trailIds: string[] }` — `trailIds` is a
+  possibly-empty array. Enrichment sets `AlarmEvent.trailIds` directly from `trailIds[]` (empty
+  `[]` when none).
+- **`domain` source:** for the Core IP MVP the domain is `core-ip`, supplied via env
+  `ENRICHMENT_DOMAIN` (default `core-ip`) and passed on every `getTrailsForObject` call. This keeps
+  Enrichment multi-domain-ready (the MVP builds only the Core IP domain pack) without a contract
+  change — the `domain` is a config value Enrichment already knows, not a new alarm field.
+
+The `openapi.json` file itself is a build-time artifact (the WireMock stub and the generated
+client are produced from Trail Builder's checked-in OpenAPI); at design stage this frozen path +
+param + response shape is the binding contract. Enrichment is **agnostic to trail composition** —
+it attaches whatever `trailIds[]` the API returns to `AlarmEvent.trailIds` and makes no assumption
+about trail member object types. This keeps enrichment domain-agnostic.
 
 ## Key flows (sequence / data-flow diagrams)
 
@@ -388,7 +476,7 @@ sequenceDiagram
     alt dropped by a filter
       P-->>C: emit nothing then commit offset
     else survivor
-      P->>TB: getTrailsForObject managedObjectId
+      P->>TB: GET trails by-object with managedObjectId and domain
       TB-->>P: trailId list
       P->>Pr: canonical AlarmEvent with trailIds set
       Pr->>OUT: enriched AlarmEvent
@@ -423,7 +511,7 @@ sequenceDiagram
     alt dropped by a filter
       P-->>C: emit nothing then commit offset
     else survivor
-      P->>TB: getTrailsForObject managedObjectId
+      P->>TB: GET trails by-object with managedObjectId and domain
       TB-->>P: trailId list
       P->>Pr: canonical AlarmEvent with trailIds set
       Pr->>OUT: enriched AlarmEvent
@@ -490,11 +578,15 @@ flowchart TD
 1. **Ruleset selection.** Equality lookup of envelope `source` in `RulesetRegistry`; miss to the
    `default` ruleset. Exactly one ruleset resolved per alarm.
 2. **Normalize (per-source mapping).** Apply `fieldMapping`: translate raw severity via
-   `severityMap`, raw eventType via `eventTypeMap`, raw cause via `probableCauseMap`; build
-   `managedObjectId` from `managedObjectIdTemplate`; carry raw keys per `vendorRawPassthrough` into
-   `vendorRaw`; set `state`/`raisedAt`/`clearedAt`/`alarmId` from the source fields per mapping.
-   Output is a canonical `AlarmEvent` validated against the frozen binding. All subsequent stages
-   operate only on canonical fields.
+   `severityMap`, raw eventType via `eventTypeMap`, raw cause via `probableCauseMap`; **set the
+   REQUIRED canonical `alarmType` via the source's `alarmTypeMap`** (raw alarm-type from
+   `alarmTypeMap.rawField` to a vocab token; unmapped handled per `onUnmapped` = `fallback` token or
+   DLQ); build `managedObjectId` from `managedObjectIdTemplate`; carry raw keys per
+   `vendorRawPassthrough` into `vendorRaw`; set `state`/`raisedAt`/`clearedAt`/`alarmId` from the
+   source fields per mapping. Output is a canonical `AlarmEvent` validated against the frozen binding
+   (which requires `alarmType`). All subsequent stages operate only on canonical fields. `alarmType`
+   is the canonical join token, **distinct from** `eventType` (X.733 category) and `probableCause`
+   (X.733 probable cause).
 3. **Dedup (count-collapse).** First alarm for `(path, source, managedObjectId, eventType)` within
    the per-source window passes and records first-seen; subsequent identical-key alarms within the
    window are dropped while `collapsedCount` increments (metric). Window eviction starts a fresh
@@ -514,7 +606,7 @@ flowchart TD
 change):** the summary reuses the **first** oscillation's identity — `alarmId` = the first
 alarm's `alarmId` (stable, idempotent: re-running the same burst yields the same summary id),
 `state = raised`, `raisedAt` = first raise time; `perceivedSeverity`, `eventType`,
-`probableCause`, `managedObjectId` carried from the first alarm. The oscillation count and window
+`probableCause`, `alarmType`, `managedObjectId` carried from the first alarm. The oscillation count and window
 go under `vendorRaw` as `flapCount` and `flapWindowSeconds`. No new top-level `AlarmEvent` field
 is introduced — **no contract change required**. `trailIds` is set by the downstream TrailTag step.
 
@@ -553,20 +645,47 @@ Raw from `vendor-beta`:
 { "eventId": "22222222-2222-2222-2222-222222222222", "type": "AlarmEvent",
   "schemaVersion": 1, "occurredAt": "2026-06-11T10:00:00Z", "source": "vendor-beta",
   "traceId": "t-b",
-  "payload": { "alarmId": "b-1", "rawSeverity": "P1", "rawEventType": "port-fault",
+  "payload": { "alarmId": "b-1", "rawSeverity": "P1", "rawAlarmType": "port-fault",
     "chassis": "c9", "slot": "3", "port": "7", "state": "raised", "raisedAt": "2026-06-11T10:00:00Z" } }
 ```
 Both normalize to canonical `AlarmEvent`s with `perceivedSeverity: CRITICAL` (via each source's
 `severityMap`), valid `<objectType>:<id>` `managedObjectId`s (`Interface:edge1-12`,
-`Port:c9-3-7`), and no raw source-specific severity codes in canonical fields (raw values live
-only under `vendorRaw`). This demonstrates source-specific handling fully absorbed inside
-Enrichment.
+`Port:c9-3-7`), **a valid canonical `alarmType` token set from each source's `alarmTypeMap`**
+(`nms-alpha` `LINK_DOWN` → `LinkDown`; `vendor-beta` `port-fault` → `PortDown` — both members of
+the `alarmTypeVocabulary`), and no raw source-specific severity/alarm-type codes in canonical
+fields (raw values live only under `vendorRaw`). The two canonical outputs (envelope `source`
+overwritten to `enrichment`, `trailIds` set by TrailTag):
+
+```json
+{ "eventId": "1a000001-1111-4111-8111-000000000001", "type": "AlarmEvent",
+  "schemaVersion": 1, "occurredAt": "2026-06-11T10:00:00Z", "source": "enrichment",
+  "traceId": "t-a",
+  "payload": { "alarmId": "a-1", "managedObjectId": "Interface:edge1-12",
+    "eventType": "communicationsAlarm", "probableCause": "linkDown", "alarmType": "LinkDown",
+    "perceivedSeverity": "CRITICAL", "raisedAt": "2026-06-11T10:00:00Z", "state": "raised",
+    "vendorRaw": { "ne": "edge1", "ifIndex": "12", "rawSeverity": "CRIT" },
+    "trailIds": ["trail-7a3f"] } }
+```
+```json
+{ "eventId": "2b000002-2222-4222-8222-000000000002", "type": "AlarmEvent",
+  "schemaVersion": 1, "occurredAt": "2026-06-11T10:00:00Z", "source": "enrichment",
+  "traceId": "t-b",
+  "payload": { "alarmId": "b-1", "managedObjectId": "Port:c9-3-7",
+    "eventType": "equipmentAlarm", "probableCause": "equipmentMalfunction", "alarmType": "PortDown",
+    "perceivedSeverity": "CRITICAL", "raisedAt": "2026-06-11T10:00:00Z", "state": "raised",
+    "vendorRaw": { "chassis": "c9", "slot": "3", "port": "7" },
+    "trailIds": ["trail-9c1d"] } }
+```
+This demonstrates source-specific handling — including the per-source raw-alarm-type to canonical
+`alarmType` mapping — fully absorbed inside Enrichment.
 
 ### Example: unmatched source then default ruleset (criterion 13)
 
 A raw alarm with `source: "feed-unknown"` matches no configured ruleset, so `RulesetSelector`
-returns `default`, `NormalizeStep` applies the default `severityMap` (`"1".."5"`) and
-`managedObjectIdTemplate`, and a valid canonical `AlarmEvent` is emitted (not DLQ, not dropped).
+returns `default`, `NormalizeStep` applies the default `severityMap` (`"1".."5"`),
+`managedObjectIdTemplate`, and the default `alarmTypeMap` (raw alarm-type to vocab token, with the
+`fallback` token for an unmapped raw value), and a valid canonical `AlarmEvent` carrying a valid
+`alarmType` vocab token is emitted (not DLQ, not dropped).
 
 Test fixtures are otherwise small hand-authored raw alarms (duplicate pair on a key, a transient
 raise+clear, an `N+1` oscillation burst, a chatter-listed alarm) plus a stubbed Trail Builder
@@ -585,8 +704,9 @@ First-class. Nothing is ever silently dropped without a metric plus a structured
 |---|---|---|
 | Undeserializable bytes (malformed JSON) | `EventCodec` raises `CodecException`; `DlqRouter` sends raw bytes plus headers to the matching `<topic>.dlq`; offset committed; processing continues | DLQ message, error log, `dlq_messages_total` |
 | Unknown major `schemaVersion` (2 or higher) | `SchemaVersionPolicy` via codec rejects with `SchemaVersionException` (a `CodecException` subtype), routed to `<topic>.dlq` as above | DLQ message, error log, metric with reason label |
-| `AlarmEvent` schema-invalid output (mapping produced a missing/invalid required field, bad `managedObjectId`, wrong enum) | codec validation fails on serialize, routed to `<topic>.dlq` with reason `normalize_invalid`; never emit a non-canonical alarm | DLQ message, error log, `normalize_failures_total` |
-| **Unmatched source** | `RulesetSelector` returns the built-in `default` ruleset; the alarm is processed normally and a canonical `AlarmEvent` is emitted | `ruleset_default_fallback_total{source}` counter, debug log; never DLQ, never dropped |
+| `AlarmEvent` schema-invalid output (mapping produced a missing/invalid required field, bad `managedObjectId`, **missing/invalid `alarmType`**, wrong enum) | codec validation fails on serialize, routed to `<topic>.dlq` with reason `normalize_invalid`; never emit a non-canonical alarm | DLQ message, error log, `normalize_failures_total` |
+| **Unmapped raw alarm-type** (the source's `alarmTypeMap` has no entry for the raw value) | per `alarmTypeMap.onUnmapped`: `default` sets `alarmType` to the configured `fallback` vocab token and emits normally; `dlq` routes the alarm to the input `<topic>.dlq` with reason `alarmtype_unmapped`. Never emit an alarm without a valid `alarmType` token | `alarmtype_fallback_total{source}` (default mode) or DLQ message + `dlq_messages_total{reason="alarmtype_unmapped"}` (dlq mode), debug/error log |
+| **Unmatched source** | `RulesetSelector` returns the built-in `default` ruleset; the alarm is processed normally and a canonical `AlarmEvent` (with a valid `alarmType` via the default `alarmTypeMap`) is emitted | `ruleset_default_fallback_total{source}` counter, debug log; never DLQ, never dropped |
 | **Bad ruleset config at startup** (missing file, unparseable YAML, no `default` ruleset, malformed mapping/params) | `RulesetConfigLoader` fails validation, **startup readiness stays down**; the service does not enrich with unknown/ambiguous config | readiness down, error log, startup failure metric |
 | **Bad ruleset config on hot-reload** | keep the last-good registry snapshot, never partially apply | error log, `ruleset_reload_failures_total`, last-good config stays active |
 | **Trail Builder unavailable / error** (resolves design Open question #42) | Resilience4j retry with backoff up to `TRAIL_BUILDER_MAX_RETRIES`; on continued failure the alarm is routed to the matching `<topic>.dlq` (NOT emitted with empty `trailIds`, NOT silently dropped). Rationale below. | DLQ message, error log, `trail_lookup_failures_total`, open-circuit gauge |
@@ -621,9 +741,10 @@ topic's DLQ so reprocessing re-enters the pipeline from the original source.
 
 ### Acceptance criterion to test (JUnit 5, unit/contract)
 
-Every spec acceptance criterion (15 total) maps 1:1 to a named JUnit 5 test. Tests use a Kafka
-test harness (embedded/Testcontainers), a WireMock stub for Trail Builder, and a small in-test
-`rulesets.yaml` (sources `nms-alpha`, `vendor-beta`, plus `default`).
+Every spec acceptance criterion (17 total) maps 1:1 to a named JUnit 5 test. Tests use a Kafka
+test harness (embedded/Testcontainers), a WireMock stub for Trail Builder (serving the frozen
+`GET /trails/by-object` path), and a small in-test `rulesets.yaml` (sources `nms-alpha`,
+`vendor-beta`, plus `default`, each carrying an `alarmTypeMap`).
 
 | # | Acceptance criterion | Test (JUnit 5) | Asserts |
 |---|---|---|---|
@@ -632,16 +753,18 @@ test harness (embedded/Testcontainers), a WireMock stub for Trail Builder, and a
 | 3 | Flap-damping produces a single summary | `FlapDampStepTest.collapsesOscillationToSingleSummary` | a burst raising/clearing more than the per-source N within the window yields exactly one summary `AlarmEvent` (state raised, `vendorRaw.flapCount` set), not the full sequence |
 | 4 | Self-clear suppression removes transients | `SelfClearStepTest.suppressesTransientClearedWithinHoldTime` | a raise plus clear within the per-source hold-time emits no output for that alarm |
 | 5 | Known-chatter removal drops listed alarms | `ChatterStepTest.dropsAlarmOnPerSourceChatterList` | an alarm whose `(managedObjectId, eventType)` is on the active per-source ruleset chatter list is not emitted |
-| 6 | Every survivor carries correct `trailIds` | `TrailTagStepTest.setsTrailIdsFromTrailBuilder` plus `TrailTagStepTest.setsEmptyArrayWhenTrailBuilderReturnsNone` | emitted `trailIds` exactly equals the Trail Builder mock response (non-empty when trails returned, empty array when none) |
+| 6 | Every survivor carries correct `trailIds` | `TrailTagStepTest.setsTrailIdsFromTrailBuilder` plus `TrailTagStepTest.setsEmptyArrayWhenTrailBuilderReturnsNone` | the client calls the **frozen** `GET /trails/by-object?managedObjectId={moId}&domain={domain}` path with the alarm's `managedObjectId` and configured `domain`; emitted `trailIds` exactly equals the response `trailIds[]` (non-empty when trails returned, empty array when none) |
 | 7 | History path lands on `alarms.enriched` | `RoutingTest.historyAlarmEmittedOnEnrichedTopic` | an `alarms.history` survivor appears on `alarms.enriched` and not on `alarms.enriched.live` |
 | 8 | Live path lands on `alarms.enriched.live` | `RoutingTest.liveAlarmEmittedOnEnrichedLiveTopic` | an `alarms.live` survivor appears on `alarms.enriched.live` and not on `alarms.enriched` |
 | 9 | Same instance handles both paths | `SameInstanceBothPathsTest.singleInstanceProcessesHistoryAndLive` | one running context with both listeners processes a history alarm and a live alarm to their respective output topics with no separate deployment |
-| 10 | Output validates against frozen `AlarmEvent` binding | `OutputContractTest.emittedAlarmDeserializesWithEventModelBinding` | any emitted message deserializes via `event-model` `EventCodec`: required fields present, `managedObjectId` matches the scheme, `trailIds` a non-null array |
+| 10 | Output validates against frozen `AlarmEvent` binding | `OutputContractTest.emittedAlarmDeserializesWithEventModelBinding` | any emitted message deserializes via `event-model` `EventCodec`: required fields present (including a non-null `alarmType`), `managedObjectId` matches the scheme, `trailIds` a non-null array |
 | 11 | Per-source filter parameters govern filtering for that source | `PerSourceFilterParamsTest.sameTransientSuppressedForSourceAEmittedForSourceB` | the same transient alarm shape is suppressed under a short-hold source and emitted under a long-hold source, proving per-source params apply independently |
 | 12 | Each source normalized by its own field mapping | `PerSourceMappingTest.differentSeverityCodesNormalizeToSameCanonicalSeverity` | a `CRIT` alarm from source A and a `P1` alarm from source B both emit `perceivedSeverity=CRITICAL`, and no source-specific raw severity codes appear in canonical fields |
 | 13 | Unmatched source falls back to the default ruleset | `DefaultRulesetFallbackTest.unmatchedSourceUsesDefaultAndEmitsCanonical` | an alarm whose `source` matches no ruleset is normalized by the `default` ruleset and emitted as a valid canonical `AlarmEvent`, not DLQ-ed or dropped |
-| 14 | Canonical-output invariant holds across sources | `CanonicalOutputAcrossSourcesTest.allSourcesEmitValidCanonicalAlarmEvents` | alarms from at least two sources each emit `AlarmEvent`s that deserialize against the frozen binding with all required fields present, confirming source handling is fully absorbed |
+| 14 | Canonical-output invariant holds across sources | `CanonicalOutputAcrossSourcesTest.allSourcesEmitValidCanonicalAlarmEvents` | alarms from at least two sources each emit `AlarmEvent`s that deserialize against the frozen binding with all required fields present (including `alarmType`), confirming source handling is fully absorbed |
 | 15 | Poison messages routed to DLQ | `DlqRoutingTest.malformedJsonRoutedToDlqAndProcessingContinues` plus `DlqRoutingTest.unknownMajorSchemaVersionRoutedToDlq` | a malformed or `schemaVersion`-2 message on `alarms.history` lands on `alarms.history.dlq` and a subsequent valid message is still processed (no crash) |
+| 16 | Every emitted `AlarmEvent` carries a valid `alarmType` from the source's `alarmTypeMap` | `AlarmTypePopulationTest.emittedAlarmTypeIsVocabTokenFromSourceMap` plus `AlarmTypePopulationTest.sourceXRawTypeMapsToConfiguredToken` | an alarm from `nms-alpha` with raw alarm-type `LINK_DOWN` emits `alarmType=LinkDown`, and one from `vendor-beta` with `port-fault` emits `alarmType=PortDown`; every emitted alarm's `alarmType` is a member of the `alarmTypeVocabulary` and is driven by the resolved source's `alarmTypeMap`; an unmapped raw value uses the configured `fallback` token (or DLQ in `dlq` mode) and never emits without `alarmType` |
+| 17 | Trail-tag calls the frozen by-object path with `domain` | `TrailTagClientContractTest.callsFrozenByObjectPathWithManagedObjectIdAndDomain` | the `TrailBuilderClient` issues `GET /trails/by-object?managedObjectId={moId}&domain={domain}` (both params present, `domain` = configured `ENRICHMENT_DOMAIN`) and sets `trailIds` from the frozen `{ managedObjectId, domain, trailIds[] }` response |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -659,6 +782,8 @@ failure/partial paths.
 | 6 | Trail Builder outage (failure path) | Trail Builder down while alarms flow | after bounded retries, affected alarms land on the input-topic DLQ, failure metric increments, no trail-less alarm is emitted; on recovery a DLQ replay re-enriches them |
 | 7 | Poison message resilience (failure path) | a malformed and a `schemaVersion`-2 message injected on `alarms.live` amid valid alarms | both poison messages on `alarms.live.dlq`, valid alarms continue to `alarms.enriched.live`, service stays healthy |
 | 8 | Bad ruleset config at startup (partial path) | start enrichment with a rulesets file that omits the `default` ruleset | readiness stays down (no enrichment with invalid config); once a valid file (including `default`) is mounted and loaded, readiness flips up and processing begins |
+| 9 | Canonical `alarmType` join-key across sources (happy + partial) | replay multi-source alarms incl. mapped raw alarm-types and one unmapped raw alarm-type per source's `alarmTypeMap` | every emitted `alarms.enriched`/`alarms.enriched.live` `AlarmEvent` carries a valid `alarmTypeVocabulary` token: `nms-alpha LINK_DOWN → LinkDown`, `vendor-beta port-fault → PortDown`; the unmapped raw value uses the configured `fallback` token (default mode) so downstream mining/codebook/correlation can join on `alarmType`; no alarm is emitted without `alarmType` |
+| 10 | Trail-tag against the frozen by-object contract (integration) | survivors flow with real Trail Builder up | Enrichment calls `GET /trails/by-object?managedObjectId=&domain=` and the emitted `trailIds[]` equals the real Trail Builder response for that object+domain |
 
 ## Config and observability
 
@@ -671,6 +796,7 @@ failure/partial paths.
 | `TRAIL_BUILDER_MAX_RETRIES`, `TRAIL_BUILDER_RETRY_BACKOFF_MS` | Resilience4j retry policy |
 | `ENRICHMENT_RULESETS_FILE` | path to the mounted per-source rulesets YAML (default `/config/rulesets.yaml`) |
 | `ENRICHMENT_RULESETS_RELOAD` (`true`/`false`) | enable file-watch hot-reload |
+| `ENRICHMENT_DOMAIN` | domain passed to Trail Builder `getTrailsForObject` (default `core-ip`) |
 | `ENRICHMENT_HISTORY_TOPIC`, `ENRICHMENT_LIVE_TOPIC`, output/dlq topic names | topic overrides (defaults match `architecture.md`) |
 
 Per-source filter parameters (dedup window, hold-time, flap N/window, chatter list) and field
@@ -684,7 +810,7 @@ the Knowledge Service. There is no `KNOWLEDGE_*` config (removed from the prior 
 - `GET /actuator/prometheus` — Micrometer metrics: `alarms_consumed_total{path,source}`,
   `alarms_emitted_total{path,source}`, `filtered_total{filter,source}`,
   `ruleset_default_fallback_total{source}`, `normalize_failures_total{source}`,
-  `dlq_messages_total{topic,reason}`, `trail_lookup_failures_total`,
+  `alarmtype_fallback_total{source}`, `dlq_messages_total{topic,reason}`, `trail_lookup_failures_total`,
   `ruleset_reload_failures_total`, pipeline latency timer, circuit-breaker state gauges.
 - Structured JSON logs with the envelope `traceId` propagated on every line.
 
