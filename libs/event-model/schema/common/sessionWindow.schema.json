@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/common/sessionWindow.schema.json",
+  "title": "SessionWindow",
+  "description": "Per-pattern session-window rule the Correlation Engine uses to govern each correlation instance's lifetime. An authored operational directive derived and populated by the Pattern Manager from the mined timing statistics — distinct from the descriptive `timing` field. Shared identically by PatternDiscoveredEvent and PatternApprovedEvent.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "windowMs": {
+      "type": "integer",
+      "description": "Session-window duration in milliseconds; how long a correlation instance for this pattern is held open awaiting a satisfying match before it expires."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["gap-based", "fixed"],
+      "description": "Window semantics: 'gap-based' (window resets/extends on each new matching alarm — an idle gap closes it) or 'fixed' (window is a fixed duration from instance start)."
+    }
+  },
+  "required": ["windowMs", "type"]
+}
