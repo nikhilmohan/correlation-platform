@@ -16,6 +16,10 @@
       "meanInterArrivalSeconds": 4.5,
       "stdDevSeconds": 1.2
     },
+    "sessionWindow": {
+      "windowMs": 60000,
+      "type": "gap-based"
+    },
     "codebookMatchId": "SCN-0007",
     "lifecycle": "approved"
   }
