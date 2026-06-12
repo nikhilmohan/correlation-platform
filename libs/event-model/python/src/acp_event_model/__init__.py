@@ -27,6 +27,7 @@ from ._generated import (
     PatternDiscoveredEvent,
     PatternMinedEvent,
     Provenance,
+    SessionWindow,
     State,
     TopologyChangedEvent,
     TrailsBuiltEvent,
@@ -59,6 +60,7 @@ __all__ = [
     "AlarmStatusChange",
     "Alarm",
     "Provenance",
+    "SessionWindow",
     "State",
     # Codec
     "TypedEnvelope",

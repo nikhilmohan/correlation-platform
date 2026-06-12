@@ -182,9 +182,17 @@ finalizes session-window boundaries downstream (§6.8).
 | `support` | float | yes | |
 | `confidence` | float | yes | |
 | `lift` | float | yes | |
-| `timing` | object | yes | timing statistics |
+| `timing` | object | yes | descriptive timing statistics |
+| `sessionWindow` | object | yes | per-pattern session-window **rule** the Correlation Engine uses to govern each correlation instance's lifetime; an authored operational directive, **populated by the Pattern Manager** (derived from the mined `timing`), distinct from the descriptive `timing` statistics; nested object, see sub-fields below |
 | `codebookMatchId` | string | no | matched codebook scenario, if any |
 | `lifecycle` | string | yes | pattern lifecycle state (e.g. `draft`) |
+
+`sessionWindow` sub-fields (shared `common/sessionWindow.schema.json`; `additionalProperties:false`):
+
+| Sub-field | Type | Required | Notes |
+|---|---|---|---|
+| `windowMs` | integer | yes | session-window duration in milliseconds; how long a correlation instance for this pattern is held open awaiting a satisfying match before it expires |
+| `type` | string (enum) | yes | window semantics; exactly one of `gap-based` (window resets/extends on each new matching alarm — an idle gap closes it) or `fixed` (fixed duration from instance start) |
 
 **PatternApprovedEvent** (carried on `patterns.approved`; Pattern Manager output after human approval):
 
@@ -196,9 +204,17 @@ finalizes session-window boundaries downstream (§6.8).
 | `support` | float | yes | |
 | `confidence` | float | yes | |
 | `lift` | float | yes | |
-| `timing` | object | yes | |
+| `timing` | object | yes | descriptive timing statistics |
+| `sessionWindow` | object | yes | per-pattern session-window **rule** the Correlation Engine uses to govern each correlation instance's lifetime; an authored operational directive, **populated by the Pattern Manager** (derived from the mined `timing`), distinct from the descriptive `timing` statistics; nested object, see sub-fields below |
 | `codebookMatchId` | string | no | |
 | `lifecycle` | string | yes | `approved` at the point this event is emitted |
+
+`sessionWindow` sub-fields (shared `common/sessionWindow.schema.json`; `additionalProperties:false`):
+
+| Sub-field | Type | Required | Notes |
+|---|---|---|---|
+| `windowMs` | integer | yes | session-window duration in milliseconds; how long a correlation instance for this pattern is held open awaiting a satisfying match before it expires |
+| `type` | string (enum) | yes | window semantics; exactly one of `gap-based` (window resets/extends on each new matching alarm — an idle gap closes it) or `fixed` (fixed duration from instance start) |
 
 **CorrelationResultEvent** (carried on `correlation.results`):
 
@@ -374,6 +390,18 @@ The `managedObjectId` is the shared identity binding for network objects. Format
 
 18. **Python binding installs cleanly:** Installing the Python package (pip install) with no
     pre-existing generated artifacts produces an importable package with no import errors.
+
+### sessionWindow rule (PatternDiscoveredEvent + PatternApprovedEvent)
+
+19. **`sessionWindow` rule enforced on both pattern events:** On **both** `PatternDiscoveredEvent`
+    and `PatternApprovedEvent`, `sessionWindow` is a **required** top-level field; omitting it
+    raises a validation error in both bindings. It is a nested object (`additionalProperties:false`)
+    with two required sub-fields — `windowMs` (integer) and `type` — and omitting either sub-field,
+    supplying a non-integer `windowMs`, supplying a `type` value other than `gap-based`/`fixed`, or
+    adding an unknown sub-field each raises a validation error. A valid `sessionWindow`
+    (e.g. `{"windowMs": 60000, "type": "gap-based"}`) round-trips byte-equal through both bindings,
+    and the existing descriptive `timing` field is unaffected (it stays present and free-form,
+    distinct from `sessionWindow`).
 
 ## Open questions
 
