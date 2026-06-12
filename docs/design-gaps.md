@@ -45,5 +45,8 @@ Gaps are fixed in the owning service's spec/design via gated PRs and reflected h
 | 3 — Codebook: CE-oriented trail-signatures projection endpoint + publish OpenAPI; alarmType value space | #136 | P1-G5, P3-G2 (the 2 remaining Blockers) | ⏳ awaiting merge |
 | 4 — Topology: freeze ingestion + sites/objects/nodes shapes; pin canonical snapshot schema | #137 | P1-G1, P1-G2, P1-G7, P1-G8, P1-G9 | ⏳ awaiting merge |
 | 5 — Trail Builder: freeze getTrail/getTrailsForObject shapes+path; snapshotId on getTrail | #138 | P1-G4, P1-G10, P2-GAP-09 | ⏳ awaiting merge |
+| 6 — Pattern Manager: trailId in read-API, rootCauseAlarmType=vocab, sessionWindow deriv pinned, PATCH body + PatternPage envelope frozen | #139 | P3-G1, P2-GAP-04, P2-GAP-05, P2-GAP-06, P2-GAP-08 | ⏳ awaiting merge |
+| 6b — Pattern Miner: emit canonical ms timing keys (NEW gap surfaced by verification) | #140 | P2-GAP-10 (new) | ⏳ awaiting merge |
+| 6c — event-model: align pattern timing fixtures to ms keys | #141 | P2-GAP-10 (fixtures) | ⏳ awaiting merge |
 
-**Remaining (Steps 3–7):** P3-G1, P2-GAP-04 (RCA-vocab), P2-GAP-05, P2-GAP-06, P2-GAP-08 (pattern-manager); P3-G3, P3-G4 (correlation-engine/web-ui); web-ui consumer-side of P2-GAP-06/07/08.
+**Remaining (Steps 3–7):** P3-G3, P3-G4 (correlation-engine/web-ui); web-ui consumer-side of P2-GAP-06/07/08.
