@@ -145,24 +145,39 @@ so dependent services can react.
    explicitly superseded.
 
 7. **Serve domain-scoped trail membership queries and trail browse via API.** Expose
-   three query operations, all domain-scoped by default:
-   - `getTrailsForObject(managedObjectId, domain)` — returns all trails the given
-     object belongs to within the specified domain.
-   - `getTrail(trailId)` — returns the trail's complete member list (typed
-     `managedObjectId` values in the `<objectType>:<id>` scheme), the `snapshotId`
-     it was built from, and the `domain` it belongs to. The response must be
-     sufficient for the web-ui to overlay trail membership on a typed multi-layer
-     topology graph (including Interface-layer objects); geometry and graph topology
-     come from the Topology Service — not duplicated here.
-   - `listTrails(snapshotId, domain)` — returns the set of all trail summaries built
-     for the given snapshot within the given domain. Each summary carries the
-     `trailId`, member count, `domain`, and the seed/bounds context (e.g. IGP area
-     or SRLG context, where available). Supports pagination and/or filtering if
-     natural; exact shape is a design-stage detail.
+   three query operations, all domain-scoped by default. Their **paths and response
+   shapes are FROZEN** in the published `openapi.json` — this is the single source of
+   truth its consumers (Codebook Generator, Enrichment, Noise Filter, web-ui) build
+   their clients against (resolves the formerly design-stage divergences P1-G4,
+   P1-G10, P2-GAP-09):
+   - `getTrailsForObject(managedObjectId, domain)` →
+     **`GET /trails/by-object?managedObjectId={managedObjectId}&domain={domain}`** —
+     returns all trails the given object belongs to within the specified domain.
+     **Frozen response:** `{ managedObjectId, domain, trailIds: string[] }`
+     (`trailIds` may be empty). The explicit `/trails/by-object` sub-resource path is
+     canonical (it does not collide with the `listTrails` operation on `GET /trails`).
+   - `getTrail(trailId)` → **`GET /trails/{trailId}`** — returns the trail's complete
+     member list, the `snapshotId` it was built from, and the `domain` it belongs to.
+     **Frozen response:** `TrailDetail { trailId, domain, snapshotId, members:
+     [{ managedObjectId, objectType }], memberCount }` (`igpArea`/`srlgGroup` optional
+     context may also be present). Each member carries **both** the typed
+     `managedObjectId` (`<objectType>:<id>` scheme, including any `Interface:*`
+     members) **and** the parsed `objectType`. `snapshotId` is **always present and
+     guaranteed** — Noise Filter relies on `getTrail(trailId).snapshotId` as the
+     provenance for the REQUIRED `TransactionEvent.snapshotId` (the source
+     `AlarmEvent` does not carry `snapshotId`). The response is visualization-ready for
+     the web-ui to overlay trail membership on a typed multi-layer topology graph
+     (including Interface-layer objects); geometry and graph topology come from the
+     Topology Service — not duplicated here. `404` on an unknown `trailId`.
+   - `listTrails(snapshotId, domain)` → **`GET /trails?snapshotId={snapshotId}&domain={domain}`**
+     — returns the set of all trail summaries built for the given snapshot within the
+     given domain. Each summary carries the `trailId`, member count, `domain`, and the
+     seed/bounds context (e.g. IGP area or SRLG context, where available). Supports
+     pagination and/or filtering if natural.
    The web-ui topology/trails module (trail visualization) is a first-class consumer
    of all three operations alongside Enrichment, Noise Filter, and Pattern Miner.
    Publish the full API as OpenAPI 3.1 at `/openapi.json`; check the generated
-   `openapi.json` into `services/trail-builder/`.
+   `openapi.json` into `services/trail-builder/` as the frozen, authoritative contract.
 
 8. **Emit `trails.built` with `domain`.** After a successful build, produce a
    `trails.built` event with the frozen `TrailsBuiltEvent` payload (`snapshotId`,
@@ -212,34 +227,48 @@ or a new `topology.changed` event may trigger a P1-style Active rebuild at any t
   intentionally out of the event; downstream consumers fetch it via the query API.
 
 - **APIs exposed** (published as OpenAPI 3.1 at `/openapi.json`; generated
-  `openapi.json` checked into `services/trail-builder/`; a surface change is a
-  contract change):
-  - `GET /trails?managedObjectId={managedObjectId}&domain={domain}` — returns all
-    trail identifiers (and optionally trail summaries) for the given object within the
-    specified domain. Corresponds to `getTrailsForObject(managedObjectId, domain)`.
-    The `domain` parameter scopes the query; it is required for MVP. Consumers:
-    Enrichment, Noise Filter, Pattern Miner, web-ui (topology/trails module).
-  - `GET /trails/{trailId}` — returns the trail's member `managedObjectId` list
-    (typed `<objectType>:<id>` values, including any `Interface:*` members in the
-    trail), the `snapshotId` it was built from, and the `domain` it belongs to.
-    Corresponds to `getTrail(trailId)`. The response is visualization-ready: member
-    identities carry type information via the `managedObjectId` prefix, enabling the
-    web-ui to distinguish Interface-layer objects from Port, IPLink, Node, etc.
-    Consumers: Enrichment, Noise Filter, Pattern Miner, web-ui (topology/trails module).
+  `openapi.json` checked into `services/trail-builder/`; **this is the FROZEN single
+  source of truth** that the consumers (Codebook Generator, Enrichment, Noise Filter,
+  web-ui) generate their clients against; the paths and response schemas below are
+  frozen and a surface change is a contract change):
+  - `GET /trails/by-object?managedObjectId={managedObjectId}&domain={domain}` —
+    returns all trail identifiers for the given object within the specified domain.
+    Corresponds to `getTrailsForObject(managedObjectId, domain)`. **FROZEN response
+    (200):** `{ managedObjectId: string, domain: string, trailIds: string[] }` —
+    `trailIds` is a (possibly empty) array of trail-id strings. Both query parameters
+    are required for MVP. The explicit `/trails/by-object` sub-resource path is the
+    canonical, frozen path (it does not collide with `listTrails` on `GET /trails`).
+    Consumers: Enrichment (sets `AlarmEvent.trailIds` from the returned `trailIds`),
+    Codebook Generator (unions `trailIds` across symptom objects), Noise Filter,
+    Pattern Miner, web-ui (topology/trails module). (Resolves P1-G4 + P1-G10.)
+  - `GET /trails/{trailId}` — returns the trail's full member list, the `snapshotId`
+    it was built from, and the `domain` it belongs to. Corresponds to
+    `getTrail(trailId)`. **FROZEN response (200):** `TrailDetail { trailId: string,
+    domain: string, snapshotId: string, members: [{ managedObjectId: string,
+    objectType: string }], memberCount: integer }` (optional `igpArea`/`srlgGroup`
+    context may also be present). Each member carries **both** the typed
+    `managedObjectId` (`<objectType>:<id>` scheme, including any `Interface:*` members
+    in the trail) **and** the parsed `objectType`, so consumers distinguish
+    Interface-layer objects from Port, IPLink, Node without re-parsing. **`snapshotId`
+    is always present and guaranteed** — Noise Filter derives the REQUIRED
+    `TransactionEvent.snapshotId` from `getTrail(trailId).snapshotId` because the
+    source `AlarmEvent` does not carry `snapshotId` (resolves P2-GAP-09). `404` on an
+    unknown `trailId`. Consumers: Noise Filter, Enrichment, Pattern Miner, web-ui
+    (topology/trails module). (Resolves P1-G4.)
   - `GET /trails?snapshotId={snapshotId}&domain={domain}` — returns the set of all
     trail summaries built for the given snapshot within the given domain. Each summary
     carries at minimum `trailId`, member count, and `domain`; additional seed/bounds
     context (e.g. IGP area, SRLG group) is included where cheaply available. Supports
-    pagination and/or filtering; exact query parameters and response shape are
-    design-stage details. Corresponds to `listTrails(snapshotId, domain)`. Primary
-    consumer: web-ui (topology/trails module).
+    pagination and/or filtering. Corresponds to `listTrails(snapshotId, domain)`.
+    Primary consumer: web-ui (topology/trails module).
 
-    > **Note:** `GET /trails?managedObjectId=&domain=` and
-    > `GET /trails?snapshotId=&domain=` are distinguished by their query parameters.
-    > The designer may choose a different path shape (e.g.
-    > `GET /domains/{domain}/snapshots/{snapshotId}/trails`) — this is a design-stage
-    > decision. The semantic contract (the operation, its `domain` scoping, and its
-    > consumers) is fixed here.
+    > **Note (frozen path disambiguation):** `getTrailsForObject` lives on the explicit
+    > sub-resource `GET /trails/by-object?managedObjectId=&domain=`, while `listTrails`
+    > lives on `GET /trails?snapshotId=&domain=`. The two operations have **distinct
+    > frozen paths** (no longer overloaded on `GET /trails` by query parameter), which
+    > removes the prior path collision and the consumer-side divergence (web-ui targeted
+    > `/trails/by-object`). These paths and the response schemas above are FROZEN in the
+    > checked-in `openapi.json`; consumers align to them.
 
   - `POST /trails/rebuild` — triggers an on-demand trail rebuild (accepts `snapshotId`
     and `domain`; `domain` is required). Returns the resulting `TrailsBuiltEvent`
