@@ -7,7 +7,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | Service | Cohort | Responsibility | Consumes | Produces |
 |---|---|---|---|---|
 | simulator | Python | domain-grounded synthetic topology + labeled alarms; eval oracle. Multi-domain by design (Core IP is the MVP domain pack) | — | alarms.history, alarms.live (+ a topology snapshot **file** uploaded to the Topology ingestion API) |
-| topology | Spring Boot | sole owner of AGE graph; versioned snapshots; query API. Ingests topology snapshots via a published **ingestion API** (file upload), not a Kafka topic | topology snapshot file (via ingestion API) | topology.changed |
+| topology | Spring Boot | sole owner of the NebulaGraph topology graph; versioned snapshots; query API. Ingests topology snapshots via a published **ingestion API** (file upload), not a Kafka topic | topology snapshot file (via ingestion API) | topology.changed |
 | knowledge | Spring Boot | authored templates/policy/params (versioned) | — | knowledge.updated |
 | trail-builder | Python | policy-bounded correlation trails | topology.changed | trails.built |
 | codebook-generator | Python | forward-propagation codebook | trails.built | codebook.generated |
@@ -16,7 +16,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
 | correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated | correlation.results |
-| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`; serves the live alarm query API | alarms.enriched.live, correlation.results | alarms.persisted.live |
+| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`, and keeps live alarm status in sync from generic `alarms.status.changed` (`AlarmStatusChange`, produced by any service); serves the live alarm query API | alarms.enriched.live, correlation.results, alarms.status.changed | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -40,7 +40,7 @@ a dependency / refreshes state in that phase but drives no work of its own; *Idl
 | Service | P1 Topology onboarding | P2 Pattern learning | P3 Real-time correlation |
 |---|---|---|---|
 | simulator | Active — generate topology file, upload to Topology ingestion API | Active — replay `alarms.history` | Active — replay `alarms.live` (wall-clock paced) |
-| topology | Active — ingest file, lift to AGE, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Idle — no real-time consumer queries it; topology context is already materialized into trails + codebook during P1 |
+| topology | Active — ingest file, lift to NebulaGraph, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Idle — no real-time consumer queries it; topology context is already materialized into trails + codebook during P1 |
 | knowledge | Passive — serves trail policy, fault-origin list, propagation templates | Passive — serves DBSCAN / session-window / min-support params | Passive — serves params + approved policy |
 | trail-builder | Active — build trails on `topology.changed`, emit `trails.built` | Passive — serves `getTrailsForObject` / `getTrail` | Passive — serves trails |
 | codebook-generator | Active — compile codebook, emit `codebook.generated` | Passive — serves codebook for reconcile | Passive — serves codebook for match |
@@ -61,15 +61,23 @@ No schema registry. `libs/event-model` (versioned with the repo) defines the **e
 (`eventId, type, schemaVersion, occurredAt, source, traceId, payload`) and **payloads**
 (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent, CodebookGeneratedEvent, TransactionEvent,
 PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent,
-KnowledgeUpdatedEvent).
+KnowledgeUpdatedEvent, AlarmStatusChange).
 Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Python services).
 Consumers reject unknown major `schemaVersion`.
 
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
 alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
+alarms.status.changed,
 transactions.clean, patterns.mined, patterns.discovered, patterns.approved, correlation.results,
 *.dlq. Producers/consumers per the table. **Adding a topic is a contract change.**
+
+> **`alarms.status.changed` (generic alarm-status sync).** Carries the `AlarmStatusChange`
+> payload. **Any** service may produce it whenever an alarm's lifecycle status changes
+> (`open` / `in-progress` / `correlated` / `cleared` / `reverted-open`); the **Alarm Manager
+> consumes** it to keep its live alarm status in sync. It is deliberately minimal and
+> **not** correlation-specific — correlation context (incident linkage, root-cause/child role)
+> stays on `correlation.results` (`CorrelationResultEvent`).
 
 > **Live alarm path (real-time).** On the live path the Alarm Manager sits **in-line** between
 > Enrichment and the Correlation Engine: Enrichment emits `alarms.enriched.live` → the Alarm
@@ -86,17 +94,21 @@ transactions.clean, patterns.mined, patterns.discovered, patterns.approved, corr
 > **Topology ingestion is file/API-based, not a topic.** The raw topology snapshot is **not**
 > a Kafka event. The Simulator generates a domain-grounded topology snapshot **file** and uploads
 > it to the Topology Service's published **ingestion API**; the Topology Service lifts it into the
-> AGE graph, versions it (`snapshotId`), and emits `topology.changed`. The **topology-snapshot file
+> NebulaGraph graph, versions it (`snapshotId`), and emits `topology.changed`. The **topology-snapshot file
 > schema** is a versioned contract (see "Topology snapshot file" below), exactly like the topic and
 > event-model contracts. (Historical note: an earlier `topology.raw` topic was removed in favour of
 > this — the raw-vs-lifted distinction and large snapshot payloads suit a file/API hand-off better.)
 
 ## Data stores & ownership
-Apache AGE — topology graph; only via Topology Service. PostgreSQL — pattern store (owned by
-Pattern Manager), incident store (owned by Correlation Engine), knowledge store (owned by
-Knowledge Service), and the **live alarm store (owned by the Alarm Manager)**; separation by
-schema. Kafka — the bus. **Single owners:** each store is written by exactly one service; others
-read via that service's API or events, never the store directly.
+NebulaGraph — topology graph; only via Topology Service (nGQL, fully abstracted behind the
+service API — callers never touch the graph DB). PostgreSQL — topology snapshot metadata &
+versioning (owned by Topology Service), pattern store (owned by Pattern Manager), incident store
+(owned by Correlation Engine), knowledge store (owned by Knowledge Service), and the **live alarm
+store (owned by the Alarm Manager)**; separation by schema. Kafka — the bus. **Single owners:**
+each store is written by exactly one service; others read via that service's API or events, never
+the store directly. **Topology Service** owns two stores: the NebulaGraph graph (the typed
+multi-layer topology) and a PostgreSQL schema for snapshot version metadata (`snapshotId`, domain,
+timestamps, ingest audit) — both internal, never shared.
 
 **Alarm Manager owns the live alarm store** — the single source of truth for **live alarm state**.
 It holds each live alarm (from `alarms.enriched.live`) with its **lifecycle state** (`open` →
@@ -195,8 +207,8 @@ Topology is loaded by **file upload to an API**, not by a Kafka event:
     Generator** (where policy/templates reference equipment characteristics). They are descriptive,
     not identity — identity remains `managedObjectId`.
 - **Topology ingestion API (owned by the Topology Service).** The Topology Service publishes an
-  OpenAPI 3.1 ingestion endpoint that accepts a topology snapshot file, lifts it into AGE, mints a
-  `snapshotId`, and emits `topology.changed`. Producers (the Simulator) build their upload client
+  OpenAPI 3.1 ingestion endpoint that accepts a topology snapshot file, lifts it into NebulaGraph,
+  mints a `snapshotId`, and emits `topology.changed`. Producers (the Simulator) build their upload client
   against the Topology Service's **published OpenAPI**, never its source — same no-coupling rule as
   every other synchronous call. The endpoint is a config-switchable integration point for the
   producer (mock from Topology's OpenAPI for unit tests, real Topology in integration).
@@ -214,6 +226,22 @@ object/edge vocabulary while sharing the same engine, event model, and service m
 - **The Knowledge Service** is the authoritative, domain-scoped home of each domain's **object-type
   set**, **edge-relation vocabulary**, **propagation templates**, **trail policy**, **model params**,
   and **device/connection attribute catalogue**. Adding a domain = authoring these records.
+
+> **Invariant — rules & ontology, never operational data.** The Knowledge Service stores only the
+> **abstract domain model**: the ontology (object-type / edge-relation vocabularies, fault-origin
+> types, the canonical alarm-**type** vocabulary), the **rules** (propagation templates, trail policy),
+> and **parameter bounds** (model-param sets) — *what kinds of things exist in a domain and how faults
+> propagate*. It must **never** hold **runtime or source-specific operational data**: no concrete alarm
+> instances (`alarmId`, `raisedAt`, severities of actual alarms), no device/topology inventory, no
+> concrete `managedObjectId` **values** (only the `<objectType>:<id>` token-format rule), and nothing
+> tied to a particular alarm **source** (a specific NMS/OSS/vendor feed or the Simulator). That
+> operational data originates from the **source** (the Simulator in the MVP; a real NMS/OSS in
+> production), is **adapted per-source by the Enrichment Service** (per-source rulesets → canonical
+> `AlarmEvent`), materialized in **Topology** (graph instances) and the live stores — never authored
+> into Knowledge. Knowledge content is identical across deployments of the same domain; only the
+> source data varies by context. (The Simulator's **domain pack** carries a *generation-side copy* of a
+> domain's types/templates/alarm-shapes to synthesize data — but the **authoritative** rules consumed
+> for correlation live in Knowledge, and concrete generated alarms never flow back into it.)
 - **The event model** is domain-agnostic: the `managedObjectId` scheme accepts any `<objectType>:<id>`
   and the `AlarmEvent` (X.733) is domain-neutral — so **no event-model contract change is needed per
   new domain**.
