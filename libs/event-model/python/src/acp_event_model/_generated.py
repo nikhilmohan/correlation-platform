@@ -112,6 +112,27 @@ class CodebookGeneratedEvent(BaseModel):
     )
 
 
+class Alarm(BaseModel):
+    """
+    Per-alarm detail mirrored from the AlarmEvent payload.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    alarmId: str = Field(..., description="Matches AlarmEvent.alarmId.")
+    eventType: str = Field(..., description="Matches AlarmEvent.eventType (X.733 event type).")
+    raisedAt: AwareDatetime = Field(..., description="Matches AlarmEvent.raisedAt (ISO-8601 UTC).")
+    managedObjectId: constr(pattern=r"^[A-Za-z][A-Za-z0-9]*:[^:]+$") = Field(
+        ...,
+        description="Matches AlarmEvent.managedObjectId; topology graph identity scheme '<objectType>:<id>'.",
+        title="ManagedObjectId",
+    )
+    perceivedSeverity: str = Field(
+        ..., description="Matches AlarmEvent.perceivedSeverity (X.733 severity)."
+    )
+
+
 class TransactionEvent(BaseModel):
     """
     Carried on transactions.clean. Raw DBSCAN-cleaned, trail-scoped alarm groups from the Noise Filter.
@@ -129,7 +150,14 @@ class TransactionEvent(BaseModel):
         None,
         description="the domain this snapshot/event belongs to (e.g. `core-ip`); a snapshot belongs to exactly one domain. Optional for backward-compat; consumers default to the single MVP domain when absent.",
     )
-    alarmIds: list[str] = Field(..., description="Alarm identifiers in this DBSCAN-cleaned group.")
+    alarmIds: list[str] = Field(
+        ...,
+        description="Alarm identifiers in this DBSCAN-cleaned group. Retained for backward-compat; `alarms` carries the richer per-alarm detail for the same group.",
+    )
+    alarms: list[Alarm] = Field(
+        ...,
+        description="Ordered per-alarm detail for the same group as `alarmIds` (sequence preserved — the Pattern Miner mines ordered sequences). Populated by the Noise Filter from the enriched AlarmEvents it already holds, so the Pattern Miner needs no separate alarm-detail lookup.",
+    )
     windowStart: AwareDatetime = Field(
         ..., description="Start of the raw time window (ISO-8601 UTC)."
     )
