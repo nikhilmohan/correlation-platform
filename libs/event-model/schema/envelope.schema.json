@@ -23,7 +23,8 @@
         "PatternDiscoveredEvent",
         "PatternApprovedEvent",
         "CorrelationResultEvent",
-        "KnowledgeUpdatedEvent"
+        "KnowledgeUpdatedEvent",
+        "AlarmStatusChange"
       ],
       "description": "Discriminator; maps 1:1 to a payload schema."
     },

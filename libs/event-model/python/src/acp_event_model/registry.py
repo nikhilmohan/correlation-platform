@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from ._generated import (
     AlarmEvent,
+    AlarmStatusChange,
     CodebookGeneratedEvent,
     CorrelationResultEvent,
     KnowledgeUpdatedEvent,
@@ -34,6 +35,7 @@ TYPE_REGISTRY: dict[str, type[BaseModel]] = {
     "PatternApprovedEvent": PatternApprovedEvent,
     "CorrelationResultEvent": CorrelationResultEvent,
     "KnowledgeUpdatedEvent": KnowledgeUpdatedEvent,
+    "AlarmStatusChange": AlarmStatusChange,
 }
 
 
@@ -45,7 +47,7 @@ def resolve_payload_type(event_type: str) -> type[BaseModel]:
     """Return the payload class for ``event_type``.
 
     Raises:
-        UnknownEventTypeError: if ``event_type`` is not one of the nine
+        UnknownEventTypeError: if ``event_type`` is not one of the
             registered discriminator strings.
     """
     try:
