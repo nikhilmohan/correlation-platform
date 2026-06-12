@@ -13,8 +13,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
- * Criteria 7, 8, 9 (Java side): AlarmEvent {@code managedObjectId} required, {@code state} enum
- * enforced, optional fields absent OK. Mirrors the Python {@code test_alarm_event.py}.
+ * Criteria 7, 8, 9, 9a (Java side): AlarmEvent {@code managedObjectId} required, {@code state} enum
+ * enforced, optional fields absent OK, and the canonical {@code alarmType} join key required +
+ * round-tripping (distinct from {@code eventType}/{@code probableCause}). Mirrors the Python
+ * {@code test_alarm_event.py}.
  */
 class AlarmEventTest {
 
@@ -54,6 +56,30 @@ class AlarmEventTest {
         TypedEnvelope<Object> env = assertDoesNotThrow(() -> codec.deserialize(json));
         AlarmEvent alarm = (AlarmEvent) env.getPayload();
         assertEquals(state, alarm.getState().value());
+    }
+
+    // Criterion 9a — canonical alarmType join key required + round-trips.
+    // Mirrors Python test_alarm_event.py::test_alarm_type_present_round_trips.
+    @Test
+    void alarmTypePresentRoundTrips() throws Exception {
+        TypedEnvelope<Object> env = codec.deserialize(Fixtures.read("AlarmEvent"));
+        AlarmEvent alarm = (AlarmEvent) env.getPayload();
+        assertEquals("LinkDown", alarm.getAlarmType(),
+                "canonical alarmType join key bound from the fixture");
+        // The canonical join key is distinct from the X.733 eventType / probableCause.
+        org.junit.jupiter.api.Assertions.assertNotEquals(alarm.getAlarmType(), alarm.getEventType());
+        org.junit.jupiter.api.Assertions.assertNotEquals(alarm.getAlarmType(), alarm.getProbableCause());
+        // And it survives re-serialization byte-equal to the golden fixture value.
+        String wire = codec.serialize(env);
+        assertEquals("LinkDown", mapper.readTree(wire).get("payload").get("alarmType").asText());
+    }
+
+    // Criterion 9a — alarmType is REQUIRED on AlarmEvent; absence raises.
+    // Mirrors Python test_alarm_event.py::test_alarm_type_required.
+    @Test
+    void missingAlarmTypeRejected() throws Exception {
+        assertThrows(CodecException.class,
+                () -> codec.deserialize(alarmFixtureWithoutPayloadField("alarmType")));
     }
 
     // Criterion 9 — optional fields (clearedAt, vendorRaw) absent OK.
