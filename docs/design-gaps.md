@@ -42,5 +42,6 @@ Gaps are fixed in the owning service's spec/design via gated PRs and reflected h
 |------|----|-------------------------------|--------|
 | 1 — event-model contract: canonical `alarmType` join key | #134 (merged) | P2-GAP-01, P2-GAP-02, P2-GAP-03 (value-space root cause); value-space half of P2-GAP-04, P3-G4 | ✅ merged |
 | 2 — Knowledge: alarmTypeVocabulary = value space; freeze vocabulary + model-params endpoints | #135 | P1-G6, P1-G11, P1-G3, P2-GAP-07 (Knowledge SSoT side) | ⏳ awaiting merge |
+| 3 — Codebook: CE-oriented trail-signatures projection endpoint + publish OpenAPI; alarmType value space | #136 | P1-G5, P3-G2 (the 2 remaining Blockers) | ⏳ awaiting merge |
 
-**Remaining (Steps 3–7):** P1-G5, P3-G2 (codebook CE-projection endpoint); P1-G1, P1-G2, P1-G7, P1-G8, P1-G9 (topology API shapes); P1-G4, P1-G10, P2-GAP-09 (trail-builder endpoints); P3-G1, P2-GAP-04 (RCA-vocab), P2-GAP-05, P2-GAP-06, P2-GAP-08 (pattern-manager); P3-G3, P3-G4 (correlation-engine/web-ui); web-ui consumer-side of P2-GAP-06/07/08.
+**Remaining (Steps 3–7):** P1-G1, P1-G2, P1-G7, P1-G8, P1-G9 (topology API shapes); P1-G4, P1-G10, P2-GAP-09 (trail-builder endpoints); P3-G1, P2-GAP-04 (RCA-vocab), P2-GAP-05, P2-GAP-06, P2-GAP-08 (pattern-manager); P3-G3, P3-G4 (correlation-engine/web-ui); web-ui consumer-side of P2-GAP-06/07/08.
