@@ -209,6 +209,24 @@ are editable at any time via the web-ui config page, `knowledge.updated` can fir
   generated `openapi.json` is checked in at `services/knowledge/openapi.json`. A change to
   this API surface is a contract change requiring `docs/architecture.md` update and human
   approval.
+  - **Frozen depended-upon surfaces (design-stage open items resolved):** the
+    `GET /domains/{domain}/vocabulary` endpoint returns the fixed shape
+    `{ domain, objectTypes: [...], relations: [...], version }` (Topology builds its
+    snapshot-validation client against it), and the model-params read/edit surface is
+    `GET|PUT /domains/{domain}/model-params/{recordId}` (+ `.../versions/{version}`) carrying the
+    versioned record payload with the real dotted param keys (e.g. `dbscan.epsilon`,
+    `prefixspan.minSupport`) — **not** a flat `/knowledge/model-params` shape. Knowledge's
+    published `openapi.json` is the single source of truth these consumers build against. Frozen in
+    `design.md`.
+- **Canonical alarm-type value space (binding, not a contract change):** the domain's
+  `alarmTypeVocabulary` record is **the authoritative value space** for the canonical
+  `AlarmEvent.alarmType` join key (merged in `libs/event-model`; mirrored on
+  `TransactionEvent.alarms[].alarmType`, propagated into codebook `predictedSymptoms[].alarmType`
+  and `rootCauseAlarmType`, matched at correlation). Propagation-template `trigger.alarmType` /
+  `effect.alarmType` are drawn from this same vocabulary and validated against it on write, so the
+  whole mining→codebook→correlation chain shares one token set. This is a binding **to** the
+  already-merged `alarmType` field — it adds **no** topic/payload/event-model change. `alarmType`
+  is distinct from `eventType` (X.733 category) and `probableCause`.
 - **APIs/data consumed from other services:** — (none; Knowledge is a server and a Kafka
   producer only)
 - **Integration points (mock vs. real):** Knowledge exposes no outbound integration points.
@@ -394,6 +412,12 @@ Each criterion maps to a single JUnit 5 test.
   issue #30 (owned on the codebook side; this note is for cross-service visibility).
   `InterfaceDown` is now part of the propagation chain and should be included in that
   coordination.
+  *Resolved (gap P1-G6):* the canonical alarm-type identifier vocabulary is the Knowledge
+  `alarmTypeVocabulary` record, and it is **the value space for the now-merged dedicated
+  `AlarmEvent.alarmType` join key** (binding pinned in `architecture.md` Invariants). Template
+  `trigger.alarmType`/`effect.alarmType` bind to `AlarmEvent.alarmType` — **not** `eventType` and
+  **not** `probableCause` — and are validated against this vocabulary on write. No event-model
+  change (Knowledge consumes/binds to the merged field).
 
 - **OQ-4 (design-stage) — Attribute catalogue: descriptive vs. enforced validation rigour.**
   The `architecture.md` describes the attribute catalogue as "descriptive" — the attribute

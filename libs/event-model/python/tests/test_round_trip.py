@@ -50,6 +50,7 @@ def test_round_trip_alarm_with_optionals() -> None:
             "managedObjectId": "Node:PE1",
             "eventType": "communicationsAlarm",
             "probableCause": "lossOfSignal",
+            "alarmType": "LOS",
             "perceivedSeverity": "critical",
             "raisedAt": "2026-06-08T12:34:55Z",
             "clearedAt": "2026-06-08T12:40:00Z",

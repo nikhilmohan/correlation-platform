@@ -64,6 +64,36 @@ The seven `recordType`s:
 > `KnowledgeUpdatedEvent` contract. See **Design alternatives** for why a record (not a hard-coded
 > enum) is correct, and the contract-change note at the end confirming this is not a contract change.
 
+> **`alarmTypeVocabulary` is THE authoritative value space for the canonical
+> `AlarmEvent.alarmType` join key (binding — gap P1-G6).** The event-model now carries a
+> **dedicated** canonical alarm-type field, `AlarmEvent.alarmType` (merged on `main`; mirrored on
+> `TransactionEvent.alarms[].alarmType`). `architecture.md` (**Invariants**) pins it as *the single
+> canonical alarm-type token the whole correlation chain joins on* and pins its **value space** to
+> *the Knowledge-authored, domain-scoped `alarmTypeVocabulary`*. This design makes that binding
+> explicit and one-directional: **every alarm-type token used anywhere in the platform's
+> mining → codebook → correlation chain is a member of the domain's `alarmTypeVocabulary`.**
+> Concretely, the single token set served by this record is the value space for:
+> - `AlarmEvent.alarmType` (Simulator/Enrichment populate it from this vocabulary before publishing);
+> - `TransactionEvent.alarms[].alarmType` (mirrored from `AlarmEvent.alarmType`, mined into sequences);
+> - the Codebook Generator's `predictedSymptoms[].alarmType` (scenario signatures);
+> - Pattern Manager's / codebook `rootCauseAlarmType`;
+> - the propagation-template `trigger.alarmType` / `effect.alarmType` tokens authored **here**
+>   (these are the *same* set — see the cross-record validation below).
+>
+> Because the templates' `trigger.alarmType`/`effect.alarmType` are validated **on write** against
+> this `alarmTypeVocabulary` (validation step D3, below) and the Codebook Generator reads both the
+> templates and this vocabulary from this service, the entire chain provably shares **one** token
+> set — there is no second, divergent list anywhere. This write-validation cross-check is what
+> *guarantees* the whole mining→codebook→correlation chain shares one token set.
+>
+> **SUPERSEDES the earlier gap text.** An earlier design-gap note proposed binding the template
+> effect identifier to `AlarmEvent.eventType`. **That is superseded.** The correct binding is
+> **`effect.alarmType` / `trigger.alarmType` == `AlarmEvent.alarmType`** (the NEW dedicated field)
+> — **not** `eventType` (which stays the X.733 *category*, e.g. `communicationsAlarm`) and **not**
+> `probableCause` (X.733 probable cause, e.g. `lossOfSignal`). The `alarmTypeVocabulary` tokens are
+> the canonical `alarmType` tokens (`PortDown`, `InterfaceDown`, `LinkDown`, ...), **not**
+> probableCause-style tokens (`lossOfSignal`/`linkDown` lowercase) and **not** X.733 categories.
+
 ### 1. Propagation-template record schema (the formalized rule)
 
 The spec authors templates in the notation `EDGE_TYPE: trigger(Type) => effect(Type)`. This
@@ -152,6 +182,15 @@ template effect names are **guaranteed** to be canonical alarm-type strings the 
 already knows. Validation is **driven by the referenced records**, never by a hard-coded Core IP
 list (so acceptance criteria 16/17 hold for any domain).
 
+The `trigger.alarmType`/`effect.alarmType` value space is **exactly** the domain's
+`alarmTypeVocabulary` — the same set that is the value space for `AlarmEvent.alarmType` (gap
+P1-G6). So a template can only ever name an alarm type the canonical join key can carry, and the
+codebook signatures the Codebook Generator compiles from these templates necessarily use tokens a
+live `AlarmEvent.alarmType` can equal. This cross-check (validation step D3) is the single
+mechanism that keeps the **template effects / codebook signatures / mined sequences / live
+`alarmType` / `rootCauseAlarmType`** on one token set. It binds to `alarmType`, **not** to
+`eventType` (X.733 category) and **not** to `probableCause`.
+
 ### 2. Fault-origin-type record schema
 
 ```json
@@ -194,6 +233,17 @@ One record per domain holds the canonical alarm-type identifier set. Core IP set
 `FiberFault` (the discriminators referenced by templates and codebook signatures). This is the
 single authoritative list against which all `propagationTemplate` effect/trigger alarm types are
 validated — resolving the Codebook Generator's `AlarmTypeVocabulary` seam (OQ-3).
+
+**This is the value space for the canonical `AlarmEvent.alarmType` field (gap P1-G6).** Per
+`architecture.md` the dedicated `AlarmEvent.alarmType` join key (mirrored on
+`TransactionEvent.alarms[].alarmType`, propagated into codebook `predictedSymptoms[].alarmType`
+and `rootCauseAlarmType`, matched at correlation) draws its values **from this record**. Knowledge
+authors the tokens; every producer/consumer in the chain is constrained to them. The Core IP set
+above is the union the propagation cascade actually emits as `effect.alarmType` plus the
+self-originated `faultOriginType.originAlarmType` values (e.g. `LOS` originated by a `FiberSpan`,
+`FiberFault` by a `LineCard`/`Fiber`), so the seed vocabulary covers every token the cascade uses.
+The vocabulary tokens are the **canonical `alarmType` tokens** — they are **not** probableCause
+tokens (`lossOfSignal`/`linkDown` lowercase) and **not** X.733 `eventType` categories.
 
 ### 4. Object-type and edge-relation vocabulary record schemas
 
@@ -567,7 +617,10 @@ of the eight types: `propagation-templates`, `fault-origin-types`, `trail-polici
 | `GET /domains/{domain}/{recordType}` | optional `?recordId=` filter | `200` list of current records for the domain+type | — |
 | `GET /domains/{domain}/{recordType}/{recordId}` | — | `200` current version | `404` |
 | `GET /domains/{domain}/{recordType}/{recordId}/versions/{version}` | — | `200` pinned version | `404` |
-| `GET /domains/{domain}/vocabulary` | — | `200` `{domain, objectTypes:[...], relations:[...]}` (both current sets, one call) | `404` unknown domain |
+| `GET /domains/{domain}/vocabulary` | — | `200` `{domain, objectTypes:[...], relations:[...], version}` (both current sets, one call — **frozen shape**, see below) | `404` unknown domain |
+| `GET /domains/{domain}/model-params/{recordId}` | — | `200` current `modelParams` record (versioned envelope + `payload.params[]` with **real dotted keys** — **frozen shape**, see below) | `404` |
+| `GET /domains/{domain}/model-params/{recordId}/versions/{version}` | — | `200` pinned `modelParams` record | `404` |
+| `PUT /domains/{domain}/model-params/{recordId}` | `modelParams` payload (real dotted keys) | `200` + new version (immutable, `is_current` flips) | `404`; `422` validation/out-of-bounds |
 | `GET /openapi.json` | — | `200` OpenAPI 3.1 document | — |
 | `GET /swagger-ui` | — | Swagger UI | — |
 
@@ -580,6 +633,98 @@ declare — all resolve to the generic store):
 - Noise Filter / Pattern Miner / Pattern Manager: `GET /domains/{domain}/model-params?paramSet=...`
   (current or `.../versions/{version}` to pin).
 - Topology: `GET /domains/{domain}/vocabulary`.
+
+### Frozen integration contracts (gaps P1-G11, P2-GAP-07)
+
+Three read/write surfaces are **hard-depended-upon by other services** and are therefore frozen
+here with exact shapes and **published in the checked-in `services/knowledge/openapi.json`**, which
+those services build their clients against (mock from this OpenAPI for their unit tests, real
+Knowledge in integration). A change to any of these shapes is a contract change requiring
+`architecture.md` update + human approval (per the spec).
+
+#### A. `GET /domains/{domain}/vocabulary` — Topology snapshot pre-validation (P1-G11, FROZEN)
+
+The Topology Service hard-depends on this single call at ingest to validate an uploaded snapshot's
+`objectType`/`relation` tokens before lifting it into the graph (fail-closed if Knowledge is
+unavailable). The earlier open item *"exact path/shape is design-stage on Knowledge's side"* is
+**resolved** — the path, request, and response are now frozen:
+
+- **Path / method:** `GET /domains/{domain}/vocabulary` (path param `domain`, e.g. `core-ip`).
+- **Request:** no body, no query params.
+- **Response `200`** (both current vocabulary sets in **one** call):
+
+```json
+{
+  "domain": "core-ip",
+  "objectTypes": ["Node","LineCard","Port","Interface","IPLink","IGPAdjacency",
+    "LSP","VPNService","FiberSpan","SRLG","Site"],
+  "relations": ["HOSTED_ON","HOSTS","TERMINATES","RIDES_ON","ADJACENCY_OVER",
+    "TRAVERSES","SERVES","MEMBER_OF","LOCATED_AT"],
+  "version": "v1"
+}
+```
+
+`objectTypes` is the current `objectTypeVocabulary` token set; `relations` is the current
+`edgeRelationVocabulary` token set; `version` is an opaque snapshot identifier the caller may pin
+or log (here the current version of the underlying vocabulary records; if the two records differ in
+version the field reports the composite current-read marker). **Response `404`** for an unknown
+domain. These two token sets are the **single source** Topology validates snapshots against
+(gap P1-G3 — see Seed data); the Simulator's domain pack is contract-tested to be a subset of this
+served vocabulary rather than carrying an independent list.
+
+**Contract test note:** a provider-side JUnit contract test (`VocabularyEndpointContractTest`)
+asserts the operation exists in the published `openapi.json` with exactly this response schema
+(`domain`, `objectTypes[]`, `relations[]`, `version`), that the live `core-ip` response contains
+`Interface`/`HOSTS`/`TERMINATES`, and that an unknown domain returns `404`. Topology builds its
+`KnowledgeVocabClient` against this frozen shape.
+
+#### B. Model-params read + edit — web-ui config edit (P2-GAP-07, FROZEN; Knowledge is SSoT)
+
+The web-ui edits model params **through Knowledge** — **Knowledge's API is the single source of
+truth** for the path and the payload. There is **no** `/knowledge/model-params` path and **no**
+flat camelCase keys (`dbscanEps`, `sessionWindowGapSeconds`, ...). The real, frozen surfaces are:
+
+- **Read current:** `GET /domains/{domain}/model-params/{recordId}`
+  (e.g. `GET /domains/core-ip/model-params/core-ip%2FmodelParams%2Fnoise-filter`). Also
+  `GET /domains/{domain}/model-params` to list, and `.../versions/{version}` to pin a version.
+- **Edit (versioned write):** `PUT /domains/{domain}/model-params/{recordId}` with the **versioned
+  record payload** — write semantics are immutable: a successful write mints a new `version` and
+  flips `is_current` (it does **not** mutate in place). Out-of-bounds values are rejected `422`.
+
+The record payload uses the **real dotted/structured param keys** exactly as they live in the
+`modelParams` records (see Seed data) — `dbscan.epsilon`, `dbscan.minSamples`,
+`window.sizeSeconds`, `prefixspan.minSupport`, `prefixspan.maxPatternLength`,
+`window.adaptive.baseGapSeconds`, etc. Read response / write request body shape:
+
+```json
+{
+  "domain": "core-ip",
+  "recordType": "modelParams",
+  "recordId": "core-ip/modelParams/noise-filter",
+  "version": "v3",
+  "isCurrent": true,
+  "payload": {
+    "paramSet": "noise-filter",
+    "params": [
+      { "key": "dbscan.epsilon",      "type": "number",  "value": 0.5, "min": 0.0, "max": 100.0 },
+      { "key": "dbscan.minSamples",   "type": "integer", "value": 3,   "min": 1,   "max": 1000 },
+      { "key": "window.sizeSeconds",  "type": "integer", "value": 60,  "min": 1,   "max": 86400, "unit": "s" }
+    ]
+  }
+}
+```
+
+The Pattern Miner set (`prefixspan.minSupport`, `prefixspan.maxPatternLength`,
+`window.adaptive.baseGapSeconds`, the named tempo profiles, ...) follows the same envelope with
+`paramSet = "pattern-miner"`. **The web-ui builds its Knowledge client from this published
+`openapi.json`** — it uses `/domains/{domain}/model-params/{recordId}`, sends the versioned record
+payload with the real dotted keys, and handles the new-version/`is_current` write semantics (the
+web-ui alignment is done on the web-ui side; here the SSoT endpoints + payloads are unambiguous).
+
+**Contract test note:** `ModelParamsEndpointContractTest` asserts the read returns the versioned
+envelope with the dotted-key `params[]` payload, the `PUT` mints a new version (old version still
+retrievable), and an out-of-bounds value (e.g. `prefixspan.minSupport = 1.5`) is rejected `422`
+naming the param.
 
 **Structured validation error body** (HTTP 422, no partial write):
 
@@ -601,9 +746,13 @@ checked-in `services/knowledge/openapi.json`. The checked-in document is the pro
 a JUnit provider-side contract test (criterion 13) asserts `/openapi.json` is valid OpenAPI 3.1,
 contains `GET`/`POST`/`PUT` for each of the eight record types, the vocabulary query operation,
 and a versioned-read operation accepting a `version` path parameter — and that the live
-implementation satisfies it. A CI check fails the build if the generated document drifts from the
-checked-in `openapi.json` (any drift is a contract change requiring `architecture.md` update +
-human approval, per the spec).
+implementation satisfies it. The published document additionally pins the three **frozen
+integration contracts** above: `GET /domains/{domain}/vocabulary` with the
+`{domain, objectTypes[], relations[], version}` response (Topology client), and the
+`GET`/`PUT` `model-params/{recordId}` operations with the versioned-record payload shape (web-ui
+client). A CI check fails the build if the generated document drifts from the checked-in
+`openapi.json` (any drift is a contract change requiring `architecture.md` update + human approval,
+per the spec).
 
 ---
 
@@ -750,6 +899,25 @@ path (so the seed is dogfood-validated). All seed records are `domain = core-ip`
   "payload": { "alarmTypes": ["PortDown","InterfaceDown","LinkDown","AdjDown","LSPDown",
     "ReachabilityLoss","LOS","FiberFault"] } }
 ```
+
+**Single source for snapshot-token validation (gap P1-G3).** The seeded `core-ip`
+`objectTypeVocabulary` and `edgeRelationVocabulary` above are the **authoritative token sets**
+against which the Topology Service validates an uploaded snapshot (via
+`GET /domains/core-ip/vocabulary`) before lifting it into the graph — there is no second
+authoritative list. The Simulator's `core-ip` domain pack does **not** carry an independent copy;
+it derives from / is contract-tested to be a **subset** of this served vocabulary (the Simulator
+alignment is handled in the Simulator's own fix). This keeps the snapshot `objectType`/`relation`
+tokens, Knowledge's served vocabulary, and Topology's validator on one set, so a token divergence
+is caught at design/contract time rather than failing ingest closed at integration time.
+
+**Single source for the canonical `alarmType` join key (gap P1-G6).** The seeded `core-ip`
+`alarmTypeVocabulary` above is likewise the **authoritative value space** for `AlarmEvent.alarmType`
+(and its mirrors/derivations down the chain). The 8 tokens are exactly the set the propagation
+cascade emits — `effect.alarmType` across the seeded templates yields
+`{PortDown, InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss}` and the
+`faultOriginType.originAlarmType` self-origin values add `{LOS, FiberFault}` (and `InterfaceDown`) —
+so the vocabulary covers every token the cascade actually uses, with no probableCause-style or
+X.733-category tokens introduced.
 
 ### Core IP fault-origin types
 
@@ -1023,6 +1191,21 @@ is logged + counted. There is no partial write — validation precedes the singl
 
 All 20 criteria map 1:1 to a named JUnit 5 test.
 
+### Data-integration binding tests (gaps P1-G6, P1-G11, P2-GAP-07, P1-G3)
+
+These derive from the data-integration fixes (binding to the merged `alarmType` contract and
+freezing the depended-upon read/edit surfaces). Each maps to a named JUnit 5 test; none requires an
+event-model change.
+
+| # | Binding / frozen contract | Test | Asserts |
+|---|---|---|---|
+| G6a | `alarmTypeVocabulary` is the value space for template `trigger.alarmType`/`effect.alarmType` | `AlarmTypeValueSpaceTest.templateAlarmTypeMustBeInVocabulary` | A template whose `effect.alarmType` is **not** in the domain's `alarmTypeVocabulary` is rejected `422` (rule `alarm-type-in-vocabulary`); a template using a vocabulary token (e.g. `InterfaceDown`) is accepted. Validation D3 binds to `alarmType`, not `eventType`/`probableCause`. |
+| G6b | Seed `alarmTypeVocabulary` covers every token the seeded cascade uses | `AlarmTypeVocabularyCoverageTest.seedCoversCascadeTokens` | The union of seeded template `effect.alarmType` + `faultOriginType.originAlarmType` values is a subset of the seeded `core-ip` `alarmTypeVocabulary` (`PortDown,InterfaceDown,LinkDown,AdjDown,LSPDown,ReachabilityLoss,LOS,FiberFault`); no probableCause/lowercase token present. |
+| G11 | `GET /domains/{domain}/vocabulary` frozen shape | `VocabularyEndpointContractTest.returnsFrozenShapeAndPublishedInOpenApi` | The live `core-ip` response is `{domain, objectTypes[], relations[], version}` (contains `Interface`,`HOSTS`,`TERMINATES`); the operation + response schema are present in the checked-in `openapi.json`; unknown domain to `404`. |
+| GAP07a | Model-params read returns the versioned record payload with real dotted keys | `ModelParamsReadContractTest.returnsVersionedRecordWithDottedKeys` | `GET /domains/core-ip/model-params/{recordId}` returns the `{domain,recordType,recordId,version,isCurrent,payload{paramSet,params[]}}` envelope with keys `dbscan.epsilon`/`prefixspan.minSupport` (not flat camelCase); operation present in `openapi.json`. |
+| GAP07b | Model-params edit is a versioned write through Knowledge (SSoT) | `ModelParamsEditContractTest.putMintsNewVersion_oldRetrievable_boundsEnforced` | `PUT /domains/core-ip/model-params/{recordId}` mints a new version (old version still retrievable via `.../versions/{v}`); an out-of-bounds value (`prefixspan.minSupport=1.5`) to `422` naming the param. |
+| G3 | Seeded vocabularies are the single source Topology validates against | `VocabularySingleSourceTest.servedVocabIsAuthoritativeSet` | The `GET .../vocabulary` `objectTypes`/`relations` exactly equal the seeded `core-ip` `objectTypeVocabulary`/`edgeRelationVocabulary` records (the authoritative set a Simulator-pack subset check / Topology validator key off — one served source, no independent copy). |
+
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
@@ -1034,8 +1217,14 @@ All 20 criteria map 1:1 to a named JUnit 5 test.
 | 5 | New-domain onboarding by records only | `POST` `transport-otn` vocabularies + template, then read them back | All created/retrieved/filtered by domain with no code change; their `knowledge.updated` events carry `domain=transport-otn`. |
 | 6 | Publish-failure resilience | Kafka broker down at emit time after a committed `PUT` | DB shows `v2` (source of truth); producer retries with backoff; `knowledge_updated_publish_failures_total` increments; on broker recovery a single event with the original `eventId` is delivered (no duplicate logical change). |
 
+| 7 | alarmType value-space binding holds end-to-end | Author a template with `effect.alarmType` outside the vocabulary, then one inside it | First `422` (`alarm-type-in-vocabulary`); second accepted. Codebook reading templates + `alarm-type-vocabulary` sees one token set that a live `AlarmEvent.alarmType` can equal — no eventType/probableCause divergence. |
+| 8 | Topology vocabulary pre-validation against the frozen contract | Topology client calls `GET /domains/core-ip/vocabulary` (frozen shape) before snapshot ingest | One response `{domain,objectTypes[],relations[],version}`; Topology validates the snapshot tokens as a subset; unknown domain to `404` (Topology fails closed). |
+| 9 | web-ui edits model params through Knowledge as SSoT | web-ui reads `GET /domains/core-ip/model-params/{recordId}`, edits `dbscan.epsilon`, `PUT`s the versioned payload | Read/write use the real dotted-key versioned record (not `/knowledge/model-params` flat keys); `PUT` mints a new version, old version pinned-retrievable; out-of-bounds rejected `422`. |
+
 These exercise the success path, the Topology/Codebook hand-offs, the validation/partial-failure
-path, the extensibility path, and the producer-down partial path.
+path, the extensibility path, the producer-down partial path, the **alarmType value-space binding
+(P1-G6)**, the **frozen vocabulary contract (P1-G11)**, and the **model-params SSoT edit
+(P2-GAP-07)**.
 
 ---
 
