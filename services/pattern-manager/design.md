@@ -26,6 +26,27 @@ The new structural-validation status (`structurallyValidated` + `structuralValid
 metadata does, and is deliberately **not** added to either frozen event. The HTTP surface,
 Pattern Store schema, and integration points are internal design and not contract changes.
 
+**Data-integration fixes folded into this design (no contract change).** Five data-integration
+gaps from `docs/design-gaps.md` are resolved here, all within the Pattern Manager's owned read API
++ derivation, with **no Kafka topic or event-model payload change**:
+- **P3-G1** — `trailId` is surfaced on `PatternView` (read API + `openapi.json`), giving the
+  Correlation Engine its per-pattern `trailId` (for `(trailId, patternId)` keying) **from the read
+  API, not from `PatternApprovedEvent`** — which deliberately stays unchanged.
+- **P2-GAP-04** — `rootCauseAlarmType` (events + `PatternView` + RCA output) is bound to the
+  canonical **`alarmType` vocabulary** (Knowledge `alarmTypeVocabulary`), the same join key as
+  `AlarmEvent.alarmType` and codebook `predictedSymptoms[].alarmType`.
+- **P2-GAP-05** — the `sessionWindow` derivation pins exact `timing` keys/units, fixes
+  `cv = stddev/median`, and gives a self-consistent worked example (resolving OQ-5); a Pattern Miner
+  follow-up to emit the pinned ms keys is flagged (contract-of-shape on the open `timing` object,
+  not an event-model change).
+- **P2-GAP-06** — the `PATCH /patterns/{id}` body is frozen as
+  `{ sequenceFlags: [{ index, optional }], reviewer, notes? }` in `openapi.json`.
+- **P2-GAP-08** — `GET /patterns` is frozen to return the **`PatternPage` envelope**
+  `{ items, total, limit, offset }`, not a bare array.
+The published `openapi.json` (OpenAPI 3.1, at `/openapi.json`, checked in at
+`services/pattern-manager/openapi.json`) is the SSoT for all of the above; consumer-side alignment
+(web-ui) is handled in the web-ui fix.
+
 **Session-window summary (OQ-5 resolution, detailed under Algorithm logical flow).** For every
 mined pattern the Pattern Manager derives `sessionWindow = {windowMs, type}` deterministically and
 **purely** from `PatternMinedEvent.timing` — with **no** Knowledge-Service input. `windowMs` is a
@@ -84,7 +105,7 @@ steps; the emit/serve tasks now additionally carry/serve `sessionWindow`.
 | 9. Emit `patterns.discovered`: one `PatternDiscoveredEvent` per persisted draft, carrying `sessionWindow` | `PatternEventPublisher.publishDiscovered(...)` builds a `TypedEnvelope` of `PatternDiscoveredEvent` (`lifecycle = draft`, **`sessionWindow = {windowMs, type}`** read from the persisted record) via `EventCodec.serialize` and sends to `patterns.discovered`. `EventCodec.serialize` validates `sessionWindow` against the merged schema before send (criterion 19). The event **does not** carry the structural-validation flag (frozen schema). |
 | 10. Serve the pattern read API (list draft with XAI incl. `sessionWindow`, get by id incl. `sessionWindow`, list approved incl. `sessionWindow`, filter by lifecycle); serve approved to Correlation Engine | `PatternQueryController` — `GET /patterns` (filter `lifecycle`, pagination), `GET /patterns/{patternId}`; backed by `PatternQueryService` reading the Pattern Store. The response and XAI metadata now include `structurallyValidated` + `structuralValidationReason` and **`sessionWindow`** ({`windowMs`, `type`}) (criterion 21). The same `GET /patterns?lifecycle=approved` serves the Correlation Engine the `sessionWindow` it uses to govern correlation-instance lifetime. |
 | 11. Process approval intent: validate `draft`, transition to `approved`, record timestamp | `POST /patterns/{patternId}/approve` calls `LifecycleService.approve(...)` which validates current state `draft`, transitions to `approved`, writes a `lifecycle_transition` audit row, then triggers task 13. |
-| 12. Process operator edits (placeholder): per-alarm `optional` flags on a `draft` pattern | `PATCH /patterns/{patternId}` calls `PatternEditService.applyEdit(...)` which validates `draft`, persists `optional` markers into `sequence_element.optional` (plus reviewer/notes into edit metadata), returns the updated record. Edit metadata stays internal — never added to `PatternApprovedEvent`. **`sessionWindow` is read-only — this endpoint never edits it** (OQ-6 post-MVP). Otherwise unchanged. |
+| 12. Process operator edits (placeholder): per-position `optional` flags on a `draft` pattern via the **frozen** `PatternEdit` body `{ sequenceFlags: [{ index, optional }], reviewer, notes? }` | `PATCH /patterns/{patternId}` calls `PatternEditService.applyEdit(...)` which validates `draft`, maps each `sequenceFlags[].index` to a `sequence_element.position` and sets that element's `optional` (plus reviewer/notes into edit metadata), returns the updated record. Out-of-range `index` gives `422`. Edit metadata stays internal — never added to `PatternApprovedEvent`. **`sessionWindow` is read-only — this endpoint never edits it** (OQ-6 post-MVP). |
 | 13. Emit `patterns.approved`: one `PatternApprovedEvent` per approval transition, carrying `sessionWindow` | `PatternEventPublisher.publishApproved(...)` builds a `TypedEnvelope` of `PatternApprovedEvent` (`lifecycle = approved`, **`sessionWindow` read from the persisted record — the same value emitted at discovery**) and sends to `patterns.approved`. `EventCodec.serialize` validates `sessionWindow` before send (criterion 20). Sole producer; the web-ui only signals via the API. The event **does not** carry the structural-validation flag (frozen schema). |
 | 14. Support deprecation: `draft` or `approved` to `deprecated`, record timestamp | `POST /patterns/{patternId}/deprecate` calls `LifecycleService.deprecate(...)` which validates current state in (`draft`, `approved`), transitions to `deprecated`, writes a `lifecycle_transition` audit row. Unchanged. |
 
@@ -355,29 +376,51 @@ from the originating mined event (discovered) or generated for an API-initiated 
 ## API contracts / API schema
 
 HTTP surface (Spring Web MVC). OpenAPI 3.1 published at `/openapi.json` via springdoc, Swagger
-UI at `/swagger-ui`, and the generated document checked in at
-`services/pattern-manager/openapi.json`. The service's own published spec drives contract/unit
+UI at `/swagger-ui`, and the generated document **checked in at
+`services/pattern-manager/openapi.json` as the single source of truth (SSoT)** for the shapes the
+web-ui and the Correlation Engine consume. The service's own published spec drives contract/unit
 tests (request/response schema validation plus provider-side verification). A change to this
 surface is a contract change requiring `docs/architecture.md` plus human approval.
+
+**Frozen-as-SSoT (this integration-fix design).** The published `openapi.json` freezes, as the one
+authoritative shape:
+- **`GET /patterns`** returns the **`PatternPage` envelope** `{ items: PatternView[], total, limit,
+  offset }` — never a bare array (P2-GAP-08).
+- **`GET /patterns/{patternId}`** returns a full **`PatternView`** (P3-G1 + P2-GAP-04 below).
+- **`PatternView`** carries **`trailId`** (P3-G1 — the CE's per-pattern `trailId` source, since the
+  frozen `PatternApprovedEvent` cannot carry it) and **`rootCauseAlarmType` as an `alarmType`
+  vocabulary token** (P2-GAP-04), in addition to `sequence`, `support`/`confidence`/`lift`,
+  `sessionWindow`, `codebookMatchId`, `reconcileStatus`, `structurallyValidated` +
+  `structuralValidationReason`, `timing`, `lifecycle`, `instanceCount`, `supportingInstances`.
+- **`PATCH /patterns/{patternId}`** accepts the **frozen `PatternEdit` body**
+  `{ sequenceFlags: [{ index, optional }], reviewer, notes? }` (P2-GAP-06).
+The web-ui and Correlation Engine clients are generated from this `openapi.json` and align to it
+(the web-ui consumer-side alignment is handled in the web-ui fix). All of the above are internal
+HTTP-surface SSoT freezes; **none** adds or changes any Kafka topic or event-model payload.
 
 Response shapes reuse the `libs/event-model` pattern fields where applicable and add the
 internal XAI/edit/lifecycle fields, now including the structural-validation status. Common
 `PatternView` body:
 
+`PatternView` is the **canonical item shape** (SSoT) served by the read API and frozen in the
+checked-in `openapi.json`. The Correlation Engine reads `trailId` + `sessionWindow` from it; the
+web-ui reads the full XAI set. It is **fully specified** as:
+
 ```
 PatternView {
   patternId: string (uuid)
-  sequence: SequenceElement[]   # each {alarmType: string, optional: boolean}
-  rootCauseAlarmType: string
+  trailId: string                # P3-G1: the trail this pattern was mined from (PatternMinedEvent.trailId)
+  sequence: SequenceElement[]   # each {alarmType: string, optional: boolean}; alarmType is an alarmType-vocabulary token
+  rootCauseAlarmType: string    # P2-GAP-04: an alarmType-vocabulary token (same space as AlarmEvent.alarmType)
   support: number
   confidence: number
   lift: number
-  timing: object                # median inter-arrival plus timeframe
+  timing: object                # the descriptive mined timing (median inter-arrival plus timeframe); open object
+  sessionWindow: { windowMs: integer (greater than 0), type: "gap-based"|"fixed" }   # derived, read-only in MVP
   codebookMatchId: string|null
   reconcileStatus: "confirmed"|"merged"|"unexplained"
   structurallyValidated: boolean
   structuralValidationReason: string|null   # non-null exactly when structurallyValidated is false
-  sessionWindow: { windowMs: integer (greater than 0), type: "gap-based"|"fixed" }   # derived, read-only in MVP
   instanceCount: integer (greater than 0)
   supportingInstances: SupportingInstance[]   # each {sourceWindowId, snapshotId, occurrence}
   lifecycle: "draft"|"approved"|"deprecated"
@@ -387,12 +430,56 @@ PatternView {
 }
 ```
 
+**`trailId` on `PatternView` (P3-G1 — solved WITHOUT any event-model change).** The frozen
+`PatternApprovedEvent` (and `PatternDiscoveredEvent`) schemas carry **no `trailId`** and we
+deliberately **do not add one** (that would be a contract change). Instead `trailId` is a **frozen
+field on `PatternView`** in the read API + published `openapi.json`. The Pattern Manager always has
+it: it is `PatternMinedEvent.trailId` (a required top-level field on the consumed event), persisted
+as the `pattern.trail_id` column. **The Correlation Engine obtains each approved pattern's
+`trailId` from this read API** (`GET /patterns?lifecycle=approved` at bootstrap, and
+`GET /patterns/{id}`) to key its correlation instances on `(trailId, patternId)` — **not** from the
+`PatternApprovedEvent`. This is the single defined source of per-pattern `trailId` for the CE.
+
+**`PatternPage` envelope (P2-GAP-08 — SSoT).** `GET /patterns` returns an **envelope object**, not
+a bare array. Frozen shape:
+
+```
+PatternPage {
+  items: PatternView[]
+  total: integer    # total matching the filter, for review-progress
+  limit: integer    # echoed page size
+  offset: integer   # echoed page offset
+}
+```
+
+Consumers (web-ui) read `.items` (plus `.total`/`.limit`/`.offset`), never a top-level array. This
+envelope is frozen in `openapi.json`.
+
+**`PatternEdit` PATCH body (P2-GAP-06 — one canonical body, frozen).** The `PATCH /patterns/{id}`
+request body is frozen as:
+
+```
+PatternEdit {
+  sequenceFlags: [ { index: integer (>= 0), optional: boolean } ]   # per-position optional markers
+  reviewer: string
+  notes?: string
+}
+```
+
+**Chosen `sequenceFlags: [{index, optional}]` over the prior `optionalAlarms: integer[]`** — it is
+the body the web-ui already sends, and it is the more expressive and extensible shape: each flag
+names a sequence position (`index`) and its boolean `optional` state, so an edit can both **set and
+clear** `optional` on specific positions in one request (a bare `int[]` of positions can only
+express the set-to-true case and is ambiguous about clears), and the per-position object can carry
+future per-element flags without another contract change. The web-ui aligns to this frozen body;
+`sessionWindow` remains **not** an editable field (read-only, OQ-6).
+
 | Method plus path | Request body | Success response | Errors |
 |---|---|---|---|
-| `GET /patterns` | query: `lifecycle?` (`draft`/`approved`/`deprecated`), `limit?` (default 50), `offset?` (default 0), `sort?` (`createdAt`/`lift`, default `-createdAt`) | `200 PatternPage { items: PatternView[], total: integer, limit, offset }` (each item carries `structurallyValidated` plus `structuralValidationReason`) | `400` invalid `lifecycle`/`sort` enum |
-| `GET /patterns/{patternId}` | — | `200 PatternView` (full XAI incl. `supportingInstances`, `structurallyValidated`, `structuralValidationReason`, `sessionWindow`) | `404` unknown `patternId` |
+| `GET /patterns` | query: `lifecycle?` (`draft`/`approved`/`deprecated`), `limit?` (default 50), `offset?` (default 0), `sort?` (`createdAt`/`lift`, default `-createdAt`) | `200 PatternPage { items: PatternView[], total: integer, limit, offset }` (the frozen **envelope** — not a bare array; each item is a full `PatternView` incl. `trailId`, `rootCauseAlarmType` vocab token, `sessionWindow`, `structurallyValidated`/`structuralValidationReason`) | `400` invalid `lifecycle`/`sort` enum |
+| `GET /patterns/{patternId}` | — | `200 PatternView` (full XAI incl. `trailId`, `supportingInstances`, `structurallyValidated`, `structuralValidationReason`, `sessionWindow`) | `404` unknown `patternId` |
 | `POST /patterns/{patternId}/approve` | `ApprovalIntent { decision: approve or reject, reviewer: string, notes?: string }` | `200 PatternView` (lifecycle `approved` when `approve`; unchanged plus rejection recorded when `reject`) | `404` unknown id, `409` not in `draft`, `422` invalid decision/missing reviewer |
-| `PATCH /patterns/{patternId}` | `PatternEdit { optionalAlarms: integer[] positions, reviewer: string, notes?: string }` (no `sessionWindow` field — read-only in MVP, OQ-6) | `200 PatternView` (`optional` markers reflected; `sessionWindow` unchanged) | `404` unknown id, `409` not in `draft`, `422` invalid positions |
+| `PATCH /patterns/{patternId}` | **frozen** `PatternEdit { sequenceFlags: [{ index: integer (at least 0), optional: boolean }], reviewer: string, notes?: string }` (per-position optional markers; no `sessionWindow` field — read-only in MVP, OQ-6) | `200 PatternView` (`optional` markers reflected per `index`; `sessionWindow` unchanged) | `404` unknown id, `409` not in `draft`, `422` invalid `index` (out of range)/missing reviewer |
 | `POST /patterns/{patternId}/deprecate` | `DeprecateIntent { reviewer: string, notes?: string }` | `200 PatternView` (lifecycle `deprecated`) | `404` unknown id, `409` not in (`draft`, `approved`) |
 
 OQ-2 (issue #46, `design-stage`) resolved here: **offset-based pagination** — `limit`/`offset`
@@ -515,7 +602,7 @@ sequenceDiagram
   participant A as PatternQueryController
   participant ED as PatternEditService
   participant S as PatternStoreService
-  U->>A: PATCH pattern with optionalAlarms reviewer notes
+  U->>A: PATCH pattern with sequenceFlags index optional reviewer notes
   A->>ED: applyEdit id edit
   ED->>S: load pattern
   alt not found
@@ -560,6 +647,34 @@ flowchart TD
 
 RCA additionally returns the **`resolvedObjects`** map (alarm type to `managedObjectId` plus
 dependency position) so the structural-validation step does not re-call Topology for resolution.
+
+**`rootCauseAlarmType` value space — canonical `alarmType` vocabulary token (P2-GAP-04).**
+`rootCauseAlarmType` (on `PatternDiscoveredEvent`/`PatternApprovedEvent`, in `PatternView`, and as
+the RCA / codebook-override output) is an **`alarmType`-vocabulary token** drawn from the domain's
+**Knowledge `alarmTypeVocabulary`** (e.g. `FiberFault`, `LinkDown`, `LOS`, `InterfaceDown`,
+`AdjDown`, `LSPDown`) — the **same** value space as `AlarmEvent.alarmType` (the merged canonical
+join key, #134) and as the codebook's `predictedSymptoms[].alarmType` / scenario root-cause
+`alarmType`. It is the `alarmType` of the **designated root-cause alarm** — **not** a
+`probableCause` value (e.g. `lossOfSignal`/`linkDown`) and **not** an `eventType` (X.733 category,
+e.g. `communicationsAlarm`). Sharing one token space is exactly what makes pattern↔codebook
+reconciliation/override (the codebook overlap test and the RCA override both compare on this token)
+and Correlation-Engine RCA tagging join correctly end-to-end.
+
+- **Where it comes from.** Because the merged `AlarmEvent.alarmType` is the single join key, the
+  mined `PatternMinedEvent.sequence[]` tokens are themselves `alarmType` vocabulary tokens (the
+  Pattern Miner mines on `alarmType` per the merged contract). RCA designates the root-cause alarm
+  and emits **that alarm's `alarmType` token verbatim** as `rootCauseAlarmType` — no translation to
+  `probableCause` or `eventType`. When the codebook override fires, the scenario's designated
+  root-cause `alarmType` (also a vocabulary token) replaces it, staying in the same space.
+- **Fixtures/examples.** The repo's frozen `PatternMinedEvent.json` fixture currently shows a
+  `probableCause`-style root-cause-ish value (`sequence` of `lossOfSignal`/`linkDown`/`bgpPeerDown`)
+  — that is the **pre-#134 value space and is NOT the canonical one**. Per the merged contract, all
+  Pattern Manager fixtures and examples (mined-input stubs, persisted `rootCauseAlarmType`,
+  `PatternDiscovered`/`PatternApproved` payloads, `PatternView` responses) **use `alarmType`
+  vocabulary tokens** (e.g. `rootCauseAlarmType = "FiberFault"`/`"LOS"`/`"LinkDown"`), consistent
+  with the codebook signatures and the Correlation Engine. This is the Pattern Manager design
+  binding the value space; it adds **no** event-model field and is **not** a contract change (the
+  value space was fixed by the merged #134 `alarmType` join key).
 
 ### Structural validation (NEW — connected-dependency-path check)
 
@@ -630,20 +745,44 @@ no Knowledge/Topology/Codebook input, and the same `timing` always yields the sa
 (criterion 18). The only constants are documented **derivation parameters** (env-overridable, with
 the documented defaults below) — they are not Knowledge-sourced business thresholds.
 
-**Timing sub-fields consumed (OQ-5 (c)).** `PatternMinedEvent.timing` is a free-form object
-(`additionalProperties: true`) produced by the Pattern Miner; the spec's XAI requires at minimum a
-median inter-arrival and a timeframe. The deriver reads these keys, all in **milliseconds**
-(confirmed against the Miner's timing convention; if a key is in seconds the deriver multiplies by
-1000 only where the Miner documents seconds — MVP assumes ms):
+**Timing sub-fields consumed — pinned keys + units (OQ-5 (c); P2-GAP-05).**
+`PatternMinedEvent.timing` is, in the frozen `libs/event-model` contract, an **open object**
+(`"type":"object", "additionalProperties": true`) with **no declared sub-fields** — it is
+loosely typed. The Pattern Manager's derivation therefore **requires** a specific, pinned set of
+keys and units, declared here as a **cross-service contract-of-shape** the Pattern Miner must
+populate. These are the canonical keys the deriver reads, **all in milliseconds (`Ms` suffix)**:
 
-- `timeframeMs` — observed span of the pattern from first to last alarm in a supporting instance
-  (the dominant signal for window length).
-- `medianInterArrivalMs` — median gap between consecutive alarms in the sequence.
-- `maxInterArrivalMs` — largest observed gap (used as a floor for gap-based windows; optional).
-- `interArrivalStddevMs` — spread of inter-arrival gaps (used to classify `type`; optional).
+| Pinned `timing` key (PM requires) | Unit | Role | Required? |
+|---|---|---|---|
+| `timeframeMs` | integer ms | Observed span from the first to the last alarm of a supporting instance — the dominant signal for window length. | Primary (fallback if absent) |
+| `medianInterArrivalMs` | number ms | **Median** gap between consecutive alarms in the sequence — the `cv` denominator. | Primary (drives `type`) |
+| `maxInterArrivalMs` | number ms | Largest observed inter-arrival gap — the gap-floor input. | Optional |
+| `stddevInterArrivalMs` | number ms | Standard deviation of inter-arrival gaps — the `cv` numerator. | Optional |
 
-Missing optional keys degrade gracefully via the documented fallbacks below; `timeframeMs` and
-`medianInterArrivalMs` are the two relied-on signals.
+> **Cross-service shape gap — Pattern Miner follow-up required (P2-GAP-05).** The repo's frozen
+> `PatternMinedEvent.json` fixture currently carries `timing = { meanInterArrivalSeconds,
+> stdDevSeconds }` — i.e. **different key names AND different units** (seconds, not ms; **mean**,
+> not **median**; and **no** `timeframeMs` or `maxInterArrivalMs` at all). Because `timing` is an
+> open object the schema does not enforce any shape, so this is **not a schema/contract change** —
+> but the Pattern Manager's derivation as designed will not find its inputs unless the Pattern
+> Miner populates the pinned ms keys above. **This is logged as a Pattern-Miner-owned follow-up:**
+> the Pattern Miner design must populate `PatternMinedEvent.timing` with at least
+> `timeframeMs` + `medianInterArrivalMs` (and ideally `maxInterArrivalMs` + `stddevInterArrivalMs`),
+> in **milliseconds**, with **median** (not mean). It is a contract-**of-shape** on the open
+> `timing` object, not an event-model field change — no new field, no `additionalProperties` flip,
+> so **no event-model/contract change is introduced here**; the alignment is a Pattern Miner design
+> fix tracked separately.
+>
+> **Resilience until the Miner aligns.** The deriver tolerates this via (a) a documented,
+> env-configurable **key-alias map** (`SESSION_WINDOW_TIMING_ALIASES`, default maps
+> `meanInterArrivalSeconds`→treat-as-median-after-×1000, `stdDevSeconds`→×1000) and (b) a
+> **unit-normalisation** step: any key whose name ends `Seconds` is multiplied by `1000` to ms
+> before use. If `timeframeMs` is still absent, the documented fallback below applies. These knobs
+> are internal implementation detail, not contract. The **target** state (and what the Pattern
+> Miner follow-up should deliver) is the native pinned ms keys above so no aliasing is needed.
+
+Missing **optional** keys degrade gracefully via the documented fallbacks below; `timeframeMs` and
+`medianInterArrivalMs` (after alias/unit normalisation) are the two relied-on signals.
 
 **Derivation parameters (documented; defaults; env-overridable — NOT hard-coded magic numbers).**
 
@@ -653,16 +792,41 @@ Missing optional keys degrade gracefully via the documented fallbacks below; `ti
 | `SESSION_WINDOW_MIN_MS` | `5000` (5 s) | Lower clamp — a window is never shorter than this, so a degenerate or near-instant timeframe still yields a usable window. |
 | `SESSION_WINDOW_MAX_MS` | `1800000` (30 min) | Upper clamp — a window never exceeds this, bounding how long a correlation instance is held open. |
 | `SESSION_WINDOW_GAP_FLOOR_FACTOR` | `2.0` | For gap-based windows, the window is at least this multiple of `maxInterArrivalMs`, so the idle-gap timeout never closes the instance mid-pattern. |
-| `SESSION_WINDOW_CV_FIXED_THRESHOLD` | `0.5` | Coefficient-of-variation cutoff for `type` selection: below this the inter-arrivals are tightly periodic (-> `fixed`), at or above it they are bursty/variable (-> `gap-based`). |
+| `SESSION_WINDOW_CV_FIXED_THRESHOLD` | `0.5` | Coefficient-of-variation cutoff for `type` selection. `cv` **strictly less than** this -> `fixed`; `cv` **greater than or equal to** this (or unknown spread) -> `gap-based`. The boundary is explicit: at exactly `cv = 0.5` the result is `gap-based` (the `< 0.5` test is strict). |
 
-**windowMs formula (OQ-5 (a)).** Deterministic, in milliseconds:
+**windowMs formula (OQ-5 (a)) — single deterministic expression.** All inputs in milliseconds
+(after the alias/unit normalisation above). The whole formula is:
 
-1. `base = ceil(timeframeMs × SESSION_WINDOW_MARGIN_FACTOR)`.
-2. If `maxInterArrivalMs` is present, raise the base to respect the gap floor:
-   `base = max(base, ceil(maxInterArrivalMs × SESSION_WINDOW_GAP_FLOOR_FACTOR))` — so a window is
-   never shorter than a couple of the largest observed gaps.
-3. `windowMs = clamp(base, SESSION_WINDOW_MIN_MS, SESSION_WINDOW_MAX_MS)` — always a positive
+```
+windowMs = clamp(
+             max( ceil(timeframeMs × SESSION_WINDOW_MARGIN_FACTOR),
+                  ceil(maxInterArrivalMs × SESSION_WINDOW_GAP_FLOOR_FACTOR) ),
+             SESSION_WINDOW_MIN_MS,
+             SESSION_WINDOW_MAX_MS )
+```
+
+Step by step:
+
+1. `marginBase = ceil(timeframeMs × SESSION_WINDOW_MARGIN_FACTOR)` (margin over the observed span).
+2. `gapFloor = ceil(maxInterArrivalMs × SESSION_WINDOW_GAP_FLOOR_FACTOR)` when `maxInterArrivalMs`
+   is present, else `0` — so an idle-gap timeout never closes the instance mid-pattern.
+3. `base = max(marginBase, gapFloor)`.
+4. `windowMs = clamp(base, SESSION_WINDOW_MIN_MS, SESSION_WINDOW_MAX_MS)` — always a positive
    integer in the documented bounds.
+
+**Worked example (internally consistent).** Given pinned timing
+`timeframeMs = 3000`, `maxInterArrivalMs = 2000`, `medianInterArrivalMs = 1000`,
+`stddevInterArrivalMs = 500`, with the default params:
+
+- `marginBase = ceil(3000 × 1.5) = 4500`.
+- `gapFloor = ceil(2000 × 2.0) = 4000`.
+- `base = max(4500, 4000) = 4500`.
+- `windowMs = clamp(4500, 5000, 1800000) = 5000` (raised to the MIN floor).
+- `cv = stddevInterArrivalMs / medianInterArrivalMs = 500 / 1000 = 0.5`; the test is **strict**
+  `cv < 0.5`, and `0.5 < 0.5` is **false**, so `type = gap-based`.
+
+Result: `sessionWindow = { windowMs: 5000, type: "gap-based" }` — a self-consistent derivation
+where the formula, the pinned field names, and the `cv = stddev/median` basis all agree.
 
 **Fallback (OQ-5, insufficient timing).** If `timeframeMs` is absent, zero, or non-positive
 (e.g. a single-instance pattern with no observable span), the deriver falls back to
@@ -671,15 +835,17 @@ valid `windowMs greater than 0` for every pattern — the derivation never fails
 non-positive window. The fallback is logged at DEBUG.
 
 **type selection (OQ-5 (b)).** Compute the coefficient of variation of inter-arrivals
-`cv = interArrivalStddevMs / medianInterArrivalMs` when both are present and `medianInterArrivalMs
-greater than 0`:
+**`cv = stddevInterArrivalMs / medianInterArrivalMs`** (standard deviation over **median** — the
+consistent basis) when both keys are present and `medianInterArrivalMs greater than 0`:
 
-- `cv` below `SESSION_WINDOW_CV_FIXED_THRESHOLD` -> **`fixed`** (alarms arrive tightly periodically,
-  so a fixed-duration window from instance start is appropriate).
-- `cv` at or above the threshold, **or** the spread is unknown (`interArrivalStddevMs` absent) ->
-  **`gap-based`** (the default — alarms are bursty/variable, so an idle-gap window that
-  extends on each new matching alarm best fits the pattern, and is the safe default when spread is
-  unknown).
+- `cv` **strictly less than** `SESSION_WINDOW_CV_FIXED_THRESHOLD` -> **`fixed`** (alarms arrive
+  tightly periodically, so a fixed-duration window from instance start is appropriate).
+- `cv` **greater than or equal to** the threshold, **or** the spread is unknown
+  (`stddevInterArrivalMs` absent) -> **`gap-based`** (the default — alarms are bursty/variable, so
+  an idle-gap window that extends on each new matching alarm best fits the pattern, and is the safe
+  default when spread is unknown). The boundary is explicit and deterministic: at exactly
+  `cv = 0.5` (with the default `0.5` threshold) the strict `< 0.5` test fails, so the type is
+  **`gap-based`**.
 
 `gap-based` is the documented **default** because mined alarm storms are typically bursty and
 variable, and because choosing it when spread is unknown avoids prematurely closing a correlation
@@ -726,13 +892,20 @@ clock, randomness, or external call participates. The same `timing` therefore al
 same `sessionWindow` (criterion 18). Derivation runs **once** at intake; approval and read never
 re-derive — they read the persisted value (criterion 20).
 
-**Residual choice noted.** The exact `timing` sub-field names assume the Pattern Miner's documented
-ms-keyed timing object (`timeframeMs`, `medianInterArrivalMs`, optional `maxInterArrivalMs` /
-`interArrivalStddevMs`). Because `timing` is a free-form (`additionalProperties: true`) object, the
-deriver is written to tolerate alternative key spellings via a small documented key-alias map (also
-env-configurable) and the fallbacks above; if the Miner's published timing keys differ materially
-at integration, only this alias map changes — not the contract, schema, or formula. This is the
-only residual OQ-5 detail and it is an internal implementation knob.
+**Pinned shape + Pattern Miner follow-up (P2-GAP-05).** The deriver's required `timing` keys are
+**pinned** above: `timeframeMs` + `medianInterArrivalMs` (primary, ms, **median**) and optional
+`maxInterArrivalMs` + `stddevInterArrivalMs` (ms). Because the frozen `PatternMinedEvent.timing`
+schema is an **open object** with no declared sub-fields and the current fixture instead carries
+`{ meanInterArrivalSeconds, stdDevSeconds }` (seconds, **mean**, no timeframe), there is a
+**cross-service shape mismatch**. It is resolved on the Pattern Manager side here by (a) the pinned
+target keys, (b) the env-configurable alias map + `*Seconds`→×1000 unit normalisation, and (c) the
+insufficient-timing fallback. The **owning follow-up is on the Pattern Miner design**: populate
+`timing` with the pinned ms keys (`timeframeMs`, `medianInterArrivalMs`, ideally
+`maxInterArrivalMs`, `stddevInterArrivalMs`). That is a contract-**of-shape** on the open `timing`
+object — **no event-model field/schema change** (no new field, `additionalProperties` stays `true`)
+— so it introduces no contract change; only the Pattern Miner's emitted `timing` content changes.
+Until then the alias/normalisation layer keeps the derivation deterministic and correct; once the
+Miner emits the native keys, the alias map becomes a no-op. This fully resolves OQ-5.
 
 ## Seed data & examples
 
@@ -789,7 +962,11 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | RCA override precedence | (A) graph ordering wins; (B) codebook always wins when present; (C) confidence-weighted blend | **B** — the spec mandates the codebook scenario is authoritative when the sequence overlaps; graph ordering is the default only when no scenario matches. |
 | DLQ vs retry for collaborator-down | (A) DLQ on any failure; (B) retry-and-redeliver for transient, DLQ only for poison | **B** — a valid event blocked by a transient dependency outage (including the structural-validation traversal) is not poison; DLQ would lose it. |
 | Edit placeholder representation | (A) new event field; (B) `optional` flags on `sequence_element` plus internal `edit_meta`, never on the event | **B** — the frozen `PatternApprovedEvent` has `additionalProperties:false`; the spec keeps edit metadata internal. |
-| Pagination (OQ-2 / issue 46) | (A) cursor-based; (B) offset-based `limit`/`offset` with a `PatternPage` envelope | **B** — the pattern corpus is small (human-reviewable counts), the UI needs `total` for review progress, offset paging is simpler for the table. |
+| **PATCH edit body shape** (P2-GAP-06) | (A) `optionalAlarms: integer[]` (flat positions); (B) `sequenceFlags: [{ index, optional }]` (per-position objects) | **B** — frozen as THE body. It is the shape the web-ui already sends, and it is more expressive/extensible: it can both set and clear `optional` per position (a flat `int[]` only sets-true and is ambiguous about clears) and can carry future per-element flags without another contract change. The web-ui aligns to it; `sessionWindow` stays non-editable. |
+| **Source of per-pattern `trailId` for the CE** (P3-G1) | (A) add `trailId` to `PatternApprovedEvent`; (B) surface `trailId` on the `PatternView` read API | **B** — the events are frozen (`additionalProperties:false`); adding `trailId` is a contract change. The Pattern Manager already has `trailId` from `PatternMinedEvent.trailId` (persisted as `pattern.trail_id`), so it exposes it on `PatternView` and the CE reads it at bootstrap from `GET /patterns?lifecycle=approved`. Solves the CE's `(trailId, patternId)` keying with no event-model change. |
+| **`rootCauseAlarmType` value space** (P2-GAP-04) | (A) `probableCause`-style token (`lossOfSignal`); (B) X.733 `eventType` category; (C) the canonical `alarmType` vocabulary token | **C** — must be the same join key as `AlarmEvent.alarmType` (merged #134) and the codebook `predictedSymptoms[].alarmType`, or pattern↔codebook reconciliation/override and CE RCA tagging silently fail to join. RCA emits the designated root-cause alarm's `alarmType` token verbatim; fixtures/examples use vocab tokens. No new field — the value space was fixed by the merged contract. |
+| **`timing` sub-field shape for derivation** (P2-GAP-05) | (A) read whatever the open `timing` object happens to contain; (B) pin required ms keys (`timeframeMs`, `medianInterArrivalMs`, optional `maxInterArrivalMs`/`stddevInterArrivalMs`) as a contract-of-shape + alias/unit-normalisation bridge + Pattern Miner follow-up | **B** — `PatternMinedEvent.timing` is an open object with no declared sub-fields and the current fixture uses different names/units (`meanInterArrivalSeconds`/`stdDevSeconds`). Pinning the keys makes the derivation deterministic and testable; the alias map + `*Seconds`→ms normalisation bridge the gap today, and the Pattern Miner design owns the follow-up to emit the native ms keys. No event-model field/schema change (the open `timing` object is unchanged). |
+| Pagination (OQ-2 / issue 46) | (A) cursor-based; (B) offset-based `limit`/`offset` with a `PatternPage` envelope | **B** — the pattern corpus is small (human-reviewable counts), the UI needs `total` for review progress, offset paging is simpler for the table. The envelope `{ items, total, limit, offset }` is frozen as SSoT (P2-GAP-08); consumers read `.items`, never a bare array. |
 | Approval plus emit atomicity | (A) emit then transition; (B) transition then emit in the same action; (C) transactional outbox | **B** for the MVP — transition then publish in the same action; outbox (C) is post-MVP hardening if exactly-once across DB and Kafka becomes mandatory. |
 | Kafka offset commit | (A) auto-commit; (B) manual ack after persist plus emit | **B** — manual ack guarantees the pattern is persisted and `patterns.discovered` emitted before the offset advances; a crash mid-processing redelivers and idempotency dedupes. |
 
@@ -799,7 +976,8 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
-| 1 | Fiber-cut sequence LOS LinkDown AdjDown LSPDown; Topology stub maps LOS to a FiberSpan with no upstream dependency plus earliest timestamp gives `rootCauseAlarmType = LOS` | `RcaServiceTest.graphOrderingPicksLowestDependencyEarliestTimestamp` | Persisted pattern `rootCauseAlarmType` equals LOS given the Topology mock plus earliest timestamp |
+| 1 | Fiber-cut sequence LOS LinkDown AdjDown LSPDown; Topology stub maps LOS to a FiberSpan with no upstream dependency plus earliest timestamp gives `rootCauseAlarmType = LOS` | `RcaServiceTest.graphOrderingPicksLowestDependencyEarliestTimestamp` | Persisted pattern `rootCauseAlarmType` equals LOS given the Topology mock plus earliest timestamp; **LOS is an `alarmType` vocabulary token** (the assertion uses canonical-vocab tokens, P2-GAP-04) |
+| 1b (P2-GAP-04) | `rootCauseAlarmType` is an `alarmType`-vocabulary token (same space as `AlarmEvent.alarmType` and codebook `predictedSymptoms[].alarmType`), NOT a `probableCause` value nor an `eventType` | `RcaServiceTest.rootCauseAlarmTypeIsAlarmTypeVocabularyToken` | Given a mined `sequence[]` of vocab tokens (e.g. `[LOS, LinkDown, ...]`), the designated `rootCauseAlarmType` is one of those `sequence` tokens (a member of the Knowledge `alarmTypeVocabulary` test fixture), never a `probableCause`/`eventType` string; under codebook override the scenario root-cause token is also a vocab token. Persisted + emitted value equals an `alarmType` token |
 | 2 | Sequence overlaps codebook scenario designating LineCardFault (Codebook stub returns scenario with non-null id), so override RCA, `rootCauseAlarmType = LineCardFault`, `codebookMatchId` set | `RcaServiceTest.codebookOverrideReplacesGraphRcaAndSetsMatchId` | `rootCauseAlarmType` equals LineCardFault and `codebookMatchId` equals scenarioId (overrides graph candidate) |
 | 3 | High `support`, low `lift` spurious co-occurrence, persisted with `codebookMatchId` absent (no model explanation), `lift` equals the low event value | `ReconciliationServiceTest.noCodebookMatchFlagsUnexplainedPreservesLift` | `codebookMatchId` is null, `reconcileStatus` is unexplained, persisted `lift` equals the event lift |
 | 4 | Any processed event gives all XAI fields present: `instanceCount` greater than 0, `support`, `confidence`, `lift`, `timing` (median inter-arrival plus timeframe), `codebookMatchId` (null if none), `structurallyValidated` (boolean), `structuralValidationReason` (non-null when false), `supportingInstances` (may be empty) | `ExplainabilityAssemblerTest.assemblesAllRequiredXaiFieldsInclStructuralValidation` | All fields populated; `instanceCount` greater than 0; `timing` has both keys; `structurallyValidated` present; reason non-null exactly when false; `supportingInstances` list present, possibly empty |
@@ -810,16 +988,21 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | 9 | `POST /deprecate` on an approved pattern gives deprecated plus non-null transition timestamp; subsequent `GET ?lifecycle=approved` excludes it | `LifecycleServiceTest.deprecateApprovedRemovesFromApprovedListing` | Store `lifecycle` is deprecated; `lifecycle_transition.transitioned_at` non-null; not in approved query result |
 | 10 | Two identical `patterns.mined` with the same `eventId` give exactly one pattern row after both | `MinedPatternConsumerIdempotencyTest.duplicateEventIdProducesSingleRow` | Pattern row count for that mining origin is 1; the second message acked without re-emit |
 | 11 | Malformed `patterns.mined` (`sequence` absent) is routed to `patterns.mined.dlq`, processing continues | `MinedPatternConsumerDlqTest.malformedEventGoesToDlqAndConsumerContinues` | One record on `patterns.mined.dlq`; the next valid message is processed; no consumer restart |
-| 12 | `GET /patterns` plus `GET /patterns/{id}` responses validate against published OpenAPI 3.1; unknown id gives 404 | `OpenApiContractTest.listAndGetValidateAgainstSchemaAndUnknownIdIs404` | List plus get bodies validate against `openapi.json` (incl. `structurallyValidated`/`structuralValidationReason` and `sessionWindow` fields); GET unknown id returns 404 |
+| 12 | `GET /patterns` plus `GET /patterns/{id}` responses validate against published OpenAPI 3.1; unknown id gives 404 | `OpenApiContractTest.listAndGetValidateAgainstSchemaAndUnknownIdIs404` | List body validates as the **`PatternPage` envelope** `{ items, total, limit, offset }` (P2-GAP-08 — NOT a bare array) and `get` body as a `PatternView`, both against `openapi.json` (incl. `trailId`, `rootCauseAlarmType`, `structurallyValidated`/`structuralValidationReason`, `sessionWindow`); GET unknown id returns 404 |
+| 12b (P2-GAP-08) | `GET /patterns` returns the `PatternPage` envelope object, not a top-level array | `PatternQueryControllerTest.listReturnsPatternPageEnvelopeNotBareArray` | The 200 body is a JSON object with `items` (array of `PatternView`), `total`, `limit`, `offset`; it is NOT a JSON array; `total` reflects the filtered count and `limit`/`offset` are echoed; validates against the `PatternPage` schema in `openapi.json` |
+| 12c (P3-G1) | `PatternView` on both `GET /patterns` and `GET /patterns/{id}` includes `trailId` (the CE's per-pattern `trailId` source) | `PatternQueryControllerTest.patternViewIncludesTrailIdFromMinedEvent` | For a pattern mined from `PatternMinedEvent.trailId = T`, every `PatternView` in the list `items` and the single-get body has `trailId == T` (= persisted `pattern.trail_id`); the `trailId` field is present in the `openapi.json` `PatternView` schema and a `?lifecycle=approved` query returns it for CE bootstrap |
 | 13 | `GET /patterns?lifecycle=approved` contains only approved; no draft/deprecated | `PatternQueryControllerTest.approvedFilterReturnsOnlyApproved` | Every item in the response has `lifecycle` equal to approved |
-| 14 | `PATCH /patterns/{id}` marking an alarm optional on a draft persists the edit (reflected by GET), lifecycle unchanged; the same edit on a non-draft is rejected (409/422) | `PatternEditServiceTest.editDraftMarksOptionalAndRejectsNonDraft` | After edit, GET shows `optional` true on the position, `lifecycle` is draft; editing an approved/deprecated pattern returns 409/422 |
+| 14 | `PATCH /patterns/{id}` marking an alarm optional on a draft persists the edit (reflected by GET), lifecycle unchanged; the same edit on a non-draft is rejected (409/422) | `PatternEditServiceTest.editDraftMarksOptionalAndRejectsNonDraft` | After edit with the **frozen** body `{ sequenceFlags: [{ index, optional }], reviewer, notes? }`, GET shows `optional` true on the flagged position, `lifecycle` is draft; editing an approved/deprecated pattern returns 409/422 |
+| 14b (P2-GAP-06) | `PATCH /patterns/{id}` accepts the frozen `PatternEdit` body `{ sequenceFlags: [{index, optional}], reviewer, notes? }` and validates against the published OpenAPI | `PatternEditServiceTest.patchAcceptsFrozenSequenceFlagsBodyAndValidatesAgainstOpenApi` | A request with `sequenceFlags` (per-position `{index, optional}` objects) is accepted (200), each `index` maps to a `sequence_element.position` and sets/clears its `optional`; the request body validates against the `PatternEdit` schema in `openapi.json`; an out-of-range `index` returns 422; the legacy `optionalAlarms` shape is NOT part of the frozen schema |
 | 15 | Alarm-type objects form a connected dependency path (each reachable within configured max-hops) gives `structurallyValidated = true`, persisted normally as draft | `StructuralValidationServiceTest.connectedObjectsValidatedTrueAndPersistedNormally` | With a Topology mock where all resolved objects are reachable from the root within max-hops, `structurallyValidated` is true, `structuralValidationReason` is null, lifecycle is draft, pattern persisted |
 | 16 | Topologically disjoint objects (no dependency path within max-hops) give `structurallyValidated = false` plus non-null reason, lifecycle draft, and the flag/reason appear in `GET /patterns/{id}` metadata | `StructuralValidationServiceTest.disjointObjectsFlaggedFalseWithReasonAndSurfacedInReadApi` | With a Topology mock where an object is unreachable, `structurallyValidated` is false, `structuralValidationReason` non-null, lifecycle draft, pattern persisted; a subsequent `GET /patterns/{id}` returns `structurallyValidated=false` and the reason string |
 | 17 | For a fixed mined pattern and fixed Topology mock, changing the Knowledge structural-validation params (e.g. reducing max-hops) flips the outcome true to false — no hard-coded threshold | `StructuralValidationServiceTest.knowledgeMaxHopsChangeFlipsValidationOutcome` | Same pattern + Topology mock: with the larger max-hops from Knowledge mock the outcome is `structurallyValidated=true`; reducing max-hops via the Knowledge mock yields `structurallyValidated=false` — confirming the threshold comes from Knowledge, not code |
 | 18 | Given known timing, derived `sessionWindow` has `windowMs` positive integer and `type` in {gap-based, fixed}; re-deriving the identical timing gives the identical window (deterministic) | `SessionWindowDeriverTest.derivesPositiveWindowAndValidTypeDeterministically` | `derive(timing)` returns `windowMs greater than 0` (integer) and `type` in {gap-based, fixed}; calling `derive` twice with the same `timing` returns equal `windowMs` and equal `type` |
+| 18b (P2-GAP-05) | Derivation reads the **pinned ms timing keys** (`timeframeMs`, `medianInterArrivalMs`, optional `maxInterArrivalMs`, `stddevInterArrivalMs`) and the worked example is internally consistent: `timing {timeframeMs:3000, maxInterArrivalMs:2000, medianInterArrivalMs:1000, stddevInterArrivalMs:500}` gives `windowMs = clamp(max(ceil(3000×1.5)=4500, ceil(2000×2.0)=4000), 5000, 1800000) = 5000` and `cv = 500/1000 = 0.5`, strict `< 0.5` false, so `type = gap-based` | `SessionWindowDeriverTest.pinnedTimingKeysProduceConsistentWorkedExampleAndBoundaryCv` | `derive` on the pinned-key fixture returns exactly `{ windowMs: 5000, type: "gap-based" }`; `cv` is computed as `stddevInterArrivalMs/medianInterArrivalMs`; the `cv == 0.5` boundary resolves to `gap-based` (strict `<`) |
+| 18c (P2-GAP-05) | The deriver tolerates the current Pattern-Miner `timing` shape `{ meanInterArrivalSeconds, stdDevSeconds }` via the alias map + `*Seconds`→ms normalisation, still producing a deterministic, valid `sessionWindow` | `SessionWindowDeriverTest.secondsAliasedTimingNormalisedToMsAndDerivesDeterministically` | Given `{ meanInterArrivalSeconds:4.5, stdDevSeconds:1.2 }` (no `timeframeMs`), the deriver normalises to ms, applies the `timeframeMs`-absent fallback (`base = MIN_MS`), and returns a `windowMs greater than 0` with a valid `type`; identical input yields identical output (deterministic) |
 | 19 | Any processed `PatternMinedEvent` gives a `PatternDiscoveredEvent` carrying `sessionWindow` ({`windowMs` integer greater than 0, `type` gap-based or fixed) that validates against the frozen `PatternDiscoveredEvent` JSON Schema | `PatternEventPublisherTest.discoveredEventCarriesValidSessionWindow` | Emitted event has non-null `sessionWindow` with `windowMs greater than 0` and valid `type`; `EventCodec.serialize`/schema validation against `PatternDiscoveredEvent.schema.json` (and `common/sessionWindow.schema.json`) passes |
 | 20 | An approved pattern's emitted `PatternApprovedEvent` `sessionWindow` equals the persisted Pattern Store value (`windowMs greater than 0`, valid `type`) and validates against the frozen `PatternApprovedEvent` JSON Schema | `PatternEventPublisherTest.approvedEventSessionWindowEqualsPersistedAndValidates` | The `sessionWindow` on the approved event equals the row's `session_window_ms`/`session_window_type` (also equal to the value on the discovered event for the same pattern); `windowMs greater than 0`, valid `type`; schema validation against `PatternApprovedEvent.schema.json` passes |
-| 21 | `GET /patterns/{id}` for an existing pattern returns `sessionWindow` ({`windowMs`, `type`}) in the record and XAI metadata; response validates against the published OpenAPI 3.1 schema | `PatternQueryControllerTest.getByIdReturnsSessionWindowAndValidatesAgainstOpenApi` | The 200 body includes `sessionWindow` with `windowMs` and `type` (and it appears in the XAI metadata block); the body validates against the published `openapi.json` |
+| 21 | `GET /patterns/{id}` for an existing pattern returns `sessionWindow` ({`windowMs`, `type`}) in the record and XAI metadata; response validates against the published OpenAPI 3.1 schema | `PatternQueryControllerTest.getByIdReturnsSessionWindowAndValidatesAgainstOpenApi` | The 200 body includes `sessionWindow` with `windowMs` and `type` (and it appears in the XAI metadata block) plus `trailId` and a vocab-token `rootCauseAlarmType`; the body validates against the published `openapi.json` `PatternView` schema |
 
 Supporting (non-1:1) unit tests: `KnowledgeParamsClientTest` (RCA **and** structural-validation
 params resolved from Knowledge, not hard-coded), `TopologyClientMockTest` /
@@ -837,7 +1020,13 @@ timeframe, gap floor from max inter-arrival, MIN/MAX clamp),
 rule), `SessionWindowDeriverTest.missingOrZeroTimeframeFallsBackToMinMsAndStaysPositive` (the
 insufficient-timing fallback yields a valid positive window),
 `SessionWindowDeriverTest.derivationUsesNoCollaborator` (asserts no Knowledge/Topology/Codebook
-call during derivation).
+call during derivation),
+`PatternQueryServiceTest.patternViewMapsTrailIdRootCauseVocabAndSessionWindow` (the `PatternView`
+mapper carries `trailId` from `pattern.trail_id`, a vocab-token `rootCauseAlarmType`, and the
+persisted `sessionWindow`), `OpenApiContractTest.patternPageEnvelopeAndPatternEditBodyFrozen`
+(the checked-in `openapi.json` declares `GET /patterns` -> `PatternPage` envelope and
+`PATCH /patterns/{id}` -> `PatternEdit { sequenceFlags, reviewer, notes? }`, both as the
+frozen SSoT shapes; the document matches the running surface).
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -859,6 +1048,9 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
 | 11 | Structural-validation params from Knowledge (partial path) | same mined pattern and Topology graph, run twice with different Knowledge `maxHops` | Run with larger max-hops: `structurallyValidated` true; run with smaller max-hops: `structurallyValidated` false — outcome driven by Knowledge, both persisted as draft |
 | 12 | Session-window derive, persist, serve, emit-consistency | `patterns.mined` with known timing then consume then derive then persist then `patterns.discovered` then approve then `patterns.approved` then `GET /patterns/{id}` | The persisted `sessionWindow` (`windowMs greater than 0`, valid `type`) equals the value on `PatternDiscoveredEvent`, on `PatternApprovedEvent`, and in the `GET /patterns/{id}` body and XAI metadata — all four identical; no Knowledge call was made during derivation |
 | 13 | Session-window fallback for thin timing (partial path) | `patterns.mined` whose `timing` has no/zero `timeframeMs` (single-instance) | The pattern is persisted with a valid `sessionWindow` (`windowMs` equals the clamped MIN-MS fallback, `type` gap-based default); both emitted events carry the valid `sessionWindow`; nothing is DLQ-ed or dropped |
+| 14 | CE bootstrap reads `trailId` from the read API (P3-G1) | approve a pattern, then `GET /patterns?lifecycle=approved` as the Correlation Engine would at bootstrap | The `PatternPage.items[]` each carry `trailId` (= the mined `PatternMinedEvent.trailId`), plus `patternId`, `sequence`, `rootCauseAlarmType` (vocab token), `confidence`, `sessionWindow` — the exact set the CE keys `(trailId, patternId)` on; no `PatternApprovedEvent` was relied on for `trailId` |
+| 15 | Frozen PATCH body + PatternPage envelope (P2-GAP-06 / P2-GAP-08) | `GET /patterns?lifecycle=draft` then `PATCH /patterns/{id}` with `{ sequenceFlags:[{index,optional}], reviewer, notes }` | List response is the `PatternPage` envelope (`items`/`total`/`limit`/`offset`); the PATCH with the frozen `sequenceFlags` body is accepted and reflected on a subsequent `GET /patterns/{id}`; both bodies validate against the checked-in `openapi.json` |
+| 16 | Timing-shape alias bridge (P2-GAP-05 partial path) | `patterns.mined` whose `timing` is the current Miner shape `{ meanInterArrivalSeconds, stdDevSeconds }` | The deriver normalises seconds→ms via the alias map, derives a deterministic valid `sessionWindow`, persists and emits it; pattern flows end-to-end with no DLQ — confirming the bridge holds until the Pattern Miner emits the pinned ms keys |
 
 ## Config & observability
 
@@ -872,9 +1064,15 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
 - **Session-window derivation params (env, NOT Knowledge):** `SESSION_WINDOW_MARGIN_FACTOR`
   (default `1.5`), `SESSION_WINDOW_MIN_MS` (default `5000`), `SESSION_WINDOW_MAX_MS` (default
   `1800000`), `SESSION_WINDOW_GAP_FLOOR_FACTOR` (default `2.0`),
-  `SESSION_WINDOW_CV_FIXED_THRESHOLD` (default `0.5`), and an optional timing key-alias map. These
-  are documented derivation constants with the defaults above — env-overridable but never
-  Knowledge-sourced, keeping session-window derivation data-driven from the mined `timing` alone.
+  `SESSION_WINDOW_CV_FIXED_THRESHOLD` (default `0.5`, strict `<` boundary), and
+  `SESSION_WINDOW_TIMING_ALIASES` (default maps the current Miner keys
+  `meanInterArrivalSeconds`→`medianInterArrivalMs` and `stdDevSeconds`→`stddevInterArrivalMs`, with
+  `*Seconds`→×1000 unit normalisation). These are documented derivation constants / shape-bridge
+  knobs with the defaults above — env-overridable but never Knowledge-sourced, keeping session-window
+  derivation data-driven from the mined `timing` alone. The **pinned required timing keys** the
+  formula reads are `timeframeMs` + `medianInterArrivalMs` (and optional `maxInterArrivalMs` +
+  `stddevInterArrivalMs`), all ms; the alias map exists only to bridge the Pattern Miner shape
+  until its follow-up emits these natively (P2-GAP-05).
 - **Health:** `/health` (Actuator liveness plus readiness; readiness gates on DB plus Kafka).
 - **Metrics:** `/metrics` (Prometheus via Micrometer): `pm_mined_consumed_total`,
   `pm_dlq_total`, `pm_duplicate_skipped_total`, `pm_patterns_discovered_total`,
@@ -890,10 +1088,14 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
 
 - **Build:** `./gradlew :services:pattern-manager:build` (Java 17 toolchain; JUnit 5 unit plus
   contract tests; Testcontainers integration tests in the integration profile).
-- **OpenAPI:** generated by springdoc; `./gradlew :services:pattern-manager:generateOpenApi`
-  writes/refreshes `services/pattern-manager/openapi.json` (checked in; CI verifies it matches
-  the running surface — including the `structurallyValidated`/`structuralValidationReason` and
-  `sessionWindow` ({`windowMs`, `type`}) fields).
+- **OpenAPI:** published as **OpenAPI 3.1 at `/openapi.json`** and **checked in at
+  `services/pattern-manager/openapi.json`** (the SSoT for the web-ui + Correlation Engine consumers).
+  It freezes `GET /patterns` (the `PatternPage` envelope), `GET /patterns/{id}`, and
+  `PATCH /patterns/{id}` (the frozen `PatternEdit { sequenceFlags, reviewer, notes? }` body), with
+  `PatternView` carrying `trailId` (P3-G1), the `alarmType`-vocab `rootCauseAlarmType` (P2-GAP-04),
+  `sessionWindow`, `structurallyValidated`/`structuralValidationReason`, and the full XAI set.
+  springdoc generates it; `./gradlew :services:pattern-manager:generateOpenApi` writes/refreshes the
+  checked-in file and CI verifies it matches the running surface.
 - **Docker:** multi-stage `Dockerfile` (`eclipse-temurin:17-jdk` build to `17-jre` runtime);
   Compose entry depends on Kafka plus PostgreSQL; env supplies broker, datasource, collaborator
   base URLs, and `INTEGRATION_MODE`.
