@@ -7,7 +7,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | Service | Cohort | Responsibility | Consumes | Produces |
 |---|---|---|---|---|
 | simulator | Python | domain-grounded synthetic topology + labeled alarms; eval oracle. Multi-domain by design (Core IP is the MVP domain pack) | — | alarms.history, alarms.live (+ a topology snapshot **file** uploaded to the Topology ingestion API) |
-| topology | Spring Boot | sole owner of AGE graph; versioned snapshots; query API. Ingests topology snapshots via a published **ingestion API** (file upload), not a Kafka topic | topology snapshot file (via ingestion API) | topology.changed |
+| topology | Spring Boot | sole owner of the NebulaGraph topology graph; versioned snapshots; query API. Ingests topology snapshots via a published **ingestion API** (file upload), not a Kafka topic | topology snapshot file (via ingestion API) | topology.changed |
 | knowledge | Spring Boot | authored templates/policy/params (versioned) | — | knowledge.updated |
 | trail-builder | Python | policy-bounded correlation trails | topology.changed | trails.built |
 | codebook-generator | Python | forward-propagation codebook | trails.built | codebook.generated |
@@ -40,7 +40,7 @@ a dependency / refreshes state in that phase but drives no work of its own; *Idl
 | Service | P1 Topology onboarding | P2 Pattern learning | P3 Real-time correlation |
 |---|---|---|---|
 | simulator | Active — generate topology file, upload to Topology ingestion API | Active — replay `alarms.history` | Active — replay `alarms.live` (wall-clock paced) |
-| topology | Active — ingest file, lift to AGE, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Idle — no real-time consumer queries it; topology context is already materialized into trails + codebook during P1 |
+| topology | Active — ingest file, lift to NebulaGraph, mint `snapshotId`, emit `topology.changed` | Passive — serves graph query API | Idle — no real-time consumer queries it; topology context is already materialized into trails + codebook during P1 |
 | knowledge | Passive — serves trail policy, fault-origin list, propagation templates | Passive — serves DBSCAN / session-window / min-support params | Passive — serves params + approved policy |
 | trail-builder | Active — build trails on `topology.changed`, emit `trails.built` | Passive — serves `getTrailsForObject` / `getTrail` | Passive — serves trails |
 | codebook-generator | Active — compile codebook, emit `codebook.generated` | Passive — serves codebook for reconcile | Passive — serves codebook for match |
@@ -86,17 +86,21 @@ transactions.clean, patterns.mined, patterns.discovered, patterns.approved, corr
 > **Topology ingestion is file/API-based, not a topic.** The raw topology snapshot is **not**
 > a Kafka event. The Simulator generates a domain-grounded topology snapshot **file** and uploads
 > it to the Topology Service's published **ingestion API**; the Topology Service lifts it into the
-> AGE graph, versions it (`snapshotId`), and emits `topology.changed`. The **topology-snapshot file
+> NebulaGraph graph, versions it (`snapshotId`), and emits `topology.changed`. The **topology-snapshot file
 > schema** is a versioned contract (see "Topology snapshot file" below), exactly like the topic and
 > event-model contracts. (Historical note: an earlier `topology.raw` topic was removed in favour of
 > this — the raw-vs-lifted distinction and large snapshot payloads suit a file/API hand-off better.)
 
 ## Data stores & ownership
-Apache AGE — topology graph; only via Topology Service. PostgreSQL — pattern store (owned by
-Pattern Manager), incident store (owned by Correlation Engine), knowledge store (owned by
-Knowledge Service), and the **live alarm store (owned by the Alarm Manager)**; separation by
-schema. Kafka — the bus. **Single owners:** each store is written by exactly one service; others
-read via that service's API or events, never the store directly.
+NebulaGraph — topology graph; only via Topology Service (nGQL, fully abstracted behind the
+service API — callers never touch the graph DB). PostgreSQL — topology snapshot metadata &
+versioning (owned by Topology Service), pattern store (owned by Pattern Manager), incident store
+(owned by Correlation Engine), knowledge store (owned by Knowledge Service), and the **live alarm
+store (owned by the Alarm Manager)**; separation by schema. Kafka — the bus. **Single owners:**
+each store is written by exactly one service; others read via that service's API or events, never
+the store directly. **Topology Service** owns two stores: the NebulaGraph graph (the typed
+multi-layer topology) and a PostgreSQL schema for snapshot version metadata (`snapshotId`, domain,
+timestamps, ingest audit) — both internal, never shared.
 
 **Alarm Manager owns the live alarm store** — the single source of truth for **live alarm state**.
 It holds each live alarm (from `alarms.enriched.live`) with its **lifecycle state** (`open` →
@@ -195,8 +199,8 @@ Topology is loaded by **file upload to an API**, not by a Kafka event:
     Generator** (where policy/templates reference equipment characteristics). They are descriptive,
     not identity — identity remains `managedObjectId`.
 - **Topology ingestion API (owned by the Topology Service).** The Topology Service publishes an
-  OpenAPI 3.1 ingestion endpoint that accepts a topology snapshot file, lifts it into AGE, mints a
-  `snapshotId`, and emits `topology.changed`. Producers (the Simulator) build their upload client
+  OpenAPI 3.1 ingestion endpoint that accepts a topology snapshot file, lifts it into NebulaGraph,
+  mints a `snapshotId`, and emits `topology.changed`. Producers (the Simulator) build their upload client
   against the Topology Service's **published OpenAPI**, never its source — same no-coupling rule as
   every other synchronous call. The endpoint is a config-switchable integration point for the
   producer (mock from Topology's OpenAPI for unit tests, real Topology in integration).
