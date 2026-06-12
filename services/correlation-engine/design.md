@@ -62,7 +62,7 @@ Every spec Task (1–10) is realized below and traceable to modules/flows.
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | 1. Load approved patterns (startup fetch + `patterns.approved` updates); record trails-active + per-pattern `sessionWindow` | `PatternBootstrapRunner` calls `PatternManagerClient.listApproved()` at startup; `PatternApprovedConsumer` refreshes incrementally. Both upsert into `PatternStore`, indexed by `trailId -> activePatterns`. Each `PatternRef` carries `sequence`, `rootCauseAlarmType`, `confidence`, and **`sessionWindow {windowMs, type}`**. |
-| 2. Load codebook (record `codebookId`, fetch full signatures, keep latest-in-scope per `snapshotId`/trail) | `CodebookConsumer` handles `codebook.generated`, calls `CodebookGeneratorClient.fetchSignatures(codebookId)`, stores into `CodebookStore` keyed by `(snapshotId, trailId)`, monotonic latest-wins replace. |
+| 2. Load codebook (record `codebookId`, fetch full signatures, keep latest-in-scope per `snapshotId`/trail) | `CodebookConsumer` handles `codebook.generated`, calls `CodebookGeneratorClient.fetchTrailSignatures(codebookId)` against the Codebook Generator's **published `GET /codebooks/{codebookId}/trail-signatures` projection** (per scenario fanned out per `trailId`: `{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[] }`), stores into `CodebookStore` keyed by `(snapshotId, trailId)`, monotonic latest-wins replace. Resolves CE Open Q4 (consumer side of P1-G5 / P3-G2). |
 | 3. Consume + validate + dedupe + DLQ + **fan out** `alarms.persisted.live` | `AlarmDeserializer` (event-model binding + `schemaVersion` check), `AlarmIngestProcessor` (dedupe via `alarmId` store, DLQ poison), then **re-key per trail**: for each `trailId` in `trailIds[]` emit one keyed record into the instance topology — the fan-out. |
 | 4. Manage correlation-instance lifecycle (lazy init, in-progress, full-match, session-expiry) | `CorrelationInstanceProcessor` (Processor API) over the `instanceStore` keyed by `(trailId, patternId)`; lazy create, incremental advance, full-match fire-and-destroy; `ExpiryPunctuator` over the `deadlineIndex` destroys expired instances and reverts their alarms. |
 | 5. Evaluate codebook decoding (fallback for unmatched alarm sets); threshold floors from Knowledge | `CodebookDecoder` invoked from the **uncovered-alarm path** (no active/covering instance) and on **session-expiry** of an instance; scores the alarm set against trail-scoped scenarios; emits a codebook candidate into `ConflictResolver`. Coexistence model defined in **Algorithm logical flow**. |
@@ -164,10 +164,10 @@ flowchart TB
 | `AlarmIngestProcessor` | Consume `alarms.persisted.live`; deserialize + validate via event-model binding; reject unknown major `schemaVersion`; dedupe on `alarmId` against `alarmDedupeStore`; route poison to DLQ; emit the alarm forward for fan-out. |
 | `Per-trail fan-out` | For each `trailId` in the alarm's `trailIds[]`, re-key the alarm to that `trailId` so the instance topology is partitioned per trail and the alarm reaches each trail's instances independently (isolation). |
 | `PatternApprovedConsumer` | Consume `patterns.approved`; dedupe on `eventId`; upsert `PatternRef` (incl. `sessionWindow`) into `PatternStore` under its `trailId`(s). |
-| `CodebookConsumer` | Consume `codebook.generated`; dedupe on `eventId`; fetch signatures; latest-in-scope replace in `CodebookStore`. |
+| `CodebookConsumer` | Consume `codebook.generated`; dedupe on `eventId`; fetch the per-trail signatures via `CodebookGeneratorClient.fetchTrailSignatures(codebookId)` (the published `GET /codebooks/{codebookId}/trail-signatures` projection); latest-in-scope replace in `CodebookStore`. |
 | `PatternBootstrapRunner` | At startup, seed `PatternStore` from `PatternManagerClient.listApproved()` (Task 1 startup fetch). |
 | `PatternStore` | Thread-safe reference model. Two indices: `(trailId, patternId) -> PatternRef`, and `trailId -> Set of patternId` (active patterns on a trail — the fan-out driver). |
-| `CodebookStore` | Trail-scoped scenario signatures, latest-in-scope per `(snapshotId, trailId)`. |
+| `CodebookStore` | Trail-scoped scenario signatures (`TrailScenarioSignature` = `{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[{alarmType, managedObjectId}] }` from the trail-signatures projection), latest-in-scope per `(snapshotId, trailId)`. |
 | `CorrelationInstanceProcessor` | The heart: lazy-create / add-to-existing / incremental sequence advance / window-deadline maintenance / full-match fire-and-destroy. Owns `instanceStore` + `deadlineIndex`. |
 | `ExpiryPunctuator` | Wall-clock `Punctuator`; on each tick destroys every instance whose deadline has passed, reverts its alarms, and (per coexistence model) hands the expired alarm set to `CodebookDecoder`. |
 | `CodebookDecoder` | Closest-match scoring of an uncovered/expired alarm set against trail-scoped scenarios; produces codebook candidates. |
@@ -330,15 +330,20 @@ erDiagram
 | `trail_id` | `text NOT NULL` | Trail scope of the incident. |
 | `root_cause_alarm_id` | `text NOT NULL` | Tagged root-cause alarm. |
 | `matched_pattern_id` | `text NULL` | Set when winner is a pattern-instance match. |
-| `matched_codebook_id` | `text NULL` | Set when winner is a codebook decode (references `codebookId`). |
+| `matched_codebook_id` | `text NULL` | The **codebook artifact id** (`codebookId` from `CodebookGeneratedEvent`) of the active codebook used when the incident was formed by a codebook decode. **Not** a scenario id. Emitted verbatim as `CorrelationResultEvent.matchedCodebookId`. See matchedCodebookId semantics. |
 | `confidence` | `numeric(5,4) NOT NULL` | In [0,1]. |
 | `match_type` | `text NOT NULL` | `pattern` or `codebook` (drives `GET /incidents?matchType=`). |
 | `instance_fingerprint` | `text NOT NULL UNIQUE` | Hash of `(trailId, patternId or codebookId, sorted matched alarmIds)`; enforces one-incident-per-`(instance, alarm set)` idempotency at the DB layer. |
 | `created_at` | `timestamptz NOT NULL DEFAULT now()` | Used by time-range filter + stats. |
 
 Indexes: `(trail_id)`, `(created_at)`, `(match_type)`, `UNIQUE(instance_fingerprint)`.
-`match_type` is the authoritative discriminator; a pattern match may also carry the pattern's
-`codebookMatchId` in `matched_codebook_id`, so the two id columns are not mutually exclusive.
+`match_type` is the authoritative discriminator. `matched_codebook_id` holds the **codebook
+artifact id** (`codebookId`) only, and only on a **codebook-decode** incident — it is **not**
+sourced from a pattern's scenario-level `codebookMatchId`. On a pattern-match incident
+`matched_pattern_id` is set and `matched_codebook_id` is `NULL` (see matchedCodebookId semantics —
+P3-G4). The pattern's own `codebookMatchId` (a codebook **scenario** reference used during Pattern
+Manager reconciliation) is deliberately **not** copied here, to avoid conflating a scenario id with
+a codebook artifact id.
 
 **`correlation.incident_alarm`** — correlation-group membership (root-cause + children).
 
@@ -406,15 +411,21 @@ Each firing is counted in `alarms_status_changed_total{newStatus}`. The richer c
 
 springdoc-openapi generates the OpenAPI 3.1 document served at `/openapi.json`; the generated
 document is checked in to `services/correlation-engine/openapi.json` and drives provider-side
-contract/unit tests (`OpenApiContractTest`). A surface change is a contract change (architecture
+contract/unit tests (`OpenApiContractTest`). The checked-in `openapi.json` freezes `GET /incidents`
+(the canonical **`IncidentPage` envelope** `{ items, total, limit, offset }` — P3-G3),
+`GET /incidents/{incidentId}`, and `GET /stats`. A surface change is a contract change (architecture
 update + human approval). Response field names reuse `libs/event-model` `CorrelationResultEvent`
 fields where applicable.
 
 ### `GET /incidents`
 List incidents. Query params: `trailId?` (string), `from?` / `to?` (ISO-8601), `matchType?`
-(`pattern` or `codebook`), `page?` (int, default 0), `size?` (int, default 50, max 500).
+(`pattern` or `codebook`), `limit?` (int, default 50, max 500), `offset?` (int, default 0).
 
-`200 OK`:
+Returns the **canonical platform list-pagination envelope** `IncidentPage`
+`{ items, total, limit, offset }` (P3-G3 fix — same envelope key set as Pattern Manager's
+`PatternPage`; see Design alternatives). `total` is the filtered count; `limit`/`offset` are echoed.
+
+`200 OK` (`IncidentPage`):
 ```json
 {
   "items": [
@@ -429,9 +440,10 @@ List incidents. Query params: `trailId?` (string), `from?` / `to?` (ISO-8601), `
       "createdAt": "2026-06-11T12:00:00Z"
     }
   ],
-  "page": 0, "size": 50, "total": 137
+  "total": 137, "limit": 50, "offset": 0
 }
 ```
+Consumers (web-ui) read `.items` (plus `.total`/`.limit`/`.offset`) — never a top-level array.
 `400` invalid query (bad `matchType` or date) returns a structured error.
 
 ### `GET /incidents/{incidentId}`
@@ -451,6 +463,21 @@ Aggregate raw counts for the web-ui Correlation Stats module. No accuracy is com
 }
 ```
 Alarm-reduction ratio = `totalAlarmsProcessed / totalIncidentsCreated` is derivable client-side.
+
+### Canonical list-pagination envelope (platform standard — P3-G3)
+
+CE's `GET /incidents` is frozen to the platform-wide canonical list-pagination envelope
+**`{ items, total, limit, offset }`** — the same key set as Pattern Manager's `PatternPage`
+(P2-GAP-08 SSoT) and web-ui's `RunStatsPage`. This is the single shape every read-API list on the
+platform shares, so consumers (web-ui's streaming/dashboard delta-diff) read `.items` uniformly and
+never special-case per-producer envelopes.
+
+> **Required alignment for the next step (not changed here):** Alarm Manager's `GET /alarms`
+> currently returns a divergent envelope `{ items, page, size, totalElements, totalPages }`. To
+> close P3-G3 end-to-end, Alarm Manager **must adopt this same `{ items, total, limit, offset }`
+> envelope**, and web-ui (which models `GET /incidents` as a bare `[IncidentVM]` array today) must
+> adopt the `IncidentPage` envelope on its CE client. Those edits land in the alarm-manager /
+> web-ui step; here we freeze **CE's** `/incidents` to the canonical shape and record the standard.
 
 ### Error response shape (all 4xx/5xx)
 ```json
@@ -475,7 +502,7 @@ key + a global `INTEGRATION_MODE=mock|real`. In `mock`, clients point at a stub
 | Collaborator | Operation used | Config key(s) | Mock / real |
 |---|---|---|---|
 | **Pattern Manager** | `GET /patterns?lifecycle=approved` returning approved patterns (`patternId`, `sequence[]`, `rootCauseAlarmType`, `trailId`, `confidence`, **`sessionWindow`**, `codebookMatchId?`) | `PATTERN_MANAGER_BASE_URL`, `INTEGRATION_MODE` | Mock: WireMock stub from Pattern Manager OpenAPI. Real: compose `pattern-manager`. |
-| **Codebook Generator** | fetch full scenario signatures for a `codebookId`, indexed by `trailId` (root-cause type + expected symptom set + trail tag). Exact endpoint per its published OpenAPI (spec Open Q4 / issue tracked). | `CODEBOOK_GENERATOR_BASE_URL`, `INTEGRATION_MODE` | Mock: WireMock stub from Codebook Generator OpenAPI. Real: compose `codebook-generator`. |
+| **Codebook Generator** | `GET /codebooks/{codebookId}/trail-signatures?trailId={trailId}` — the **CE-oriented trail-signatures projection** (Codebook Generator design, frozen): a list of `TrailScenarioSignature` `{ trailId, scenarioId, rootCauseAlarmType (alarmType-vocab token), expectedSymptoms: [{alarmType, managedObjectId}] }`, fanned out one per `(scenario, trailId)`. CE keys the result by `trailId`. This **resolves CE Open Q4** (consumer side of P1-G5 / P3-G2): the producer published this exact shape in its `openapi.json`; the CE client is built against it. | `CODEBOOK_GENERATOR_BASE_URL`, `INTEGRATION_MODE` | Mock: WireMock/MockWebServer stub generated from Codebook Generator's **published `openapi.json`** (`trail-signatures` operation) for unit tests. Real: compose `codebook-generator`. |
 | **Knowledge Service** | fetch partial-match tolerance, scoring threshold floors, conflict-resolution weights (**not** session-window — that is per-pattern from `sessionWindow`) | `KNOWLEDGE_BASE_URL`, `INTEGRATION_MODE` | Mock: WireMock stub returning the test's parameter set. Real: compose `knowledge`. |
 
 `KnowledgeParamsProvider` pulls + caches params with a TTL refresh; all match-quality/conflict
@@ -583,8 +610,8 @@ sequenceDiagram
   PT->>PAC: PatternApprovedEvent dedupe on eventId
   PAC->>PS: upsert pattern with sessionWindow under trailId
   CB->>CBC: CodebookGeneratedEvent codebookId snapshotId
-  CBC->>CGC: fetch signatures for codebookId
-  CGC-->>CBC: scenarios per trail root cause type symptom set
+  CBC->>CGC: GET trail-signatures for codebookId
+  CGC-->>CBC: TrailScenarioSignature per trail rootCauseAlarmType and expectedSymptoms
   CBC->>CBS: replace latest in scope for snapshotId and trail
 ```
 
@@ -713,11 +740,25 @@ tolerance for missing/extra alarms is AC12.)
 
 ### Codebook decoding (scoring)
 
-Distance between observed symptom set O and scenario signature S:
-`missingPenalty * count(S minus O) + spuriousPenalty * count(O minus S)`, lower is better — it
-tolerates missing alarms and penalizes spurious ones. The best-scoring scenario whose normalized
-score clears the Knowledge **threshold floor** is the candidate; `rootCauseAlarmId` is resolved
-from the scenario's `rootCauseAlarmType`. Penalties + floor come from Knowledge (AC12, AC15).
+The decoder reads each trail-scoped `TrailScenarioSignature` from `CodebookStore` — the CE-facing
+projection (`{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[{alarmType, managedObjectId}] }`)
+fetched from the Codebook Generator's `GET /codebooks/{codebookId}/trail-signatures` endpoint. The
+scoring is over **`alarmType` vocabulary tokens**:
+
+- **Observed set O** = the multiset of `alarmType` tokens of the live alarms in the uncovered/expired
+  alarm set on the trail (`AlarmEvent.alarmType` — the canonical join-key token).
+- **Scenario signature S** = the multiset of `expectedSymptoms[].alarmType` tokens of a scenario.
+  Both O and S live in the **same vocabulary** (`AlarmEvent.alarmType` == `expectedSymptoms[].alarmType`
+  == `rootCauseAlarmType`), so the comparison is a direct token-set comparison — no value-space
+  translation is needed (this is the point of the projection's vocab alignment).
+
+Distance: `missingPenalty * count(S minus O) + spuriousPenalty * count(O minus S)`, lower is
+better — it tolerates missing alarms (the spec's closest-match tolerance) and penalizes spurious
+ones. The best-scoring scenario whose normalized score clears the Knowledge **threshold floor** is
+the candidate; `rootCauseAlarmId` is resolved by matching the scenario's `rootCauseAlarmType` token
+to the specific live alarm in O carrying that `alarmType`. Penalties + floor come from Knowledge
+(AC12, AC15). `matchedCodebookId` on the resulting incident is set to the **`codebookId`** of the
+active codebook the signatures were fetched from (see matchedCodebookId semantics, below).
 
 ### Conflict resolution
 
@@ -732,6 +773,34 @@ winner per disjoint alarm set (AC11).
 alarmIds)`, also stored as `instance_fingerprint`. Re-evaluating the same matched set for the same
 instance yields the same `incidentId`; the `UNIQUE(instance_fingerprint)` constraint makes a
 duplicate persist a no-op — guaranteeing one incident per `(instance, alarm set)` (AC16).
+
+### `matchedCodebookId` semantics (P3-G4 — clarification, no schema change)
+
+`CorrelationResultEvent.matchedCodebookId` and `PatternApprovedEvent.codebookMatchId` have
+**different granularities** and must not be conflated (the P3-G4 ambiguity). The frozen schema
+descriptions already state the distinction; this design pins down precisely what CE writes:
+
+| Field | Owner / carrier | Granularity | What it references |
+|---|---|---|---|
+| `CorrelationResultEvent.matchedCodebookId` | **CE output** (this service) | codebook **artifact** id | The `codebookId` from `CodebookGeneratedEvent` — the version of the codebook whose `trail-signatures` produced the decode. |
+| `PatternApprovedEvent.codebookMatchId` | Pattern Manager output | codebook **scenario** match reference | A scenario-level reference recorded during Pattern Manager's codebook-vs-pattern reconciliation. Used **upstream**, not by CE's incident emission. |
+
+**What CE writes into `matchedCodebookId`:** on a **codebook-decode** incident, CE sets
+`matchedCodebookId` = the `codebookId` of the **active codebook** (the one whose trail-signatures
+were fetched and scored — `CodebookStore`'s latest-in-scope `codebookId` for that `(snapshotId,
+trailId)`). It is the **codebook artifact id**, never a `scenarioId` and never the matched pattern's
+`codebookMatchId`. On a **pattern-match** incident, `matchedCodebookId` is **null** (the winner is a
+pattern; `matchedPatternId` carries the pattern). CE never derives `matchedCodebookId` from a
+pattern's `codebookMatchId`.
+
+> **Doc follow-up (flagged, not done here):** the distinction is already reflected in the frozen
+> schema descriptions (`CorrelationResultEvent.matchedCodebookId` = "references codebookId from
+> CodebookGeneratedEvent"; `CodebookGeneratedEvent.codebookId` = "referenced as matchedCodebookId
+> in CorrelationResultEvent"; `PatternApprovedEvent.codebookMatchId` = "Matched codebook scenario,
+> if any"), so **no schema change is required**. If a future reviewer wants the contrast stated even
+> more explicitly in `architecture.md` or a schema description, that is a **separate, tiny
+> event-model/docs PR into `main`** — out of scope for this CE design change, which makes **no**
+> schema or topic change.
 
 ---
 
@@ -755,13 +824,22 @@ Unit/contract test fixtures (this service consumes; it does not generate synthet
 ```
 (`PAT-FIBER` and `PAT-CARD` are both active on `TRAIL-1` with **different** windows — AC7.)
 
-**Codebook scenario signatures (from Codebook Generator mock):**
+**Codebook trail-signatures (from Codebook Generator mock — the `GET /codebooks/{codebookId}/trail-signatures` projection shape):**
 ```json
 { "codebookId": "CODEBOOK-2026-06-11-001",
-  "scenarios": [
-    { "trailId": "TRAIL-1", "rootCauseAlarmType": "lossOfSignal",
-      "expectedSymptoms": ["lossOfSignal", "linkDown", "bgpPeerDown"] } ] }
+  "domain": "core-ip",
+  "trailSignatures": [
+    { "trailId": "TRAIL-1",
+      "scenarioId": "CODEBOOK-2026-06-11-001:Interface:i1",
+      "rootCauseAlarmType": "lossOfSignal",
+      "expectedSymptoms": [
+        { "alarmType": "lossOfSignal", "managedObjectId": "Interface:i1" },
+        { "alarmType": "linkDown",     "managedObjectId": "IPLink:l1" },
+        { "alarmType": "bgpPeerDown",  "managedObjectId": "BGPPeer:p1" } ] } ] }
 ```
+(`expectedSymptoms[].alarmType` and `rootCauseAlarmType` are the same `AlarmEvent.alarmType`
+vocabulary the live alarms carry — the decoder scores on these tokens directly. The mock is
+generated from the Codebook Generator's published `openapi.json`.)
 
 **Knowledge params (from Knowledge mock) — no session-window here:**
 ```json
@@ -821,6 +899,9 @@ All errors are emitted as structured JSON logs with `traceId`; nothing is silent
 | `AlarmStatusChange` vs `CorrelationResultEvent` | (a) put correlation context on `alarms.status.changed`; (b) **minimal `AlarmStatusChange` for status, rich context on `CorrelationResultEvent`** | **(b)** — matches the merged contract: `AlarmStatusChange` is a generic `{alarmId, newStatus, source, changedAt}` signal; incident linkage/role stays on `CorrelationResultEvent` (AC22). |
 | Persist vs. emit ordering | (a) emit then persist; (b) **persist then emit** | **(b)** — the Incident Store is the system of record; emitting only after a committed incident prevents downstream consumers from seeing an incident the store lacks. |
 | RCA accuracy | (a) compute server-side; (b) **expose raw counts only** | **(b)** — spec/architecture put accuracy at the integration-test/evaluation oracle (vs. Simulator ground truth); the engine exposes counts via `/stats`, no accuracy API. |
+| Codebook signature fetch shape (CE Open Q4 / P1-G5 / P3-G2) | (a) consume native `GET /codebooks/{id}/scenarios` (`{scenarioId, faultOriginObjectId, faultOriginType, predictedSymptoms[], trailIds[]}`) and adapt client-side (rename, derive root cause, fan out `trailIds`); (b) **consume the producer's CE-oriented `GET /codebooks/{id}/trail-signatures` projection** (`{trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[]}`, already fanned out per trail) | **(b)** — the Codebook Generator's merged fix publishes exactly the per-`trailId` `{trailId, rootCauseAlarmType, expectedSymptoms[]}` shape CE wanted, with `rootCauseAlarmType`/`expectedSymptoms[].alarmType` in the `AlarmEvent.alarmType` vocabulary. CE builds its client + mock against that published `openapi.json` — one stored truth on the producer, no client-side adaptation, and a shared join key. (a) re-creates the value-space/field-name divergence the projection was added to remove. |
+| List-pagination envelope (P3-G3) | (a) keep CE's `{ items, page, size, total }`; (b) Alarm Manager's `{ items, page, size, totalElements, totalPages }`; (c) **the platform-canonical `{ items, total, limit, offset }`** (Pattern Manager `PatternPage`, web-ui `RunStatsPage`) | **(c)** — the streaming view polls CE `/incidents` and AM `/alarms` together and already consumes `{ items, total, limit, offset }` for patterns + run-stats. Standardizing on that one envelope lets web-ui read `.items`/`.total`/`.limit`/`.offset` uniformly with no per-producer special-casing. (a)/(b) keep two divergent shapes. (Alarm Manager + web-ui adopt the same envelope in the next step.) |
+| `matchedCodebookId` value (P3-G4) | (a) write the matched pattern's `codebookMatchId` (a scenario id); (b) **write the active codebook's `codebookId` (artifact id) on codebook-decode incidents, null otherwise** | **(b)** — the frozen `CorrelationResultEvent.matchedCodebookId` description says it references `codebookId`. Writing a scenario id (the pattern's `codebookMatchId` granularity) would invite a wrong join. CE sets it to the codebook artifact id of the active codebook used by the decode; never from a pattern's scenario reference. Description-level clarification only — no schema change. |
 
 ---
 
@@ -828,8 +909,10 @@ All errors are emitted as structured JSON logs with `traceId`; nothing is silent
 
 ### Acceptance criterion → test (unit/contract, JUnit 5)
 
-All 22 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use the
+All 25 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use the
 `TopologyTestDriver`, advancing wall-clock time to drive punctuation deterministically.
+(Criteria 23–25 are the data-integration-fix criteria: codebook trail-signatures client + decode,
+the canonical `IncidentPage` envelope, and `matchedCodebookId` semantics.)
 
 | # | Acceptance criterion | Test (JUnit 5) | Asserts |
 |---|---|---|---|
@@ -841,13 +924,13 @@ All 22 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use th
 | 6 | In-progress status on alarm admission | `InProgressStatusTest#admissionFiresExactlyOneInProgressStatus` | Admitting an alarm fires exactly one `AlarmStatusChange` with `newStatus=in-progress`, matching `alarmId`, `source=correlation-engine`. |
 | 7 | Per-pattern session windows are independent | `PerPatternWindowTest#twoPatternsExpireAtTheirOwnWindows` | With P1 `windowMs=W1` and P2 `windowMs=W2` (W1 not equal W2) on the same trail, instance(T,P1) expires at W1 and instance(T,P2) at W2; neither expiry uses the other's duration. |
 | 8 | Isolation — concurrent instances produce independent incidents | `IsolationTest#concurrentInstancesDisjointChildAlarms` | Two simultaneous sequences from different topology parts produce two incidents with disjoint `childAlarmIds[]`; no alarm appears in both. |
-| 9 | Codebook cold-start — decode without an active pattern instance | `CodebookColdStartTest#noPatternCodebookMatchOnly` | With a matching alarm set on a trail but no active pattern instance, an incident is created with `matchedCodebookId` set, `matchedPatternId` null, and `rootCauseAlarmId` resolved from the scenario's root-cause designation. |
+| 9 | Codebook cold-start — decode without an active pattern instance | `CodebookColdStartTest#noPatternCodebookMatchOnly` | With a matching alarm set on a trail but no active pattern instance, the engine fetches per-trail signatures via the `GET /codebooks/{id}/trail-signatures` mock, scores the live alarms' `alarmType` tokens against `expectedSymptoms[].alarmType`, and creates an incident with `matchedCodebookId` = the active `codebookId`, `matchedPatternId` null, and `rootCauseAlarmId` resolved from the scenario's `rootCauseAlarmType` token. |
 | 10 | Fiber-cut storm — one incident, partial match tolerated | `FiberCutStormTest#oneIncidentLosRootCausePartialTolerated` | LOS + N downstream with one dropped and Knowledge tolerance permitting N-1 of N yields exactly one `CorrelationResultEvent`; `rootCauseAlarmId`=LOS; `childAlarmIds[]`=surviving downstream. |
 | 11 | Deterministic conflict resolution — specificity then confidence | `ConflictResolverTest#specificityThenConfidenceDeterministicWinner` | Two patterns claim the same set; higher-specificity pattern wins on every replay; on a specificity tie higher `confidence` wins; weights from Knowledge mock (no literals in setup). |
 | 12 | Codebook tolerance — missing and extra alarms | `CodebookToleranceTest#missingAndSpuriousSelectsBestScenario` | Observed set missing one of S and containing one spurious alarm still selects that scenario as best closest-match and creates an incident; floors from Knowledge mock. |
 | 13 | `CorrelationResultEvent` schema compliance | `CorrelationResultSchemaTest#emittedEventValidatesAgainstFrozenSchema` | Every emitted event validates against the frozen schema; required fields (`incidentId`, `rootCauseAlarmId`, `childAlarmIds`, `confidence`, `trailId`) present + non-null. |
 | 14 | Required fields populated — pattern match | `CorrelationResultFieldsTest#patternMatchFieldsPopulated` | `matchedPatternId` non-null, `confidence` in [0,1], `trailId` equals the matched pattern's `trailId`. |
-| 15 | Required fields populated — codebook match | `CorrelationResultFieldsTest#codebookMatchFieldsPopulated` | `matchedCodebookId` non-null, `matchedPatternId` null, `confidence` in [0,1], `trailId` equals the codebook scenario's trail tag. |
+| 15 | Required fields populated — codebook match | `CorrelationResultFieldsTest#codebookMatchFieldsPopulated` | `matchedCodebookId` non-null **and equal to the active codebook's `codebookId`** (the artifact id, not a scenarioId, not the pattern's `codebookMatchId`), `matchedPatternId` null, `confidence` in [0,1], `trailId` equals the codebook scenario's trail tag. |
 | 16 | Idempotency — duplicate alarm, no duplicate instance/incident | `IdempotencyTest#duplicateAlarmSingleAdmissionSingleIncident` | Replaying the same `alarmId` twice while (T,P) is active processes it once; the instance's alarm set contains it once; exactly one incident if full-match. |
 | 17 | Alarm-reduction ratio computable from stats API | `StatsApiTest#statsExposeRawCountsForReductionRatio` | After K alarms collapsing to I incidents, `GET /stats` returns `totalAlarmsProcessed>=K` and `totalIncidentsCreated==I`; ratio derivable without an extra API. |
 | 18 | Incident read API — root cause and children | `IncidentApiTest#getIncidentMatchesEmittedEvent` | `GET /incidents/{id}` returns `rootCauseAlarmId` + `childAlarmIds[]` equal to the emitted `CorrelationResultEvent` for the same `incidentId`. |
@@ -855,6 +938,9 @@ All 22 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use th
 | 20 | Latest codebook used — newer replaces prior | `CodebookVersioningTest#latestCodebookInScopeWins` | After V1 then V2 for the same `snapshotId`/trail, evaluations beginning after V2 use V2 signatures; no `codebookId` on `PatternApprovedEvent` required. |
 | 21 | All match-quality thresholds from Knowledge — no hard-coded | `KnowledgeParamsTest#allMatchParamsExternallySourcedChangeBehaviour` | Replacing every Knowledge param (partial-match tolerance, scoring floors, conflict weights) with non-default values changes matching + conflict outcomes with no code change. (Session-window excluded — per-pattern.) |
 | 22 | `AlarmStatusChange` schema compliance | `AlarmStatusChangeSchemaTest#emittedEventValidatesAgainstFrozenSchema` | Every emitted `AlarmStatusChange` validates against the frozen schema; `alarmId`, `newStatus`, `source`, `changedAt` present; `source=correlation-engine`. |
+| 23 | Codebook client fetches the trail-signatures projection and decodes (P1-G5/P3-G2) | `CodebookTrailSignaturesClientTest#fetchesTrailSignaturesAndDecodesOnAlarmTypeTokens` | On `codebook.generated`, `CodebookGeneratorClient` calls `GET /codebooks/{codebookId}/trail-signatures` (mock from the Codebook Generator `openapi.json`); the parsed `TrailScenarioSignature` carries `trailId`, `scenarioId`, `rootCauseAlarmType`, `expectedSymptoms[{alarmType, managedObjectId}]`; a decode scores the live `alarmType` tokens against `expectedSymptoms[].alarmType` and selects the best scenario. |
+| 24 | `GET /incidents` returns the canonical `{ items, total, limit, offset }` envelope (P3-G3) | `IncidentPageEnvelopeTest#listReturnsItemsTotalLimitOffsetEnvelope` | The `200` body is a JSON object with `items` (array of incidents), `total` (filtered count), `limit`, `offset` — **not** a bare array and **not** `{page,size,total}`; `limit`/`offset` are echoed; validates against the `IncidentPage` schema in the checked-in `openapi.json`. |
+| 25 | `matchedCodebookId` carries the `codebookId` on a codebook-decode incident (P3-G4) | `MatchedCodebookIdSemanticsTest#codebookDecodeWritesActiveCodebookId` | A codebook-decode incident's `matchedCodebookId` equals the active codebook's `codebookId` (the `CodebookGeneratedEvent` artifact id), is **not** a scenarioId and **not** the matched pattern's `codebookMatchId`; a pattern-match incident has `matchedCodebookId == null`. |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -866,7 +952,7 @@ Testcontainers/Compose, real collaborators in `real` mode).
 | 1 | Fiber-cut storm to one incident, LOS root cause, partial-match tolerated | Replay fiber-cut alarms on `alarms.persisted.live` with one dropped → lazy-init, incremental admit, full-match fire | Exactly one `CorrelationResultEvent` with LOS root cause; incident readable via `GET /incidents/{id}`; `AlarmStatusChange(in-progress)` then `(correlated)` observed on `alarms.status.changed`. |
 | 2 | Multi-trail fan-out | One alarm with `trailIds=[T1,T2]`, distinct active patterns per trail | Two independent instances; if both complete, two incidents with disjoint child sets. |
 | 3 | Session-expiry revert (failure/partial path) | Open an instance, then withhold further alarms past the window | No incident; `AlarmStatusChange(reverted-open)` per accumulated alarm; `instance_session_expirations_total` increments. |
-| 4 | Codebook cold-start (no patterns) | Load only a codebook (no approved patterns), replay a matching set | Incident emitted with `matchedCodebookId` set, `matchedPatternId` null, correct RCA. |
+| 4 | Codebook cold-start (no patterns) | Load only a codebook (no approved patterns); CE fetches `GET /codebooks/{id}/trail-signatures`; replay a matching alarm set | Incident emitted with `matchedCodebookId` = the active codebook's `codebookId` (artifact id), `matchedPatternId` null, RCA resolved from the scenario's `rootCauseAlarmType` token (scored on `expectedSymptoms[].alarmType` vs live `alarmType`). |
 | 5 | Conflict between two patterns | Two overlapping approved patterns both claim a set | Higher-specificity (then higher-confidence) pattern wins deterministically across repeats. |
 | 6 | Codebook hot-swap | V1 then V2 `codebook.generated` for the same scope, then a matching set | V2 signatures drive the decode (AC20). |
 | 7 | Poison alarm (failure path) | Unparseable message then a valid one on `alarms.persisted.live` | Poison in `alarms.persisted.live.dlq`; valid message produces its incident; pipeline never halts. |
@@ -875,6 +961,8 @@ Testcontainers/Compose, real collaborators in `real` mode).
 | 10 | Per-pattern window independence | Two patterns with different `sessionWindow.windowMs` on one trail, partial fills | Each instance expires at its own window; one may fire while the other reverts. |
 | 11 | Dependency-down (failure path) | Codebook Generator returns 5xx on fetch | Prior codebook retained; failure counted; pattern path still produces incidents; engine stays healthy. |
 | 12 | Stats + reduction ratio | Replay K alarms to I incidents, then `GET /stats` | Raw counts expose K and I; ratio derivable; per-match-type breakdown correct. |
+| 13 | List-envelope contract for web-ui (P3-G3) | After incidents exist, `GET /incidents?limit=L&offset=O` against the real service | Body is the canonical `{ items, total, limit, offset }` envelope (not a bare array, not `{page,size,total}`); `total` = filtered count; `limit`/`offset` echoed; matches the checked-in `openapi.json`; web-ui's CE client reads `.items` uniformly with its `PatternPage`/`RunStatsPage` clients. |
+| 14 | Codebook decode against real Codebook Generator (P1-G5/P3-G2) | In `real` mode, `codebook.generated` then a no-pattern matching set on a trail | CE fetches `GET /codebooks/{id}/trail-signatures` from the live Codebook Generator, decodes on `alarmType` tokens, and emits an incident whose `matchedCodebookId` = the live `codebookId`; no field-name/value-space mismatch (producer + consumer share the projection shape and vocabulary). |
 
 ---
 
