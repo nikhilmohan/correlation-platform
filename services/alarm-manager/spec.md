@@ -146,7 +146,14 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
   and human approval.
   - *Live alarm query API (primary consumer: web-ui):*
     - `GET /alarms` — list alarms, filterable by `state` (including `in-progress`), `trailId`,
-      `incidentId`, `from` (ISO-8601 UTC), `to` (ISO-8601 UTC); paginated.
+      `incidentId`, `from` (ISO-8601 UTC), `to` (ISO-8601 UTC); paginated with `limit` /
+      `offset` query params. The list response is the **platform-canonical list-pagination
+      envelope** `{ items, total, limit, offset }` (P3-G3) — the **same** envelope the
+      Correlation Engine `GET /incidents` and the Pattern Manager `GET /patterns` (`PatternPage`)
+      return, so the web-ui streaming view reads one uniform envelope (`.items` / `.total` /
+      `.limit` / `.offset`) across the endpoints it polls. `items` is an array of the per-alarm
+      summary (item shape unchanged); `total` is the count matching the filter; `limit` / `offset`
+      are echoed from the request. This envelope is frozen in `services/alarm-manager/openapi.json`.
     - `GET /alarms/{alarmId}` — retrieve a single alarm's full record: all `AlarmEvent`
       fields, lifecycle state, `incidentId`, role tag (`root-cause` / `child` / `none`), and
       the ordered list of state transitions with UTC timestamps.
@@ -257,7 +264,9 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
     routed to the dead-letter topic without persisting any record or publishing any republish.
 
 14. A `GET /openapi.json` request returns HTTP 200 whose body is a valid OpenAPI 3.1 document
-    containing the `/alarms` and `/alarms/{alarmId}` path operations defined in this spec.
+    containing the `/alarms` and `/alarms/{alarmId}` path operations defined in this spec, in
+    which the `GET /alarms` response schema is the `{ items, total, limit, offset }` envelope and
+    the operation declares `limit` / `offset` query params.
 
 15. Given any stored alarm record, its `managedObjectId` value conforms to the
     `<objectType>:<id>` format defined in `libs/event-model`; an `AlarmEvent` carrying a
@@ -282,6 +291,14 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
 19. Given a `GET /alarms` request with `state=in-progress`, only alarms with lifecycle state
     `in-progress` are returned; alarms with state `open`, `correlated`, or `cleared` are absent
     from the response.
+
+20. Given a `GET /alarms` request with `limit=L` and `offset=O` matching N alarms, the response
+    body is the platform-canonical list-pagination envelope `{ items, total, limit, offset }` —
+    a JSON object (not a bare array) whose `items` is the array of matching per-alarm summaries
+    (paged by `limit`/`offset`), `total` equals N (the full filtered count), and `limit`/`offset`
+    echo the request; the body does NOT use `page` / `size` / `totalElements` / `totalPages`. This
+    is the same envelope returned by the Correlation Engine `GET /incidents`, so the web-ui reads
+    one uniform envelope across both endpoints (P3-G3).
 
 20. Given an `AlarmStatusChange` message consumed from `alarms.status.changed` that fails schema
     validation against the frozen `AlarmStatusChange` binding (e.g. missing required field
