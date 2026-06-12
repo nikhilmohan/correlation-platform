@@ -15,11 +15,11 @@ import java.util.List;
  */
 final class Fixtures {
 
-    /** The ten payload type names — one golden fixture each. */
+    /** The eleven payload type names — one golden fixture each. */
     static final List<String> ALL_TYPES = List.of(
             "AlarmEvent", "TopologyChangedEvent", "TrailsBuiltEvent", "CodebookGeneratedEvent",
             "TransactionEvent", "PatternMinedEvent", "PatternDiscoveredEvent", "PatternApprovedEvent",
-            "CorrelationResultEvent", "KnowledgeUpdatedEvent");
+            "CorrelationResultEvent", "KnowledgeUpdatedEvent", "AlarmStatusChange");
 
     private Fixtures() {
     }

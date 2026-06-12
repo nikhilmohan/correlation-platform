@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/event-model/payloads/AlarmStatusChange.schema.json",
+  "title": "AlarmStatusChange",
+  "description": "Carried on alarms.status.changed; generic alarm lifecycle status change, fired by any service, consumed by Alarm Manager.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "alarmId": {
+      "type": "string",
+      "description": "The alarm whose status changed; matches AlarmEvent.alarmId."
+    },
+    "newStatus": {
+      "type": "string",
+      "enum": [
+        "open",
+        "in-progress",
+        "correlated",
+        "cleared",
+        "reverted-open"
+      ],
+      "description": "New lifecycle status: open; in-progress (alarm entered an active correlation instance); correlated (a completed match); cleared; reverted-open (instance expired without a match)."
+    },
+    "source": {
+      "type": "string",
+      "description": "The service that fired the change (e.g. correlation-engine, enrichment, alarm-manager); names the originator of the status change."
+    },
+    "changedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the status change occurred (ISO-8601 UTC)."
+    }
+  },
+  "required": [
+    "alarmId",
+    "newStatus",
+    "source",
+    "changedAt"
+  ]
+}
