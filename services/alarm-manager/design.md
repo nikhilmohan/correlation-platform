@@ -346,16 +346,26 @@ Query parameters (all optional, AND-combined):
 | `incidentId` | string | only alarms linked to this incident |
 | `from` | ISO-8601 UTC date-time | `raisedAt` at or after `from` |
 | `to` | ISO-8601 UTC date-time | `raisedAt` at or before `to` |
-| `page` | integer (default 0) | page index |
-| `size` | integer (default 50, max 500) | page size |
+| `limit` | integer (default 50, max 500) | page size (echoed back in the response envelope) |
+| `offset` | integer (default 0) | number of matching rows to skip (echoed back in the response envelope) |
 
-Response `200` body (`AlarmListResponse`):
+Response `200` body (`AlarmPage` — the **platform-canonical list-pagination envelope**
+`{ items, total, limit, offset }`, P3-G3):
 ```
 {
   "items": [ AlarmSummary, ... ],
-  "page": 0, "size": 50, "totalElements": 123, "totalPages": 3
+  "total": 123,
+  "limit": 50,
+  "offset": 0
 }
 ```
+This is the **same envelope** the Correlation Engine `GET /incidents` returns and the Pattern
+Manager `GET /patterns` `PatternPage` returns, so the web-ui streaming view reads **one uniform
+envelope** (`.items` / `.total` / `.limit` / `.offset`) across both polled endpoints — `total`
+is the count matching the filter (for the streaming/progress view), and `limit` / `offset` are
+echoed from the request. The item shape `AlarmSummary` is **unchanged** — only the envelope keys
+change (was `{ items, page, size, totalElements, totalPages }`).
+
 `AlarmSummary` = `{ alarmId, managedObjectId, eventType, perceivedSeverity, raisedAt,
 lifecycleState, role, incidentId, trailIds }` (`lifecycleState` now ranges over `open` /
 `in-progress` / `correlated` / `cleared`).
@@ -485,10 +495,10 @@ sequenceDiagram
   participant UI as web-ui
   participant API as AlarmQueryController
   participant DB as live alarm store
-  UI->>API: GET alarms state in-progress trailId t1
-  API->>DB: filtered query
-  DB-->>API: matching alarm rows
-  API-->>UI: 200 AlarmListResponse
+  UI->>API: GET alarms state in-progress trailId t1 limit 50 offset 0
+  API->>DB: filtered query plus count for total
+  DB-->>API: matching alarm rows plus total count
+  API-->>UI: 200 AlarmPage items total limit offset
   UI->>API: GET alarms by alarmId
   API->>DB: load alarm plus ordered transitions
   DB-->>API: alarm plus transitions
@@ -598,6 +608,8 @@ and logged with the `traceId`.
 | Consideration | Alternatives considered | Chosen plus rationale |
 |---|---|---|
 | STATE source of truth | (a) `AlarmStatusChange` on `alarms.status.changed` as the canonical STATE channel, (b) keep deriving lifecycle STATE from `correlation.results` (the prior design) | **(a) `AlarmStatusChange`.** The merged spec/contract makes `alarms.status.changed` the generic, non-correlation-specific status-sync channel; it carries `in-progress` and `reverted-open` which `correlation.results` cannot express. STATE and ROLE become cleanly separated, and any service (not just the Correlation Engine) can drive STATE. |
+| `GET /alarms` list-pagination envelope (P3-G3) | (a) keep the prior `{ items, page, size, totalElements, totalPages }` Spring-`Page`-style envelope, (b) adopt the **platform-canonical** `{ items, total, limit, offset }` (Pattern Manager `PatternPage`, Correlation Engine `GET /incidents`) | **(b) `{ items, total, limit, offset }`.** The web-ui streaming view polls **both** Correlation Engine `GET /incidents` and Alarm Manager `GET /alarms`; under (a) it had to read two different envelope shapes (a data-integration gap). Standardizing on the one envelope already frozen by Pattern Manager and the Correlation Engine lets the web-ui read one uniform shape (`.items` / `.total` / `.limit` / `.offset`) across both endpoints. Request params move to `limit` / `offset` to match the envelope exactly. The item shape `AlarmSummary` is untouched. |
+| `GET /alarms` request params | (a) keep `page` / `size` request params but return the `{ items, total, limit, offset }` envelope, (b) move request params to **`limit` / `offset`** to match the envelope | **(b) `limit` / `offset`.** Full consistency with the response envelope and with the Pattern Manager `GET /patterns` request params, so the web-ui sends and reads the same vocabulary on every list endpoint; no `page→offset` translation in the client. The existing `state` / `trailId` / `incidentId` / `from` / `to` filters are unchanged. |
 | STATE vs. ROLE separation | Single writer touching both `lifecycle_state` and `role`/`incident_id` vs. **disjoint-column** ownership (STATE channel writes `lifecycle_state` only; ROLE channel writes `role`/`incident_id` only) | **Disjoint-column ownership.** Because the two channels never write the same columns, out-of-order, at-least-once arrival of the two events is naturally idempotent and order-independent — no merge/conflict logic, no total-order requirement. Reconciliation is just both applied. |
 | `reverted-open` modelling | (a) a stored distinct state, (b) a **transition back to `open`** distinguished by an audit `reason` | **(b) transition to `open` with reason.** Matches the spec exactly (`reverted-open` is not a permanent state), keeps the state set minimal (`open` / `in-progress` / `correlated` / `cleared`), and preserves the full revert history in the audit log. |
 | Role-clearing on revert | (a) always clear `role`/`incident_id` on `reverted-open`, (b) clear only a **provisional** in-progress association, preserve a finalised `CorrelationResultEvent` role/incident | **(b).** Adopts the spec's open-question recommendation: a revert means *this* correlation instance expired; a previously completed correlation result remains a real fact about the alarm. Provisional (in-progress) associations are cleared; finalised role/`incidentId` survive. |
@@ -624,19 +636,20 @@ the consumer/producer paths).
 | 5 | Same `eventId` consumed twice then applied once, no duplicate audit | `CorrelationIdempotencyTest.redeliveredEventAppliedExactlyOnce` | after two deliveries: `processed_event` has one row; each affected alarm has exactly one `role-assigned` transition |
 | 6 | `GET /alarms/{alarmId}` for root cause then `correlated`, `root-cause`, `incidentId`, audit has `open` plus `correlated` with distinct UTC timestamps | `AlarmDetailApiTest.returnsCorrelatedRootCauseWithOpenAndCorrelatedTransitions` | response `lifecycleState=correlated`, `role=root-cause`, correct `incidentId`; `transitions` contains an `open` and a `correlated` entry with distinct `occurredAt` |
 | 7 | `AlarmEvent` `state=cleared` then lifecycle `cleared` plus `cleared` audit | `LifecycleServiceTest.clearedEventTransitionsAlarmToClearedWithAudit` | alarm `lifecycle_state=cleared`, `cleared_at` set; a `state_transition` with `to_state=cleared` |
-| 8 | `GET /alarms?state=open` then only `open` alarms | `AlarmListApiTest.filtersByLifecycleStateOpen` | response contains only `open` alarms; `in-progress`/`correlated`/`cleared` absent |
+| 8 | `GET /alarms?state=open` then only `open` alarms | `AlarmListApiTest.filtersByLifecycleStateOpen` | `200` body is the canonical `AlarmPage` envelope — a JSON object with `items`, `total`, `limit`, `offset` (NOT `page`/`size`/`totalElements`/`totalPages`, NOT a bare array); `items` contains only `open` alarms (`in-progress`/`correlated`/`cleared` absent) and `total` equals the filtered count |
 | 9 | `GET /alarms?trailId=...` then only alarms whose `trailIds` contain it | `AlarmListApiTest.filtersByTrailIdMembership` | only alarms with the trail in `trailIds`; other-trail alarms excluded |
 | 10 | `GET /alarms?incidentId=...` then only alarms linked to that incident | `AlarmListApiTest.filtersByIncidentId` | only alarms with that `incident_id`; other/none excluded |
 | 11 | `GET /alarms?from&to` then only alarms with `raisedAt` in window | `AlarmListApiTest.filtersByRaisedAtTimeWindow` | only alarms with `raisedAt` within the window; outside excluded |
 | 12 | Schema-invalid message (missing `alarmId`) then `alarms.enriched.live.dlq`, no persist, no republish | `EnrichedConsumerDlqTest.schemaInvalidAlarmRoutedToDlqNoPersistNoRepublish` | message appears on `alarms.enriched.live.dlq`; `alarm` table empty; nothing on `alarms.persisted.live` |
 | 13 | Unknown major `schemaVersion` then DLQ, no persist, no state change | `SchemaVersionDlqTest.unknownMajorVersionRejectedToDlq` | message on the matching `<topic>.dlq`; no row persisted; no republish/state change |
-| 14 | `GET /openapi.json` then 200, valid OpenAPI 3.1 with `/alarms` plus `/alarms/{alarmId}` | `OpenApiContractTest.publishesValidOpenApi31WithAlarmPaths` | `200`; body parses as OpenAPI 3.1; contains both path operations; `state` enum includes `in-progress`; equals the checked-in `openapi.json` |
+| 14 | `GET /openapi.json` then 200, valid OpenAPI 3.1 with `/alarms` plus `/alarms/{alarmId}` | `OpenApiContractTest.publishesValidOpenApi31WithAlarmPaths` | `200`; body parses as OpenAPI 3.1; contains both path operations; `state` enum includes `in-progress`; the `GET /alarms` response schema is the `AlarmPage` envelope `{ items, total, limit, offset }` and the operation declares `limit` / `offset` query params (not `page`/`size`); equals the checked-in `openapi.json` |
 | 15 | Stored `managedObjectId` conforms to `objectType:id`; malformed then `alarms.enriched.live.dlq` | `ManagedObjectIdValidationTest.malformedManagedObjectIdRoutedToDlqAndStoredIdsConform` | a malformed-`managedObjectId` alarm is DLQ-routed and not persisted; every stored `managed_object_id` matches `ManagedObjectId.PATTERN` |
 | 16 | `AlarmStatusChange(newStatus=in-progress)` for a known alarm then `in-progress` plus audit with `source`/`changedAt` | `AlarmStatusChangeConsumerTest.inProgressSetsStateAndAuditsSourceAndChangedAt` | alarm `lifecycle_state=in-progress`; a `state_transition` `to_state=in-progress` carrying `source` and `changed_at` from the payload and a UTC `occurred_at` |
 | 17 | `AlarmStatusChange(newStatus=reverted-open)` for an `in-progress` alarm then back to `open`, revert-reason audit, in-progress role cleared | `AlarmStatusChangeConsumerTest.revertedOpenReturnsToOpenWithReasonAndClearsProvisionalRole` | alarm `lifecycle_state=open`; a `state_transition` `to_state=open` whose `reason` notes the revert; a provisional in-progress `role` is reset to `none` (a finalised correlation role is preserved) |
 | 18 | Alarm whose role+`incidentId` came from a `CorrelationResultEvent` and whose state was set `correlated` by `AlarmStatusChange` then both correct, reconciled on `alarmId` | `ComplementaryReconciliationTest.stateFromStatusChangeRoleAndIncidentFromCorrelationReconciledOnAlarmId` | after both events (in either order): record has `lifecycle_state=correlated` AND `role`+`incident_id` from the `CorrelationResultEvent`; neither channel overwrote the other's columns |
 | 19 | `GET /alarms?state=in-progress` then only `in-progress` alarms | `AlarmListApiTest.filtersByLifecycleStateInProgress` | response contains only `in-progress` alarms; `open`/`correlated`/`cleared` absent |
 | 20 | Schema-invalid `AlarmStatusChange` (missing `alarmId` or bad `newStatus`) then `alarms.status.changed.dlq`, store unmodified, processing continues | `AlarmStatusChangeDlqTest.invalidStatusChangeRoutedToDlqStoreUnmodifiedProcessingContinues` | poison message lands on `alarms.status.changed.dlq`; no `alarm` row changed; a subsequent valid `AlarmStatusChange` is still applied |
+| 21 (P3-G3) | `GET /alarms` returns the platform-canonical `{ items, total, limit, offset }` list envelope with `limit`/`offset` request params (same shape as Correlation Engine `GET /incidents` / Pattern Manager `PatternPage`), so the web-ui reads one uniform envelope | `AlarmListApiTest.returnsCanonicalItemsTotalLimitOffsetEnvelopeWithLimitOffsetParams` | for a filter matching N alarms with `?limit=L&offset=O`, the `200` body is a JSON object with exactly `items` (array of `AlarmSummary`), `total` (== N, the full filtered count), `limit` (== L), `offset` (== O); it is NOT a JSON array and does NOT contain `page`/`size`/`totalElements`/`totalPages`; `items.length` respects `limit`/`offset` paging; each item retains the unchanged `AlarmSummary` fields |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -654,7 +667,7 @@ harnesses).
 | 6 | At-least-once redelivery (partial/duplicate path) | Re-deliver the same `alarms.enriched.live`, `alarms.status.changed`, and `correlation.results` messages | Exactly one alarm row, one republish, one transition per logical change; `processed_event` dedupes the status and correlation events; no duplicates |
 | 7 | Poison message (failure path) | Produce a malformed `AlarmEvent` (missing `alarmId`), an envelope with `schemaVersion=2`, and an `AlarmStatusChange` with an unrecognised `newStatus` | Each lands on the matching `<topic>.dlq` (`alarms.enriched.live.dlq` / `alarms.status.changed.dlq`); no rows persisted/modified; service keeps processing subsequent valid messages |
 | 8 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent`, an `AlarmStatusChange`, and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `status_for_unknown_alarm` / `clear_for_unknown_alarm` metrics increment; a later raise for the same `alarmId` still persists `open` |
-| 9 | web-ui contract | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service | Responses match the published schema (filters incl. `in-progress`, detail with transitions incl. `source`/`changedAt`); no drift between running surface and checked-in spec |
+| 9 | web-ui contract (uniform pagination envelope, P3-G3) | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms?limit&offset` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service, alongside its `GET /incidents` poll | `GET /alarms` returns the **same** `{ items, total, limit, offset }` envelope as Correlation Engine `GET /incidents`, so the streaming view reads `.items`/`.total`/`.limit`/`.offset` uniformly across both polled endpoints; detail with transitions incl. `source`/`changedAt`; no drift between running surface and checked-in `openapi.json` |
 
 ## Config & observability
 
