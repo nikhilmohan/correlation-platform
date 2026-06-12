@@ -27,6 +27,10 @@
       "additionalProperties": true,
       "description": "Timing statistics."
     },
+    "sessionWindow": {
+      "$ref": "../common/sessionWindow.schema.json",
+      "description": "Per-pattern session-window rule the Correlation Engine uses to govern each correlation instance's lifetime. An authored operational directive derived and populated by the Pattern Manager from the mined `timing` — distinct from the descriptive `timing` statistics."
+    },
     "codebookMatchId": {
       "type": "string",
       "description": "Matched codebook scenario, if any."
@@ -44,6 +48,7 @@
     "confidence",
     "lift",
     "timing",
+    "sessionWindow",
     "lifecycle"
   ]
 }
