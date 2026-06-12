@@ -39,6 +39,10 @@
             "type": "string",
             "description": "Matches AlarmEvent.alarmId."
           },
+          "alarmType": {
+            "type": "string",
+            "description": "Canonical alarm-type token drawn from the domain's Knowledge alarmTypeVocabulary (e.g. PortDown, InterfaceDown, LinkDown, FiberFault). The single join key used for pattern mining, codebook signatures, rootCauseAlarmType, and correlation matching. Distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause). Mirrored from AlarmEvent.alarmType."
+          },
           "eventType": {
             "type": "string",
             "description": "Matches AlarmEvent.eventType (X.733 event type)."
@@ -59,6 +63,7 @@
         },
         "required": [
           "alarmId",
+          "alarmType",
           "eventType",
           "raisedAt",
           "managedObjectId",
