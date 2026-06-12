@@ -3,11 +3,22 @@
 Sole owner of **live alarm state**. On the real-time path the Alarm Manager sits **in-line**
 between the Enrichment Service and the Correlation Engine: it consumes `alarms.enriched.live`,
 persists each live alarm (initial lifecycle state `open`), and republishes the same `AlarmEvent`
-on `alarms.persisted.live` for the Correlation Engine. It consumes `correlation.results` to
-maintain each alarm's lifecycle (`open` then `correlated` then `cleared`), its correlation-group
-role (`root-cause` / `child`), and its incident linkage, and it serves the live alarm query API
-to the web-ui. There is **no historical corpus** (MVP live-only). This design realizes every task
-and acceptance criterion in the approved, merged `services/alarm-manager/spec.md`.
+on `alarms.persisted.live` for the Correlation Engine. It consumes `alarms.status.changed`
+(`AlarmStatusChange`) as the **canonical alarm-status-sync channel**, applying `newStatus`
+(`open` / `in-progress` / `correlated` / `cleared` / `reverted-open`) to each alarm's lifecycle
+**STATE**, and it consumes `correlation.results` (`CorrelationResultEvent`) as the **canonical
+correlation-context channel**, maintaining each alarm's correlation-group **ROLE**
+(`root-cause` / `child`) and **incident linkage** (`incidentId`). These two channels are
+**complementary**: `AlarmStatusChange` is authoritative for STATE, `CorrelationResultEvent` is
+authoritative for ROLE + `incidentId`, reconciled on `alarmId`. It serves the live alarm query
+API to the web-ui. There is **no historical corpus** (MVP live-only). This design realizes every
+task and acceptance criterion in the approved, merged `services/alarm-manager/spec.md`.
+
+> **Supersedes** the previously merged design (PR #104, branch `design/alarm-manager`): the only
+> material change is making `alarms.status.changed` (`AlarmStatusChange`) the canonical
+> alarm-status-sync channel that drives lifecycle STATE (incl. the new `in-progress` state and
+> the `reverted-open` transition), while `correlation.results` is re-scoped to ROLE + incident
+> only. Everything else from the prior design is preserved.
 
 ## Stack
 
@@ -18,10 +29,10 @@ and acceptance criterion in the approved, merged `services/alarm-manager/spec.md
 - **Persistence:** PostgreSQL (the live alarm store — sole owner), Spring Data JDBC plus Flyway
   for schema migrations. The Alarm Manager is the only writer to this store.
 - **Event contract:** `com.acp:event-model` (frozen Java/Jackson binding) — `EventCodec`,
-  `SchemaVersionPolicy`, `ManagedObjectId`, generated `AlarmEvent` and `CorrelationResultEvent`
-  POJOs. Schema validation is the codec's responsibility; `CodecException`,
-  `SchemaVersionException`, `UnknownEventTypeException`, and `ManagedObjectIdException` are the
-  DLQ signals.
+  `SchemaVersionPolicy`, `ManagedObjectId`, generated `AlarmEvent`, `CorrelationResultEvent`,
+  and `AlarmStatusChange` POJOs. Schema validation is the codec's responsibility;
+  `CodecException`, `SchemaVersionException`, `UnknownEventTypeException`, and
+  `ManagedObjectIdException` are the DLQ signals.
 - **HTTP / API:** Spring Web MVC (blocking) plus springdoc-openapi for the OpenAPI 3.1 document
   at `/openapi.json` and Swagger UI. No outbound HTTP clients (the service makes no synchronous
   calls to collaborators).
@@ -34,28 +45,30 @@ and acceptance criterion in the approved, merged `services/alarm-manager/spec.md
 
 ## Task breakdown (from the spec)
 
-Every spec **Tasks (high-level)** item (1 to 5) is realized below and is traceable to modules
+Every spec **Tasks (high-level)** item (1 to 6) is realized below and is traceable to modules
 and flows.
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| 1. Consume `alarms.enriched.live`; persist each `AlarmEvent` with lifecycle `open` (idempotent on `alarmId`); republish the same `AlarmEvent` on `alarms.persisted.live` (idempotent, no second emit on redelivery) | `EnrichedAlarmConsumer` (`@KafkaListener` on `alarms.enriched.live`) then `IngestService.persistAndRepublish` — codec-validate, upsert into `alarm` keyed on `alarmId`, write an `open` row to `state_transition`, then `PersistedAlarmProducer.republish` guarded by the `published` flag on the alarm row so a redelivery never re-emits. See Key flow (a). |
-| 2. Consume `correlation.results`; mark `rootCauseAlarmId` `correlated` / `root-cause`, mark each `childAlarmIds` `correlated` / `child`, link `incidentId`, audit each change; idempotent on envelope `eventId` | `CorrelationResultConsumer` (`@KafkaListener` on `correlation.results`) then `CorrelationService.apply` — guard on `processed_event(eventId)`, update each affected `alarm` row (state, role, `incidentId`), append a `correlated` `state_transition` per affected alarm. See Key flow (b). |
-| 3. Handle clear events: an `AlarmEvent` from `alarms.enriched.live` with wire `state = cleared` transitions the matching alarm to lifecycle `cleared` plus a timestamped audit entry | `EnrichedAlarmConsumer` branches on the codec-bound `AlarmEvent.state`: `raised` then persist+republish path (task 1); `cleared` then `LifecycleService.clear` sets lifecycle `cleared` and appends a `cleared` `state_transition`. See Key flow (a) and the lifecycle state diagram. |
-| 4. Serve the live alarm query API for web-ui — list filterable by `state` / `trailId` / `incidentId` / time window; single-alarm full record with lifecycle, role, `incidentId`, ordered transition history (UTC) | `AlarmQueryController` (`GET /alarms`, `GET /alarms/{alarmId}`) then `AlarmQueryService` then `AlarmRepository` filtered queries. springdoc publishes OpenAPI 3.1. See Key flow (c). |
-| 5. Route poison messages (schema-invalid or non-processable after retries) to `alarms.enriched.live.dlq` / `correlation.results.dlq`; never drop silently | `DlqRouter` — on `CodecException` / `SchemaVersionException` / `ManagedObjectIdException` / `UnknownEventTypeException` (or exhausted retries) send the raw bytes plus failure-metadata headers to the matching `<topic>.dlq` and commit the offset. See Error handling. |
+| 1. Consume `alarms.enriched.live`; persist each `AlarmEvent` with lifecycle `open` (idempotent on `alarmId`); republish the same `AlarmEvent` on `alarms.persisted.live` (idempotent, no second emit on redelivery) | `EnrichedAlarmConsumer` (`@KafkaListener` on `alarms.enriched.live`) then `IngestService.persistAndRepublish` — codec-validate, upsert into `alarm` keyed on `alarmId`, write an `open` row to `state_transition`, then `PersistedAlarmProducer.republish` guarded by the `published` flag so a redelivery never re-emits. See Key flow (a). |
+| 2. Consume `alarms.status.changed` (`AlarmStatusChange`); apply `newStatus` to lifecycle STATE; audit each transition with `source` and `changedAt`; handle `reverted-open` as a transition back to `open` with a reason and clear in-progress role association; dedupe on envelope `eventId` | `AlarmStatusChangeConsumer` (`@KafkaListener` on `alarms.status.changed`) then `StatusSyncService.apply` — codec-validate (reject unknown `schemaVersion`/`newStatus` to `alarms.status.changed.dlq`), guard on `processed_event(eventId)`, apply `newStatus` to `alarm.lifecycle_state` via `LifecycleService`, append a `state_transition` carrying `source`/`changed_at`/`reason`. See Key flow (b) and the lifecycle state machine. |
+| 3. Consume `correlation.results` (`CorrelationResultEvent`); update ROLE + incident linkage only — `root-cause`/`incidentId` for `rootCauseAlarmId`, `child`/same `incidentId` for each `childAlarmIds`; reconcile with STATE by `alarmId`; audit; idempotent on envelope `eventId` | `CorrelationResultConsumer` (`@KafkaListener` on `correlation.results`) then `CorrelationService.applyRoleAndIncident` — guard on `processed_event(eventId)`, update only `role` + `incident_id` (never `lifecycle_state`) on each affected `alarm` row, append a `role-assigned` audit entry per affected alarm. See Key flow (c). |
+| 4. Handle clear events arriving via `alarms.enriched.live` (`AlarmEvent.state = cleared`): transition the matching alarm to lifecycle `cleared` + audit (canonical clear path is `AlarmStatusChange`; both handled consistently and idempotently) | `EnrichedAlarmConsumer` branches on the codec-bound `AlarmEvent.state`: `raised` then persist+republish (task 1); `cleared` then `LifecycleService.clear` sets lifecycle `cleared` and appends a `cleared` `state_transition`. The same `LifecycleService` applies `AlarmStatusChange(newStatus=cleared)` (task 2), so both paths converge on one transition rule. See Key flow (a) and the lifecycle state diagram. |
+| 5. Serve the live alarm query API — list filterable by `state` (incl. `in-progress`) / `trailId` / `incidentId` / time window; single-alarm full record with lifecycle, role, `incidentId`, ordered transition history (UTC) | `AlarmQueryController` (`GET /alarms`, `GET /alarms/{alarmId}`) then `AlarmQueryService` then `AlarmRepository` filtered queries. springdoc publishes OpenAPI 3.1. See Key flow (d). |
+| 6. Route poison messages (schema-invalid or non-processable after retries) to `alarms.enriched.live.dlq` / `correlation.results.dlq` / `alarms.status.changed.dlq`; never drop silently | `DlqRouter` — on `CodecException` / `SchemaVersionException` / `ManagedObjectIdException` / `UnknownEventTypeException` (or exhausted retries) send the raw bytes plus failure-metadata headers to the matching `<topic>.dlq` and commit the offset. See Error handling. |
 
 ## Phase applicability (design view)
 
 Matches the canonical phase map in `architecture.md` (alarm-manager row): **Idle / Idle /
 Active**. The Alarm Manager has no role in P1 or P2 (it does not consume the history/learning
-path topics); all of its work is on the P3 real-time path.
+path topics); all of its work — including the new `AlarmStatusChange` status-sync consumer — is
+on the P3 real-time path.
 
 | Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
 |---|---|---|---|
 | P1 — Topology onboarding | Idle | None of the Kafka listeners fire (no live alarms flow). `/health`, `/metrics`, `/openapi.json` live; the query API returns an empty result set. | None (dormant) |
 | P2 — Pattern learning | Idle | Dormant. The service does **not** subscribe to `alarms.history`, `alarms.enriched`, or `transactions.clean`; the learning path is mined in-flight by other services and persists nothing here. | None (dormant) |
-| P3 — Real-time correlation | Active | `EnrichedAlarmConsumer`, `IngestService`, `LifecycleService`, `PersistedAlarmProducer`, `CorrelationResultConsumer`, `CorrelationService`, `AlarmQueryController` / `AlarmQueryService`, `DlqRouter` | In: `alarms.enriched.live`, `correlation.results` (Kafka); Out: `alarms.persisted.live` (Kafka), `alarms.enriched.live.dlq`, `correlation.results.dlq`; Serves: live alarm query API to web-ui |
+| P3 — Real-time correlation | Active | `EnrichedAlarmConsumer`, `IngestService`, `LifecycleService`, `PersistedAlarmProducer`, **`AlarmStatusChangeConsumer`, `StatusSyncService`** (canonical STATE channel), `CorrelationResultConsumer`, `CorrelationService` (ROLE+incident), `AlarmQueryController` / `AlarmQueryService`, `DlqRouter` | In: `alarms.enriched.live`, **`alarms.status.changed`**, `correlation.results` (Kafka); Out: `alarms.persisted.live` (Kafka), `alarms.enriched.live.dlq`, **`alarms.status.changed.dlq`**, `correlation.results.dlq`; Serves: live alarm query API to web-ui |
 
 ## Module breakdown
 
@@ -63,14 +76,18 @@ path topics); all of its work is on the P3 real-time path.
 flowchart TD
   ENR["alarms.enriched.live listener, EnrichedAlarmConsumer"] --> CODEC1["EventCodec deserialize plus schema validate"]
   CODEC1 -->|valid raised| INGEST["IngestService persist plus republish"]
-  CODEC1 -->|valid cleared| LIFE["LifecycleService clear"]
+  CODEC1 -->|valid cleared| LIFE["LifecycleService apply transition"]
   CODEC1 -->|CodecException| DLQ1["DlqRouter to alarms.enriched.live.dlq"]
   INGEST --> REPO["AlarmRepository, StateTransitionRepository"]
   INGEST --> PROD["PersistedAlarmProducer republish, published guard"]
   PROD --> OUT["alarms.persisted.live"]
+  STAT["alarms.status.changed listener, AlarmStatusChangeConsumer"] --> CODEC3["EventCodec deserialize plus schema validate"]
+  CODEC3 -->|valid| SSVC["StatusSyncService apply newStatus, processed_event guard"]
+  CODEC3 -->|CodecException or bad newStatus| DLQ3["DlqRouter to alarms.status.changed.dlq"]
+  SSVC --> LIFE
   LIFE --> REPO
   CORR["correlation.results listener, CorrelationResultConsumer"] --> CODEC2["EventCodec deserialize plus schema validate"]
-  CODEC2 -->|valid| CSVC["CorrelationService apply, processed_event guard"]
+  CODEC2 -->|valid| CSVC["CorrelationService apply role plus incident, processed_event guard"]
   CODEC2 -->|CodecException| DLQ2["DlqRouter to correlation.results.dlq"]
   CSVC --> REPO
   REPO --> PG[("PostgreSQL live alarm store")]
@@ -82,44 +99,79 @@ flowchart TD
 - **`EnrichedAlarmConsumer`** — `@KafkaListener` on `alarms.enriched.live`. Deserializes raw
   bytes via `EventCodec`, confirms envelope `type` is `AlarmEvent`, then branches on the bound
   `AlarmEvent.state`: `raised` then `IngestService.persistAndRepublish`; `cleared` then
-  `LifecycleService.clear`. Codec exceptions route to `DlqRouter`.
+  `LifecycleService.clear`. Codec exceptions route to `DlqRouter` (`alarms.enriched.live.dlq`).
 - **`IngestService`** — idempotent upsert of the alarm into `alarm` keyed on `alarmId` with
   lifecycle `open`, plus a single `open` `state_transition` row on first insert, then calls
   `PersistedAlarmProducer.republish`. The persist and the republish-guard flip occur in one DB
   transaction; the actual Kafka send happens after commit (transactional-outbox-style guard, see
   Design alternatives) so a redelivery cannot double-persist or double-emit.
-- **`LifecycleService`** — applies the `cleared` transition and is the shared owner of the
-  state-machine validity rules — sets lifecycle `cleared`, appends a `cleared`
-  `state_transition`. A clear for an unknown `alarmId` is a no-op recorded in metrics (not an
-  error; the raise may not yet have arrived — see Error handling).
+- **`AlarmStatusChangeConsumer`** *(new)* — `@KafkaListener` on `alarms.status.changed`.
+  Deserializes raw bytes via `EventCodec`, confirms envelope `type` is `AlarmStatusChange` and
+  the major `schemaVersion` is supported, then `StatusSyncService.apply`. Any codec/validation
+  failure (incl. an unrecognised `newStatus` enum value or unknown `schemaVersion`) routes to
+  `DlqRouter` (`alarms.status.changed.dlq`); the store is not modified and processing continues.
+- **`StatusSyncService`** *(new)* — the canonical STATE channel. Guarded by
+  `processed_event(eventId)` (unique insert; on conflict the event was already applied — no-op).
+  Maps `newStatus` to a lifecycle action and delegates the actual transition to `LifecycleService`
+  (the single owner of state-machine validity), passing `source` and `changedAt` from the payload
+  so they are recorded on the audit entry:
+  - `open` — set `lifecycle_state` to `open`.
+  - `in-progress` — set `lifecycle_state` to `in-progress` (the **new** intermediate state).
+  - `correlated` — set `lifecycle_state` to `correlated`. ROLE + `incidentId` are **not** touched
+    here; they come from `correlation.results` (reconciled on `alarmId`).
+  - `cleared` — set `lifecycle_state` to `cleared`, set `cleared_at` to `changedAt`.
+  - `reverted-open` — transition back to `open` with audit reason
+    `reverted from correlation: instance expired without a match`, and **clear any in-progress
+    role association** (reset `role` to `none` only if it was provisionally set by an in-progress
+    flow; a final role/`incidentId` already assigned by a completed `CorrelationResultEvent` is
+    preserved — see Design alternatives). A status change for an unknown `alarmId` is a no-op
+    recorded in metrics (the raise may not yet have arrived; never silently dropped).
+- **`LifecycleService`** — the **single owner of the lifecycle state-machine validity rules**.
+  Applies a transition (`open` / `in-progress` / `correlated` / `cleared` / revert-to-`open`) to
+  the `alarm` row and appends one `state_transition` audit row with `to_state`, `reason`,
+  `caused_by_event_id`, `source`, `changed_at`, and `occurred_at`. Used by both
+  `StatusSyncService` (canonical status path) and `EnrichedAlarmConsumer` (wire-`cleared` path),
+  so all STATE changes flow through one rule set.
 - **`PersistedAlarmProducer`** — republishes the **same** `AlarmEvent` (faithful re-serialize of
   the consumed payload via the codec) onto `alarms.persisted.live`, only when the alarm row's
   `published` flag is still false; on success it sets `published = true`. Idempotent producer
   config.
 - **`CorrelationResultConsumer`** — `@KafkaListener` on `correlation.results`. Deserializes via
-  `EventCodec`, confirms `type` is `CorrelationResultEvent`, then `CorrelationService.apply`.
-- **`CorrelationService`** — guarded by `processed_event(eventId)`: inserts the `eventId`
-  (unique constraint) first; on conflict the event was already applied and the call is a no-op.
-  Otherwise updates the root-cause alarm (state `correlated`, role `root-cause`, `incidentId`)
-  and every child alarm (state `correlated`, role `child`, same `incidentId`), appending one
-  `correlated` `state_transition` per affected alarm — all in one DB transaction.
+  `EventCodec`, confirms `type` is `CorrelationResultEvent`, then
+  `CorrelationService.applyRoleAndIncident`.
+- **`CorrelationService`** — the canonical ROLE+incident channel, **scoped to role and incident
+  linkage only — it never sets `lifecycle_state`**. Guarded by `processed_event(eventId)`:
+  inserts the `eventId` (unique constraint) first; on conflict the event was already applied and
+  the call is a no-op. Otherwise updates the root-cause alarm (`role = root-cause`, `incident_id`)
+  and every child alarm (`role = child`, same `incident_id`), appending one `role-assigned`
+  `state_transition` audit entry per affected alarm — all in one DB transaction. Lifecycle STATE
+  is left to `AlarmStatusChange(newStatus=correlated)`.
 - **`AlarmQueryController` / `AlarmQueryService` / `AlarmRepository`** — the read side: filtered
-  list and single-alarm full record (joins `state_transition`).
+  list (state filter now includes `in-progress`) and single-alarm full record (joins
+  `state_transition`).
 - **`DlqRouter`** — sends offending raw bytes plus failure-metadata headers (`x-dlq-reason`,
-  `x-dlq-source-topic`, `traceId` when extractable) to the matching `<topic>.dlq` and commits
-  the source offset so processing continues.
+  `x-dlq-source-topic`, `traceId` when extractable) to the matching `<topic>.dlq`
+  (`alarms.enriched.live.dlq` / `alarms.status.changed.dlq` / `correlation.results.dlq`) and
+  commits the source offset so processing continues.
 
 ## Data model / DB schema
 
 The Alarm Manager **owns** the live alarm store (PostgreSQL, dedicated schema). It is the sole
 writer. There is **no corpus and no historical-alarm table**. The store holds each live alarm,
-its lifecycle, its denormalized correlation outcome, and an ordered transition audit.
+its lifecycle STATE, its denormalized correlation outcome (ROLE + `incidentId`), and an ordered
+transition audit.
 
 **Ownership note (denormalization).** `incident_id` and `role` are **denormalized** onto the
 alarm record. The Correlation Engine remains the **system of record for incidents** (it owns the
 Incident Store); the Alarm Manager only reflects the `incidentId` reference plus role tag from
 `correlation.results` into the alarm-centric view. The Alarm Manager never creates, owns, or
 serves incident records.
+
+**Complementary STATE vs. ROLE.** `lifecycle_state` is written only by the STATE channel
+(`AlarmStatusChange` via `StatusSyncService`, plus the wire-`cleared` and initial-`open` ingest
+paths). `role` + `incident_id` are written only by the ROLE channel (`CorrelationResultEvent` via
+`CorrelationService`). The two never write each other's columns, so out-of-order arrival of the
+two channels is naturally idempotent and order-independent.
 
 ```mermaid
 erDiagram
@@ -152,6 +204,8 @@ erDiagram
     text alarm_id FK
     text to_state
     text reason
+    text source
+    timestamptz changed_at
     text caused_by_event_id
     timestamptz occurred_at
   }
@@ -168,45 +222,68 @@ erDiagram
 | `perceived_severity` | `text` NOT NULL | `AlarmEvent.perceivedSeverity` |
 | `wire_state` | `text` NOT NULL | last seen `AlarmEvent.state` (`raised` / `cleared`) |
 | `raised_at` | `timestamptz` NOT NULL | `AlarmEvent.raisedAt` (used by the time-window filter) |
-| `cleared_at` | `timestamptz` NULL | `AlarmEvent.clearedAt` when cleared |
+| `cleared_at` | `timestamptz` NULL | set when cleared (`AlarmEvent.clearedAt` or `AlarmStatusChange.changedAt`) |
 | `trail_ids` | `jsonb` NOT NULL | `AlarmEvent.trailIds` array; GIN-indexed for trail filtering |
 | `vendor_raw` | `jsonb` NULL | `AlarmEvent.vendorRaw` pass-through |
-| `lifecycle_state` | `text` NOT NULL | Alarm Manager lifecycle: `open` / `correlated` / `cleared` (distinct from `wire_state`) |
-| `role` | `text` NOT NULL DEFAULT `none` | `root-cause` / `child` / `none` |
+| `lifecycle_state` | `text` NOT NULL | Alarm Manager lifecycle STATE; **now one of `open` / `in-progress` / `correlated` / `cleared`** (distinct from `wire_state`); written only by the STATE channel |
+| `role` | `text` NOT NULL DEFAULT `none` | `root-cause` / `child` / `none`; written only by the ROLE channel |
 | `incident_id` | `text` NULL | denormalized incident reference from `correlation.results` |
 | `published` | `boolean` NOT NULL DEFAULT false | republish-once guard for `alarms.persisted.live` |
 | `raw_envelope` | `jsonb` NOT NULL | the exact consumed envelope, so republish re-emits a faithful `AlarmEvent` |
 | `created_at` / `updated_at` | `timestamptz` NOT NULL | row audit |
 
-**Table `state_transition`** (append-only audit; one row per lifecycle change):
+**State-set constraint (DDL delta).** The `lifecycle_state` check constraint now admits the new
+`in-progress` value. `reverted-open` is **not** a stored state — it is a transition **to** `open`
+(distinguished only by the audit `reason`):
+
+```sql
+-- migration V2__add_in_progress_state_and_audit_source.sql
+ALTER TABLE alarm DROP CONSTRAINT IF EXISTS alarm_lifecycle_state_chk;
+ALTER TABLE alarm ADD CONSTRAINT alarm_lifecycle_state_chk
+  CHECK (lifecycle_state IN ('open', 'in-progress', 'correlated', 'cleared'));
+
+-- audit table gains the originating source plus the payload changedAt
+ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS source     text;
+ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS changed_at timestamptz;
+```
+
+**Table `state_transition`** (append-only audit; one row per lifecycle/role change):
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `bigint` PK (identity) | surrogate |
 | `alarm_id` | `text` NOT NULL FK to `alarm.alarm_id` | |
-| `to_state` | `text` NOT NULL | `open` / `correlated` / `cleared` |
-| `reason` | `text` NULL | e.g. `ingest`, `correlation`, `clear` |
+| `to_state` | `text` NOT NULL | `open` / `in-progress` / `correlated` / `cleared` (or `role-assigned` for ROLE-only audit) |
+| `reason` | `text` NULL | e.g. `ingest`, `status-sync`, `clear`, `reverted from correlation: instance expired without a match`, `role-assigned` |
+| `source` | `text` NULL | **new** — `AlarmStatusChange.source` (the service that fired the change) where the transition came from the status channel |
+| `changed_at` | `timestamptz` NULL | **new** — `AlarmStatusChange.changedAt` (when the originator observed the change) |
 | `caused_by_event_id` | `text` NULL | envelope `eventId` of the causing event (dedupe trace) |
-| `occurred_at` | `timestamptz` NOT NULL | UTC timestamp of the transition |
+| `occurred_at` | `timestamptz` NOT NULL | UTC timestamp the Alarm Manager applied the transition |
 
-**Table `processed_event`** (idempotency guard for `correlation.results`):
+**Table `processed_event`** (idempotency guard for `correlation.results` **and**
+`alarms.status.changed`):
 
 | Column | Type | Notes |
 |---|---|---|
-| `event_id` | `text` PK | envelope `eventId`; UNIQUE insert = processed-once guard |
+| `event_id` | `text` PK | envelope `eventId`; UNIQUE insert = processed-once guard (shared by both event-driven channels) |
 | `applied_at` | `timestamptz` NOT NULL | when applied |
 
 **Keys / indexes / constraints:**
 - `alarm.alarm_id` PK — anchors persist idempotency (`INSERT ... ON CONFLICT (alarm_id) DO NOTHING`
   for first-insert; the republish guard uses `published`).
-- `idx_alarm_lifecycle_state` on `(lifecycle_state)` — `state` filter.
+- `alarm_lifecycle_state_chk` — admits `open` / `in-progress` / `correlated` / `cleared`.
+- `idx_alarm_lifecycle_state` on `(lifecycle_state)` — `state` filter (incl. `in-progress`).
 - `idx_alarm_incident_id` on `(incident_id)` — `incidentId` filter.
 - `idx_alarm_raised_at` on `(raised_at)` — time-window filter.
 - `gin_alarm_trail_ids` GIN on `(trail_ids)` — `trailId` membership filter.
 - `idx_transition_alarm_id` on `state_transition (alarm_id, occurred_at)` — ordered history.
-- `processed_event.event_id` PK / UNIQUE — correlation-result idempotency.
-- A partial unique guard ensures **at most one** `open` `state_transition` per alarm
-  (acceptance #1): unique index on `state_transition (alarm_id)` where `to_state = open`.
+- `processed_event.event_id` PK / UNIQUE — shared idempotency guard for `correlation.results`
+  and `alarms.status.changed`.
+- A partial unique guard ensures **at most one** `open`-from-ingest `state_transition` per alarm
+  (acceptance #1). The initial `open` audit entry from ingest is distinct from a later
+  revert-to-`open` entry (the latter carries `reason = reverted from correlation: ...`); the
+  partial unique index is scoped to `to_state = open AND reason = ingest` so a revert does not
+  violate it.
 
 ## Event handling
 
@@ -215,12 +292,41 @@ erDiagram
     `AlarmEvent.alarmId` (persist via PK upsert; republish via the `published` flag). Branch on
     wire `state` (`raised` then persist+republish; `cleared` then lifecycle clear). **DLQ:**
     `alarms.enriched.live.dlq`.
-  - `correlation.results` then `CorrelationResultConsumer`. **Idempotency / dedupe key:**
-    envelope `eventId` (`processed_event` unique insert). **DLQ:** `correlation.results.dlq`.
+  - `alarms.status.changed` then `AlarmStatusChangeConsumer` *(new — canonical STATE channel)*.
+    **Idempotency / dedupe key:** envelope `eventId` (`processed_event` unique insert). Applies
+    `newStatus` to `lifecycle_state` via `LifecycleService`. **DLQ:** `alarms.status.changed.dlq`
+    (codec failure, unknown `schemaVersion`, or unrecognised `newStatus`). At-least-once
+    delivery; a later authoritative status event wins for STATE.
+  - `correlation.results` then `CorrelationResultConsumer` *(re-scoped to ROLE + incident only)*.
+    **Idempotency / dedupe key:** envelope `eventId` (`processed_event` unique insert). **DLQ:**
+    `correlation.results.dlq`.
 - **Producers:**
   - `alarms.persisted.live` then `PersistedAlarmProducer` — payload type **`AlarmEvent`** from
     `libs/event-model`, the same payload that was consumed (faithful re-serialize from
     `raw_envelope` via `EventCodec`). No new payload is introduced (matches `architecture.md`).
+
+**Complementary model / precedence (STATE vs. ROLE), reconciled on `alarmId`.**
+
+- **STATE** (`lifecycle_state`) is owned by `AlarmStatusChange` on `alarms.status.changed`. A
+  later authoritative status event wins (last-writer per `eventId` dedupe). `open` to
+  `in-progress` to `correlated` are driven by status events; `cleared` and revert-to-`open` too.
+- **ROLE + `incidentId`** (`role`, `incident_id`) are owned by `CorrelationResultEvent` on
+  `correlation.results`. They are never derived from `AlarmStatusChange`.
+- **Reconciliation on `alarmId`** (and `incidentId` for the group). The two channels write
+  disjoint columns, so for a given alarm the final record is `state` (from the latest applicable
+  status event) plus `role`/`incident_id` (from the correlation result), regardless of arrival
+  order. Either may arrive first; both are applied idempotently (`processed_event(eventId)`).
+  - If `correlation.results` arrives first: `role`/`incident_id` are set while `lifecycle_state`
+    remains its current STATE (e.g. `in-progress`); a later
+    `AlarmStatusChange(newStatus=correlated)` flips STATE to `correlated`, leaving role/incident
+    intact (AC 18).
+  - If `AlarmStatusChange(newStatus=correlated)` arrives first: STATE becomes `correlated`
+    immediately; a later `correlation.results` fills in `role`/`incident_id`. The record is
+    consistent once both are applied.
+  - `reverted-open` (STATE channel) returns STATE to `open` and clears a **provisional**
+    in-progress role association; a **final** role/`incidentId` from a completed
+    `CorrelationResultEvent` is preserved (Design alternatives — the spec's open-question
+    recommendation, adopted here).
 
 ## API contracts / API schema
 
@@ -235,7 +341,7 @@ Query parameters (all optional, AND-combined):
 
 | Param | Type | Meaning |
 |---|---|---|
-| `state` | enum `open` / `correlated` / `cleared` | filter by lifecycle state |
+| `state` | enum `open` / `in-progress` / `correlated` / `cleared` | filter by lifecycle STATE (**`in-progress` now included**) |
 | `trailId` | string | only alarms whose `trailIds` contain this value |
 | `incidentId` | string | only alarms linked to this incident |
 | `from` | ISO-8601 UTC date-time | `raisedAt` at or after `from` |
@@ -251,7 +357,8 @@ Response `200` body (`AlarmListResponse`):
 }
 ```
 `AlarmSummary` = `{ alarmId, managedObjectId, eventType, perceivedSeverity, raisedAt,
-lifecycleState, role, incidentId, trailIds }`.
+lifecycleState, role, incidentId, trailIds }` (`lifecycleState` now ranges over `open` /
+`in-progress` / `correlated` / `cleared`).
 
 Errors: `400` (`ProblemDetail`, RFC 9457) for an invalid `state` enum, malformed `from`/`to`, or
 `from` after `to`; `500` for an unexpected server error.
@@ -260,16 +367,17 @@ Errors: `400` (`ProblemDetail`, RFC 9457) for an invalid `state` enum, malformed
 
 Response `200` body (`AlarmDetail`) = all `AlarmEvent` fields (`alarmId`, `managedObjectId`,
 `eventType`, `probableCause`, `perceivedSeverity`, `raisedAt`, `clearedAt`, `state`, `trailIds`,
-`vendorRaw`) plus `lifecycleState` (`open` / `correlated` / `cleared`), `role` (`root-cause` /
-`child` / `none`), `incidentId`, and `transitions`: an **ordered** array of
-`{ toState, reason, occurredAt }` (ascending `occurredAt`, UTC).
+`vendorRaw`) plus `lifecycleState` (`open` / `in-progress` / `correlated` / `cleared`), `role`
+(`root-cause` / `child` / `none`), `incidentId`, and `transitions`: an **ordered** array of
+`{ toState, reason, source, changedAt, occurredAt }` (ascending `occurredAt`, UTC). `source` and
+`changedAt` are populated for `AlarmStatusChange`-driven transitions, null otherwise.
 
 Errors: `404` (`ProblemDetail`) when `alarmId` is unknown; `500` otherwise.
 
 ### `GET /openapi.json`
 
 Returns `200` with a valid OpenAPI 3.1 document containing the `/alarms` and `/alarms/{alarmId}`
-operations.
+operations (the `/alarms` `state` enum includes `in-progress`).
 
 ## Integration points (mock vs. real)
 
@@ -314,7 +422,41 @@ sequenceDiagram
   AM->>K1: commit offset
 ```
 
-### (b) Correlation result — lifecycle plus role plus incident
+### (b) Status sync — AlarmStatusChange drives lifecycle STATE
+
+```mermaid
+sequenceDiagram
+  participant SVC as Any service e.g. Correlation Engine
+  participant K as alarms.status.changed
+  participant AM as AlarmStatusChangeConsumer
+  participant DB as live alarm store
+  SVC->>K: AlarmStatusChange newStatus source changedAt
+  K->>AM: deliver raw bytes
+  AM->>AM: EventCodec deserialize plus validate newStatus enum
+  alt invalid schema or unknown newStatus
+    AM->>AM: route to alarms.status.changed.dlq, store unchanged
+  else valid
+    AM->>DB: insert processed_event eventId
+    alt eventId is new
+      alt newStatus is in-progress
+        AM->>DB: set lifecycle in-progress, audit with source and changedAt
+      else newStatus is correlated
+        AM->>DB: set lifecycle correlated, audit, role and incident untouched
+      else newStatus is cleared
+        AM->>DB: set lifecycle cleared, set cleared_at, audit
+      else newStatus is reverted-open
+        AM->>DB: set lifecycle open with revert reason, clear provisional role, audit
+      else newStatus is open
+        AM->>DB: set lifecycle open, audit
+      end
+    else eventId already processed
+      AM->>AM: no-op, idempotent
+    end
+  end
+  AM->>K: commit offset
+```
+
+### (c) Correlation result — ROLE plus incident only
 
 ```mermaid
 sequenceDiagram
@@ -327,23 +469,23 @@ sequenceDiagram
   AM->>AM: EventCodec deserialize plus validate
   AM->>DB: insert processed_event eventId
   alt eventId is new
-    AM->>DB: update rootCauseAlarmId to correlated root-cause plus incidentId
-    AM->>DB: update each childAlarmId to correlated child plus incidentId
-    AM->>DB: insert correlated state_transition per affected alarm
+    AM->>DB: set rootCauseAlarmId role root-cause plus incidentId, lifecycle untouched
+    AM->>DB: set each childAlarmId role child plus incidentId, lifecycle untouched
+    AM->>DB: insert role-assigned state_transition per affected alarm
   else eventId already processed
     AM->>AM: no-op, idempotent
   end
   AM->>K: commit offset
 ```
 
-### (c) web-ui live alarm query
+### (d) web-ui live alarm query
 
 ```mermaid
 sequenceDiagram
   participant UI as web-ui
   participant API as AlarmQueryController
   participant DB as live alarm store
-  UI->>API: GET alarms state open trailId t1
+  UI->>API: GET alarms state in-progress trailId t1
   API->>DB: filtered query
   DB-->>API: matching alarm rows
   API-->>UI: 200 AlarmListResponse
@@ -355,39 +497,61 @@ sequenceDiagram
 
 ## Algorithm logical flow
 
-The core logic is the **lifecycle state machine** plus role tagging plus idempotent persist and
-republish. No statistical/ML algorithm (those live in Noise Filter, Pattern Miner, Correlation
-Engine). The lifecycle:
+The core logic is the **lifecycle state machine** (driven by the STATE channel) plus **role
+tagging** (driven by the ROLE channel) plus idempotent persist and republish. No statistical/ML
+algorithm (those live in Noise Filter, Pattern Miner, Correlation Engine). The lifecycle STATE
+machine:
 
 ```mermaid
 stateDiagram-v2
   [*] --> open : ingest raised, persist plus republish
-  open --> correlated : correlation result, root-cause or child plus incidentId
-  open --> cleared : ingest cleared
-  correlated --> cleared : ingest cleared
+  open --> in_progress : AlarmStatusChange in-progress
+  in_progress --> correlated : AlarmStatusChange correlated
+  open --> correlated : AlarmStatusChange correlated
+  in_progress --> open : AlarmStatusChange reverted-open, clear provisional role
+  correlated --> open : AlarmStatusChange reverted-open, clear provisional role
+  open --> cleared : ingest cleared or AlarmStatusChange cleared
+  in_progress --> cleared : ingest cleared or AlarmStatusChange cleared
+  correlated --> cleared : ingest cleared or AlarmStatusChange cleared
   cleared --> [*]
 ```
+
+Note: `reverted-open` is **not** a node — it is the labelled transition back to `open`. ROLE
+(`root-cause` / `child` / `none`) and `incidentId` are orthogonal attributes set by the ROLE
+channel; they are not states in this machine.
 
 Decision logic per consumed message:
 
 1. **Enriched-alarm message.** Deserialize plus validate (codec; rejects unknown major
-   `schemaVersion`, malformed `managedObjectId`, missing required fields). If invalid then DLQ.
+   `schemaVersion`, malformed `managedObjectId`, missing required fields). If invalid then
+   `alarms.enriched.live.dlq`.
    - If `state = raised`: `INSERT ... ON CONFLICT (alarm_id) DO NOTHING`; if a row was inserted,
-     append the single `open` transition. Then, if `published = false`, set `published = true`
-     and emit on `alarms.persisted.live` (after commit). A redelivery finds the row present and
-     `published = true` then no second persist, no second transition, no second emit.
+     append the single `open` (`reason = ingest`) transition. Then, if `published = false`, set
+     `published = true` and emit on `alarms.persisted.live` (after commit). A redelivery finds the
+     row present and `published = true` then no second persist, no second transition, no second
+     emit.
    - If `state = cleared`: if the alarm exists and is not already `cleared`, set
      `lifecycle_state = cleared`, set `cleared_at`, append a `cleared` transition. If the
-     `alarmId` is unknown, record a `clear_for_unknown_alarm` metric and no-op (the raise may
-     arrive later; never drop silently — it is logged).
-2. **Correlation-result message.** Deserialize plus validate. If invalid then DLQ. Insert
-   `processed_event(eventId)`; on conflict the result was already applied then no-op. Otherwise,
-   for `rootCauseAlarmId` set `lifecycle_state = correlated`, `role = root-cause`,
-   `incident_id`; for each `childAlarmIds` set `lifecycle_state = correlated`, `role = child`,
-   the same `incident_id`; append one `correlated` transition per affected alarm. A `correlated`
-   over a `cleared` alarm is permitted by data but does not re-clear it; ordering is tolerated
-   (a correlation arriving for a not-yet-persisted alarm records the linkage where the alarm is
-   present and counts the absent ones as a metric, never an error — see Error handling).
+     `alarmId` is unknown, record a `clear_for_unknown_alarm` metric and no-op.
+2. **AlarmStatusChange message** *(new — STATE channel)*. Deserialize plus validate (codec;
+   rejects unknown major `schemaVersion` and any `newStatus` outside the frozen enum). If invalid
+   then `alarms.status.changed.dlq` and the store is untouched. Else insert
+   `processed_event(eventId)`; on conflict no-op. Else apply `newStatus` via `LifecycleService`,
+   recording `source` plus `changedAt` in the audit entry:
+   - `in-progress` to `lifecycle_state = in-progress`.
+   - `correlated` to `lifecycle_state = correlated` (role/incident untouched).
+   - `cleared` to `lifecycle_state = cleared`, `cleared_at = changedAt`.
+   - `reverted-open` to `lifecycle_state = open` with the revert reason; clear a **provisional**
+     in-progress role association (`role = none` if not finalised by a `CorrelationResultEvent`).
+   - `open` to `lifecycle_state = open`.
+   A status change for an unknown `alarmId` records a `status_for_unknown_alarm` metric and
+   no-ops (never an error, never silently dropped).
+3. **Correlation-result message** *(ROLE channel)*. Deserialize plus validate. If invalid then
+   `correlation.results.dlq`. Insert `processed_event(eventId)`; on conflict no-op. Otherwise, for
+   `rootCauseAlarmId` set `role = root-cause`, `incident_id`; for each `childAlarmIds` set
+   `role = child`, the same `incident_id`; append one `role-assigned` transition per affected
+   alarm. **Lifecycle STATE is never written here.** A correlation arriving for a not-yet-persisted
+   alarm records the linkage where present and counts the absent ones as a metric.
 
 Parameters are configuration only (Kafka group IDs, retry counts, page-size caps); there are no
 domain thresholds, so nothing is read from the Knowledge Service.
@@ -395,8 +559,9 @@ domain thresholds, so nothing is read from the Knowledge Service.
 ## Seed data & examples
 
 N/A — the Alarm Manager generates no seed/fixture/sample data of its own; it derives all state
-from consumed `AlarmEvent` and `CorrelationResultEvent` messages. Test fixtures reuse the frozen
-`libs/event-model/schema/fixtures/AlarmEvent.json` and `CorrelationResultEvent.json`.
+from consumed `AlarmEvent`, `AlarmStatusChange`, and `CorrelationResultEvent` messages. Test
+fixtures reuse the frozen `libs/event-model/schema/fixtures/AlarmEvent.json`,
+`AlarmStatusChange.json`, and `CorrelationResultEvent.json`.
 
 ## UI wireframes
 
@@ -409,32 +574,39 @@ consumed by web-ui.
 |---|---|
 | Undeserializable / schema-invalid `alarms.enriched.live` message (e.g. missing `alarmId`) | `EventCodec` throws `CodecException`; `DlqRouter` sends raw bytes plus metadata to `alarms.enriched.live.dlq`; **no** alarm persisted, **no** republish (acceptance #12). Logged at WARN with `traceId`. |
 | Malformed `managedObjectId` on an `AlarmEvent` | Codec rejects (the `managedObjectId` pattern in the payload schema) then `CodecException` then `alarms.enriched.live.dlq`; nothing persisted (acceptance #15). |
-| Unknown major `schemaVersion` (2 or higher) on either topic | `SchemaVersionPolicy.check` throws `SchemaVersionException`; message routed to the matching `<topic>.dlq` with no persist and no republish (acceptance #13). |
-| Undeserializable / schema-invalid `correlation.results` message | `CodecException` then `correlation.results.dlq`; no state update. |
-| Wrong envelope `type` on a topic (e.g. a non-`AlarmEvent` on `alarms.enriched.live`) | Treated as poison then matching `<topic>.dlq`. |
+| Unknown major `schemaVersion` (2 or higher) on any consumed topic | `SchemaVersionPolicy.check` throws `SchemaVersionException`; message routed to the matching `<topic>.dlq` with no persist and no state change (acceptance #13). |
+| Schema-invalid `alarms.status.changed` message — missing `alarmId`, or an unrecognised `newStatus` outside the frozen enum | `EventCodec` throws `CodecException`; `DlqRouter` sends raw bytes plus metadata to `alarms.status.changed.dlq`; the live alarm store is **not** modified; processing of subsequent messages continues (acceptance #20). |
+| Undeserializable / schema-invalid `correlation.results` message | `CodecException` then `correlation.results.dlq`; no role/incident update. |
+| Wrong envelope `type` on a topic (e.g. a non-`AlarmStatusChange` on `alarms.status.changed`) | Treated as poison then matching `<topic>.dlq`. |
 | Kafka redelivery of an already-persisted alarm | PK upsert plus `published` guard make persist, transition, and republish exactly-once (acceptance #3). |
-| Kafka redelivery of an already-applied correlation result | `processed_event(eventId)` unique-insert guard makes the update exactly-once, no duplicate transitions (acceptance #5). |
-| Clear for an unknown `alarmId` | No-op plus `clear_for_unknown_alarm` metric plus log (the raise may arrive later). Never an error, never silently lost from observability. |
-| Correlation result referencing an alarm not yet persisted | The present alarms are updated; absent ones counted via the `correlation_for_unknown_alarm` metric plus log. The `processed_event` row is still written (the result is considered applied). |
-| Transient DB error during persist/update | Spring Kafka retry (bounded, exponential backoff from config); on exhaustion the message goes to the matching `<topic>.dlq`. Offsets are committed only after successful processing or DLQ routing, so nothing is silently dropped. |
-| Kafka send failure during republish | The DB transaction (persist plus `published` flip) commits, and the producer send is retried by the idempotent producer; if it ultimately fails, the `published` flag stays the basis for a single re-attempt on the next redelivery (no double-emit). Failures surfaced via metric plus log. |
+| Kafka redelivery of an already-applied `AlarmStatusChange` | `processed_event(eventId)` unique-insert guard makes the STATE update exactly-once, no duplicate transitions. |
+| Kafka redelivery of an already-applied correlation result | `processed_event(eventId)` unique-insert guard makes the role/incident update exactly-once, no duplicate transitions (acceptance #5). |
+| `AlarmStatusChange` / `cleared` / correlation for an unknown `alarmId` | No-op plus `status_for_unknown_alarm` / `clear_for_unknown_alarm` / `correlation_for_unknown_alarm` metric plus log (the raise may arrive later). Never an error, never silently lost from observability. |
+| Out-of-order STATE vs. ROLE arrival for the same alarm | Tolerated: the two channels write disjoint columns and are each idempotent; the record is consistent once both are applied (complementary model). |
+| `reverted-open` for an alarm with a finalised role/incident | STATE returns to `open`; provisional in-progress role is cleared but a finalised `CorrelationResultEvent` role/`incidentId` is preserved (acceptance #17 plus Design alternatives). |
+| Transient DB error during persist/update | Spring Kafka retry (bounded, exponential backoff from config); on exhaustion the message goes to the matching `<topic>.dlq`. Offsets are committed only after successful processing or DLQ routing. |
+| Kafka send failure during republish | The DB transaction (persist plus `published` flip) commits, and the producer send is retried by the idempotent producer; if it ultimately fails, the `published` flag stays the basis for a single re-attempt on the next redelivery (no double-emit). Surfaced via metric plus log. |
 | Invalid query request (`state` not in enum, bad `from`/`to`, `from` after `to`) | `400` `ProblemDetail` with a structured message; nothing read. |
 | `GET /alarms/{alarmId}` unknown id | `404` `ProblemDetail`. |
 
 Nothing is ever silently dropped: every poison message lands on a `<topic>.dlq`, and every
-unexpected condition (unknown-alarm clear, unknown-alarm correlation, send failure) is counted
-in metrics and logged with the `traceId`.
+unexpected condition (unknown-alarm status/clear/correlation, send failure) is counted in metrics
+and logged with the `traceId`.
 
 ## Design alternatives
 
 | Consideration | Alternatives considered | Chosen plus rationale |
 |---|---|---|
-| Stream framework | Kafka Streams vs. plain `spring-kafka` consumer/producer | **Plain `spring-kafka`.** This service is a stateful **DB**-backed persist/republish plus a query API, not a stream-join/window topology; Postgres is the state store, not a Kafka changelog. Plain consumers keep the model simple and consistent with the other non-correlation Spring services. Kafka Streams adds a state-store/topology layer with no benefit here. |
-| Republish-once mechanism | (a) `published` boolean flag on the alarm row checked in the same DB tx, send after commit, (b) Kafka transactions / EOS exactly-once across consume plus produce, (c) a separate dedupe topic or store | **(a) `published` flag.** Gives idempotent republish with a single store and simple reasoning; the send-after-commit ordering plus the flag prevents a redelivery from double-emitting. Full Kafka EOS (b) couples consumer plus producer transactions and the downstream Correlation Engine tolerates at-least-once anyway; (c) adds infrastructure. The flag is the minimal correct design. |
-| Correlation-result idempotency | `processed_event(eventId)` guard table vs. checking whether the alarm is already `correlated` | **`processed_event` table.** The envelope `eventId` is the spec's idempotency key and is unambiguous even when a result re-states the same incident; inspecting alarm state alone cannot distinguish a genuine re-emit from a legitimate new result for the same alarms. |
-| `incidentId` / role storage | Denormalize onto the alarm row vs. a separate `alarm_incident` link table | **Denormalize onto the alarm row.** One incident per alarm in the alarm-centric MVP view; the query API filters/returns by `incidentId` directly and avoids a join. The Correlation Engine remains the incident system-of-record, so this is a read-optimized projection, not a second source of truth. |
-| Lifecycle vs. wire state | Reuse `AlarmEvent.state` (`raised`/`cleared`) as lifecycle vs. a separate `lifecycle_state` column | **Separate `lifecycle_state`.** The wire enum has only `raised` and `cleared`; the lifecycle needs a third value `correlated`. Keeping both (`wire_state` plus `lifecycle_state`) preserves the faithful wire value for republish while modelling the richer lifecycle. |
-| Clear-before-raise / correlation-before-raise ordering | Reject (DLQ) vs. tolerate (no-op plus metric) | **Tolerate.** At-least-once plus independent topics make out-of-order arrival normal; treating it as poison would lose real signal. Tolerate with observability so the condition is visible but processing continues. |
+| STATE source of truth | (a) `AlarmStatusChange` on `alarms.status.changed` as the canonical STATE channel, (b) keep deriving lifecycle STATE from `correlation.results` (the prior design) | **(a) `AlarmStatusChange`.** The merged spec/contract makes `alarms.status.changed` the generic, non-correlation-specific status-sync channel; it carries `in-progress` and `reverted-open` which `correlation.results` cannot express. STATE and ROLE become cleanly separated, and any service (not just the Correlation Engine) can drive STATE. |
+| STATE vs. ROLE separation | Single writer touching both `lifecycle_state` and `role`/`incident_id` vs. **disjoint-column** ownership (STATE channel writes `lifecycle_state` only; ROLE channel writes `role`/`incident_id` only) | **Disjoint-column ownership.** Because the two channels never write the same columns, out-of-order, at-least-once arrival of the two events is naturally idempotent and order-independent — no merge/conflict logic, no total-order requirement. Reconciliation is just both applied. |
+| `reverted-open` modelling | (a) a stored distinct state, (b) a **transition back to `open`** distinguished by an audit `reason` | **(b) transition to `open` with reason.** Matches the spec exactly (`reverted-open` is not a permanent state), keeps the state set minimal (`open` / `in-progress` / `correlated` / `cleared`), and preserves the full revert history in the audit log. |
+| Role-clearing on revert | (a) always clear `role`/`incident_id` on `reverted-open`, (b) clear only a **provisional** in-progress association, preserve a finalised `CorrelationResultEvent` role/incident | **(b).** Adopts the spec's open-question recommendation: a revert means *this* correlation instance expired; a previously completed correlation result remains a real fact about the alarm. Provisional (in-progress) associations are cleared; finalised role/`incidentId` survive. |
+| Status idempotency | Shared `processed_event(eventId)` guard table (used by both `correlation.results` and `alarms.status.changed`) vs. inferring from current `lifecycle_state` | **Shared `processed_event` table.** The envelope `eventId` is the spec's idempotency key and is unambiguous; inspecting state alone cannot distinguish a genuine re-emit from a legitimate new status for the same alarm. One guard table serves both event-driven channels. |
+| Stream framework | Kafka Streams vs. plain `spring-kafka` consumer/producer | **Plain `spring-kafka`.** A stateful **DB**-backed persist/republish plus a query API, not a stream-join/window topology; Postgres is the state store. Plain consumers keep the model simple and consistent with the other non-correlation Spring services. |
+| Republish-once mechanism | (a) `published` boolean flag checked in the same DB tx, send after commit, (b) Kafka EOS exactly-once across consume plus produce, (c) a separate dedupe topic/store | **(a) `published` flag.** Idempotent republish with a single store and simple reasoning; the send-after-commit ordering plus the flag prevents double-emit. Full EOS couples consumer plus producer transactions and the downstream Correlation Engine tolerates at-least-once anyway. |
+| `incidentId` / role storage | Denormalize onto the alarm row vs. a separate `alarm_incident` link table | **Denormalize onto the alarm row.** One incident per alarm in the alarm-centric MVP view; the query API filters/returns by `incidentId` directly. The Correlation Engine remains the incident system-of-record, so this is a read-optimized projection. |
+| Lifecycle vs. wire state | Reuse `AlarmEvent.state` (`raised`/`cleared`) as lifecycle vs. a separate `lifecycle_state` column | **Separate `lifecycle_state`.** The wire enum has only `raised`/`cleared`; the lifecycle now needs `in-progress` and `correlated` as well. Keeping both preserves the faithful wire value for republish while modelling the richer lifecycle. |
+| Out-of-order clear/correlation/status before raise | Reject (DLQ) vs. tolerate (no-op plus metric) | **Tolerate.** At-least-once plus independent topics make out-of-order arrival normal; treating it as poison would lose real signal. Tolerate with observability so the condition is visible but processing continues. |
 
 ## Test plan
 
@@ -448,18 +620,23 @@ the consumer/producer paths).
 | 1 | Valid `AlarmEvent` then persisted `open` with all fields plus single `open` audit entry | `IngestServiceTest.persistsAlarmOpenWithAllFieldsAndSingleOpenTransition` | `alarm` row has `lifecycle_state=open`, `alarmId`/`managedObjectId`/`trailIds`/`raisedAt`/`perceivedSeverity` stored; exactly one `state_transition` with `to_state=open` and a UTC `occurred_at` |
 | 2 | Same `AlarmEvent` republished on `alarms.persisted.live`, valid against frozen binding | `PersistedAlarmProducerTest.republishesSameAlarmEventValidAgainstBinding` | a message on `alarms.persisted.live` deserializes via `EventCodec` to an equal `AlarmEvent` (round-trips against the frozen `AlarmEvent` schema) |
 | 3 | Same `alarmId` consumed twice then one record plus one republish | `IngestIdempotencyTest.redeliveryProducesNoDoublePersistNoDoubleRepublish` | after two deliveries: exactly one `alarm` row, one `open` transition, exactly one message on `alarms.persisted.live` |
-| 4 | `CorrelationResultEvent` then root-cause `correlated`/`root-cause`/`incidentId`, children `correlated`/`child`/same `incidentId`, `correlated` audit per alarm | `CorrelationServiceTest.appliesRootCauseAndChildrenWithIncidentAndAudit` | root-cause row state/role/`incidentId` correct; each child row state/role/`incidentId` correct; one `correlated` transition per affected alarm |
-| 5 | Same `eventId` consumed twice then applied once, no duplicate audit | `CorrelationIdempotencyTest.redeliveredEventAppliedExactlyOnce` | after two deliveries: `processed_event` has one row; each affected alarm has exactly one `correlated` transition |
+| 4 | `CorrelationResultEvent` then root-cause `root-cause`/`incidentId`, children `child`/same `incidentId`, `role-assigned` audit per alarm; STATE untouched | `CorrelationServiceTest.appliesRoleAndIncidentOnlyWithAuditLeavingStateUntouched` | root-cause row `role`/`incident_id` correct; each child row `role`/`incident_id` correct; one `role-assigned` transition per affected alarm; `lifecycle_state` unchanged by this event |
+| 5 | Same `eventId` consumed twice then applied once, no duplicate audit | `CorrelationIdempotencyTest.redeliveredEventAppliedExactlyOnce` | after two deliveries: `processed_event` has one row; each affected alarm has exactly one `role-assigned` transition |
 | 6 | `GET /alarms/{alarmId}` for root cause then `correlated`, `root-cause`, `incidentId`, audit has `open` plus `correlated` with distinct UTC timestamps | `AlarmDetailApiTest.returnsCorrelatedRootCauseWithOpenAndCorrelatedTransitions` | response `lifecycleState=correlated`, `role=root-cause`, correct `incidentId`; `transitions` contains an `open` and a `correlated` entry with distinct `occurredAt` |
 | 7 | `AlarmEvent` `state=cleared` then lifecycle `cleared` plus `cleared` audit | `LifecycleServiceTest.clearedEventTransitionsAlarmToClearedWithAudit` | alarm `lifecycle_state=cleared`, `cleared_at` set; a `state_transition` with `to_state=cleared` |
-| 8 | `GET /alarms?state=open` then only `open` alarms | `AlarmListApiTest.filtersByLifecycleStateOpen` | response contains only `open` alarms; `correlated`/`cleared` absent |
+| 8 | `GET /alarms?state=open` then only `open` alarms | `AlarmListApiTest.filtersByLifecycleStateOpen` | response contains only `open` alarms; `in-progress`/`correlated`/`cleared` absent |
 | 9 | `GET /alarms?trailId=...` then only alarms whose `trailIds` contain it | `AlarmListApiTest.filtersByTrailIdMembership` | only alarms with the trail in `trailIds`; other-trail alarms excluded |
 | 10 | `GET /alarms?incidentId=...` then only alarms linked to that incident | `AlarmListApiTest.filtersByIncidentId` | only alarms with that `incident_id`; other/none excluded |
 | 11 | `GET /alarms?from&to` then only alarms with `raisedAt` in window | `AlarmListApiTest.filtersByRaisedAtTimeWindow` | only alarms with `raisedAt` within the window; outside excluded |
 | 12 | Schema-invalid message (missing `alarmId`) then `alarms.enriched.live.dlq`, no persist, no republish | `EnrichedConsumerDlqTest.schemaInvalidAlarmRoutedToDlqNoPersistNoRepublish` | message appears on `alarms.enriched.live.dlq`; `alarm` table empty; nothing on `alarms.persisted.live` |
-| 13 | Unknown major `schemaVersion` then DLQ, no persist, no republish | `SchemaVersionDlqTest.unknownMajorVersionRejectedToDlq` | message on the matching `<topic>.dlq`; no row persisted; no republish |
-| 14 | `GET /openapi.json` then 200, valid OpenAPI 3.1 with `/alarms` plus `/alarms/{alarmId}` | `OpenApiContractTest.publishesValidOpenApi31WithAlarmPaths` | `200`; body parses as OpenAPI 3.1; contains both path operations; equals the checked-in `openapi.json` |
+| 13 | Unknown major `schemaVersion` then DLQ, no persist, no state change | `SchemaVersionDlqTest.unknownMajorVersionRejectedToDlq` | message on the matching `<topic>.dlq`; no row persisted; no republish/state change |
+| 14 | `GET /openapi.json` then 200, valid OpenAPI 3.1 with `/alarms` plus `/alarms/{alarmId}` | `OpenApiContractTest.publishesValidOpenApi31WithAlarmPaths` | `200`; body parses as OpenAPI 3.1; contains both path operations; `state` enum includes `in-progress`; equals the checked-in `openapi.json` |
 | 15 | Stored `managedObjectId` conforms to `objectType:id`; malformed then `alarms.enriched.live.dlq` | `ManagedObjectIdValidationTest.malformedManagedObjectIdRoutedToDlqAndStoredIdsConform` | a malformed-`managedObjectId` alarm is DLQ-routed and not persisted; every stored `managed_object_id` matches `ManagedObjectId.PATTERN` |
+| 16 | `AlarmStatusChange(newStatus=in-progress)` for a known alarm then `in-progress` plus audit with `source`/`changedAt` | `AlarmStatusChangeConsumerTest.inProgressSetsStateAndAuditsSourceAndChangedAt` | alarm `lifecycle_state=in-progress`; a `state_transition` `to_state=in-progress` carrying `source` and `changed_at` from the payload and a UTC `occurred_at` |
+| 17 | `AlarmStatusChange(newStatus=reverted-open)` for an `in-progress` alarm then back to `open`, revert-reason audit, in-progress role cleared | `AlarmStatusChangeConsumerTest.revertedOpenReturnsToOpenWithReasonAndClearsProvisionalRole` | alarm `lifecycle_state=open`; a `state_transition` `to_state=open` whose `reason` notes the revert; a provisional in-progress `role` is reset to `none` (a finalised correlation role is preserved) |
+| 18 | Alarm whose role+`incidentId` came from a `CorrelationResultEvent` and whose state was set `correlated` by `AlarmStatusChange` then both correct, reconciled on `alarmId` | `ComplementaryReconciliationTest.stateFromStatusChangeRoleAndIncidentFromCorrelationReconciledOnAlarmId` | after both events (in either order): record has `lifecycle_state=correlated` AND `role`+`incident_id` from the `CorrelationResultEvent`; neither channel overwrote the other's columns |
+| 19 | `GET /alarms?state=in-progress` then only `in-progress` alarms | `AlarmListApiTest.filtersByLifecycleStateInProgress` | response contains only `in-progress` alarms; `open`/`correlated`/`cleared` absent |
+| 20 | Schema-invalid `AlarmStatusChange` (missing `alarmId` or bad `newStatus`) then `alarms.status.changed.dlq`, store unmodified, processing continues | `AlarmStatusChangeDlqTest.invalidStatusChangeRoutedToDlqStoreUnmodifiedProcessingContinues` | poison message lands on `alarms.status.changed.dlq`; no `alarm` row changed; a subsequent valid `AlarmStatusChange` is still applied |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -470,25 +647,28 @@ harnesses).
 | # | Scenario | Trigger then path | Expected outcome |
 |---|---|---|---|
 | 1 | Live alarm flows in-line to correlation | Produce an enriched `AlarmEvent` (`state=raised`) on `alarms.enriched.live` | Alarm persisted `open` with one `open` transition; the same `AlarmEvent` appears on `alarms.persisted.live` for the Correlation Engine; `GET /alarms?state=open` returns it |
-| 2 | Correlation outcome reflected into live state | Produce a `CorrelationResultEvent` referencing a persisted root cause plus children | Root cause `correlated`/`root-cause`, children `correlated`/`child`, all linked to `incidentId`; `GET /alarms?incidentId=...` returns exactly that group; `GET /alarms/{rootCause}` shows `open` plus `correlated` transitions |
-| 3 | Clear path | Produce an `AlarmEvent` `state=cleared` for a persisted alarm | Alarm transitions to `cleared`; `GET /alarms?state=cleared` returns it; `GET /alarms?state=open` no longer returns it |
-| 4 | At-least-once redelivery (partial/duplicate path) | Re-deliver the same `alarms.enriched.live` and the same `correlation.results` message | Exactly one alarm row, one republish on `alarms.persisted.live`, one `open` plus one `correlated` transition; no duplicates |
-| 5 | Poison message (failure path) | Produce a malformed `AlarmEvent` (missing `alarmId`) and an envelope with `schemaVersion=2` | Both land on the matching `<topic>.dlq`; no rows persisted; no republish; service keeps processing subsequent valid messages |
-| 6 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent` and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `clear_for_unknown_alarm` metrics increment; a later raise for the same `alarmId` still persists `open` |
-| 7 | web-ui contract | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms` plus `GET /alarms/{alarmId}` against the real service | Responses match the published schema (filters, detail with transitions); no drift between running surface and checked-in spec |
+| 2 | Active correlation instance — in-progress then correlated | Produce `AlarmStatusChange(in-progress)`, then a `CorrelationResultEvent`, then `AlarmStatusChange(correlated)` for the same alarm | After `in-progress`, `GET /alarms?state=in-progress` returns it; after the correlation result plus `correlated`, the record has `lifecycle_state=correlated`, `role` plus `incidentId` from the result; audit shows `open` then `in-progress` then `correlated` with `source`/`changedAt` populated |
+| 3 | Complementary reconciliation, either arrival order | Produce `CorrelationResultEvent` before `AlarmStatusChange(correlated)` for one alarm, and the reverse order for another | Both alarms end with `lifecycle_state=correlated` AND correct `role`/`incidentId`; STATE never overwrote ROLE and vice-versa |
+| 4 | Reverted-open (instance expired) | Produce `AlarmStatusChange(in-progress)` then `AlarmStatusChange(reverted-open)` for the same alarm | Alarm returns to `lifecycle_state=open`; audit has a revert-reason entry; `GET /alarms?state=open` returns it; `GET /alarms?state=in-progress` no longer returns it; provisional role cleared |
+| 5 | Clear path (both channels) | Produce an `AlarmEvent` `state=cleared`, and separately an `AlarmStatusChange(cleared)`, for persisted alarms | Each alarm transitions to `cleared`; `GET /alarms?state=cleared` returns them; `GET /alarms?state=open` no longer returns them |
+| 6 | At-least-once redelivery (partial/duplicate path) | Re-deliver the same `alarms.enriched.live`, `alarms.status.changed`, and `correlation.results` messages | Exactly one alarm row, one republish, one transition per logical change; `processed_event` dedupes the status and correlation events; no duplicates |
+| 7 | Poison message (failure path) | Produce a malformed `AlarmEvent` (missing `alarmId`), an envelope with `schemaVersion=2`, and an `AlarmStatusChange` with an unrecognised `newStatus` | Each lands on the matching `<topic>.dlq` (`alarms.enriched.live.dlq` / `alarms.status.changed.dlq`); no rows persisted/modified; service keeps processing subsequent valid messages |
+| 8 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent`, an `AlarmStatusChange`, and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `status_for_unknown_alarm` / `clear_for_unknown_alarm` metrics increment; a later raise for the same `alarmId` still persists `open` |
+| 9 | web-ui contract | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service | Responses match the published schema (filters incl. `in-progress`, detail with transitions incl. `source`/`changedAt`); no drift between running surface and checked-in spec |
 
 ## Config & observability
 
 - **Config (env only, no hard-coded values):** `KAFKA_BOOTSTRAP_SERVERS`,
   `ALARM_DB_JDBC_URL` / `ALARM_DB_USER` / `ALARM_DB_PASSWORD`,
-  `KAFKA_GROUP_ID_ENRICHED` / `KAFKA_GROUP_ID_CORRELATION`,
+  `KAFKA_GROUP_ID_ENRICHED` / `KAFKA_GROUP_ID_STATUS` / `KAFKA_GROUP_ID_CORRELATION`,
   `KAFKA_CONSUMER_MAX_RETRIES` / `KAFKA_RETRY_BACKOFF_MS`, `QUERY_MAX_PAGE_SIZE`. No Knowledge
   Service params are needed (no domain thresholds).
 - **`/health`** — Actuator liveness plus readiness (readiness gates on Kafka consumer assignment
-  and a DB connection check).
+  for all three consumers and a DB connection check).
 - **`/metrics`** — Prometheus (Micrometer): `alarms_persisted_total`,
-  `alarms_republished_total`, `correlation_results_applied_total`, `alarms_cleared_total`,
-  `dlq_routed_total{topic}`, `clear_for_unknown_alarm_total`,
+  `alarms_republished_total`, `status_changes_applied_total{newStatus}`,
+  `correlation_results_applied_total`, `alarms_cleared_total`, `dlq_routed_total{topic}`,
+  `status_for_unknown_alarm_total`, `clear_for_unknown_alarm_total`,
   `correlation_for_unknown_alarm_total`, consumer lag, query latency.
 - **Logging** — structured JSON; the envelope `traceId` is extracted and propagated into every
   log line (MDC) for cross-service tracing.
@@ -503,5 +683,9 @@ harnesses).
   port (`/health`, `/metrics`, `/openapi.json`, `/alarms`).
 - **Compose:** depends on `kafka` and `postgres` (its own schema); all addresses from env.
 - **Local run:** `./gradlew bootRun` with `KAFKA_BOOTSTRAP_SERVERS` and `ALARM_DB_JDBC_URL` set;
-  Flyway applies the `alarm` / `state_transition` / `processed_event` migrations on startup.
-- **README:** documents env vars, topics consumed/produced, the query API, and the DLQ topics.
+  Flyway applies the `alarm` / `state_transition` / `processed_event` migrations (incl. the
+  `in-progress` state and audit `source`/`changed_at` delta) on startup.
+- **README:** documents env vars, topics consumed (`alarms.enriched.live`,
+  `alarms.status.changed`, `correlation.results`) / produced (`alarms.persisted.live`), the
+  query API, and the DLQ topics (`alarms.enriched.live.dlq`, `alarms.status.changed.dlq`,
+  `correlation.results.dlq`).
