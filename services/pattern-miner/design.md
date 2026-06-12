@@ -59,7 +59,7 @@ Every spec **Task (high-level)** is realized below; none is dropped or re-scoped
 | 3. Apply a **dynamic, activity/idle-driven session window** per trail: pool per-trail alarms, split on idle gaps; the closing gap **adapts to each burst's tempo** (fast cascade vs. slow-developing get different boundaries); all params Knowledge-sourced incl. base/fallback gap. | `windowing.SessionWindower` reads each `TransactionEvent.alarms[]` (ordered typed alarms), pools them per `trailId`, orders by `raisedAt`, and splits into sessions where the inter-arrival gap exceeds an **adaptive closing gap** computed per burst by `windowing.AdaptiveGap` from the `WindowingParams`. Each session gets a composite `sourceWindowId`. (Mechanism resolved below — Algorithm logical flow → Windowing.) |
 | 4. Run PrefixSpan (Spark MLlib) over the session-windowed, trail-scoped sequences yielding all frequent ordered subsequences meeting min-support; **pure sequence mining, no topology**. | `mining.PrefixSpanMiner` builds the Spark `sequences` DataFrame (one row per session = ordered list of single-item `eventType` sets), runs `PrefixSpan(minSupport, maxPatternLength)`, and reads back `freqSequences`, truncated to `maxSequenceCount`. No topology graph is consulted. |
 | 5. Compute support, confidence, lift for each discovered sequence (MVP metrics; no conviction). | `metrics.MetricsComputer` computes `support` (relative frequency), `confidence` (conditional probability of the sequence given its prefix), and `lift` (over the independence baseline) from PrefixSpan frequency counts + per-item marginals. `conviction` is **not** computed and not in the schema. |
-| 6. Assemble a `PatternMinedEvent` per sequence: `sequence`, `support`, `confidence`, `lift`, `trailId`, `timing`, `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`) — no RCA/lifecycle fields. | `assemble.PatternAssembler` builds a `PatternMinedEvent` (Pydantic) per discovered sequence; `timing` = inter-arrival statistics computed from the per-alarm `raisedAt` in `alarms[]` within matching sessions; `provenance` carries the composite `sourceWindowId`, the `snapshotId` from the source transaction, `codebookVersion` from the Knowledge response, and `domain` propagated from the transaction. RCA/lifecycle/patternId are structurally impossible (schema forbids extras). |
+| 6. Assemble a `PatternMinedEvent` per sequence: `sequence`, `support`, `confidence`, `lift`, `trailId`, `timing`, `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`) — no RCA/lifecycle fields. | `assemble.PatternAssembler` builds a `PatternMinedEvent` (Pydantic) per discovered sequence; `timing` is the canonical **millisecond-keyed** inter-arrival statistics object (`timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `interArrivalStddevMs`) computed by `metrics.TimingComputer` from the per-alarm `raisedAt` in `alarms[]` within matching sessions — the **contract-of-shape the Pattern Manager's `SessionWindowDeriver` consumes** (see Timing statistics, contract-of-shape on the open `timing` object below). `provenance` carries the composite `sourceWindowId`, the `snapshotId` from the source transaction, `codebookVersion` from the Knowledge response, and `domain` propagated from the transaction. RCA/lifecycle/patternId are structurally impossible (schema forbids extras). |
 | 7. Emit one `PatternMinedEvent` on `patterns.mined` per discovered sequence. | `emit.Producer` wraps each `PatternMinedEvent` in an envelope (`type="PatternMinedEvent"`, `schemaVersion=1`, `source="pattern-miner"`, propagated `traceId`) and produces to `patterns.mined`. |
 | 8. Route unprocessable (poison) messages to `transactions.clean.dlq`. | `ingest.DlqRouter` catches deserialize/validation failures and unknown major `schemaVersion`, publishes the raw bytes + a structured error header to `transactions.clean.dlq`, and continues. |
 
@@ -88,6 +88,7 @@ flowchart TD
   AG["windowing.AdaptiveGap (per-burst tempo gap)"]
   M["mining.PrefixSpanMiner (Spark MLlib, no topology)"]
   MET["metrics.MetricsComputer (support, confidence, lift)"]
+  TC["metrics.TimingComputer (ms timing stats from raisedAt)"]
   A["assemble.PatternAssembler (PatternMinedEvent plus provenance)"]
   E["emit.Producer (patterns.mined)"]
   OBS["health and metrics (ASGI plus Prometheus)"]
@@ -99,8 +100,10 @@ flowchart TD
   AG --> W
   K --> M
   W --> M
+  W --> TC
   M --> MET
   MET --> A
+  TC --> A
   K --> A
   A --> E
 ```
@@ -122,8 +125,12 @@ flowchart TD
 - **mining.PrefixSpanMiner** — Spark MLlib `PrefixSpan` over the session sequences (pure sequence
   mining; no topology).
 - **metrics.MetricsComputer** — support / confidence / lift from frequency counts + marginals.
+- **metrics.TimingComputer** — computes the canonical **millisecond-keyed** `timing` object
+  (`timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `interArrivalStddevMs`) from the
+  `alarms[].raisedAt` in the sessions that match a discovered sequence. These are the **exact keys
+  and units the Pattern Manager's `SessionWindowDeriver` consumes** (see Timing statistics).
 - **assemble.PatternAssembler** — builds `PatternMinedEvent` + `Provenance` (incl. `domain`);
-  `timing` from `alarms[].raisedAt`.
+  attaches the `TimingComputer` ms-keyed `timing` object.
 - **emit.Producer** — envelopes and produces to `patterns.mined`.
 - **health/metrics** — `/health`, `/metrics` only (no business HTTP).
 
@@ -211,7 +218,8 @@ sequenceDiagram
   W->>PS: per-trail session sequences of eventType, sourceWindowId per session
   PS-->>MC: frequent ordered sequences plus counts
   MC->>AS: support, confidence, lift per sequence
-  AS->>P: one PatternMinedEvent per sequence (provenance plus domain)
+  W->>AS: ms timing timeframeMs, medianInterArrivalMs, maxInterArrivalMs, interArrivalStddevMs
+  AS->>P: one PatternMinedEvent per sequence (timing plus provenance plus domain)
 ```
 
 ### Poison-message / DLQ path
@@ -249,7 +257,7 @@ flowchart TD
   FREQ -- no --> DONE["emit nothing, log empty result"]
   FREQ -- yes --> CAP["truncate to maxSequenceCount by descending support"]
   CAP --> METR["compute support, confidence, lift per sequence"]
-  METR --> TIM["compute timing inter-arrival stats from alarms raisedAt"]
+  METR --> TIM["compute ms timing timeframeMs, medianInterArrivalMs, maxInterArrivalMs, interArrivalStddevMs from alarms raisedAt"]
   TIM --> PROV["assemble provenance sourceWindowId, snapshotId, codebookVersion, domain"]
   PROV --> EMIT["emit one PatternMinedEvent per sequence to patterns.mined"]
 ```
@@ -321,6 +329,59 @@ distinguishes the multiple sessions a single trail/transaction can yield.
   baseline); a spurious high-support co-occurrence yields `lift` near 1.0 (criterion 2).
 - `conviction` is **deliberately not computed** (out of MVP; not in the frozen schema).
 
+### Timing statistics (contract-of-shape on the open `timing` object)
+
+`PatternMinedEvent.timing` is an **open object** (`additionalProperties: true` in the frozen
+`PatternMinedEvent` schema) — so the schema does **not** change here. What *does* change is the
+producer-side **contract-of-shape**: the keys and units the Miner writes into that open object,
+agreed with the **sole consumer**, the Pattern Manager's `SessionWindowDeriver` (frozen in the
+Pattern Manager design). `metrics.TimingComputer` emits **exactly** these four canonical sub-fields,
+all in **milliseconds**, computed from the per-alarm `raisedAt` across the sessions that match the
+discovered sequence:
+
+| Key | Units | Definition |
+|---|---|---|
+| `timeframeMs` | ms | Observed span of a sequence occurrence — `max(raisedAt) − min(raisedAt)` across the alarms of the matching session, taken as the **median over all matching session occurrences** (the representative timeframe of the pattern, robust to outlier sessions). The dominant signal the deriver uses for window length. |
+| `medianInterArrivalMs` | ms | **Median** gap between consecutive alarms (ordered by `raisedAt`) within a sequence occurrence, taken over all consecutive-alarm gaps across the matching sessions. **Median, not mean** — the deriver uses it as the denominator of `cv`. |
+| `maxInterArrivalMs` | ms | The **maximum** consecutive-alarm gap observed across the matching sessions. The deriver uses it as a gap floor for gap-based windows. |
+| `interArrivalStddevMs` | ms | The **standard deviation** of the consecutive-alarm inter-arrival gaps across the matching sessions. The deriver computes `cv = interArrivalStddevMs / medianInterArrivalMs` to classify the window `type`. |
+
+**Computation.** `raisedAt` is an ISO-8601 instant; each gap and span is computed as a duration in
+**whole milliseconds** (`(t2 − t1)` in ms, integer). Inter-arrivals are the consecutive-alarm gaps
+**within** each matching session (never across the idle boundary between sessions). `timeframeMs`,
+`medianInterArrivalMs`, `maxInterArrivalMs`, and `interArrivalStddevMs` are aggregated over **all
+matching session occurrences** of the sequence so the statistics describe the pattern, not a single
+session. A degenerate occurrence (a single-alarm session, or one alarm in the sequence) yields no
+inter-arrival sample for that occurrence; if a sequence has **no** inter-arrival sample at all,
+`medianInterArrivalMs`, `maxInterArrivalMs`, and `interArrivalStddevMs` are emitted as `0` and
+`timeframeMs` as `0`, which the consumer's documented fallback handles (it never fails on thin
+timing).
+
+**Why median (not mean).** The previous design emitted `meanInterArrivalSeconds` /
+`stdDevSeconds`. The consumer derives the coefficient of variation as
+`cv = interArrivalStddevMs / medianInterArrivalMs`, so it needs the **median** (robust to the
+heavy-tailed bursty gaps typical of alarm storms), not the mean, and it needs **milliseconds**, not
+seconds. The mean/seconds keys are therefore **removed** and replaced by the four ms keys above.
+This is the P2-GAP-10 data-integration alignment: producer keys/units are now byte-aligned to the
+consumer's `SessionWindowDeriver`.
+
+**Consumer alignment (informative — not owned here).** The Pattern Manager reads `timeframeMs` and
+`medianInterArrivalMs` as its two relied-on signals and `maxInterArrivalMs` /
+`interArrivalStddevMs` as optional refinements (`base = ceil(timeframeMs × marginFactor)`, gap floor
+from `maxInterArrivalMs`, `cv = interArrivalStddevMs / medianInterArrivalMs` for the window `type`).
+The Miner is the **producer** and emits the keys the consumer requires; the deriver itself is the
+Pattern Manager's concern.
+
+> **Fixture-alignment follow-up (event-model, not changed here).** The schema `timing` stays an
+> open object — **no event-model schema change**. The checked-in fixture
+> `libs/event-model/schema/fixtures/PatternMinedEvent.json` still illustrates the **old**
+> `{meanInterArrivalSeconds, stdDevSeconds}` shape; it should be updated to the new canonical keys
+> (`{timeframeMs, medianInterArrivalMs, maxInterArrivalMs, interArrivalStddevMs}`) as a small
+> **fixture-only follow-up in `libs/event-model`** so cross-service fixture-based tests match the
+> producer/consumer agreement. That edit belongs to the event-model owner (this design unit does not
+> edit event-model) and is **not** a schema change — the fixture must still validate against the
+> unchanged open `timing` schema.
+
 **No pattern state.** The flow ends at emit. There is no RCA step, no codebook reconciliation, no
 lifecycle assignment, no topology access, and nothing is persisted — those are out of scope
 (Pattern Manager).
@@ -334,6 +395,26 @@ Simulator-style injected fiber-cut sequence `["lossOfSignal","linkDown","bgpPeer
 low-lift co-occurrence, a fast-tempo and a slow-tempo burst, and a two-burst idle-split trail —
 described inline in the Test plan rather than as a standalone seed dataset. No resolver fake is
 needed (alarm detail is in-band).
+
+**Worked timing example (ms keys).** A session whose alarms `raisedAt` are
+`12:00:00.000`, `12:00:04.000`, `12:00:09.000` (one occurrence of
+`["lossOfSignal","linkDown","bgpPeerDown"]`) has consecutive gaps `4000 ms` and `5000 ms` and a
+span of `9000 ms`. Over a single such occurrence the Miner emits:
+
+```json
+"timing": {
+  "timeframeMs": 9000,
+  "medianInterArrivalMs": 4500,
+  "maxInterArrivalMs": 5000,
+  "interArrivalStddevMs": 500
+}
+```
+
+(median of `{4000, 5000}` is `4500`; max is `5000`; population stddev of `{4000, 5000}` is `500`;
+span is `9000`.) These are the exact keys/units the Pattern Manager `SessionWindowDeriver` consumes.
+The same example replaces the old `{meanInterArrivalSeconds: 4.5, stdDevSeconds: 1.2}` illustration —
+note the **fixture-alignment follow-up** flagged in Timing statistics for
+`libs/event-model/schema/fixtures/PatternMinedEvent.json`.
 
 ## UI wireframes
 
@@ -366,6 +447,7 @@ results; every other failure is logged and either DLQ-routed or fails the run.
 | **Stateless job vs. long-running Streams app** | (a) batch Spark job run per learning window; (b) a long-running streaming windower. | **(a) stateless batch job.** The spec and architecture classify the Miner as a stateless, container-only Spark job active only in P2; batch matches the offline learning phase and keeps it stateless (no owned store). |
 | **Dedupe scope** | (a) per-run in-memory `eventId` set; (b) durable dedupe store. | **(a) in-memory.** The service owns no datastore (stateless); at-least-once replay safety comes from `eventId` dedupe within a run plus idempotent re-mining (same input yields same patterns). A durable store would violate the no-owned-store invariant for this service. |
 | **Knowledge-unavailable behaviour** | (a) fail the run; (b) mine with last-known/default thresholds (incl. a default gap). | **(a) fail fast plus retry.** Mining with stale/default thresholds (or a default windowing gap) would reintroduce hard-coded behaviour (forbidden) and could emit patterns under wrong boundaries; failing the run and retrying preserves no-hard-coded-thresholds. |
+| **`timing` keys + units (P2-GAP-10)** | (a) keep the old `{meanInterArrivalSeconds, stdDevSeconds}`; (b) make `timing` a typed schema object (real contract change); (c) emit the consumer-aligned ms keys `{timeframeMs, medianInterArrivalMs, maxInterArrivalMs, interArrivalStddevMs}` on the **open** `timing` object. | **(c) consumer-aligned ms keys on the open object.** The sole consumer (Pattern Manager `SessionWindowDeriver`) reads `timeframeMs` + `medianInterArrivalMs` (and optional `maxInterArrivalMs`/`interArrivalStddevMs`) in **milliseconds**, computing `cv` from the **median**. (a) is wrong keys (mean vs median, no timeframe/max) and wrong units (seconds) — the deriver would mis-derive every window. (b) is over-engineering and a frozen-schema change for a field deliberately kept open; the decision (held with the human) is to keep `timing` open and pin the keys by producer/consumer agreement. (c) needs **no schema change** (the schema is `additionalProperties:true`), aligns producer to consumer exactly, and uses median for robustness against bursty heavy-tailed gaps. |
 
 ## Test plan
 
@@ -389,9 +471,12 @@ Test inputs are `TransactionEvent`s with **typed `alarms[]`** populated inline �
 | 11 | A single trail with two bursts separated by a clear idle period (longer than any intra-burst gap) splits into **exactly two** sessions; intra-burst alarms stay together. | `test_idle_period_splits_trail_into_two_sessions` | Build one trail with burst-1, a long idle gap, then burst-2 (each intra-burst inter-arrival small). Windowing produces **exactly two sessions**, burst-1's alarms all in session 1 and burst-2's all in session 2, with no further intra-burst split. |
 | 12 | Changing the Knowledge windowing configuration and reprocessing the **same** inputs yields **different** session boundaries — proving adaptation is Knowledge-governed, nothing hard-coded. | `test_knowledge_windowing_config_changes_boundaries` | Reprocess a fixed alarm-event set twice with two different `WindowingParams` from the Knowledge mock (e.g. different `baseGap`/`multiplier`); the resulting session boundaries (count and/or membership) differ; under identical params they are identical (deterministic), confirming boundaries are a pure function of Knowledge-sourced params plus input. |
 | — (typed `alarms[]`, no resolver) | Session sequences + timing are built directly from `TransactionEvent.alarms[]` — no alarm-detail resolver/lookup. | `test_sequences_and_timing_built_from_typed_alarms` | The PrefixSpan input items equal the `alarms[].eventType` values in `raisedAt` order, and `timing` inter-arrival stats are computed from `alarms[].raisedAt`; no resolver/lookup/HTTP-join is invoked (there is no such collaborator), and removing `alarms[]` makes the event fail schema validation and DLQ-route (not a resolver call). |
+| — (P2-GAP-10) timing canonical keys + units consumed by Pattern Manager | `PatternMinedEvent.timing` carries exactly `timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `interArrivalStddevMs`, all in **milliseconds**; no `meanInterArrivalSeconds`/`stdDevSeconds`. | `test_timing_emits_ms_keys_for_session_window_deriver` | For the worked example (`raisedAt` gaps `4000`/`5000` ms, span `9000` ms), the emitted `timing` equals `{timeframeMs:9000, medianInterArrivalMs:4500, maxInterArrivalMs:5000, interArrivalStddevMs:500}`; the four keys are present and integer-ms; the old `meanInterArrivalSeconds`/`stdDevSeconds` keys are **absent**; the object still validates against the open (`additionalProperties:true`) `timing` schema. |
+| — (P2-GAP-10) median, not mean | `medianInterArrivalMs` is the **median** of consecutive inter-arrival gaps (so the consumer's `cv = interArrivalStddevMs / medianInterArrivalMs` is well-defined), never the mean. | `test_median_inter_arrival_used_not_mean` | For an asymmetric gap set whose median and mean differ (e.g. gaps `1000, 1000, 7000` ms → median `1000`, mean `3000`), `medianInterArrivalMs` equals `1000` (median), proving median is emitted; `maxInterArrivalMs` equals `7000`; `interArrivalStddevMs` equals the stddev of the gaps. |
 
 Every spec acceptance criterion (1–12) maps to a named pytest test above, plus the typed-`alarms[]`
-no-resolver test.
+no-resolver test and the two P2-GAP-10 timing tests (ms canonical keys; median-not-mean) that pin
+the producer-side contract-of-shape the Pattern Manager `SessionWindowDeriver` consumes.
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -411,6 +496,7 @@ alarm-detail collaborator.
 | 8 | At-least-once redelivery | Redeliver an already-consumed `eventId` | No duplicate `PatternMinedEvent`; dedupe metric increments. |
 | 9 | Knowledge down (failure path) | Stop Knowledge, publish a transaction | Run fails fast with retries and back-off; no event emitted under stale/default thresholds or a default gap; offsets not advanced so it retries when Knowledge returns. |
 | 10 | No-RCA / no-topology boundary holds end to end | Inspect every emitted `patterns.mined` event and the service's dependencies | No event carries `rootCauseAlarmType`/`patternId`/`lifecycle`; the service makes no call to the Topology graph — RCA, lifecycle, and topology validation remain the Pattern Manager's job. |
+| 11 | Timing keys consumed by Pattern Manager (P2-GAP-10) | Mine a fiber-cut storm; the emitted `patterns.mined` event flows into a real Pattern Manager `SessionWindowDeriver` (or a deriver-shaped reader) | The emitted `timing` carries `timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `interArrivalStddevMs` in ms; the consumer derives a valid `sessionWindow` (`windowMs greater than 0`, valid `type`) **without** a key-alias remap and **without** any seconds-to-ms conversion — confirming producer/consumer byte-alignment on the open `timing` object end to end. |
 
 ## Config & observability
 
@@ -430,7 +516,8 @@ alarm-detail collaborator.
   session count, sequence count, and duration. **Structured JSON logs** for: message consumed,
   duplicate dropped, DLQ routed, params fetched, **session window finalized (with the adaptive gap
   used and tempo class per burst)**, mining run started/completed (with sequence count), events
-  emitted, and every error.
+  emitted (including the ms `timing` stats `timeframeMs`/`medianInterArrivalMs`/`maxInterArrivalMs`/`interArrivalStddevMs`),
+  and every error.
 
 ## Build & run
 

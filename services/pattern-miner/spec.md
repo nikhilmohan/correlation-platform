@@ -94,6 +94,12 @@ responsibilities belong exclusively to the Pattern Manager (§6.9).
    `support`, `confidence`, `lift`, `trailId`, `timing` (inter-arrival statistics), and
    `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion` — the last sourced from
    the Knowledge Service mining-params response) — with no RCA or lifecycle fields.
+   `timing` is an **open object** in the frozen schema (`additionalProperties: true`); the
+   Miner is its **sole producer** and emits the canonical, consumer-aligned **millisecond**
+   sub-fields the Pattern Manager's session-window deriver consumes — `timeframeMs`,
+   `medianInterArrivalMs`, `maxInterArrivalMs`, `interArrivalStddevMs` (median, not mean; ms,
+   not seconds). This is a producer/consumer contract-of-shape on the open field, **not** an
+   event-model schema change.
 7. Emit each `PatternMinedEvent` onto `patterns.mined` (one event per discovered sequence).
 8. Route any unprocessable (poison) message to `transactions.clean.dlq`.
 
