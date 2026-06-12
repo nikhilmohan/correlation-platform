@@ -48,5 +48,8 @@ Gaps are fixed in the owning service's spec/design via gated PRs and reflected h
 | 6 — Pattern Manager: trailId in read-API, rootCauseAlarmType=vocab, sessionWindow deriv pinned, PATCH body + PatternPage envelope frozen | #139 | P3-G1, P2-GAP-04, P2-GAP-05, P2-GAP-06, P2-GAP-08 | ⏳ awaiting merge |
 | 6b — Pattern Miner: emit canonical ms timing keys (NEW gap surfaced by verification) | #140 | P2-GAP-10 (new) | ⏳ awaiting merge |
 | 6c — event-model: align pattern timing fixtures to ms keys | #141 | P2-GAP-10 (fixtures) | ⏳ awaiting merge |
+| 7a — Correlation Engine: codebook trail-signatures client, canonical {items,total,limit,offset} envelope, matchedCodebookId semantics | #142 | P3-G3 (CE side), P3-G4, CE codebook-client (P1-G5/P3-G2 consumer side) | ⏳ awaiting merge |
+| 7b — Alarm Manager: GET /alarms canonical {items,total,limit,offset} envelope | #143 | P3-G3 (AM side) | ⏳ awaiting merge |
+| 7c — web-ui: align ALL clients to frozen producer shapes (topology/trail/knowledge/pattern-mgr/CE/AM) | #144 | P1-G7/G8/G9/G10, P2-GAP-06/07/08, P3-G3 (all consumer side) | ⏳ awaiting merge |
 
-**Remaining (Steps 3–7):** P3-G3, P3-G4 (correlation-engine/web-ui); web-ui consumer-side of P2-GAP-06/07/08.
+**Remaining:** none — all 24 original gaps + the 1 transitively-surfaced gap (P2-GAP-10) are addressed across the fix PRs above. **Gap register closed** (pending merge of the fix PRs).
