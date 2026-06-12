@@ -6,7 +6,7 @@ also read `docs/architecture.md` and the target `services/<svc>/spec.md` and `de
 ## What this is
 An event-driven, topology-grounded platform that correlates Core IP network alarms into
 incidents with a tagged root cause. Docker-based microservices on Apache Kafka, PostgreSQL,
-and Apache AGE. Full detail: the Solution Design doc; per-service detail: each service's
+and NebulaGraph (topology graph). Full detail: the Solution Design doc; per-service detail: each service's
 `spec.md` (contract) and `design.md` (how).
 
 ## Repo layout
@@ -24,7 +24,7 @@ correlation-engine, alarm-manager. Angular 20: web-ui.
   and the `managedObjectId` scheme; build it first; depend on it + topic contracts, never on
   another service's code.
 - A new topic/payload is a contract change → update `docs/architecture.md` + human approval.
-- Single owners: Topology Service is the only thing touching Apache AGE; Knowledge Service is
+- Single owners: Topology Service is the only thing touching the NebulaGraph topology graph; Knowledge Service is
   the only home for authored templates/policy/params; Pattern Manager is the only owner of
   pattern state/lifecycle.
 - Idempotency: Kafka is at-least-once; consumers dedupe on `eventId`/`alarmId`.

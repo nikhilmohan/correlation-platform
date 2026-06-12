@@ -25,7 +25,46 @@
     "alarmIds": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Alarm identifiers in this DBSCAN-cleaned group."
+      "description": "Alarm identifiers in this DBSCAN-cleaned group. Retained for backward-compat; `alarms` carries the richer per-alarm detail for the same group."
+    },
+    "alarms": {
+      "type": "array",
+      "description": "Ordered per-alarm detail for the same group as `alarmIds` (sequence preserved — the Pattern Miner mines ordered sequences). Populated by the Noise Filter from the enriched AlarmEvents it already holds, so the Pattern Miner needs no separate alarm-detail lookup.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Per-alarm detail mirrored from the AlarmEvent payload.",
+        "properties": {
+          "alarmId": {
+            "type": "string",
+            "description": "Matches AlarmEvent.alarmId."
+          },
+          "eventType": {
+            "type": "string",
+            "description": "Matches AlarmEvent.eventType (X.733 event type)."
+          },
+          "raisedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Matches AlarmEvent.raisedAt (ISO-8601 UTC)."
+          },
+          "managedObjectId": {
+            "$ref": "../common/managedObjectId.schema.json",
+            "description": "Matches AlarmEvent.managedObjectId; topology graph identity scheme '<objectType>:<id>'."
+          },
+          "perceivedSeverity": {
+            "type": "string",
+            "description": "Matches AlarmEvent.perceivedSeverity (X.733 severity)."
+          }
+        },
+        "required": [
+          "alarmId",
+          "eventType",
+          "raisedAt",
+          "managedObjectId",
+          "perceivedSeverity"
+        ]
+      }
     },
     "windowStart": {
       "type": "string",
@@ -43,6 +82,7 @@
     "trailId",
     "snapshotId",
     "alarmIds",
+    "alarms",
     "windowStart",
     "windowEnd"
   ]
