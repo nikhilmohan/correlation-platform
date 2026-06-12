@@ -137,19 +137,37 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
 - **APIs exposed** (published as OpenAPI 3.1 at `/openapi.json` + checked-in
   `services/topology/openapi.json`; a change to this surface is a **contract change**):
 
+  The response shapes below are **frozen** (data-integration freeze — gaps **P1-G1, P1-G7, P1-G8,
+  P1-G9** in `docs/design-gaps.md`) and are the **single source of truth** consumers (the Simulator
+  upload client, the web-ui typed clients) build against; the checked-in `openapi.json` is authoritative.
+
   *Ingestion API:*
-  - `POST /topology/snapshots` — upload a topology snapshot file; returns `snapshotId` on
-    success or a structured validation error on rejection. Validates against the topology-file
-    schema at `services/topology/schema/snapshot.schema.json`.
+  - `POST /topology/snapshots` — upload a topology snapshot file; **frozen response: `200`
+    (synchronous)** with body `SnapshotIngestResponse { snapshotId, domain, status, nodeCount,
+    edgeCount, changeType }` (`snapshotId` minted inline during the lift; `snapshotId` + `status`
+    are the mandatory minimum), or a structured validation error on rejection (`422`). **P1-G1**:
+    `200` (not `202`) because the lift is synchronous; consumers read `snapshotId` from the `200`
+    body. Validates against the single canonical topology-file schema at
+    `services/topology/schema/snapshot.schema.json`.
 
   *Query API:*
-  - `GET /topology/nodes/{managedObjectId}` — return the node object and its layer.
-  - `GET /topology/edges/{edgeId}` — return the edge object.
+  - `GET /topology/nodes/{managedObjectId}` — return the node object and its layer. **Frozen
+    response: `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }`** with
+    **no separate `layer` field**; **P1-G9**: `layer == objectType` (documented derivation; consumers
+    map `objectType` to `layer`).
+  - `GET /topology/edges/{edgeId}` — return the edge object (`EdgeDto { edgeId, from, to, relation,
+    domain, attributes, snapshotId }`).
   - `GET /topology/nodes/{managedObjectId}/neighbors` — return direct neighbors (optionally
     filtered by edge type).
   - `GET /topology/traversal` — bounded traversal from a start `managedObjectId` over
     specified edge type(s), up to a caller-supplied depth bound.
   - `GET /topology/nodes` — list nodes, filterable by `objectType`.
+  - `GET /topology/sites` — list sites. **Frozen response: `SiteListDto { domain, snapshotId, count,
+    sites: SiteDto[] }`** where **`SiteDto { siteId, name, latitude, longitude, region }`** has
+    **flat per-site geo fields** (`siteId` = the Site node's `managedObjectId`); **P1-G7**.
+  - `GET /topology/sites/{siteId}/objects` — list the objects at a site **plus the edges** for the
+    device graph. **Frozen response: `SiteObjectsDto { siteId, domain, snapshotId, nodeCount,
+    edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`** — **nodes AND edges**; **P1-G8**.
   - `GET /topology/snapshots` — list available snapshots (at minimum: current + previous).
   - `GET /topology/snapshots/current` — return the current `snapshotId` and summary.
 
@@ -175,12 +193,15 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
     `domain`, timestamps, ingest audit); owned by this service's PostgreSQL schema; internal
     only; never shared as a store. Graph data lives in NebulaGraph; this store holds only the
     versioning and audit metadata that tracks each snapshot.
-  - **Topology-snapshot file schema** — owned by this service at
-    `services/topology/schema/snapshot.schema.json`. This file is a versioned contract; it is
-    NOT a Kafka payload and does NOT reside in `libs/event-model`. Schema changes are a
-    `services/topology` PR, still contract-gated (an `architecture.md`/spec update + human
-    approval is required, exactly as for a new Kafka topic/payload). The designer authors the
-    actual JSON Schema file at this path.
+  - **Topology-snapshot file schema** — owned by this service at the **single canonical home**
+    `services/topology/schema/snapshot.schema.json` (**P1-G2**). This is the **one** checked-in
+    copy of the schema: the Simulator (producer) validates its generated file against **this same**
+    file — there is **no** independent `services/simulator/schema/...` copy and a CI lockstep guard
+    fails the build on any fork or drift. This file is a versioned contract; it is NOT a Kafka
+    payload and does NOT reside in `libs/event-model` (it is an HTTP-upload body, not an event-model
+    payload). Schema changes are a `services/topology` PR, still contract-gated (an
+    `architecture.md`/spec update + human approval is required, exactly as for a new Kafka
+    topic/payload). The designer authors the actual JSON Schema file at this path.
 
     **Approved field-level definition** (this is what the ingestion API validates against):
 
@@ -258,9 +279,11 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
 Each criterion maps to a single unit test (JUnit 5).
 
 1. **Snapshot load and queryability.** Given a valid topology snapshot file with N nodes and M
-   edges submitted to `POST /topology/snapshots`, the service returns HTTP 200 with a
-   `snapshotId`, and subsequent calls to the query API return the correct node and edge data.
-   NebulaGraph credentials and nGQL endpoints are not reachable from outside the service process.
+   edges submitted to `POST /topology/snapshots`, the service returns **HTTP 200** with the frozen
+   `SnapshotIngestResponse { snapshotId, domain, status, nodeCount, edgeCount, changeType }` body
+   (**P1-G1**: 200 synchronous, not 202), and subsequent calls to the query API return the correct
+   node and edge data. NebulaGraph credentials and nGQL endpoints are not reachable from outside the
+   service process.
 
 2. **Schema validation — accept conforming file.** A snapshot file fully conforming to
    `services/topology/schema/snapshot.schema.json` (all required fields present: `schemaVersion`,
@@ -346,6 +369,35 @@ Each criterion maps to a single unit test (JUnit 5).
     response body exposes a NebulaGraph connection string, NebulaGraph endpoint, or raw nGQL
     query result structure. All graph data is returned through the service's typed API response
     shapes.
+
+20. **Ingestion returns the frozen `SnapshotIngestResponse` (P1-G1).** `POST /topology/snapshots`
+    on a valid file returns **HTTP 200** (not 202) with body `{ snapshotId, domain, status,
+    nodeCount, edgeCount, changeType }`; `snapshotId` is non-empty and equals the `snapshotId`
+    carried in the emitted `topology.changed` event; the live response validates against the
+    `SnapshotIngestResponse` schema in the checked-in `openapi.json`.
+
+21. **`GET /topology/sites` returns the frozen flat `SiteDto` (P1-G7).** The response is
+    `SiteListDto { domain, snapshotId, count, sites: [...] }` and **each site is
+    `{ siteId, name, latitude, longitude, region }`** with **flat top-level geo fields** (not
+    nested under `attributes`, not a raw `NodeDto`); `siteId` equals the Site node's
+    `managedObjectId`; the response validates against the checked-in `openapi.json`.
+
+22. **`GET /topology/sites/{siteId}/objects` returns nodes AND edges (P1-G8).** The response is
+    `SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[],
+    edges: EdgeDto[] }`; `nodes` are the devices `LOCATED_AT` the site and `edges` are the
+    intra-site edges plus the `LOCATED_AT` edges to the site (each an `EdgeDto`); an unknown
+    `siteId` returns HTTP 404; the response validates against the checked-in `openapi.json`.
+
+23. **`GET /topology/nodes/{managedObjectId}` returns the frozen `NodeDto`; `layer == objectType`
+    (P1-G9).** The response is exactly `NodeDto { managedObjectId, objectType, domain, snapshotId,
+    name?, attributes }` with **no separate `layer` field**; the design + `openapi.json` document
+    that `layer` is `objectType`; the response validates against the checked-in `openapi.json`.
+
+24. **Single canonical snapshot-file schema (P1-G2).** A conforming snapshot file validates against
+    the single checked-in schema at `services/topology/schema/snapshot.schema.json` and a malformed
+    one fails; the canonical schema exists at exactly that one path; there is **no** independent
+    `services/simulator/schema/...` copy; the Simulator (producer) references this same file, so
+    producer and validator cannot diverge (CI lockstep guard).
 
 ---
 
