@@ -120,7 +120,7 @@
   <h3>Constraints</h3>
   <ul>
     <li><strong>Open-source, permissive licenses only</strong> (Apache-2.0 / BSD / MIT / PostgreSQL). No GPL/AGPL/BSL/source-available components.</li>
-    <li>Event-driven via <strong>Apache Kafka</strong>; persistence via <strong>PostgreSQL</strong>; topology graph via <strong>Apache AGE</strong> (Postgres extension), abstracted inside the Topology Service.</li>
+    <li>Event-driven via <strong>Apache Kafka</strong>; persistence via <strong>PostgreSQL</strong>; topology graph via <strong>NebulaGraph</strong> (standalone distributed graph DB, nGQL), abstracted inside the Topology Service.</li>
   </ul>
 
   <hr>
@@ -152,13 +152,13 @@
 flowchart TD
   SIM["Simulator Service<br/>topology + labeled alarms"]
   KAFKA(["Apache Kafka"])
-  AGE[("Apache AGE<br/>topology graph")]
-  PG[("PostgreSQL<br/>alarms · patterns · incidents · knowledge")]
+  NEBULA[("NebulaGraph<br/>topology graph")]
+  PG[("PostgreSQL<br/>snapshot meta · patterns · incidents · knowledge · live alarms")]
   UI["Angular Web UI<br/>topology / patterns / stats"]
 
   subgraph P1["Phase 1 — offline"]
     KS["Knowledge Service<br/>templates, policy, params"]
-    TOP["Topology Service<br/>owns AGE graph"]
+    TOP["Topology Service<br/>owns NebulaGraph graph"]
     TB["Trail Builder Service"]
     CG["Codebook Generator Service"]
   end
@@ -176,7 +176,7 @@ flowchart TD
 
   SIM -->|"alarms.history / alarms.live"| KAFKA
   SIM -->|"topology snapshot file (ingestion API)"| TOP
-  TOP <--> AGE
+  TOP <--> NEBULA
   TOP -->|"topology.changed"| TB
   TOP -->|"topology.changed"| UI
   TB -->|"trails.built"| CG
@@ -291,7 +291,7 @@ classDiagram
 
   <h3>4.4 Data stores</h3>
   <ul>
-    <li><strong>Apache AGE (Postgres extension)</strong> — topology graph; accessed only through the Topology Service.</li>
+    <li><strong>NebulaGraph (standalone distributed graph DB)</strong> — topology graph; accessed only through the Topology Service.</li>
     <li><strong>PostgreSQL</strong> — alarm store, pattern store (owned by the Pattern Manager, with lifecycle), incident/correlation-group store, knowledge store (templates, policy, params). Logical separation by schema.</li>
     <li><strong>Apache Kafka</strong> — inter-service event bus.</li>
   </ul>
@@ -367,20 +367,20 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
   </ul>
 
   <h3>6.2 Topology Service</h3>
-  <p><strong>Responsibility:</strong> Sole owner of the topology graph. Ingests a topology snapshot <strong>file via a published ingestion API</strong>, lifts records into the typed multi-layer graph in <strong>Apache AGE</strong>, versions snapshots, exposes query APIs, emits <code>topology.changed</code>.</p>
+  <p><strong>Responsibility:</strong> Sole owner of the topology graph. Ingests a topology snapshot <strong>file via a published ingestion API</strong>, lifts records into the typed multi-layer graph in <strong>NebulaGraph</strong>, versions snapshots (metadata in PostgreSQL), exposes query APIs, emits <code>topology.changed</code>.</p>
   <h4>Build instructions:</h4>
   <ul>
     <li>Expose a <strong>topology ingestion API</strong> (OpenAPI 3.1) accepting a topology snapshot file (the versioned topology-file schema); apply <strong>lifting rules</strong> (flat link/adjacency/LSP/VPN/fiber records → typed nodes + typed edges per §5).</li>
-    <li>Persist into AGE, <strong>abstract AGE entirely behind a service API</strong> (openCypher internally; callers never touch the DB).</li>
+    <li>Persist into NebulaGraph, <strong>abstract NebulaGraph entirely behind a service API</strong> (nGQL internally; callers never touch the DB).</li>
     <li>Maintain <code>snapshotId</code> versioning; keep current + previous snapshot.</li>
     <li>Expose REST/gRPC: get node/edge, get neighbors, traverse by edge types (bounded), resolve <code>managedObjectId</code> → object + layer, list objects by type.</li>
     <li>Emit <code>topology.changed</code> with the new <code>snapshotId</code>.</li>
   </ul>
-  <p><strong>Technologies:</strong> Java (Spring Boot); PostgreSQL + Apache AGE; openCypher.</p>
+  <p><strong>Technologies:</strong> Java (Spring Boot); NebulaGraph (nGQL) for the graph + PostgreSQL for snapshot metadata.</p>
   <p><strong>Integrations:</strong> Ingests the topology snapshot file via its published ingestion API (producers upload against that OpenAPI); produces <code>topology.changed</code>; serves Trail Builder, Codebook Generator, Enrichment, UI.</p>
   <h4>Acceptance criteria:</h4>
   <ul>
-    <li>A snapshot with N nodes/edges loads and is queryable; AGE is never exposed outside the service.</li>
+    <li>A snapshot with N nodes/edges loads and is queryable; NebulaGraph is never exposed outside the service.</li>
     <li>Bounded traversal by edge types returns correct closures (verified against the synthetic topology).</li>
     <li><code>managedObjectId</code> resolution returns the object and its layer.</li>
     <li>Re-ingesting a changed topology creates a new <code>snapshotId</code> and emits <code>topology.changed</code>.</li>
@@ -620,7 +620,7 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
 
   <h2>9. Build Roadmap (walking skeleton first)</h2>
   <ol>
-    <li><strong>Skeleton (one scenario end-to-end):</strong> Simulator (small topology + one fiber-cut scenario + IDs) → Topology Service (load into AGE, query) → Trail Builder (one trail) → Codebook Generator (scenarios) → Topology UI renders it.</li>
+    <li><strong>Skeleton (one scenario end-to-end):</strong> Simulator (small topology + one fiber-cut scenario + IDs) → Topology Service (load into NebulaGraph, query) → Trail Builder (one trail) → Codebook Generator (scenarios) → Topology UI renders it.</li>
     <li><strong>Learning slice:</strong> Enrichment (dedup/det-filter/trail-tag) → Noise Filter (DBSCAN) → Pattern Miner (session-window + PrefixSpan) → Pattern Manager (RCA + reconcile + XAI + lifecycle) recovers the injected pattern → Pattern UI approve.</li>
     <li><strong>Real-time slice:</strong> Correlation Engine consumes live replay, matches approved pattern + codebook, emits one incident with RCA + children → Stats UI shows reduction ratio + RCA accuracy.</li>
     <li><strong>Breadth:</strong> more scenarios, larger topology, more noise classes, multiple overlapping trails, conflict resolution, config tuning.</li>
@@ -648,7 +648,7 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
     <tbody>
       <tr><td>Messaging</td><td>Apache Kafka</td><td>Apache-2.0</td></tr>
       <tr><td>Relational store</td><td>PostgreSQL</td><td>PostgreSQL (BSD-like)</td></tr>
-      <tr><td>Graph store</td><td>Apache AGE (Postgres ext.)</td><td>Apache-2.0</td></tr>
+      <tr><td>Graph store</td><td>NebulaGraph (standalone)</td><td>Apache-2.0</td></tr>
       <tr><td>Backend services (API / streaming / state)</td><td>Spring Boot (Java)</td><td>Apache-2.0</td></tr>
       <tr><td>Graph / simulation services</td><td>Python (FastAPI), <code>networkx</code></td><td>BSD</td></tr>
       <tr><td>Clustering (DBSCAN)</td><td>Python — scikit-learn, hdbscan</td><td>BSD</td></tr>
@@ -659,7 +659,7 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
       <tr><td>Containerization</td><td>Docker, Docker Compose</td><td>Apache-2.0</td></tr>
     </tbody>
   </table>
-  <p class="note"><strong>Stack split (by workload, not by default):</strong> services whose core job is in-process graph computation or ML run Python — Simulator, Trail Builder and Codebook Generator (<code>networkx</code>), Noise Filter (scikit-learn) and Pattern Miner (PySpark). Services whose core job is API, persistence, streaming or domain state run Spring Boot — Topology, Knowledge, Enrichment, Pattern Manager and Correlation Engine. The Topology Service stays on Spring Boot because the graph work lives in Apache AGE (openCypher), not in process.</p>
+  <p class="note"><strong>Stack split (by workload, not by default):</strong> services whose core job is in-process graph computation or ML run Python — Simulator, Trail Builder and Codebook Generator (<code>networkx</code>), Noise Filter (scikit-learn) and Pattern Miner (PySpark). Services whose core job is API, persistence, streaming or domain state run Spring Boot — Topology, Knowledge, Enrichment, Pattern Manager and Correlation Engine. The Topology Service stays on Spring Boot because the graph work lives in NebulaGraph (nGQL), not in process.</p>
   <p><strong>Explicitly excluded:</strong> Neo4j Community (GPLv3), ArangoDB CE (BSL/restrictive since 3.12), SPMF mining lib (GPLv3), Confluent Schema Registry (community license), Grafana (AGPLv3), Redpanda (BSL).</p>
 
   <hr>
@@ -671,7 +671,7 @@ MEMBER_OF       : co-failure grouping (fate sharing)</code></pre>
     <li><strong>Match the agent to the stack:</strong> the build now has a Python cohort (Simulator, Trail Builder, Codebook Generator, Noise Filter, Pattern Miner) and a Spring Boot cohort (Topology, Knowledge, Enrichment, Pattern Manager, Correlation) — route each to the appropriate specialist agent pool rather than a single generalist.</li>
     <li>Enforce acceptance criteria as automated tests before integration.</li>
     <li>Integrate along the <strong>roadmap order</strong> (§9); the Simulator's ground-truth labels are the integration test oracle.</li>
-    <li>Keep the Topology Service as the only component touching AGE; keep the Knowledge Service as the only home for authored templates/policy/params; keep the Pattern Manager as the only owner of pattern state — these boundaries prevent the architecture from rotting.</li>
+    <li>Keep the Topology Service as the only component touching NebulaGraph; keep the Knowledge Service as the only home for authored templates/policy/params; keep the Pattern Manager as the only owner of pattern state — these boundaries prevent the architecture from rotting.</li>
     <li>Defer (explicitly out of MVP): redundancy/protection-aware templates, closed-loop feedback execution, multi-domain, HA/scale.</li>
   </ul>
 
