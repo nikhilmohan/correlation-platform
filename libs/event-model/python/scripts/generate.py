@@ -44,8 +44,11 @@ SCHEMA_DIR = PKG_DIR.parent / "schema"
 PAYLOADS_DIR = SCHEMA_DIR / "payloads"
 OUTPUT = PKG_DIR / "src" / "acp_event_model" / "_generated.py"
 
-# title of the managedObjectId schema -> becomes a $defs key
+# titles of the shared common/* schemas -> become $defs keys (one model each,
+# referenced by every payload that $refs them — keeps the binding single-source
+# and avoids duplicate per-payload inline models).
 MANAGED_OBJECT_ID_DEF = "ManagedObjectId"
+SESSION_WINDOW_DEF = "SessionWindow"
 
 PAYLOAD_FILES = [
     "AlarmEvent.schema.json",
@@ -58,6 +61,7 @@ PAYLOAD_FILES = [
     "PatternApprovedEvent.schema.json",
     "CorrelationResultEvent.schema.json",
     "KnowledgeUpdatedEvent.schema.json",
+    "AlarmStatusChange.schema.json",
 ]
 
 
@@ -73,6 +77,8 @@ def _rewrite_refs(node: Any) -> Any:
             if key == "$ref" and isinstance(value, str):
                 if "managedObjectId.schema.json" in value:
                     out[key] = f"#/$defs/{MANAGED_OBJECT_ID_DEF}"
+                elif "sessionWindow.schema.json" in value:
+                    out[key] = f"#/$defs/{SESSION_WINDOW_DEF}"
                 else:
                     out[key] = value
             else:
@@ -91,6 +97,9 @@ def build_bundle() -> dict[str, Any]:
 
     moi = _load(SCHEMA_DIR / "common" / "managedObjectId.schema.json")
     defs[MANAGED_OBJECT_ID_DEF] = _rewrite_refs(moi)
+
+    session_window = _load(SCHEMA_DIR / "common" / "sessionWindow.schema.json")
+    defs[SESSION_WINDOW_DEF] = _rewrite_refs(session_window)
 
     for filename in PAYLOAD_FILES:
         schema = _load(PAYLOADS_DIR / filename)
