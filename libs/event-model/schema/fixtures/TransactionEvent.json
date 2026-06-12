@@ -14,6 +14,7 @@
     "alarms": [
       {
         "alarmId": "ALM-0001",
+        "alarmType": "FiberFault",
         "eventType": "communicationsAlarm",
         "raisedAt": "2026-06-08T12:30:05Z",
         "managedObjectId": "Port:PE1-LC2-P3",
@@ -21,6 +22,7 @@
       },
       {
         "alarmId": "ALM-0002",
+        "alarmType": "LinkDown",
         "eventType": "communicationsAlarm",
         "raisedAt": "2026-06-08T12:31:10Z",
         "managedObjectId": "IPLink:PE1-PE2",
@@ -28,6 +30,7 @@
       },
       {
         "alarmId": "ALM-0003",
+        "alarmType": "LSPDown",
         "eventType": "qualityOfServiceAlarm",
         "raisedAt": "2026-06-08T12:33:20Z",
         "managedObjectId": "LSP:PE1-PE2-01",
