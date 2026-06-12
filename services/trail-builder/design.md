@@ -10,6 +10,16 @@ The contract surface this design builds against (`topology.changed` carrying `do
 already FROZEN in `libs/event-model` and merged into `docs/architecture.md`. No contract change
 is proposed here.
 
+**Data-integration API freeze (this revision).** Applies the producer-side fixes for three
+data-integration gaps where Trail Builder's published query-API shape/paths diverged from its
+consumers' (Codebook Generator, Enrichment, Noise Filter, web-ui) expectations. Trail Builder's
+checked-in `openapi.json` is the **single source of truth**; this revision FREEZES the paths and
+response schemas of `getTrail`, `getTrailsForObject`, and `listTrails` so consumers align to them
+(consumer-side alignment is handled in those services' own fixes). Gaps addressed: **P1-G4**
+(getTrail/getTrailsForObject response schemas), **P1-G10** (getTrailsForObject endpoint path),
+**P2-GAP-09** (`snapshotId` guaranteed on getTrail). This is **service-owned API surface only** —
+no Kafka topic or event-model change; `TrailsBuiltEvent` is unchanged.
+
 ## Stack
 
 - **Language / runtime:** Python 3.13 (pinned to the local toolchain per `CLAUDE.md`).
@@ -43,7 +53,7 @@ Every spec Task (1–8) is realized below; no task is dropped or re-scoped.
 | **4. Fetch trail policy from Knowledge (domain-parameterized).** | `policy_client.KnowledgePolicyClient.get_policy(domain)` calls the Knowledge read API for the `trailPolicy` record scoped to `domain`, returning a `TrailPolicy` value object (IGP-area key, SRLG-union rule, dependency-edge set). Cached per-domain; invalidated by Task 2. No hard-coded policy values. |
 | **5. Compute trails per domain, traversing Interface objects.** | `closure.TrailClosure` builds a `networkx.MultiDiGraph` slice and computes overlapping, IGP-area-bounded transitive closures over the policy's dependency-edge set (which includes `HOSTS` Port to Interface and `TERMINATES` Interface to IPLink, so `Interface:*` objects are natural members), then unions SRLG-co-member links into shared trails. Algorithm logical flow below. |
 | **6. Persist trail definitions with domain.** | `repository.TrailRepository` writes `trail` + `trail_member` rows in one transaction tagged with `snapshotId` and `domain`; a rebuild for the same `domain`+`snapshotId` supersedes prior rows for that pair; older snapshots retained per the retention rule (Data model). |
-| **7. Serve domain-scoped queries + browse via API.** | `api.routes`: `GET /trails?managedObjectId=&domain=` (getTrailsForObject), `GET /trails/{trailId}` (getTrail, viz-ready typed members), `GET /trails?snapshotId=&domain=` (listTrails summaries). FastAPI publishes OpenAPI 3.1 at `/openapi.json`; the generated `openapi.json` is checked into `services/trail-builder/`. |
+| **7. Serve domain-scoped queries + browse via API.** | `api.routes`: **`GET /trails/by-object?managedObjectId=&domain=`** (getTrailsForObject → frozen `{ managedObjectId, domain, trailIds }`), `GET /trails/{trailId}` (getTrail → frozen `TrailDetail` with `members[{managedObjectId,objectType}]` + `snapshotId`), `GET /trails?snapshotId=&domain=` (listTrails summaries). FastAPI publishes OpenAPI 3.1 at `/openapi.json`; the generated `openapi.json` is checked into `services/trail-builder/` as the **frozen single source of truth** consumers build against (paths + response schemas frozen; P1-G4/P1-G10/P2-GAP-09). |
 | **8. Emit `trails.built` with `domain`.** | `event_publisher.TrailsBuiltPublisher` builds a `TrailsBuiltEvent` (`snapshotId`, `trailIds`, `trailCount == len(trailIds)`, `domain` taken from the triggering event — no Topology lookup) wrapped in an `Envelope`, serialized via `acp_event_model.serialize`, produced to `trails.built`. |
 
 ## Phase applicability (design view)
@@ -182,29 +192,62 @@ configurable via `TRAIL_RETENTION_SNAPSHOTS` (default 2).
 ## API contracts / API schema
 
 FastAPI generates OpenAPI 3.1 at `/openapi.json`; the generated document is checked into
-`services/trail-builder/openapi.json` and is the single source of truth for the HTTP surface.
-The service's own contract/unit tests validate request inputs and response bodies against this
-checked-in document (AC-16). All trail queries are domain-scoped. The two `GET /trails`
-operations are distinguished by query parameter (`managedObjectId` vs `snapshotId`), per the
-spec permitted shape.
+`services/trail-builder/openapi.json` and is **the single, frozen source of truth** for the HTTP
+surface that every consumer (Codebook Generator, Enrichment, Noise Filter, web-ui) generates its
+client against. The three trail-query operations — `getTrail`, `getTrailsForObject`,
+`listTrails` — have **frozen paths and frozen response schemas** below; their shapes do not drift
+without a contract change (data-integration fixes **P1-G4**, **P1-G10**, **P2-GAP-09**). The
+service's own contract/unit tests validate request inputs and response bodies against this
+checked-in document (AC-16). All trail queries are domain-scoped.
 
-| Operation | Method + path | Request | Response 200 | Errors |
+**Frozen path disambiguation (P1-G10).** `getTrailsForObject` and `listTrails` no longer share
+`GET /trails` distinguished only by query param. `getTrailsForObject` is moved to the explicit
+sub-resource **`GET /trails/by-object`**, chosen because: (a) it is the path the web-ui already
+targets, removing the consumer-side mismatch; (b) it cleanly separates a per-object lookup from
+the snapshot-scoped `listTrails` browse, so the two operations cannot collide on one path; (c) it
+reads as a self-describing sub-resource. `listTrails` keeps `GET /trails?snapshotId=&domain=`.
+
+| Operation | Method + path (FROZEN) | Request | Response 200 (FROZEN) | Errors |
 |---|---|---|---|---|
-| getTrailsForObject | `GET /trails?managedObjectId={moId}&domain={domain}` | both query params required | `TrailsForObjectResponse { managedObjectId, domain, trailIds: string[], trails: TrailSummary[] }` | 400 missing/malformed param; 422 bad `managedObjectId` shape |
+| getTrailsForObject | `GET /trails/by-object?managedObjectId={moId}&domain={domain}` | both query params required | `TrailsForObjectResponse { managedObjectId, domain, trailIds: string[] }` | 400 missing param; 422 bad `managedObjectId` shape |
 | listTrails | `GET /trails?snapshotId={snapshotId}&domain={domain}` | both query params required, optional `limit`/`offset` | `ListTrailsResponse { snapshotId, domain, count, trails: TrailSummary[] }` | 400 missing param |
-| getTrail | `GET /trails/{trailId}` | path param | `TrailDetail { trailId, snapshotId, domain, igpArea?, srlgGroup?, members: TrailMember[] }` | 404 unknown trailId |
+| getTrail | `GET /trails/{trailId}` | path param | `TrailDetail { trailId, domain, snapshotId, members: TrailMember[], memberCount, igpArea?, srlgGroup? }` | 404 unknown trailId |
 | rebuild | `POST /trails/rebuild` | `RebuildRequest { snapshotId, domain }` (both required) | `TrailsBuiltSummary { snapshotId, domain, trailIds: string[], trailCount }` | 400 missing field; 502 if Topology/Knowledge unavailable |
 | health | `GET /health` | — | `{ status, dependencies: { topology, knowledge, db, kafka } }` | 503 if not ready |
 | metrics | `GET /metrics` | — | Prometheus text | — |
 | openapi | `GET /openapi.json` | — | OpenAPI 3.1 document | — |
 
-Shared schemas:
-- `TrailSummary { trailId, domain, memberCount, igpArea?, srlgGroup? }`.
-- `TrailMember { managedObjectId, objectType }` — `managedObjectId` is the typed
-  `<objectType>:<id>` string (viz-ready; AC-5/18); `objectType` is the parsed prefix so the
-  web-ui distinguishes `Interface` from `Port`/`IPLink`/`Node` without an extra call.
-- `TrailDetail.members` includes any `Interface:*` members in the closure (AC-19).
+**Frozen response schemas (the contract consumers build against):**
+
+- **`TrailsForObjectResponse` (getTrailsForObject — FROZEN, P1-G4).**
+  `{ managedObjectId: string, domain: string, trailIds: string[] }`. `trailIds` is a
+  (possibly empty) array of trail-id strings — the **canonical, intentionally minimal** shape:
+  Enrichment sets `AlarmEvent.trailIds` directly from it, Codebook Generator unions `trailIds`
+  across symptom objects, and web-ui reads `trailIds` to highlight member trails on device-select
+  — none needs per-trail summaries here. A richer list variant is **not** added: no consumer
+  requires trail summaries from the per-object lookup, and `listTrails` (summaries) / `getTrail`
+  (detail) already serve those needs. This replaces the prior `{ ..., trails: TrailSummary[] }`
+  variant so the producer shape exactly matches what the consumers read.
+- **`TrailDetail` (getTrail — FROZEN, P1-G4 + P2-GAP-09).** `{ trailId: string, domain: string,
+  snapshotId: string, members: TrailMember[], memberCount: integer, igpArea?: string,
+  srlgGroup?: string }`.
+  - `snapshotId` is **always present and guaranteed** (P2-GAP-09): the source `AlarmEvent` carries
+    no `snapshotId`, so Noise Filter derives the REQUIRED `TransactionEvent.snapshotId` from
+    `getTrail(trailId).snapshotId`. A contract test asserts the field is present and non-null on
+    every `getTrail` 200 (AC-21).
+  - `members: TrailMember[]` where **`TrailMember { managedObjectId: string, objectType: string }`**
+    — each member carries **both** the typed `managedObjectId` (`<objectType>:<id>` scheme; AC-5/18)
+    **and** the parsed `objectType`, so the web-ui distinguishes `Interface` from
+    `Port`/`IPLink`/`Node` without an extra call or re-parse. `members` includes any `Interface:*`
+    members in the closure (AC-19).
+  - `memberCount == len(members)`.
+- **`TrailSummary` (listTrails item).** `{ trailId, domain, memberCount, igpArea?, srlgGroup? }`.
 - `TrailsBuiltSummary` mirrors the `TrailsBuiltEvent` payload (`trailCount == len(trailIds)`).
+
+These frozen shapes are exactly what the consumer designs read: Enrichment / Codebook Generator
+consume `TrailsForObjectResponse.trailIds[]`; Noise Filter consumes `TrailDetail.snapshotId` (and
+`members`); web-ui consumes all three. This freeze is **service-owned API surface only** — it
+introduces no Kafka topic and no event-model payload change; `TrailsBuiltEvent` is unchanged.
 
 `POST /trails/rebuild` (resolves Open question 3): for the MVP it is an **internal-only** endpoint
 — guarded by a shared bearer token from `REBUILD_API_TOKEN` (env). When the var is unset
@@ -220,7 +263,7 @@ startup. Clients are built against the collaborator's **published OpenAPI spec**
 |---|---|---|---|
 | **Topology Service** — graph closure: list seeds by type, neighbors, bounded traversal over `HOSTS`/`TERMINATES`/`RIDES_ON`/`ADJACENCY_OVER`/`TRAVERSES`/`SERVES`/`MEMBER_OF` (domain-scoped) | `TOPOLOGY_SERVICE_BASE_URL`, `TOPOLOGY_SERVICE_MODE` (`mock`/`real`) | `respx` stubs generated from Topology published `openapi.json` returning fixture graph slices | live Topology Service on the `integration` Compose network |
 | **Knowledge Service** — read the domain-scoped `trailPolicy` record (IGP-area bound, SRLG-union rule, dependency-edge set) | `KNOWLEDGE_SERVICE_BASE_URL`, `KNOWLEDGE_SERVICE_MODE` (`mock`/`real`) | `respx` stubs from Knowledge published `openapi.json` returning per-domain policy | live Knowledge Service |
-| **web-ui** (inbound consumer) | n/a (we publish) | builds its client from **our** checked-in `openapi.json` | calls our query API |
+| **Codebook Generator / Enrichment / Noise Filter / web-ui** (inbound consumers of our query API) | n/a (we publish) | each builds its client from **our** checked-in, **frozen** `openapi.json` (`getTrail`, `getTrailsForObject`, `listTrails` paths + response schemas frozen — P1-G4/P1-G10/P2-GAP-09) | call our query API: Enrichment + Codebook read `getTrailsForObject.trailIds[]`; Noise Filter reads `getTrail.snapshotId` (+ `members`); web-ui reads all three |
 
 The exact Topology traversal endpoint shapes and the Knowledge trail-policy record shape are
 design-stage items tracked in issues #24 and #25; this design pins the operations and
@@ -265,18 +308,18 @@ sequenceDiagram
   participant API as FastAPI routes
   participant R as TrailRepository
   participant DB as PostgreSQL
-  UI->>API: GET trails with managedObjectId and domain
+  UI->>API: GET trails by-object with managedObjectId and domain
   API->>R: trails_for_object moId domain
   R->>DB: select trail_id where domain and managed_object_id
-  DB-->>R: trail rows
-  R-->>API: TrailSummary list
-  API-->>UI: TrailsForObjectResponse
+  DB-->>R: trail id rows
+  R-->>API: trailIds list
+  API-->>UI: TrailsForObjectResponse managedObjectId domain trailIds
   UI->>API: GET trails by trailId
   API->>R: get_trail trailId
   R->>DB: select members where trail_id
   DB-->>R: typed member rows incl Interface
-  R-->>API: TrailDetail
-  API-->>UI: viz-ready members with snapshotId and domain
+  R-->>API: TrailDetail with snapshotId
+  API-->>UI: viz-ready members managedObjectId objectType snapshotId domain
 ```
 
 ### Flow C — knowledge.updated policy refresh
@@ -384,7 +427,9 @@ metric + health signal.
 | Interface membership | (a) traverse `HOSTS`/`TERMINATES` as dependency edges so Interface is a natural member; (b) treat Interface as a pass-through and stitch Port to IPLink directly | **(a)** — §5 makes Interface first-class and fault-capable (InterfaceDown originates a cascade); (b) would drop a real fault origin from the trail and break AC-19. |
 | `trailId` scheme | (a) deterministic content hash of (domain, snapshot, member set); (b) random UUID per build | **(a)** — reproducible across re-runs of an identical slice, so re-delivery/rebuild is naturally idempotent and diff-able; (b) churns ids on every build. |
 | Supersession granularity | (a) per `(domain, snapshotId)` pair; (b) global per `snapshotId`; (c) never delete | **(a)** — domains are independent; superseding by domain+snapshot preserves other domains trails and matches the spec. (b) would cross-domain-leak; (c) grows unbounded. |
-| Query path shape | (a) two `GET /trails` distinguished by query param; (b) nested `GET /domains/{d}/snapshots/{s}/trails` | **(a)** — matches the spec primary shape and keeps a flat, cache-friendly surface; the spec permits either, and (a) is simpler for the web-ui client. |
+| getTrailsForObject path (P1-G10) | (a) overload `GET /trails?managedObjectId=` (distinguished from `listTrails` by query param); (b) explicit sub-resource `GET /trails/by-object?managedObjectId=`; (c) nested `GET /domains/{d}/snapshots/{s}/trails` | **(b)** — frozen. It is the path web-ui already targets (removing the consumer mismatch), and it prevents `getTrailsForObject` and `listTrails` colliding on one path. (a) overloads a single path on a query param (the prior divergence source); (c) is verbose and not what any consumer calls. |
+| getTrailsForObject response shape (P1-G4) | (a) `{ managedObjectId, domain, trailIds: string[] }`; (b) `{ managedObjectId, domain, trailIds, trails: TrailSummary[] }` (richer) | **(a)** — frozen canonical. Enrichment, Codebook Generator and web-ui all consume only `trailIds[]`; `listTrails`/`getTrail` already cover summaries/detail, so a richer per-object variant is dead weight and would invite divergent consumer assumptions. |
+| getTrail snapshotId (P2-GAP-09) | (a) guarantee `snapshotId` in `TrailDetail`; (b) make it optional | **(a)** — Noise Filter derives the REQUIRED `TransactionEvent.snapshotId` from `getTrail(trailId).snapshotId` (the source `AlarmEvent` has none), so the field is frozen as always-present and contract-tested. Optional would break a required downstream field. |
 | Idempotency store | (a) dedicated `processed_event` table; (b) rely on deterministic `trailId` upsert only | **(a)** — explicit `eventId` PK guarantees exactly-one `trails.built` emission (AC-7), which a member-set hash alone cannot (two different events could yield the same trails). |
 | Policy cache invalidation | (a) `knowledge.updated`-driven invalidate + lazy re-fetch; (b) TTL cache; (c) fetch every build | **(a)** — event-driven freshness with no per-build latency (Task 2); (c) adds latency to every build; (b) risks stale policy between TTL ticks. |
 
@@ -397,8 +442,8 @@ metric + health signal.
 | 1 | Multi-trail overlap | `test_object_on_two_lsps_one_srlg_yields_three_trails` | `getTrailsForObject(X, domain)` returns at least 3 distinct trail ids. |
 | 2 | Policy-bounded (IGP area) | `test_no_trail_spans_two_igp_areas` | every trail members share one IGP area; no whole-network trail. |
 | 3 | SRLG union | `test_two_links_sharing_srlg_in_same_trail` | both `IPLink`s of one SRLG appear in the same trail. |
-| 4 | `getTrailsForObject` completeness | `test_get_trails_for_object_exact_set` | per object, returned trail ids equal the persisted set, no more, no fewer. |
-| 5 | `getTrail` correctness + domain + viz readiness | `test_get_trail_returns_members_snapshot_domain_typed` | returns full members, matching `snapshotId` + `domain`; every member matches the `<objectType>:<id>` scheme. |
+| 4 | `getTrailsForObject` completeness + frozen path/shape (P1-G4, P1-G10) | `test_get_trails_for_object_exact_set` | served at the frozen path `GET /trails/by-object?managedObjectId=&domain=`; returns the frozen shape `{ managedObjectId, domain, trailIds: string[] }`; `trailIds` equals the persisted set for the object, no more no fewer; empty `[]` when none. |
+| 5 | `getTrail` correctness + domain + viz readiness + frozen member shape (P1-G4) | `test_get_trail_returns_members_snapshot_domain_typed` | returns frozen `TrailDetail`: full `members` where **every member is `{ managedObjectId, objectType }`** (both fields present), `managedObjectId` matches `<objectType>:<id>` and `objectType` equals its parsed prefix; matching `snapshotId` + `domain`; `memberCount == len(members)`. |
 | 6 | `topology.changed` triggers build + emits `trails.built` with domain | `test_topology_changed_emits_trails_built_with_domain` | emitted payload deserializes as `TrailsBuiltEvent`; `trailCount == len(trailIds)`; `snapshotId`/`domain` match the trigger; Topology mock records zero domain-resolution calls. |
 | 7 | Idempotency | `test_duplicate_event_id_one_emission_no_dup_rows` | same `eventId` twice gives exactly one `trails.built` and no duplicate trail rows. |
 | 8 | `knowledge.updated` refresh trigger | `test_knowledge_updated_trailpolicy_refetches_no_emit` | `recordType == "trailPolicy"` re-fetches policy for that domain; no `trails.built`; next `topology.changed` uses the new policy. |
@@ -409,11 +454,14 @@ metric + health signal.
 | 13 | No hard-coded URLs / policy / domain defaults | `test_base_url_env_change_redirects_calls` + `test_domain_never_defaulted_in_config` | changing `*_BASE_URL` redirects calls without code change; the domain in policy fetch derives from the event/request. |
 | 14 | Poison message handling | `test_poison_topology_changed_routed_to_dlq` | malformed or unknown-major-`schemaVersion` message goes to `topology.changed.dlq`, consumer survives, next message processed. |
 | 15 | `snapshotId` + `domain` alignment | `test_new_snapshot_creates_new_records_keeps_prior` | new-snapshot build tags new rows with the new `snapshotId`; prior snapshot records intact. |
-| 16 | OpenAPI contract compliance | `test_responses_validate_against_checked_in_openapi` | requests/responses for the three GETs + rebuild validate against `openapi.json`, incl. `domain`. |
+| 16 | OpenAPI contract compliance (frozen surface published) | `test_responses_validate_against_checked_in_openapi` | requests/responses for the three GETs + rebuild validate against the checked-in frozen `openapi.json`, incl. `domain`; the document declares `getTrail`, `getTrailsForObject` (at `/trails/by-object`), `listTrails` with their frozen response schemas. |
 | 17 | `listTrails` enumerates all trails for snapshot+domain | `test_listtrails_returns_all_n_with_counts` | `listTrails(S, D)` returns exactly N summaries, each with `trailId`/`domain`/member-count over zero; union of ids equals the `trails.built` `trailIds`. |
 | 18 | `getTrail` members typed + viz-sufficient | `test_get_trail_members_all_typed_no_extra_call` | every member matches `<objectType>:<id>`; response carries `snapshotId`+`domain`; no per-member call needed. |
 | 19 | Closure traverses through Interface | `test_trail_includes_interface_between_port_and_iplink` | a Port HOSTS Interface TERMINATES IPLink path gives a trail member list containing the `Interface:*` entry. |
 | 20 | `trails.built` domain matches event without lookup | `test_trails_built_domain_from_event_no_topology_lookup` | trigger `domain="core-ip"` gives emitted `domain="core-ip"`; Topology mock records zero domain-resolution calls. |
+| 21 | `getTrail` guarantees `snapshotId` for Noise-Filter provenance (P2-GAP-09) | `test_get_trail_response_always_includes_snapshot_id` | every `getTrail` 200 includes a non-null `snapshotId` matching the build snapshot; a consumer can resolve `TransactionEvent.snapshotId` from it; the field is asserted present in the checked-in `openapi.json` `TrailDetail` schema. |
+| 22 | `getTrailsForObject` lives at the frozen path, not on `GET /trails` (P1-G10) | `test_get_trails_for_object_path_is_by_object` | `GET /trails/by-object?managedObjectId=&domain=` returns 200 with the frozen shape; `GET /trails?managedObjectId=&domain=` does NOT serve getTrailsForObject (it is not the frozen per-object operation); the path collision with `listTrails` is gone. |
+| 23 | Frozen consumer-facing shapes match what consumers read | `test_frozen_shapes_match_consumer_contracts` | `getTrailsForObject` exposes `trailIds: string[]` (Enrichment/Codebook consume it); `getTrail.members[i]` exposes both `managedObjectId` and `objectType`; `getTrail` exposes `snapshotId` (Noise Filter) — all asserted against the checked-in `openapi.json`. |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -432,6 +480,8 @@ Service-scoped end-to-end paths the integration stage exercises (Trail Builder +
 | 8 | Dependency-down (partial path) | Topology Service down during a build | build held (eventId not marked processed), error logged, `/health` degraded, `build_failures_total` increments; on recovery a redelivery completes the build. |
 | 9 | Snapshot supersession | build snapshot S1 then S2 for `core-ip` | S2 trails persisted + emitted; S1 retained as previous; older-than-previous pruned per retention. |
 | 10 | web-ui viz consumption | web-ui calls `listTrails` then `getTrail` against the live service | typed members (incl. Interface) returned; web-ui overlays trails without a per-member call. |
+| 11 | Enrichment / Codebook trail-tag against frozen path (P1-G4/P1-G10) | Enrichment + Codebook clients (generated from our `openapi.json`) call `GET /trails/by-object?managedObjectId=&domain=` | 200 with `{ managedObjectId, domain, trailIds }`; Enrichment sets `AlarmEvent.trailIds` and Codebook unions `trailIds` — no shape/path adapter needed. |
+| 12 | Noise Filter snapshotId provenance (P2-GAP-09) | Noise Filter client calls `getTrail(trailId)` to populate `TransactionEvent.snapshotId` | `getTrail` 200 carries `snapshotId`; Noise Filter resolves the REQUIRED `TransactionEvent.snapshotId` for every emitted transaction; no hold/retry for a missing field. |
 
 ## Config & observability
 
