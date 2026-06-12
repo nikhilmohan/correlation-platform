@@ -83,6 +83,18 @@ fault origins and produces a distinct scenario signature for each.
   of truth for the HTTP surface.
 - Maintain **`snapshotId` alignment**: every codebook is tied to the `snapshotId` from which
   it was compiled; a new `snapshotId` always produces a new codebook and a new `codebookId`.
+- Enforce the **one-active-codebook invariant**: at any point in time there is exactly **one
+  active codebook per `(domain, snapshotId)`** key. When a codebook is successfully compiled
+  for a `(domain, snapshotId)` that already has an active codebook (e.g. a re-trigger of the
+  same snapshot), the newly compiled codebook becomes THE active one for that key and the prior
+  codebook is superseded (no longer active). A codebookId's content never mutates — supersede
+  creates/activates a new codebook record; it does not edit the prior one. The invariant
+  guarantees that Pattern Manager (P2) and Correlation Engine (P3) always retrieve the same
+  codebook for a given `(domain, snapshotId)`.
+- Expose a **deterministic active-codebook retrieval endpoint** that returns the single active
+  codebook for a specified `(domain, snapshotId)`. This is the canonical retrieval path for
+  downstream consumers that need "the codebook for this domain+snapshot." Retrieval by
+  `codebookId` also remains supported.
 - Deduplicate consumed `trails.built` events on the envelope `eventId`.
 - Expose `/health`, `/metrics` (Prometheus), structured JSON logs; config from env.
 - Dockerfile and Docker Compose entry.
@@ -171,11 +183,16 @@ fault origins and produces a distinct scenario signature for each.
    (`getTrailsForObject` / `getTrail`) — the trails for this snapshot are domain-scoped — and
    attach the resulting `trailIds[]` to the scenario.
 
-7. **Persist the codebook with domain.** Store all scenarios (fault-origin instance, predicted
-   symptom signature, trail tags, `snapshotId`, `domain`) in PostgreSQL under a freshly minted
-   `codebookId`. The `domain` is a non-nullable column on the codebook record. A new `snapshotId`
-   always produces a new codebook and a new `codebookId`; regeneration does not overwrite a
-   prior codebook for a different snapshot.
+7. **Persist the codebook and set it active for its `(domain, snapshotId)`.**  Store all
+   scenarios (fault-origin instance, predicted symptom signature, trail tags, `snapshotId`,
+   `domain`) in PostgreSQL under a freshly minted `codebookId`, and atomically set this new
+   codebook as the single active codebook for the `(domain, snapshotId)` key, superseding any
+   prior active codebook for that key. The `domain` is a non-nullable column on the codebook
+   record. A new `snapshotId` always produces a new codebook and a new `codebookId`.
+   Superseding does not mutate the prior codebook's content — the prior codebook record is
+   preserved (as superseded); only its active status changes. The mechanism (hard-delete vs.
+   inactive-flag) is a design decision; the invariant — exactly one active per
+   `(domain, snapshotId)` — is the contract.
 
 8. **Emit `codebook.generated` with domain.** Publish a `CodebookGeneratedEvent` (`snapshotId`,
    `scenarioCount`, `codebookId`, `domain`) on the `codebook.generated` topic using the frozen
@@ -187,8 +204,10 @@ fault origins and produces a distinct scenario signature for each.
 9. **Serve the domain-scoped codebook query API.** Answer requests from Pattern Manager and
    Correlation Engine: retrieve a codebook's full scenario list and signatures by `codebookId`;
    retrieve scenarios by `snapshotId`; retrieve a single scenario's predicted symptom signature
-   and trail tags by scenario identifier; list codebooks filtered by `domain`. Every response
-   includes the codebook's `domain`. The published OpenAPI 3.1 spec is the surface contract.
+   and trail tags by scenario identifier; list codebooks filtered by `domain`; and return the
+   **single active codebook** for a `(domain, snapshotId)` via the deterministic active-codebook
+   retrieval endpoint. Every response includes the codebook's `domain`. The published OpenAPI
+   3.1 spec is the surface contract.
 
 ---
 
@@ -201,9 +220,9 @@ the Correlation Engine (matching) respectively.
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Compile domain-scoped codebook: on `trails.built`, read `domain` directly from the event payload, fetch domain-scoped fault-origin list (including Interface) + propagation templates (including HOSTS/TERMINATES/ADJACENCY_OVER interface templates) from Knowledge, enumerate domain-scoped fault-origin instances (including Interface instances) from Topology, run templates forward over graph closure, tag scenarios to trails, persist codebook (with `domain`), mint `codebookId`, emit `codebook.generated` (with `domain`) | **Active** | In: `trails.built` (carrying `snapshotId`, `trailIds[]`, `domain`) + Topology query API (domain-scoped), Knowledge fault-origin list API (with `domain` param), Knowledge propagation templates API (with `domain` param), Trail Builder API reads; Out: `codebook.generated` (carrying `snapshotId`, `scenarioCount`, `codebookId`, `domain`) |
-| P2 — Pattern learning | Serves the domain-scoped codebook (scenario signatures + trail tags) to the Pattern Manager, which uses it to: (a) **reconcile** mined patterns — confirm those matching a scenario and flag patterns with no model explanation; (b) **supply authoritative RCA** — where a mined pattern overlaps a scenario, the scenario's root cause overrides the Manager's ordering-based RCA; (c) feed **explainability** (codebook-overlap metadata). The codebook is the model-based check on data-mined patterns; it drives no work of its own. | **Passive** | In: codebook query API requests from Pattern Manager (may include `domain` filter); Out: codebook query API responses (scenario signatures, trail tags, RCA per scenario, `domain`). No topic output. |
-| P3 — Real-time correlation | Serves the domain-scoped codebook to the Correlation Engine as the **model-based correlation/RCA source**, co-equal with approved patterns. The engine runs a **closest-match decode** of the live symptom set against trail-scoped scenarios to pick a root-cause scenario — enabling RCA even with no learned pattern. The winning scenario's id is recorded as `matchedCodebookId` on the incident. The codebook drives no work of its own. | **Passive** | In: codebook query API requests from Correlation Engine (may include `domain` filter; codebook also delivered via `codebook.generated`); Out: codebook query API responses (scenario signatures + RCA, `domain`, scoped by trail/snapshot). No topic output. |
+| P1 — Topology onboarding | Compile domain-scoped codebook: on `trails.built`, read `domain` directly from the event payload, fetch domain-scoped fault-origin list (including Interface) + propagation templates (including HOSTS/TERMINATES/ADJACENCY_OVER interface templates) from Knowledge, enumerate domain-scoped fault-origin instances (including Interface instances) from Topology, run templates forward over graph closure, tag scenarios to trails, persist codebook (with `domain`), set it as the single active codebook for its `(domain, snapshotId)`, mint `codebookId`, emit `codebook.generated` (with `domain`) | **Active** | In: `trails.built` (carrying `snapshotId`, `trailIds[]`, `domain`) + Topology query API (domain-scoped), Knowledge fault-origin list API (with `domain` param), Knowledge propagation templates API (with `domain` param), Trail Builder API reads; Out: `codebook.generated` (carrying `snapshotId`, `scenarioCount`, `codebookId`, `domain`) |
+| P2 — Pattern learning | Serves the domain-scoped codebook (scenario signatures + trail tags) to the Pattern Manager, which uses it to: (a) **reconcile** mined patterns — confirm those matching a scenario and flag patterns with no model explanation; (b) **supply authoritative RCA** — where a mined pattern overlaps a scenario, the scenario's root cause overrides the Manager's ordering-based RCA; (c) feed **explainability** (codebook-overlap metadata). The codebook is the model-based check on data-mined patterns; it drives no work of its own. | **Passive** | In: codebook query API requests from Pattern Manager (may include `domain` filter or active-codebook retrieval by `(domain, snapshotId)`); Out: codebook query API responses (scenario signatures, trail tags, RCA per scenario, `domain`). No topic output. |
+| P3 — Real-time correlation | Serves the domain-scoped codebook to the Correlation Engine as the **model-based correlation/RCA source**, co-equal with approved patterns. The engine runs a **closest-match decode** of the live symptom set against trail-scoped scenarios to pick a root-cause scenario — enabling RCA even with no learned pattern. The winning scenario's id is recorded as `matchedCodebookId` on the incident. The codebook drives no work of its own. | **Passive** | In: codebook query API requests from Correlation Engine (may include `domain` filter or active-codebook retrieval by `(domain, snapshotId)`; codebook also delivered via `codebook.generated`); Out: codebook query API responses (scenario signatures + RCA, `domain`, scoped by trail/snapshot). No topic output. |
 
 ---
 
@@ -262,6 +281,11 @@ the Correlation Engine (matching) respectively.
   - `GET /codebooks?domain={domain}` — return all codebooks compiled for the given domain,
     ordered by `compiledAt` descending. Supports domain-scoped lookup by Pattern Manager and
     Correlation Engine.
+  - `GET /codebooks/active?domain={domain}&snapshotId={snapshotId}` — return the **single
+    active codebook** for the specified `(domain, snapshotId)` key. Returns exactly one
+    codebook or 404 if none has been compiled for that key. This is the deterministic retrieval
+    endpoint that guarantees Pattern Manager (P2) and Correlation Engine (P3) retrieve the same
+    codebook for a given `(domain, snapshotId)`.
   - `/health` and `/metrics` (Prometheus-compatible).
 
 - **APIs consumed from other services** (integration points — built against each producer's
@@ -297,9 +321,12 @@ the Correlation Engine (matching) respectively.
   - No integration point URL or mock toggle is hard-coded.
 
 - **Data owned:** PostgreSQL — Codebook Store (schema: `codebook`). Owns: codebooks table
-  (codebookId, snapshotId, scenarioCount, compiledAt, **domain** [non-nullable]), scenarios
-  table (scenarioId, codebookId, faultOriginObjectId, faultOriginType, predictedSymptoms as
-  ordered alarm-type list, trailIds). No other service writes to this schema.
+  (codebookId, snapshotId, scenarioCount, compiledAt, **domain** [non-nullable], **active**
+  [boolean, non-nullable — true for the single active codebook per `(domain, snapshotId)` key,
+  false/absent for superseded codebooks]), scenarios table (scenarioId, codebookId,
+  faultOriginObjectId, faultOriginType, predictedSymptoms as ordered alarm-type list, trailIds).
+  The `(domain, snapshotId, active=true)` combination is unique — enforced at the store level.
+  No other service writes to this schema.
 
 ---
 
@@ -309,6 +336,10 @@ the Correlation Engine (matching) respectively.
   for a new `snapshotId` always mints a fresh `codebookId` and a new codebook; re-processing
   the same `eventId` is a no-op (the existing codebook is preserved and re-emitted if already
   compiled).
+- **One-active-codebook invariant:** the store enforces that exactly one codebook record per
+  `(domain, snapshotId)` is active at any time. The persist step (Task 7) sets the new codebook
+  active and supersedes any prior active codebook for that key atomically. Consumers querying
+  the active-codebook endpoint always receive a single deterministic result.
 - **Config:** all integration-point base URLs, `MOCK|REAL` toggles, database connection
   parameters, Kafka bootstrap servers, consumer group ID, and log level are provided via
   environment variables. No thresholds, no URLs, no domain names, and no topology-domain
@@ -457,6 +488,27 @@ Each criterion maps to a single pytest test.
     additional configuration beyond pointing to the same Knowledge and Topology service endpoints.
     The persisted record carries `domain = "transport"`.
 
+18. **ONE-ACTIVE: exactly one active codebook per `(domain, snapshotId)` after compilation.**
+    After compiling a codebook for `(domain="core-ip", snapshotId="snap-X")`, exactly one
+    codebook record in the store is active for that key, and
+    `GET /codebooks/active?domain=core-ip&snapshotId=snap-X` returns a `200` response
+    containing that codebook (with its `codebookId` matching the one emitted on
+    `codebook.generated`); the response validates against the published `openapi.json` schema.
+
+19. **SUPERSEDE: recompiling the same `(domain, snapshotId)` makes the new codebook the single active one.**
+    Given an existing active codebook `CB-OLD` for `(domain="core-ip", snapshotId="snap-X")`,
+    when a second compilation completes for the same `(domain, snapshotId)` (producing
+    `CB-NEW`), then: (a) `GET /codebooks/active?domain=core-ip&snapshotId=snap-X` returns
+    `CB-NEW` (not `CB-OLD`); (b) exactly one active codebook exists for that key (no duplicate
+    actives); and (c) both `CB-OLD` and `CB-NEW` remain retrievable by their individual
+    `codebookId` values (the prior codebook's content is not destroyed).
+
+20. **DETERMINISTIC-RETRIEVAL: two retrievals of the active codebook for the same `(domain, snapshotId)` return the same codebook.**
+    Given a compiled active codebook for `(domain="core-ip", snapshotId="snap-X")`, two
+    sequential calls to `GET /codebooks/active?domain=core-ip&snapshotId=snap-X` (simulating
+    Pattern Manager in P2 and Correlation Engine in P3) both return `200` responses with
+    identical `codebookId` values; no interleaving compilation occurs between the two calls.
+
 ---
 
 ## Open questions
@@ -512,3 +564,13 @@ All remaining open questions are **design-stage items**.
   `domain` on every `codebook.generated` event it emits so downstream consumers (Pattern
   Manager, Correlation Engine) receive the domain without a secondary API lookup. No additional
   contract change is required.
+
+- **OQ-6 [DESIGN-STAGE]: Supersede mechanism — hard-delete vs. inactive-flag.**
+  Task 7 requires that recompiling for a `(domain, snapshotId)` that already has an active
+  codebook supersedes the prior active codebook so exactly one remains active. The spec does not
+  mandate whether the prior codebook is hard-deleted or marked inactive (e.g. an `active=false`
+  flag). The designer must choose the mechanism that best satisfies: (a) the uniqueness
+  invariant — `(domain, snapshotId, active=true)` is unique in the store; (b) the
+  non-mutability of a given `codebookId`'s content (AC-19 requires the prior codebook to remain
+  retrievable by its `codebookId`); (c) the atomicity of the supersede operation. The choice
+  has no impact on the Kafka contract or event-model. Not a spec blocker.
