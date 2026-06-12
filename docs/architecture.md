@@ -16,7 +16,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
 | correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated | correlation.results |
-| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`; serves the live alarm query API | alarms.enriched.live, correlation.results | alarms.persisted.live |
+| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`, and keeps live alarm status in sync from generic `alarms.status.changed` (`AlarmStatusChange`, produced by any service); serves the live alarm query API | alarms.enriched.live, correlation.results, alarms.status.changed | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -61,15 +61,23 @@ No schema registry. `libs/event-model` (versioned with the repo) defines the **e
 (`eventId, type, schemaVersion, occurredAt, source, traceId, payload`) and **payloads**
 (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent, CodebookGeneratedEvent, TransactionEvent,
 PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent,
-KnowledgeUpdatedEvent).
+KnowledgeUpdatedEvent, AlarmStatusChange).
 Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Python services).
 Consumers reject unknown major `schemaVersion`.
 
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
 alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
+alarms.status.changed,
 transactions.clean, patterns.mined, patterns.discovered, patterns.approved, correlation.results,
 *.dlq. Producers/consumers per the table. **Adding a topic is a contract change.**
+
+> **`alarms.status.changed` (generic alarm-status sync).** Carries the `AlarmStatusChange`
+> payload. **Any** service may produce it whenever an alarm's lifecycle status changes
+> (`open` / `in-progress` / `correlated` / `cleared` / `reverted-open`); the **Alarm Manager
+> consumes** it to keep its live alarm status in sync. It is deliberately minimal and
+> **not** correlation-specific — correlation context (incident linkage, root-cause/child role)
+> stays on `correlation.results` (`CorrelationResultEvent`).
 
 > **Live alarm path (real-time).** On the live path the Alarm Manager sits **in-line** between
 > Enrichment and the Correlation Engine: Enrichment emits `alarms.enriched.live` → the Alarm
@@ -218,6 +226,22 @@ object/edge vocabulary while sharing the same engine, event model, and service m
 - **The Knowledge Service** is the authoritative, domain-scoped home of each domain's **object-type
   set**, **edge-relation vocabulary**, **propagation templates**, **trail policy**, **model params**,
   and **device/connection attribute catalogue**. Adding a domain = authoring these records.
+
+> **Invariant — rules & ontology, never operational data.** The Knowledge Service stores only the
+> **abstract domain model**: the ontology (object-type / edge-relation vocabularies, fault-origin
+> types, the canonical alarm-**type** vocabulary), the **rules** (propagation templates, trail policy),
+> and **parameter bounds** (model-param sets) — *what kinds of things exist in a domain and how faults
+> propagate*. It must **never** hold **runtime or source-specific operational data**: no concrete alarm
+> instances (`alarmId`, `raisedAt`, severities of actual alarms), no device/topology inventory, no
+> concrete `managedObjectId` **values** (only the `<objectType>:<id>` token-format rule), and nothing
+> tied to a particular alarm **source** (a specific NMS/OSS/vendor feed or the Simulator). That
+> operational data originates from the **source** (the Simulator in the MVP; a real NMS/OSS in
+> production), is **adapted per-source by the Enrichment Service** (per-source rulesets → canonical
+> `AlarmEvent`), materialized in **Topology** (graph instances) and the live stores — never authored
+> into Knowledge. Knowledge content is identical across deployments of the same domain; only the
+> source data varies by context. (The Simulator's **domain pack** carries a *generation-side copy* of a
+> domain's types/templates/alarm-shapes to synthesize data — but the **authoritative** rules consumed
+> for correlation live in Knowledge, and concrete generated alarms never flow back into it.)
 - **The event model** is domain-agnostic: the `managedObjectId` scheme accepts any `<objectType>:<id>`
   and the `AlarmEvent` (X.733) is domain-neutral — so **no event-model contract change is needed per
   new domain**.

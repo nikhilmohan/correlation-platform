@@ -28,6 +28,7 @@ PAYLOAD_TYPES: list[str] = [
     "PatternApprovedEvent",
     "CorrelationResultEvent",
     "KnowledgeUpdatedEvent",
+    "AlarmStatusChange",
 ]
 
 
