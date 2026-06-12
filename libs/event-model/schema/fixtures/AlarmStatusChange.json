@@ -1,0 +1,14 @@
+{
+  "eventId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "type": "AlarmStatusChange",
+  "schemaVersion": 1,
+  "occurredAt": "2026-06-08T12:45:00Z",
+  "source": "correlation-engine",
+  "traceId": "trace-status-0001",
+  "payload": {
+    "alarmId": "ALM-0001",
+    "newStatus": "correlated",
+    "source": "correlation-engine",
+    "changedAt": "2026-06-08T12:45:00Z"
+  }
+}
