@@ -28,9 +28,10 @@ import org.junit.jupiter.params.provider.ValueSource;
  */
 class TransactionEventAlarmsTest {
 
-    /** The five fields each {@code alarms[]} entry must carry (mirrored from AlarmEvent). */
+    /** The six fields each {@code alarms[]} entry must carry (mirrored from AlarmEvent). */
     private static final List<String> ALARM_REQUIRED =
-            List.of("alarmId", "eventType", "raisedAt", "managedObjectId", "perceivedSeverity");
+            List.of("alarmId", "alarmType", "eventType", "raisedAt", "managedObjectId",
+                    "perceivedSeverity");
 
     private final EventCodec codec = new EventCodec();
     private final ObjectMapper mapper = new ObjectMapper();
@@ -58,10 +59,29 @@ class TransactionEventAlarmsTest {
         Alarm first = alarms.get(0);
         assertInstanceOf(Alarm.class, first);
         assertEquals("ALM-0001", first.getAlarmId());
+        assertEquals("FiberFault", first.getAlarmType());
         assertEquals("communicationsAlarm", first.getEventType());
         assertEquals("Port:PE1-LC2-P3", first.getManagedObjectId());
         assertEquals("critical", first.getPerceivedSeverity());
         assertTrue(first.getRaisedAt().startsWith("2026-06-08T12:30:05"));
+    }
+
+    // Each alarms[] entry carries the canonical alarmType join key (vocab tokens), in and out.
+    // Mirrors Python test_transaction.py::test_alarms_alarm_type_join_key_round_trips.
+    @Test
+    void alarmsAlarmTypeJoinKeyRoundTrips() throws Exception {
+        TypedEnvelope<Object> env = codec.deserialize(fixture());
+        TransactionEvent txn = (TransactionEvent) env.getPayload();
+        assertEquals(List.of("FiberFault", "LinkDown", "LSPDown"),
+                txn.getAlarms().stream().map(Alarm::getAlarmType).collect(Collectors.toList()));
+
+        // The canonical join-key tokens survive re-serialization, in order.
+        JsonNode out = mapper.readTree(codec.serialize(env));
+        List<String> wireTypes = StreamSupport
+                .stream(out.get("payload").get("alarms").spliterator(), false)
+                .map(n -> n.get("alarmType").asText())
+                .collect(Collectors.toList());
+        assertEquals(List.of("FiberFault", "LinkDown", "LSPDown"), wireTypes);
     }
 
     // alarms[] is ORDERED — the Pattern Miner depends on sequence preservation, in and out.
@@ -91,11 +111,13 @@ class TransactionEventAlarmsTest {
                 "alarms[] must round-trip byte-equal to the golden fixture");
     }
 
-    // Each alarms[] entry requires all five fields (additionalProperties:false on the entry).
+    // Each alarms[] entry requires all six fields (additionalProperties:false on the entry),
+    // including the canonical alarmType join key.
     @ParameterizedTest(name = "missing alarms[].{0} rejected")
-    @ValueSource(strings = {"alarmId", "eventType", "raisedAt", "managedObjectId", "perceivedSeverity"})
+    @ValueSource(strings = {"alarmId", "alarmType", "eventType", "raisedAt", "managedObjectId",
+            "perceivedSeverity"})
     void alarmEntryMissingFieldRejected(String field) {
-        assertEquals(5, ALARM_REQUIRED.size());
+        assertEquals(6, ALARM_REQUIRED.size());
         assertThrows(CodecException.class,
                 () -> codec.deserialize(fixtureWithFirstAlarm(a -> a.remove(field))));
     }

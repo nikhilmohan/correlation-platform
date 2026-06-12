@@ -22,8 +22,15 @@ REQUIRED = [
     "windowEnd",
 ]
 
-#: The five fields each `alarms[]` entry must carry (mirrored from AlarmEvent).
-ALARM_REQUIRED = ["alarmId", "eventType", "raisedAt", "managedObjectId", "perceivedSeverity"]
+#: The six fields each `alarms[]` entry must carry (mirrored from AlarmEvent).
+ALARM_REQUIRED = [
+    "alarmId",
+    "alarmType",
+    "eventType",
+    "raisedAt",
+    "managedObjectId",
+    "perceivedSeverity",
+]
 
 
 def _ev() -> dict:
@@ -68,10 +75,23 @@ def test_alarms_typed_detail() -> None:
     first = alarms[0]
     assert isinstance(first, m.Alarm)
     assert first.alarmId == "ALM-0001"
+    assert first.alarmType == "FiberFault"
     assert first.eventType == "communicationsAlarm"
     assert first.managedObjectId == "Port:PE1-LC2-P3"
     assert first.perceivedSeverity == "critical"
     assert first.raisedAt.isoformat().startswith("2026-06-08T12:30:05")
+
+
+def test_alarms_alarm_type_join_key_round_trips() -> None:
+    """Each `alarms[]` entry carries the canonical `alarmType` join key (vocab tokens)."""
+    env = m.deserialize(_ev())
+    assert [a.alarmType for a in env.payload.alarms] == ["FiberFault", "LinkDown", "LSPDown"]
+    out = json.loads(m.serialize(env))
+    assert [a["alarmType"] for a in out["payload"]["alarms"]] == [
+        "FiberFault",
+        "LinkDown",
+        "LSPDown",
+    ]
 
 
 def test_alarms_order_preserved() -> None:
