@@ -100,6 +100,7 @@ source code to access event shapes.
 | `managedObjectId` | string | yes | must match topology graph identity scheme (format: `<objectType>:<id>`) |
 | `eventType` | string | yes | X.733 event type |
 | `probableCause` | string | yes | X.733 probable cause |
+| `alarmType` | string | yes | canonical alarm-type token from the Knowledge `alarmTypeVocabulary` (e.g. `PortDown`, `InterfaceDown`, `LinkDown`, `FiberFault`); the single join key for pattern mining, codebook signatures, `rootCauseAlarmType`, and correlation matching. Distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause) |
 | `perceivedSeverity` | string | yes | X.733 severity |
 | `raisedAt` | datetime | yes | when the alarm was raised |
 | `clearedAt` | datetime | no | set when alarm is cleared |
@@ -148,7 +149,7 @@ finalizes session-window boundaries downstream (§6.8).
 | `trailId` | string | yes | trail scope of the alarm group |
 | `snapshotId` | string | yes | topology snapshot in scope when this group was formed |
 | `alarmIds` | string[] | yes | alarm identifiers in this DBSCAN-cleaned group |
-| `alarms` | object[] | yes | ordered per-alarm detail for the same group as `alarmIds` (sequence preserved — the Pattern Miner mines ordered sequences). Populated by the Noise Filter from the enriched `AlarmEvent`s it already holds, so the Pattern Miner needs no separate alarm-detail lookup. Each item: `alarmId` (string), `eventType` (string), `raisedAt` (datetime), `managedObjectId` (string, `<objectType>:<id>` scheme), `perceivedSeverity` (string) — all required; mirrored from the `AlarmEvent` payload |
+| `alarms` | object[] | yes | ordered per-alarm detail for the same group as `alarmIds` (sequence preserved — the Pattern Miner mines ordered sequences). Populated by the Noise Filter from the enriched `AlarmEvent`s it already holds, so the Pattern Miner needs no separate alarm-detail lookup. Each item: `alarmId` (string), `alarmType` (string), `eventType` (string), `raisedAt` (datetime), `managedObjectId` (string, `<objectType>:<id>` scheme), `perceivedSeverity` (string) — all required; mirrored from the `AlarmEvent` payload. `alarmType` is the canonical alarm-type token from the Knowledge `alarmTypeVocabulary` and is the join key for mining/codebook/correlation; distinct from `eventType` (X.733 category) and `probableCause` |
 | `windowStart` | datetime | yes | start of the raw time window |
 | `windowEnd` | datetime | yes | end of the raw time window |
 
@@ -333,6 +334,12 @@ The `managedObjectId` is the shared identity binding for network objects. Format
 9. **AlarmEvent optional fields:** Deserializing an `AlarmEvent` with `clearedAt` and
    `vendorRaw` absent succeeds; the resulting object represents those fields as absent/null.
 
+9a. **`alarmType` required on AlarmEvent (canonical join key):** Deserializing an `AlarmEvent`
+    payload with `alarmType` absent raises a validation error in both bindings. A valid
+    `AlarmEvent` carrying `alarmType` (a Knowledge `alarmTypeVocabulary` token) round-trips
+    byte-equal to the golden fixture in both bindings. `alarmType` is distinct from `eventType`
+    (X.733 category) and `probableCause` (X.733 probable cause).
+
 ### PatternMinedEvent
 
 10. **PatternMinedEvent carries no RCA or lifecycle fields:** The `PatternMinedEvent` schema
@@ -364,7 +371,8 @@ The `managedObjectId` is the shared identity binding for network objects. Format
     of `transactionId`, `trailId`, `snapshotId`, `alarmIds`, `alarms`, `windowStart`, or
     `windowEnd` absent raises a validation error in both bindings. Deserializing a valid
     `TransactionEvent` with all seven fields present succeeds. Each `alarms` item requires
-    `alarmId`, `eventType`, `raisedAt`, `managedObjectId`, and `perceivedSeverity`; a missing
+    `alarmId`, `alarmType`, `eventType`, `raisedAt`, `managedObjectId`, and `perceivedSeverity`
+    (`alarmType` mirrors `AlarmEvent.alarmType` — the canonical join key); a missing
     sub-field or an unknown extra sub-field (the item is `additionalProperties: false`) raises
     a validation error.
 

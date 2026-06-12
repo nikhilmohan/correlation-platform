@@ -35,6 +35,7 @@ class BindingImportTest {
                 .withManagedObjectId(moi.toString())
                 .withEventType("communicationsAlarm")
                 .withProbableCause("lossOfSignal")
+                .withAlarmType("LinkDown")
                 .withPerceivedSeverity("critical")
                 .withRaisedAt("2026-06-08T12:34:55Z")
                 .withState(AlarmEvent.State.RAISED)
