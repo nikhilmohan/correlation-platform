@@ -16,7 +16,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
 | correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated | correlation.results |
-| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`; serves the live alarm query API | alarms.enriched.live, correlation.results | alarms.persisted.live |
+| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`, and keeps live alarm status in sync from generic `alarms.status.changed` (`AlarmStatusChange`, produced by any service); serves the live alarm query API | alarms.enriched.live, correlation.results, alarms.status.changed | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -61,15 +61,23 @@ No schema registry. `libs/event-model` (versioned with the repo) defines the **e
 (`eventId, type, schemaVersion, occurredAt, source, traceId, payload`) and **payloads**
 (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent, CodebookGeneratedEvent, TransactionEvent,
 PatternMinedEvent, PatternDiscoveredEvent/PatternApprovedEvent, CorrelationResultEvent,
-KnowledgeUpdatedEvent).
+KnowledgeUpdatedEvent, AlarmStatusChange).
 Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Python services).
 Consumers reject unknown major `schemaVersion`.
 
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
 alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
+alarms.status.changed,
 transactions.clean, patterns.mined, patterns.discovered, patterns.approved, correlation.results,
 *.dlq. Producers/consumers per the table. **Adding a topic is a contract change.**
+
+> **`alarms.status.changed` (generic alarm-status sync).** Carries the `AlarmStatusChange`
+> payload. **Any** service may produce it whenever an alarm's lifecycle status changes
+> (`open` / `in-progress` / `correlated` / `cleared` / `reverted-open`); the **Alarm Manager
+> consumes** it to keep its live alarm status in sync. It is deliberately minimal and
+> **not** correlation-specific — correlation context (incident linkage, root-cause/child role)
+> stays on `correlation.results` (`CorrelationResultEvent`).
 
 > **Live alarm path (real-time).** On the live path the Alarm Manager sits **in-line** between
 > Enrichment and the Correlation Engine: Enrichment emits `alarms.enriched.live` → the Alarm

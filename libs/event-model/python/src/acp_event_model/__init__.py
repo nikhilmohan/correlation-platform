@@ -18,6 +18,7 @@ from __future__ import annotations
 from ._generated import (
     Alarm,
     AlarmEvent,
+    AlarmStatusChange,
     CodebookGeneratedEvent,
     CorrelationResultEvent,
     Envelope,
@@ -55,6 +56,7 @@ __all__ = [
     "PatternApprovedEvent",
     "CorrelationResultEvent",
     "KnowledgeUpdatedEvent",
+    "AlarmStatusChange",
     "Alarm",
     "Provenance",
     "State",

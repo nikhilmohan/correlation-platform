@@ -3,10 +3,11 @@
 ## Purpose
 
 The shared canonical event library: the single source of truth for the event **envelope**
-(`eventId`, `type`, `schemaVersion`, `occurredAt`, `source`, `traceId`, `payload`), the nine
+(`eventId`, `type`, `schemaVersion`, `occurredAt`, `source`, `traceId`, `payload`), the
 specialized **payloads** (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent,
 CodebookGeneratedEvent, TransactionEvent, PatternMinedEvent, PatternDiscoveredEvent,
-PatternApprovedEvent, CorrelationResultEvent), and the `managedObjectId` scheme. Two language
+PatternApprovedEvent, CorrelationResultEvent, KnowledgeUpdatedEvent, AlarmStatusChange), and the
+`managedObjectId` scheme. Two language
 bindings — Java (Spring Boot cohort) and Python/Pydantic (Python cohort) — are generated from
 **one JSON Schema**. It is a pure contract/binding library: **no business or domain logic**,
 extensible via subclassing. Every service imports it; no service depends on another service's
@@ -17,7 +18,10 @@ source code to access event shapes.
 **In scope:**
 - Define the **envelope** with exact fields: `eventId`, `type`, `schemaVersion`, `occurredAt`,
   `source`, `traceId`, `payload`.
-- Define all nine **payload schemas** with their authoritative field lists (see Contract section).
+- Define all **payload schemas** (AlarmEvent, TopologyChangedEvent, TrailsBuiltEvent,
+  CodebookGeneratedEvent, TransactionEvent, PatternMinedEvent, PatternDiscoveredEvent,
+  PatternApprovedEvent, CorrelationResultEvent, KnowledgeUpdatedEvent, AlarmStatusChange) with
+  their authoritative field lists (see Contract section).
 - Define the **`managedObjectId` scheme** — the shared identity binding that allows alarms and
   the topology graph to reference the same objects. Format: `<objectType>:<id>` (see Contract
   section for known types and validation rule).
@@ -46,7 +50,7 @@ source code to access event shapes.
 
 1. Define the **envelope** schema with fields `eventId`, `type`, `schemaVersion`, `occurredAt`,
    `source`, `traceId`, `payload`, and generate both Java and Python bindings from it.
-2. Define each of the **nine payload schemas** (see Contract) from one JSON Schema source,
+2. Define each of the **payload schemas** (see Contract) from one JSON Schema source,
    generating both bindings, such that each `type` string resolves to exactly one payload.
 3. Define and encode the **`managedObjectId` scheme** — format `<objectType>:<id>`,
    **domain-agnostic**: `objectType` is any alphanumeric token starting with a letter (the
@@ -84,7 +88,7 @@ source code to access event shapes.
 | `occurredAt` | datetime (ISO-8601) | yes | when the event occurred |
 | `source` | string | yes | originating service name |
 | `traceId` | string | yes | distributed trace identifier |
-| `payload` | object | yes | typed per `type`; one of the nine payload schemas |
+| `payload` | object | yes | typed per `type`; one of the payload schemas |
 
 ### Payload schemas (authoritative field lists from §7)
 
@@ -207,6 +211,20 @@ finalizes session-window boundaries downstream (§6.8).
 | `matchedCodebookId` | string | no | codebook scenario that matched, if any; references `codebookId` from CodebookGeneratedEvent |
 | `confidence` | float | yes | correlation confidence score |
 | `trailId` | string | yes | trail scope of the incident |
+
+**AlarmStatusChange** (carried on `alarms.status.changed`):
+
+A generic alarm-lifecycle status-change event, fired by **any** service when an alarm's status
+changes; the **Alarm Manager** consumes it to keep live alarm status in sync. Deliberately
+minimal and **not** correlation-specific (correlation context such as `incidentId`/role lives on
+`CorrelationResultEvent`, not here).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `alarmId` | string | yes | the alarm whose status changed; matches `AlarmEvent.alarmId` |
+| `newStatus` | string (enum: open, in-progress, correlated, cleared, reverted-open) | yes | new lifecycle status; `in-progress` = alarm entered an active correlation instance, `correlated` = a completed match, `reverted-open` = instance expired without a match |
+| `source` | string | yes | the service that fired the change (e.g. `correlation-engine`, `enrichment`, `alarm-manager`); names the originator of the status change |
+| `changedAt` | datetime (ISO-8601 UTC) | yes | when the status change occurred |
 
 ### `managedObjectId` scheme
 
