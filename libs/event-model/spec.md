@@ -144,6 +144,7 @@ finalizes session-window boundaries downstream (§6.8).
 | `trailId` | string | yes | trail scope of the alarm group |
 | `snapshotId` | string | yes | topology snapshot in scope when this group was formed |
 | `alarmIds` | string[] | yes | alarm identifiers in this DBSCAN-cleaned group |
+| `alarms` | object[] | yes | ordered per-alarm detail for the same group as `alarmIds` (sequence preserved — the Pattern Miner mines ordered sequences). Populated by the Noise Filter from the enriched `AlarmEvent`s it already holds, so the Pattern Miner needs no separate alarm-detail lookup. Each item: `alarmId` (string), `eventType` (string), `raisedAt` (datetime), `managedObjectId` (string, `<objectType>:<id>` scheme), `perceivedSeverity` (string) — all required; mirrored from the `AlarmEvent` payload |
 | `windowStart` | datetime | yes | start of the raw time window |
 | `windowEnd` | datetime | yes | end of the raw time window |
 
@@ -326,9 +327,12 @@ The `managedObjectId` is the shared identity binding for network objects. Format
 ### TransactionEvent
 
 14. **TransactionEvent required fields enforced:** Deserializing a `TransactionEvent` with any
-    of `transactionId`, `trailId`, `snapshotId`, `alarmIds`, `windowStart`, or `windowEnd`
-    absent raises a validation error in both bindings. Deserializing a valid `TransactionEvent`
-    with all six fields present succeeds.
+    of `transactionId`, `trailId`, `snapshotId`, `alarmIds`, `alarms`, `windowStart`, or
+    `windowEnd` absent raises a validation error in both bindings. Deserializing a valid
+    `TransactionEvent` with all seven fields present succeeds. Each `alarms` item requires
+    `alarmId`, `eventType`, `raisedAt`, `managedObjectId`, and `perceivedSeverity`; a missing
+    sub-field or an unknown extra sub-field (the item is `additionalProperties: false`) raises
+    a validation error.
 
 ### `managedObjectId` scheme
 
