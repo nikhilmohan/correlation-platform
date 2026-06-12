@@ -127,6 +127,15 @@ A durable historical-alarm corpus is deferred post-MVP.
 API.
 
 ## Invariants
+Canonical alarm-type join key: `AlarmEvent.alarmType` (mirrored on `TransactionEvent.alarms[].alarmType`)
+is the **single canonical alarm-type token** that the correlation chain joins on — mining sequences,
+codebook signatures, `rootCauseAlarmType`, and correlation matching all key off it. Its value space is
+the Knowledge-authored, domain-scoped `alarmTypeVocabulary` (e.g. `PortDown`, `InterfaceDown`, `LinkDown`,
+`FiberFault`), the same token set the propagation templates use as `trigger.alarmType`/`effect.alarmType`.
+`alarmType` is **distinct from** `eventType` (X.733 category, e.g. `communicationsAlarm`) and `probableCause`
+(X.733 probable cause, e.g. `lossOfSignal`), which keep their existing meanings. `AlarmEvent` producers
+(the **Simulator** for synthetic alarms; the **Enrichment Service** when mapping per-source rulesets to the
+canonical model) populate `alarmType` from the domain's `alarmTypeVocabulary` before publishing.
 Identity binding: alarms use the same `managedObjectId` as the graph (defined in event-model).
 The `managedObjectId` scheme is **domain-agnostic**: format `<objectType>:<id>` where `objectType`
 is an alphanumeric token starting with a letter (`^[A-Za-z][A-Za-z0-9]*$`) and `id` is non-empty
