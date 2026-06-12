@@ -16,7 +16,9 @@ never a subclass.
 from __future__ import annotations
 
 from ._generated import (
+    Alarm,
     AlarmEvent,
+    AlarmStatusChange,
     CodebookGeneratedEvent,
     CorrelationResultEvent,
     Envelope,
@@ -25,6 +27,7 @@ from ._generated import (
     PatternDiscoveredEvent,
     PatternMinedEvent,
     Provenance,
+    SessionWindow,
     State,
     TopologyChangedEvent,
     TrailsBuiltEvent,
@@ -54,7 +57,10 @@ __all__ = [
     "PatternApprovedEvent",
     "CorrelationResultEvent",
     "KnowledgeUpdatedEvent",
+    "AlarmStatusChange",
+    "Alarm",
     "Provenance",
+    "SessionWindow",
     "State",
     # Codec
     "TypedEnvelope",
