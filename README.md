@@ -5,13 +5,13 @@ incidents with a tagged root cause. It combines a model-derived **codebook** (fo
 propagation over the network topology) with **data-mined patterns** (DBSCAN noise filtering +
 PrefixSpan sequence mining), keeps a human in the loop for pattern approval, and performs
 real-time correlation of live alarms. Built as Docker-based microservices on **Apache Kafka**,
-**PostgreSQL**, and **Apache AGE**.
+**PostgreSQL**, and **NebulaGraph** (topology graph).
 
 ## Architecture at a glance
 
 - **Python cohort** (`networkx` / scikit-learn / PySpark): `simulator`, `trail-builder`,
   `codebook-generator`, `noise-filter`, `pattern-miner`.
-- **Spring Boot cohort**: `topology` (owns the Apache AGE graph), `knowledge`, `enrichment`,
+- **Spring Boot cohort**: `topology` (owns the NebulaGraph topology graph), `knowledge`, `enrichment`,
   `pattern-manager` (owns the Pattern Store), `correlation-engine`.
 - **Angular 20**: `web-ui` (topology/trails · pattern review/XAI · config · stats).
 - **`libs/event-model`**: the shared canonical event library (Java + Python/Pydantic bindings
@@ -31,5 +31,5 @@ automated CI. The full workflow, branch model, and gates are in
 ## Getting started
 
 1. Read [`README-workflow.md`](README-workflow.md) — **note the GitHub-auth prerequisite**.
-2. Bring up the integration infra: `docker compose up -d kafka postgres-age`.
+2. Bring up the integration infra: `docker compose up -d kafka postgres nebula-metad nebula-storaged nebula-graphd`.
 3. Toolchains are pinned to **Java 17 · Python 3.13 · Node 24** (see CI and Dockerfiles).

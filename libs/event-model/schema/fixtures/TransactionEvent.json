@@ -11,6 +11,29 @@
     "snapshotId": "SNAP-2026-06-08-001",
     "domain": "core-ip",
     "alarmIds": ["ALM-0001", "ALM-0002", "ALM-0003"],
+    "alarms": [
+      {
+        "alarmId": "ALM-0001",
+        "eventType": "communicationsAlarm",
+        "raisedAt": "2026-06-08T12:30:05Z",
+        "managedObjectId": "Port:PE1-LC2-P3",
+        "perceivedSeverity": "critical"
+      },
+      {
+        "alarmId": "ALM-0002",
+        "eventType": "communicationsAlarm",
+        "raisedAt": "2026-06-08T12:31:10Z",
+        "managedObjectId": "IPLink:PE1-PE2",
+        "perceivedSeverity": "major"
+      },
+      {
+        "alarmId": "ALM-0003",
+        "eventType": "qualityOfServiceAlarm",
+        "raisedAt": "2026-06-08T12:33:20Z",
+        "managedObjectId": "LSP:PE1-PE2-01",
+        "perceivedSeverity": "minor"
+      }
+    ],
     "windowStart": "2026-06-08T12:30:00Z",
     "windowEnd": "2026-06-08T12:35:00Z"
   }
