@@ -1,0 +1,288 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Pattern Manager Read & Lifecycle API",
+    "description": "Single source of truth (SSoT) for the pattern read API the web-ui and the Correlation Engine consume. Freezes the PatternPage envelope (GET /patterns), the PatternView item shape (incl. trailId and the alarmType-vocabulary rootCauseAlarmType), and the PatternEdit PATCH body. Adds NO Kafka topic or event-model payload change.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "/", "description": "Pattern Manager service base" }
+  ],
+  "paths": {
+    "/patterns": {
+      "get": {
+        "operationId": "listPatterns",
+        "summary": "List patterns (PatternPage envelope, never a bare array).",
+        "description": "Returns the PatternPage envelope { items, total, limit, offset }. The Correlation Engine bootstraps approved patterns via lifecycle=approved and reads trailId + sessionWindow from each item (P3-G1).",
+        "parameters": [
+          {
+            "name": "lifecycle",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["draft", "approved", "deprecated"] }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0, "default": 0 }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["-createdAt", "createdAt", "-lift", "lift"], "default": "-createdAt" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page of patterns.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PatternPage" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid lifecycle/sort enum.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      }
+    },
+    "/patterns/{patternId}": {
+      "get": {
+        "operationId": "getPattern",
+        "summary": "Retrieve a single pattern (full PatternView with XAI).",
+        "parameters": [
+          { "name": "patternId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pattern.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PatternView" } } }
+          },
+          "404": {
+            "description": "Unknown patternId.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "editPattern",
+        "summary": "Operator edit of a draft pattern (frozen PatternEdit body).",
+        "description": "Per-position optional markers via sequenceFlags. Allowed only while the pattern is draft. sessionWindow is read-only and never editable here.",
+        "parameters": [
+          { "name": "patternId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PatternEdit" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated pattern (optional markers reflected; sessionWindow unchanged).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PatternView" } } }
+          },
+          "404": { "description": "Unknown patternId.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "409": { "description": "Pattern not in draft.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "422": { "description": "Invalid index (out of range) or missing reviewer.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/patterns/{patternId}/approve": {
+      "post": {
+        "operationId": "approvePattern",
+        "summary": "Approval-intent; transitions draft to approved and emits PatternApprovedEvent.",
+        "parameters": [
+          { "name": "patternId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApprovalIntent" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated pattern.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PatternView" } } } },
+          "404": { "description": "Unknown patternId.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "409": { "description": "Pattern not in draft.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "422": { "description": "Invalid decision / missing reviewer.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    },
+    "/patterns/{patternId}/deprecate": {
+      "post": {
+        "operationId": "deprecatePattern",
+        "summary": "Transition a draft or approved pattern to deprecated.",
+        "parameters": [
+          { "name": "patternId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DeprecateIntent" } } }
+        },
+        "responses": {
+          "200": { "description": "Updated pattern.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PatternView" } } } },
+          "404": { "description": "Unknown patternId.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+          "409": { "description": "Pattern not in draft or approved.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "PatternPage": {
+        "type": "object",
+        "description": "Frozen pagination envelope for GET /patterns (P2-GAP-08). Not a bare array.",
+        "additionalProperties": false,
+        "required": ["items", "total", "limit", "offset"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/PatternView" } },
+          "total": { "type": "integer", "minimum": 0, "description": "Total patterns matching the filter." },
+          "limit": { "type": "integer", "minimum": 1, "description": "Echoed page size." },
+          "offset": { "type": "integer", "minimum": 0, "description": "Echoed page offset." }
+        }
+      },
+      "PatternView": {
+        "type": "object",
+        "description": "Canonical pattern item shape served by the read API (SSoT).",
+        "additionalProperties": false,
+        "required": [
+          "patternId", "trailId", "sequence", "rootCauseAlarmType",
+          "support", "confidence", "lift", "timing", "sessionWindow",
+          "codebookMatchId", "reconcileStatus",
+          "structurallyValidated", "structuralValidationReason",
+          "instanceCount", "supportingInstances", "lifecycle",
+          "domain", "createdAt", "updatedAt"
+        ],
+        "properties": {
+          "patternId": { "type": "string", "format": "uuid" },
+          "trailId": {
+            "type": "string",
+            "description": "Trail this pattern was mined from (PatternMinedEvent.trailId). The Correlation Engine's per-pattern trailId source for (trailId, patternId) keying, since the frozen PatternApprovedEvent carries none (P3-G1)."
+          },
+          "sequence": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SequenceElement" }
+          },
+          "rootCauseAlarmType": {
+            "type": "string",
+            "description": "alarmType-vocabulary token (Knowledge alarmTypeVocabulary); same value space as AlarmEvent.alarmType and codebook predictedSymptoms[].alarmType (P2-GAP-04). Not a probableCause value, not an eventType."
+          },
+          "support": { "type": "number" },
+          "confidence": { "type": "number" },
+          "lift": { "type": "number" },
+          "timing": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Descriptive mined timing (open object); the deriver reads timeframeMs + medianInterArrivalMs (and optional maxInterArrivalMs + stddevInterArrivalMs), all ms."
+          },
+          "sessionWindow": { "$ref": "#/components/schemas/SessionWindow" },
+          "codebookMatchId": { "type": ["string", "null"] },
+          "reconcileStatus": { "type": "string", "enum": ["confirmed", "merged", "unexplained"] },
+          "structurallyValidated": { "type": "boolean" },
+          "structuralValidationReason": {
+            "type": ["string", "null"],
+            "description": "Non-null exactly when structurallyValidated is false."
+          },
+          "instanceCount": { "type": "integer", "minimum": 1 },
+          "supportingInstances": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SupportingInstance" }
+          },
+          "lifecycle": { "type": "string", "enum": ["draft", "approved", "deprecated"] },
+          "domain": { "type": ["string", "null"] },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SequenceElement": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["alarmType", "optional"],
+        "properties": {
+          "alarmType": { "type": "string", "description": "alarmType-vocabulary token." },
+          "optional": { "type": "boolean" }
+        }
+      },
+      "SessionWindow": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["windowMs", "type"],
+        "description": "Derived per-pattern session-window rule; read-only in MVP. Mirrors libs/event-model common/sessionWindow.schema.json.",
+        "properties": {
+          "windowMs": { "type": "integer", "minimum": 1 },
+          "type": { "type": "string", "enum": ["gap-based", "fixed"] }
+        }
+      },
+      "SupportingInstance": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceWindowId", "snapshotId"],
+        "properties": {
+          "sourceWindowId": { "type": "string" },
+          "snapshotId": { "type": "string" },
+          "occurrence": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "PatternEdit": {
+        "type": "object",
+        "description": "Frozen operator-edit body for PATCH /patterns/{patternId} (P2-GAP-06). Per-position optional markers via sequenceFlags. No sessionWindow field (read-only).",
+        "additionalProperties": false,
+        "required": ["sequenceFlags", "reviewer"],
+        "properties": {
+          "sequenceFlags": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["index", "optional"],
+              "properties": {
+                "index": { "type": "integer", "minimum": 0, "description": "Zero-based sequence position." },
+                "optional": { "type": "boolean" }
+              }
+            }
+          },
+          "reviewer": { "type": "string", "minLength": 1 },
+          "notes": { "type": "string" }
+        }
+      },
+      "ApprovalIntent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision", "reviewer"],
+        "properties": {
+          "decision": { "type": "string", "enum": ["approve", "reject"] },
+          "reviewer": { "type": "string", "minLength": 1 },
+          "notes": { "type": "string" }
+        }
+      },
+      "DeprecateIntent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reviewer"],
+        "properties": {
+          "reviewer": { "type": "string", "minLength": 1 },
+          "notes": { "type": "string" }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["timestamp", "status", "error", "message"],
+        "properties": {
+          "timestamp": { "type": "string", "format": "date-time" },
+          "status": { "type": "integer" },
+          "error": { "type": "string" },
+          "message": { "type": "string" },
+          "patternId": { "type": "string" }
+        }
+      }
+    }
+  }
+}
