@@ -26,5 +26,6 @@ def test_all_payloads_exported() -> None:
         "PatternApprovedEvent",
         "CorrelationResultEvent",
         "KnowledgeUpdatedEvent",
+        "SessionWindow",
     ]:
         assert hasattr(m, name), f"missing export: {name}"
