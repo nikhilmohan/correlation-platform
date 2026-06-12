@@ -1,6 +1,7 @@
 package com.acp.eventmodel;
 
 import com.acp.eventmodel.generated.AlarmEvent;
+import com.acp.eventmodel.generated.AlarmStatusChange;
 import com.acp.eventmodel.generated.CodebookGeneratedEvent;
 import com.acp.eventmodel.generated.CorrelationResultEvent;
 import com.acp.eventmodel.generated.KnowledgeUpdatedEvent;
@@ -15,8 +16,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Discriminator registry: {@code type} string &rarr; payload class, 1:1 (criterion 5). Ten
- * registered types (the original nine plus {@code KnowledgeUpdatedEvent}).
+ * Discriminator registry: {@code type} string &rarr; payload class, 1:1 (criterion 5). Eleven
+ * registered types (the original nine plus {@code KnowledgeUpdatedEvent} and
+ * {@code AlarmStatusChange}).
  *
  * <p>A thin, schema-agnostic helper. It references the generated payload <em>classes</em> (whose
  * names equal the wire {@code type} strings) but no field lists, so it does not break the
@@ -38,12 +40,13 @@ public final class TypeRegistry {
         REGISTRY.put("PatternApprovedEvent", PatternApprovedEvent.class);
         REGISTRY.put("CorrelationResultEvent", CorrelationResultEvent.class);
         REGISTRY.put("KnowledgeUpdatedEvent", KnowledgeUpdatedEvent.class);
+        REGISTRY.put("AlarmStatusChange", AlarmStatusChange.class);
     }
 
     private TypeRegistry() {
     }
 
-    /** @return the set of the ten recognised {@code type} discriminator strings. */
+    /** @return the set of the eleven recognised {@code type} discriminator strings. */
     public static Set<String> knownTypes() {
         return REGISTRY.keySet();
     }
@@ -53,7 +56,7 @@ public final class TypeRegistry {
      *
      * @param eventType the envelope's {@code type} discriminator
      * @return the generated payload class
-     * @throws UnknownEventTypeException if {@code eventType} is not one of the ten registered
+     * @throws UnknownEventTypeException if {@code eventType} is not one of the eleven registered
      *     discriminator strings
      */
     public static Class<?> resolve(String eventType) {
