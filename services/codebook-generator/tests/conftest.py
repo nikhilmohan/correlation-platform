@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 import respx
-from acp_event_model import TrailsBuiltEvent, TypedEnvelope, serialize
+from acp_event_model import TrailsBuiltEvent, TypedEnvelope
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
@@ -271,9 +271,7 @@ TRANSPORT_NODES: dict[str, list[dict]] = {
 TRANSPORT_CLOSURES: dict[str, dict] = {
     "OpticalAmp:o1": {
         "reached": [_node("OpticalChannel:ch1", "OpticalChannel", "transport")],
-        "edges": [
-            {"source": "OpticalAmp:o1", "target": "OpticalChannel:ch1", "relation": "FEEDS"}
-        ],
+        "edges": [{"source": "OpticalAmp:o1", "target": "OpticalChannel:ch1", "relation": "FEEDS"}],
     },
 }
 
@@ -332,9 +330,7 @@ class MockCollaborators:
         def _vocab(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(
-                200, json={"alarmTypes": _DOMAIN_DATA[domain]["vocabulary"]}
-            )
+            return httpx.Response(200, json={"alarmTypes": _DOMAIN_DATA[domain]["vocabulary"]})
 
         # Topology — nodes (list by type) + traversal
         @self.router.route(method="GET", host="topology.test", path="/topology/nodes")
@@ -359,9 +355,7 @@ class MockCollaborators:
             self._record(request)
             domain = request.url.params["domain"]
             start = request.url.params["start"]
-            closure = _DOMAIN_DATA[domain]["closures"].get(
-                start, {"reached": [], "edges": []}
-            )
+            closure = _DOMAIN_DATA[domain]["closures"].get(start, {"reached": [], "edges": []})
             return httpx.Response(
                 200,
                 json={

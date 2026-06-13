@@ -1,32 +1,61 @@
-"""Forward-propagation signature tests (spec acceptance criteria 1, 2, 3).
+"""Forward-propagation signature tests — spec acceptance criteria 1, 2, 3.
 
-Drive the networkx propagation engine via the full compile pipeline (mocked collaborators)
-so the asserted signatures are exactly what gets compiled and persisted.
+These are PURE-LOGIC tests: they exercise the networkx propagation engine
+(:func:`codebook_generator.propagation.propagate`) directly against the frozen
+collaborator shapes defined in ``conftest`` (Knowledge templates + fault-origin types,
+Topology closures), with no store / consumer / HTTP wiring. The asserted ordered
+signatures are exactly the cascade signatures the compile pipeline persists.
 """
 
 from __future__ import annotations
 
-from codebook_generator.store import CodebookStore
+from codebook_generator.models import (
+    FaultOriginType,
+    NodeDto,
+    PropagationTemplate,
+    TraversalDto,
+)
+from codebook_generator.propagation import build_closure_graph, propagate
 
-from .conftest import CORE_IP_VOCABULARY, trails_built_bytes
+from .conftest import (
+    CORE_IP_FAULT_ORIGINS,
+    CORE_IP_NODES,
+    CORE_IP_TEMPLATES,
+    CORE_IP_VOCABULARY,
+)
+
+# --------------------------------------------------------------------------- #
+# Helpers: build typed inputs from the frozen conftest collaborator shapes.   #
+# --------------------------------------------------------------------------- #
+_FAULT_ORIGINS = [FaultOriginType(**fo) for fo in CORE_IP_FAULT_ORIGINS]
+_TEMPLATES = [PropagationTemplate(**t) for t in CORE_IP_TEMPLATES]
 
 
-def _scenarios_by_origin(store: CodebookStore, codebook_id: str) -> dict[str, list[tuple[str, str]]]:
-    cb = store.get_full_codebook(codebook_id)
-    assert cb is not None
-    return {
-        s.faultOriginObjectId: [(x.alarmType, x.managedObjectId) for x in s.predictedSymptoms]
-        for s in cb.scenarios
-    }
+def _origin(object_type: str) -> NodeDto:
+    """The single Core IP fault-origin instance of the given object type."""
+    return NodeDto(**CORE_IP_NODES[object_type][0])
 
 
-def test_fiber_cut_signature_matches_expected_cascade(components, store: CodebookStore) -> None:
-    """AC-1: FiberSpan origin -> [FiberFault, LinkDown, LSPDown, ReachabilityLoss], no InterfaceDown."""
-    result = components.handler.handle(trails_built_bytes(snapshot_id="snap-A", domain="core-ip"))
-    assert result is not None
-    by_origin = _scenarios_by_origin(store, result.codebook_id)
+def _signature(object_type: str) -> list[tuple[str, str]]:
+    """Run propagation for a Core IP origin type and return [(alarmType, objectId)]."""
+    from .conftest import CORE_IP_CLOSURES
 
-    fiber = by_origin["FiberSpan:f1"]
+    origin = _origin(object_type)
+    raw = CORE_IP_CLOSURES[origin.managedObjectId]
+    traversal = TraversalDto(
+        start=origin.managedObjectId,
+        domain="core-ip",
+        reached=[NodeDto(**n) for n in raw["reached"]],
+        edges=raw["edges"],
+    )
+    closure = build_closure_graph(origin, traversal)
+    symptoms = propagate(origin, closure, _TEMPLATES, _FAULT_ORIGINS)
+    return [(s.alarmType, s.managedObjectId) for s in symptoms]
+
+
+def test_fiber_cut_signature_matches_expected_cascade() -> None:
+    """AC-1: FiberSpan origin -> [FiberFault, LinkDown, LSPDown, ReachabilityLoss]."""
+    fiber = _signature("FiberSpan")
     assert fiber == [
         ("FiberFault", "FiberSpan:f1"),
         ("LinkDown", "IPLink:l1"),
@@ -39,36 +68,29 @@ def test_fiber_cut_signature_matches_expected_cascade(components, store: Codeboo
     assert all(a in CORE_IP_VOCABULARY for (a, _o) in fiber)
 
 
-def test_linecard_and_port_signatures_distinguishable(components, store: CodebookStore) -> None:
-    """AC-2: LineCard has multiple PortDown; Port has its LOS discriminator, no top-level PortDown."""
-    result = components.handler.handle(trails_built_bytes(snapshot_id="snap-A", domain="core-ip"))
-    assert result is not None
-    by_origin = _scenarios_by_origin(store, result.codebook_id)
+def test_linecard_and_port_signatures_distinguishable() -> None:
+    """AC-2: LineCard has multiple PortDown; Port starts at LOS, no top-level PortDown."""
+    linecard = _signature("LineCard")
+    port = _signature("Port")
 
-    linecard_alarms = [a for (a, _o) in by_origin["LineCard:c1"]]
-    port_alarms = [a for (a, _o) in by_origin["Port:p1"]]
+    linecard_alarms = [a for (a, _o) in linecard]
+    port_alarms = [a for (a, _o) in port]
 
     # LineCard cascades HOSTED_ON to multiple Ports -> multiple PortDown.
     assert linecard_alarms.count("PortDown") >= 2
     # The Port scenario does not carry PortDown above its own origin (it starts at LOS).
     assert "PortDown" not in port_alarms
-    # The port-layer discriminator (LOS) is the Port origin alarm, absent from LineCard's top-level.
+    # The port-layer discriminator (LOS) is the Port origin alarm, absent from LineCard.
     assert port_alarms[0] == "LOS"
     assert "LOS" not in linecard_alarms
+    # Both signatures stay within the domain vocabulary.
+    assert all(a in CORE_IP_VOCABULARY for a in linecard_alarms + port_alarms)
 
 
-def test_interface_fault_signature_matches_expected_cascade(
-    components, store: CodebookStore
-) -> None:
+def test_interface_fault_signature_matches_expected_cascade() -> None:
     """AC-3: Interface origin -> [InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss]."""
-    result = components.handler.handle(trails_built_bytes(snapshot_id="snap-A", domain="core-ip"))
-    assert result is not None
-    cb = store.get_full_codebook(result.codebook_id)
-    assert cb is not None
-    iface = next(s for s in cb.scenarios if s.faultOriginObjectId == "Interface:i1")
-
-    assert iface.faultOriginType == "Interface"
-    assert [(x.alarmType, x.managedObjectId) for x in iface.predictedSymptoms] == [
+    iface = _signature("Interface")
+    assert iface == [
         ("InterfaceDown", "Interface:i1"),
         ("LinkDown", "IPLink:l1"),
         ("AdjDown", "IGPAdjacency:a1"),
@@ -76,6 +98,6 @@ def test_interface_fault_signature_matches_expected_cascade(
         ("ReachabilityLoss", "VPNService:v1"),
     ]
     # Distinct from fiber-cut: starts at InterfaceDown (the origin's own alarm).
-    assert iface.predictedSymptoms[0].alarmType == "InterfaceDown"
+    assert iface[0][0] == "InterfaceDown"
     # Distinct from port-fault: no PortDown precedes InterfaceDown.
-    assert "PortDown" not in [x.alarmType for x in iface.predictedSymptoms]
+    assert "PortDown" not in [a for (a, _o) in iface]

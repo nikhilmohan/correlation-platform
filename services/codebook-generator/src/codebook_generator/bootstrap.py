@@ -85,6 +85,4 @@ def build_components(
         dlq=dlq,
         default_domain=settings.default_domain,
     )
-    return Components(
-        store=the_store, pipeline=pipeline, handler=handler, http_client=client
-    )
+    return Components(store=the_store, pipeline=pipeline, handler=handler, http_client=client)

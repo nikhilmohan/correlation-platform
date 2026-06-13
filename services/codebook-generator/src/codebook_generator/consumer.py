@@ -9,8 +9,6 @@ the :class:`CompilationPipeline`, and commits the offset only after a successful
 
 from __future__ import annotations
 
-from typing import Protocol
-
 from acp_event_model import CodecError, SchemaVersionError, UnknownEventTypeError, deserialize
 from pydantic import BaseModel, ValidationError
 

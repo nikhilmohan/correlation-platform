@@ -138,9 +138,7 @@ def create_app(store: CodebookStore | None = None) -> FastAPI:
     ) -> CodebookListResponse:
         if domain:
             metas = store.list_by_domain(domain)
-            return CodebookListResponse(
-                domain=domain, codebooks=[_meta_to_model(m) for m in metas]
-            )
+            return CodebookListResponse(domain=domain, codebooks=[_meta_to_model(m) for m in metas])
         if snapshotId:
             metas = store.list_by_snapshot(snapshotId)
             return CodebookListResponse(
@@ -174,9 +172,7 @@ def create_app(store: CodebookStore | None = None) -> FastAPI:
         response_model=CodebookMeta,
         responses={404: {"model": ErrorResponse}},
     )
-    def get_codebook(
-        codebookId: str, store: CodebookStore = Depends(get_store)
-    ) -> CodebookMeta:
+    def get_codebook(codebookId: str, store: CodebookStore = Depends(get_store)) -> CodebookMeta:
         meta = store.get_codebook_meta(codebookId)
         if meta is None:
             raise HTTPException(status_code=404, detail=f"unknown codebookId {codebookId}")

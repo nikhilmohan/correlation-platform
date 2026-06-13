@@ -23,9 +23,9 @@ class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "level": record.levelname,
-            "timestamp": datetime.now(UTC).isoformat(timespec="milliseconds").replace(
-                "+00:00", "Z"
-            ),
+            "timestamp": datetime.now(UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
             "service": SERVICE_NAME,
             "message": record.getMessage(),
         }

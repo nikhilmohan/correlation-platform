@@ -157,7 +157,8 @@ class CompilationPipeline:
                 closure = build_closure_graph(node, traversal)
                 symptoms = propagate(node, closure, templates, fault_origin_types)
                 scenario = Scenario(
-                    scenarioId=node.managedObjectId,  # provisional; store rewrites to codebook-scoped id
+                    # provisional; store rewrites to codebook-scoped id
+                    scenarioId=node.managedObjectId,
                     faultOriginObjectId=node.managedObjectId,
                     faultOriginType=node.objectType,
                     predictedSymptoms=symptoms,

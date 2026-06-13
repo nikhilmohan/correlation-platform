@@ -179,9 +179,7 @@ class CodebookStore:
                             "codebook_id": codebook_id,
                             "fault_origin_object_id": s.faultOriginObjectId,
                             "fault_origin_type": s.faultOriginType,
-                            "predicted_symptoms": [
-                                sym.model_dump() for sym in s.predictedSymptoms
-                            ],
+                            "predicted_symptoms": [sym.model_dump() for sym in s.predictedSymptoms],
                             "trail_ids": list(s.trailIds),
                         }
                         for s in scenarios
@@ -209,9 +207,13 @@ class CodebookStore:
 
     # --- Reads ---
     def _codebook_meta_row(self, conn: Any, codebook_id: str) -> dict[str, Any] | None:
-        row = conn.execute(
-            select(codebooks_table).where(codebooks_table.c.codebook_id == codebook_id)
-        ).mappings().first()
+        row = (
+            conn.execute(
+                select(codebooks_table).where(codebooks_table.c.codebook_id == codebook_id)
+            )
+            .mappings()
+            .first()
+        )
         return dict(row) if row else None
 
     def get_codebook_meta(self, codebook_id: str) -> dict[str, Any] | None:

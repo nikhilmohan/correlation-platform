@@ -58,6 +58,11 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom requires `Depends(...)` as a parameter default;
+# B008 (no function calls in argument defaults) is a known false positive there.
+"src/codebook_generator/api.py" = ["B008"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--cov=codebook_generator --cov-report=term-missing"

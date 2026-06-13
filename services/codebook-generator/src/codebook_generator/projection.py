@@ -28,7 +28,9 @@ class TrailScenarioSignature(BaseModel):
     expectedSymptoms: list[PredictedSymptom] = Field(default_factory=list)
 
 
-def project_scenario(scenario: Scenario, trail_id: str | None = None) -> list[TrailScenarioSignature]:
+def project_scenario(
+    scenario: Scenario, trail_id: str | None = None
+) -> list[TrailScenarioSignature]:
     """Project one scenario to its per-trail signatures.
 
     Args:

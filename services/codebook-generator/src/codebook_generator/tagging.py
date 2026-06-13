@@ -11,9 +11,7 @@ from .clients.trail_builder import TrailBuilderClient
 from .models import Scenario
 
 
-def tag_scenario(
-    scenario: Scenario, domain: str, trail_builder: TrailBuilderClient
-) -> list[str]:
+def tag_scenario(scenario: Scenario, domain: str, trail_builder: TrailBuilderClient) -> list[str]:
     """Return the ordered union of trail ids across the scenario's symptom objects."""
     ordered: list[str] = []
     seen: set[str] = set()

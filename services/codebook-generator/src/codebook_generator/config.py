@@ -18,7 +18,7 @@ class ConfigError(RuntimeError):
     """Raised at startup when required configuration is missing or invalid."""
 
 
-class IntegrationMode(str, enum.Enum):
+class IntegrationMode(enum.StrEnum):
     """Mock vs. real toggle for an outbound integration point."""
 
     MOCK = "MOCK"
@@ -40,9 +40,7 @@ class Settings(BaseSettings):
         default="codebook-generator-trails.built", alias="KAFKA_CONSUMER_GROUP"
     )
     trails_built_topic: str = Field(default="trails.built", alias="TRAILS_BUILT_TOPIC")
-    trails_built_dlq_topic: str = Field(
-        default="trails.built.dlq", alias="TRAILS_BUILT_DLQ_TOPIC"
-    )
+    trails_built_dlq_topic: str = Field(default="trails.built.dlq", alias="TRAILS_BUILT_DLQ_TOPIC")
     codebook_generated_topic: str = Field(
         default="codebook.generated", alias="CODEBOOK_GENERATED_TOPIC"
     )
@@ -115,9 +113,7 @@ class Settings(BaseSettings):
             ConfigError: listing every missing integration-point URL.
         """
         missing = [
-            field.upper()
-            for field in self._REQUIRED_URL_FIELDS
-            if not getattr(self, field).strip()
+            field.upper() for field in self._REQUIRED_URL_FIELDS if not getattr(self, field).strip()
         ]
         if missing:
             raise ConfigError(

@@ -53,9 +53,7 @@ def _infer_type(managed_object_id: str) -> str:
     return managed_object_id.split(":", 1)[0] if ":" in managed_object_id else managed_object_id
 
 
-def origin_alarm_type(
-    fault_origin_type: str, fault_origin_types: list[FaultOriginType]
-) -> str:
+def origin_alarm_type(fault_origin_type: str, fault_origin_types: list[FaultOriginType]) -> str:
     """Return the self-emitted origin alarm token for ``fault_origin_type``.
 
     Read from the Knowledge fault-origin type record's ``originAlarmType`` (vocabulary
