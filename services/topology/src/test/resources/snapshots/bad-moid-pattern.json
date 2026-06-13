@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "no-colon-here", "objectType": "Node" }
+  ],
+  "edges": []
+}
