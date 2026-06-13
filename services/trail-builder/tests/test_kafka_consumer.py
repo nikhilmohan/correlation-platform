@@ -40,9 +40,7 @@ class FakeBuildService:
     calls: list[tuple[str, str, str, bool]] = field(default_factory=list)
     raise_integration: bool = False
 
-    def build(
-        self, snapshot_id: str, domain: str, trace_id: str, emit: bool = True
-    ) -> BuildResult:
+    def build(self, snapshot_id: str, domain: str, trace_id: str, emit: bool = True) -> BuildResult:
         self.calls.append((snapshot_id, domain, trace_id, emit))
         if self.raise_integration:
             raise IntegrationError("topology", "unreachable")
@@ -97,9 +95,7 @@ def _knowledge_updated_raw(record_type: str = "trailPolicy", domain: str = "core
 
 
 def _handler(settings, engine, build_service, dlq_producer) -> TopologyChangedHandler:
-    return TopologyChangedHandler(
-        settings, IdempotencyStore(engine), build_service, dlq_producer
-    )
+    return TopologyChangedHandler(settings, IdempotencyStore(engine), build_service, dlq_producer)
 
 
 # --- TopologyChangedHandler ---
@@ -144,9 +140,7 @@ def test_held_event_is_not_marked_processed(settings, engine, producer) -> None:
 def test_missing_domain_falls_back_on_event_path(settings, engine, producer) -> None:
     """A legacy topology.changed without domain uses the configured fallback (event path only)."""
     build = FakeBuildService()
-    status = _handler(settings, engine, build, producer).handle(
-        _topology_changed_raw(domain=None)
-    )
+    status = _handler(settings, engine, build, producer).handle(_topology_changed_raw(domain=None))
     assert status == "built"
     # Fallback domain is the configured DEFAULT_DOMAIN.
     assert build.calls[0][1] == settings.default_domain

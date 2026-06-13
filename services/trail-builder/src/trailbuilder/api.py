@@ -46,7 +46,13 @@ def create_app(container: Container) -> FastAPI:
     def get_container() -> Container:
         return app.state.container
 
-    ContainerDep = Annotated[Container, Depends(get_container)]
+    # NB: ``Depends(get_container)`` is supplied as a parameter *default* rather
+    # than via a closure-local ``Annotated`` alias. Under
+    # ``from __future__ import annotations`` FastAPI resolves a route's string
+    # annotation against the module globals, where a closure-local alias is
+    # invisible — so an aliased ``Container`` would be mis-read as a query param.
+    # A default value is a runtime object and is unaffected by postponed
+    # annotations, so the dependency is recognised reliably.
 
     @app.get(
         "/trails/by-object",
@@ -55,9 +61,9 @@ def create_app(container: Container) -> FastAPI:
         tags=["trails"],
     )
     def get_trails_for_object(
-        c: ContainerDep,
         managedObjectId: Annotated[str, Query(description="Typed <objectType>:<id>.")],
         domain: Annotated[str, Query(description="REQUIRED — the domain that scopes the trails.")],
+        c: Container = Depends(get_container),
     ) -> TrailsForObjectResponse:
         QUERY_REQUESTS_TOTAL.labels(op="getTrailsForObject").inc()
         # Validate the managedObjectId shape (422 on malformed).
@@ -79,11 +85,11 @@ def create_app(container: Container) -> FastAPI:
         tags=["trails"],
     )
     def list_trails(
-        c: ContainerDep,
         snapshotId: Annotated[str, Query(description="The snapshot the trails were built from.")],
         domain: Annotated[str, Query(description="REQUIRED — the domain that scopes the trails.")],
         limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
+        c: Container = Depends(get_container),
     ) -> ListTrailsResponse:
         QUERY_REQUESTS_TOTAL.labels(op="listTrails").inc()
         trails = c.repository.list_trails(snapshotId, domain, limit=limit, offset=offset)
@@ -108,7 +114,7 @@ def create_app(container: Container) -> FastAPI:
         tags=["trails"],
         responses={404: {"description": "Unknown trailId"}},
     )
-    def get_trail(c: ContainerDep, trailId: str) -> TrailDetail:
+    def get_trail(trailId: str, c: Container = Depends(get_container)) -> TrailDetail:
         QUERY_REQUESTS_TOTAL.labels(op="getTrail").inc()
         trail = c.repository.get_trail(trailId)
         if trail is None:
@@ -123,9 +129,9 @@ def create_app(container: Container) -> FastAPI:
         responses={502: {"description": "Topology/Knowledge unavailable"}},
     )
     def rebuild(
-        c: ContainerDep,
         request: RebuildRequest,
         authorization: Annotated[str | None, Header()] = None,
+        c: Container = Depends(get_container),
     ) -> TrailsBuiltSummary:
         _check_rebuild_auth(c, authorization)
         try:
@@ -144,7 +150,7 @@ def create_app(container: Container) -> FastAPI:
         )
 
     @app.get("/health", response_model=HealthResponse, tags=["ops"])
-    def health(c: ContainerDep, response: Response) -> HealthResponse:
+    def health(response: Response, c: Container = Depends(get_container)) -> HealthResponse:
         deps = DependencyHealth(
             topology="ok" if c.topology.ping() else "degraded",
             knowledge="ok" if c.policy.ping() else "degraded",

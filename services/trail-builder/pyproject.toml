@@ -56,6 +56,14 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "W"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom requires `Depends(...)` as a parameter
+# default; B008 (no function-call defaults) is the documented exception for it.
+"src/trailbuilder/api.py" = ["B008"]
+# The poison-exception tuple is defined before the local imports on purpose (it
+# documents the DLQ contract up-front); E402 is intentional here.
+"src/trailbuilder/kafka_consumer.py" = ["E402"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

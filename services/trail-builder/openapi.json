@@ -1,0 +1,643 @@
+{
+  "components": {
+    "schemas": {
+      "DependencyHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "db": {
+            "title": "Db",
+            "type": "string"
+          },
+          "kafka": {
+            "title": "Kafka",
+            "type": "string"
+          },
+          "knowledge": {
+            "title": "Knowledge",
+            "type": "string"
+          },
+          "topology": {
+            "title": "Topology",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topology",
+          "knowledge",
+          "db",
+          "kafka"
+        ],
+        "title": "DependencyHealth",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "$ref": "#/components/schemas/DependencyHealth"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "dependencies"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "ListTrailsResponse": {
+        "additionalProperties": false,
+        "description": "listTrails \u2014 the set of trail summaries for a snapshot+domain.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "snapshotId": {
+            "title": "Snapshotid",
+            "type": "string"
+          },
+          "trails": {
+            "items": {
+              "$ref": "#/components/schemas/TrailSummary"
+            },
+            "title": "Trails",
+            "type": "array"
+          }
+        },
+        "required": [
+          "snapshotId",
+          "domain",
+          "count",
+          "trails"
+        ],
+        "title": "ListTrailsResponse",
+        "type": "object"
+      },
+      "RebuildRequest": {
+        "additionalProperties": false,
+        "description": "POST /trails/rebuild \u2014 both fields required.",
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "snapshotId": {
+            "title": "Snapshotid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshotId",
+          "domain"
+        ],
+        "title": "RebuildRequest",
+        "type": "object"
+      },
+      "TrailDetail": {
+        "additionalProperties": false,
+        "description": "getTrail \u2014 FROZEN (P1-G4 + P2-GAP-09). ``snapshotId`` is always present.",
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "igpArea": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Igparea"
+          },
+          "memberCount": {
+            "title": "Membercount",
+            "type": "integer"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/TrailMember"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "snapshotId": {
+            "title": "Snapshotid",
+            "type": "string"
+          },
+          "srlgGroup": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Srlggroup"
+          },
+          "trailId": {
+            "title": "Trailid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trailId",
+          "domain",
+          "snapshotId",
+          "members",
+          "memberCount"
+        ],
+        "title": "TrailDetail",
+        "type": "object"
+      },
+      "TrailMember": {
+        "additionalProperties": false,
+        "description": "A trail member carrying BOTH the typed managedObjectId and its objectType.",
+        "properties": {
+          "managedObjectId": {
+            "description": "Typed <objectType>:<id>.",
+            "title": "Managedobjectid",
+            "type": "string"
+          },
+          "objectType": {
+            "description": "Parsed object-type prefix (e.g. Interface).",
+            "title": "Objecttype",
+            "type": "string"
+          }
+        },
+        "required": [
+          "managedObjectId",
+          "objectType"
+        ],
+        "title": "TrailMember",
+        "type": "object"
+      },
+      "TrailSummary": {
+        "additionalProperties": false,
+        "description": "A listTrails item summary.",
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "igpArea": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Igparea"
+          },
+          "memberCount": {
+            "title": "Membercount",
+            "type": "integer"
+          },
+          "srlgGroup": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Srlggroup"
+          },
+          "trailId": {
+            "title": "Trailid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trailId",
+          "domain",
+          "memberCount"
+        ],
+        "title": "TrailSummary",
+        "type": "object"
+      },
+      "TrailsBuiltSummary": {
+        "additionalProperties": false,
+        "description": "POST /trails/rebuild response \u2014 mirrors the TrailsBuiltEvent payload.",
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "snapshotId": {
+            "title": "Snapshotid",
+            "type": "string"
+          },
+          "trailCount": {
+            "title": "Trailcount",
+            "type": "integer"
+          },
+          "trailIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Trailids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "snapshotId",
+          "domain",
+          "trailIds",
+          "trailCount"
+        ],
+        "title": "TrailsBuiltSummary",
+        "type": "object"
+      },
+      "TrailsForObjectResponse": {
+        "additionalProperties": false,
+        "description": "getTrailsForObject \u2014 FROZEN (P1-G4). Intentionally minimal: ``trailIds`` only.",
+        "properties": {
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "managedObjectId": {
+            "title": "Managedobjectid",
+            "type": "string"
+          },
+          "trailIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Trailids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "managedObjectId",
+          "domain",
+          "trailIds"
+        ],
+        "title": "TrailsForObjectResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Policy-bounded correlation trails. The trail-query operations (getTrailsForObject, getTrail, listTrails) are the frozen contract consumers build against.",
+    "title": "Trail Builder Service",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics",
+        "tags": [
+          "ops"
+        ]
+      }
+    },
+    "/trails": {
+      "get": {
+        "operationId": "listTrails",
+        "parameters": [
+          {
+            "description": "The snapshot the trails were built from.",
+            "in": "query",
+            "name": "snapshotId",
+            "required": true,
+            "schema": {
+              "description": "The snapshot the trails were built from.",
+              "title": "Snapshotid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "REQUIRED \u2014 the domain that scopes the trails.",
+            "in": "query",
+            "name": "domain",
+            "required": true,
+            "schema": {
+              "description": "REQUIRED \u2014 the domain that scopes the trails.",
+              "title": "Domain",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListTrailsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Trails",
+        "tags": [
+          "trails"
+        ]
+      }
+    },
+    "/trails/by-object": {
+      "get": {
+        "operationId": "getTrailsForObject",
+        "parameters": [
+          {
+            "description": "Typed <objectType>:<id>.",
+            "in": "query",
+            "name": "managedObjectId",
+            "required": true,
+            "schema": {
+              "description": "Typed <objectType>:<id>.",
+              "title": "Managedobjectid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "REQUIRED \u2014 the domain that scopes the trails.",
+            "in": "query",
+            "name": "domain",
+            "required": true,
+            "schema": {
+              "description": "REQUIRED \u2014 the domain that scopes the trails.",
+              "title": "Domain",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrailsForObjectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Trails For Object",
+        "tags": [
+          "trails"
+        ]
+      }
+    },
+    "/trails/rebuild": {
+      "post": {
+        "operationId": "rebuildTrails",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrailsBuiltSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "description": "Topology/Knowledge unavailable"
+          }
+        },
+        "summary": "Rebuild",
+        "tags": [
+          "trails"
+        ]
+      }
+    },
+    "/trails/{trailId}": {
+      "get": {
+        "operationId": "getTrail",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "trailId",
+            "required": true,
+            "schema": {
+              "title": "Trailid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrailDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Unknown trailId"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Trail",
+        "tags": [
+          "trails"
+        ]
+      }
+    }
+  }
+}

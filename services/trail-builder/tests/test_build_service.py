@@ -31,7 +31,7 @@ from trailbuilder.clients.policy_client import KnowledgePolicyClient
 from trailbuilder.clients.topology_client import TopologyClient
 from trailbuilder.closure import TrailClosure
 from trailbuilder.event_publisher import TrailsBuiltPublisher
-from trailbuilder.models import Boundary, GraphSlice, SrlgRule, Trail, TrailPolicy
+from trailbuilder.models import Boundary, GraphSlice, SrlgRule, TrailPolicy
 from trailbuilder.repository import TrailRepository
 
 TOPO_BASE = "http://topology.test"
@@ -64,16 +64,15 @@ def _service(
 ) -> BuildService:
     repo = TrailRepository(engine, settings.trail_retention_snapshots)
     publisher = TrailsBuiltPublisher(producer, settings.trails_built_topic, settings.service_name)
-    return BuildService(
-        settings, topology_client, policy_client, repo, TrailClosure(), publisher
-    )
+    return BuildService(settings, topology_client, policy_client, repo, TrailClosure(), publisher)
 
 
 def test_build_persists_trails_and_returns_result(settings, engine, producer) -> None:
     """AC-6: a build computes + persists trails and returns a populated BuildResult."""
     graph = _core_ip_graph()
-    with install_topology_stub(TOPO_BASE, graph), install_knowledge_stub(
-        KNOW_BASE, {"core-ip": DEFAULT_POLICY}
+    with (
+        install_topology_stub(TOPO_BASE, graph),
+        install_knowledge_stub(KNOW_BASE, {"core-ip": DEFAULT_POLICY}),
     ):
         topo = TopologyClient(settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0))
         policy = KnowledgePolicyClient(
@@ -95,8 +94,9 @@ def test_build_persists_trails_and_returns_result(settings, engine, producer) ->
 def test_build_emits_trails_built_with_event_domain(settings, engine, producer) -> None:
     """AC-6 + AC-20: emit produces trails.built carrying the supplied domain verbatim."""
     graph = _core_ip_graph()
-    with install_topology_stub(TOPO_BASE, graph), install_knowledge_stub(
-        KNOW_BASE, {"core-ip": DEFAULT_POLICY}
+    with (
+        install_topology_stub(TOPO_BASE, graph),
+        install_knowledge_stub(KNOW_BASE, {"core-ip": DEFAULT_POLICY}),
     ):
         topo = TopologyClient(settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0))
         policy = KnowledgePolicyClient(
@@ -116,8 +116,9 @@ def test_build_emits_trails_built_with_event_domain(settings, engine, producer) 
 def test_build_with_emit_false_does_not_publish(settings, engine, producer) -> None:
     """emit=False (used internally) persists but produces no trails.built event."""
     graph = _core_ip_graph()
-    with install_topology_stub(TOPO_BASE, graph), install_knowledge_stub(
-        KNOW_BASE, {"core-ip": DEFAULT_POLICY}
+    with (
+        install_topology_stub(TOPO_BASE, graph),
+        install_knowledge_stub(KNOW_BASE, {"core-ip": DEFAULT_POLICY}),
     ):
         topo = TopologyClient(settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0))
         policy = KnowledgePolicyClient(
@@ -134,12 +135,13 @@ def test_policy_fetched_per_domain(settings, engine, producer) -> None:
     core_graph = _core_ip_graph("core-ip")
     metro_graph = _core_ip_graph("metro")
     policy_calls: list[str] = []
-    with install_topology_stub(TOPO_BASE, core_graph), install_knowledge_stub(
-        KNOW_BASE, {"core-ip": DEFAULT_POLICY, "metro": METRO_POLICY}, call_log=policy_calls
+    with (
+        install_topology_stub(TOPO_BASE, core_graph),
+        install_knowledge_stub(
+            KNOW_BASE, {"core-ip": DEFAULT_POLICY, "metro": METRO_POLICY}, call_log=policy_calls
+        ),
     ):
-        topo_core = TopologyClient(
-            settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0)
-        )
+        topo_core = TopologyClient(settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0))
         policy = KnowledgePolicyClient(
             settings, client=httpx.Client(base_url=KNOW_BASE, timeout=5.0)
         )
@@ -160,8 +162,9 @@ def test_policy_fetched_per_domain(settings, engine, producer) -> None:
 def test_non_core_ip_domain_carries_correct_domain(settings, engine, producer) -> None:
     """AC-11: a non-Core-IP domain builds with its own policy and carries its domain."""
     graph = _core_ip_graph("metro")
-    with install_topology_stub(TOPO_BASE, graph), install_knowledge_stub(
-        KNOW_BASE, {"metro": METRO_POLICY}
+    with (
+        install_topology_stub(TOPO_BASE, graph),
+        install_knowledge_stub(KNOW_BASE, {"metro": METRO_POLICY}),
     ):
         topo = TopologyClient(settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0))
         policy = KnowledgePolicyClient(
@@ -180,8 +183,9 @@ def test_non_core_ip_domain_carries_correct_domain(settings, engine, producer) -
 def test_new_snapshot_leaves_prior_records_intact(settings, engine, producer) -> None:
     """AC-15: rebuilding for a new snapshotId keeps prior snapshot trail records."""
     graph = _core_ip_graph()
-    with install_topology_stub(TOPO_BASE, graph), install_knowledge_stub(
-        KNOW_BASE, {"core-ip": DEFAULT_POLICY}
+    with (
+        install_topology_stub(TOPO_BASE, graph),
+        install_knowledge_stub(KNOW_BASE, {"core-ip": DEFAULT_POLICY}),
     ):
         topo = TopologyClient(settings, client=httpx.Client(base_url=TOPO_BASE, timeout=5.0))
         policy = KnowledgePolicyClient(
@@ -207,9 +211,7 @@ def test_integration_error_is_reraised_to_hold_build(settings, engine, producer)
             raise AssertionError("topology should not be called when policy fails")
 
     repo = TrailRepository(engine, settings.trail_retention_snapshots)
-    publisher = TrailsBuiltPublisher(
-        producer, settings.trails_built_topic, settings.service_name
-    )
+    publisher = TrailsBuiltPublisher(producer, settings.trails_built_topic, settings.service_name)
     svc = BuildService(
         settings,
         _UnusedTopology(),  # type: ignore[arg-type]
@@ -241,9 +243,7 @@ def test_topology_failure_holds_and_does_not_emit(settings, engine, producer) ->
             raise IntegrationError("topology", "unreachable")
 
     repo = TrailRepository(engine, settings.trail_retention_snapshots)
-    publisher = TrailsBuiltPublisher(
-        producer, settings.trails_built_topic, settings.service_name
-    )
+    publisher = TrailsBuiltPublisher(producer, settings.trails_built_topic, settings.service_name)
     svc = BuildService(
         settings,
         _FailingTopology(),  # type: ignore[arg-type]
