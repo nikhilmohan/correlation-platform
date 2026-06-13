@@ -135,7 +135,17 @@ so dependent services can react.
    dependency chain for fault propagation. Trails overlap — a seed object appearing on
    multiple LSPs and/or in an SRLG group produces membership in multiple trails.
    Computation stays within the domain; cross-domain graph traversal is not performed
-   in MVP.
+   in MVP. **IGP-area bound (grounded).** The IGP-area boundary reads each object's
+   `igpArea` value from its topology node attributes under the key named by the trail
+   policy boundary (`boundary.attributeKey` = `igpArea`); closure prunes members whose
+   `igpArea` differs from the seed's, so no trail spans two areas (the no-whole-network-trail
+   property). This bound is populatable and exercised on real data: the Simulator emits a
+   grounded `igpArea` per Node/Interface and the Knowledge `attributeCatalogue` catalogues
+   it, so the bound fires on Simulator-generated topology — not only on unit fixtures. The
+   no-whole-network-trail property is verified at integration time against Simulator-generated
+   (grounded-`igpArea`) data, not `igpArea`-injected fixtures. `igpArea` is a descriptive
+   node attribute carried within the existing topology node-attribute map; this is not a
+   contract change.
 
 6. **Persist trail definitions with domain.** Store each trail as its member set of
    `managedObjectId` values, the `snapshotId` it was built from, and the `domain` it
