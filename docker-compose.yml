@@ -237,10 +237,43 @@ services:
     networks:
       - cp-net
 
+  # --- Trail Builder — builds policy-bounded correlation trails. Consumes `topology.changed`
+  #     (+ `knowledge.updated` for policy refresh), reads the Topology + Knowledge APIs, persists
+  #     trails durably in its own `trailbuilder` PostgreSQL schema, emits `trails.built`, and
+  #     serves the trail query API. Reads Topology via API only — never NebulaGraph. ---
+  trail-builder:
+    build:
+      context: .
+      dockerfile: services/trail-builder/Dockerfile
+    image: acp/trail-builder:0.1.0
+    container_name: cp-trail-builder
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgresql+psycopg://correlation:correlation@postgres:5432/correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      TOPOLOGY_SERVICE_BASE_URL: "http://topology:8080"
+      TOPOLOGY_SERVICE_MODE: "real"
+      KNOWLEDGE_SERVICE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_SERVICE_MODE: "real"
+      LOG_LEVEL: "INFO"
+    ports:
+      - "8083:8000"      # trail query API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
-#   simulator, trail-builder, codebook-generator, enrichment,
+#   simulator, codebook-generator, enrichment,
 #   noise-filter, pattern-manager, correlation-engine, web-ui
 #
 #   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)
