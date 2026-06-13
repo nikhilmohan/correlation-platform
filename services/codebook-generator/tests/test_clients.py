@@ -1,0 +1,108 @@
+"""Integration-point client mechanics tests (retry/backoff + response shaping).
+
+Exercises :func:`codebook_generator.clients.base.request_with_retry` (bounded retry on 5xx /
+transport errors, 4xx unrecoverable) and the client response-shaping helpers (Knowledge
+records normalization, Trail Builder ``getTrail``) — the spec's retry-with-backoff error
+handling and the frozen producer shapes, with an injected no-op sleep.
+"""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from codebook_generator.clients.base import IntegrationError, request_with_retry
+from codebook_generator.clients.knowledge import KnowledgeClient, _records
+from codebook_generator.clients.trail_builder import TrailBuilderClient
+
+
+def _client(handler) -> httpx.Client:  # noqa: ANN001
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_retry_succeeds_after_transient_5xx() -> None:
+    """A 5xx then a 200 succeeds within the retry budget."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(503 if calls["n"] == 1 else 200, json={"ok": True})
+
+    client = _client(handler)
+    resp = request_with_retry(
+        lambda: client.get("http://x.test/y"),
+        max_retries=2,
+        backoff_ms=1,
+        sleep=lambda _s: None,
+    )
+    assert resp.status_code == 200
+    assert calls["n"] == 2
+
+
+def test_4xx_is_unrecoverable() -> None:
+    """A 4xx raises IntegrationError immediately (no retry)."""
+    client = _client(lambda r: httpx.Response(404))
+    with pytest.raises(IntegrationError):
+        request_with_retry(
+            lambda: client.get("http://x.test/y"),
+            max_retries=3,
+            backoff_ms=1,
+            sleep=lambda _s: None,
+        )
+
+
+def test_5xx_exhaustion_raises() -> None:
+    """Persistent 5xx raises IntegrationError after exhausting retries."""
+    client = _client(lambda r: httpx.Response(500))
+    with pytest.raises(IntegrationError):
+        request_with_retry(
+            lambda: client.get("http://x.test/y"),
+            max_retries=1,
+            backoff_ms=1,
+            sleep=lambda _s: None,
+        )
+
+
+def test_transport_error_exhaustion_raises() -> None:
+    """A persistent transport error raises IntegrationError after retries."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client = _client(handler)
+    with pytest.raises(IntegrationError):
+        request_with_retry(
+            lambda: client.get("http://x.test/y"),
+            max_retries=1,
+            backoff_ms=1,
+            sleep=lambda _s: None,
+        )
+
+
+def test_records_normalizes_list_and_wrapped_shapes() -> None:
+    """_records accepts a bare list, {records:[...]}, {items:[...]}, and unknown -> []."""
+    assert _records([{"a": 1}]) == [{"a": 1}]
+    assert _records({"records": [{"a": 1}]}) == [{"a": 1}]
+    assert _records({"items": [{"b": 2}]}) == [{"b": 2}]
+    assert _records(42) == []
+
+
+def test_knowledge_vocabulary_accepts_bare_list_shape() -> None:
+    """get_alarm_type_vocabulary handles both {alarmTypes:[...]} and a bare list."""
+    client = _client(lambda r: httpx.Response(200, json=["A", "B"]))
+    kc = KnowledgeClient(
+        fault_origins_base_url="http://k.test",
+        propagation_templates_base_url="http://k.test",
+        alarm_type_vocabulary_base_url="http://k.test",
+        client=client,
+        max_retries=0,
+        backoff_ms=1,
+    )
+    assert kc.get_alarm_type_vocabulary("core-ip") == ["A", "B"]
+
+
+def test_trail_builder_get_trail_returns_raw() -> None:
+    """getTrail returns the raw trail detail body."""
+    client = _client(lambda r: httpx.Response(200, json={"trailId": "T1", "members": ["a"]}))
+    tb = TrailBuilderClient(base_url="http://tb.test", client=client, max_retries=0, backoff_ms=1)
+    assert tb.get_trail("T1") == {"trailId": "T1", "members": ["a"]}
