@@ -180,7 +180,9 @@ flowchart TD
 Trail Builder owns a PostgreSQL schema (`trailbuilder`). Three tables: `trail` (one row per
 trail), `trail_member` (trail-to-`managedObjectId`, including `Interface:*` members), and
 `processed_event` (`eventId` dedupe). Columns lead with `domain` and `snapshot_id` so the
-domain/snapshot scoping is the primary access path.
+domain/snapshot scoping is the primary access path. All three tables (and the Alembic version
+table) live **inside** the owned `trailbuilder` schema, created by an explicit first migration —
+see "Schema creation & schema-binding" below.
 
 ```mermaid
 erDiagram
@@ -238,6 +240,116 @@ pair never duplicates rows. **Retention: keep the current + the immediately prev
 build (delete trail rows for the domain whose snapshot_id is neither current nor previous).
 This matches the spec "retained until explicitly superseded" intent while bounding growth;
 configurable via `TRAIL_RETENTION_SNAPSHOTS` (default 2).
+
+### Schema creation & schema-binding (shared-DB readiness)
+
+Per the `architecture.md` shared-infra conventions, all relational stores live in **one** shared
+PostgreSQL instance/database, and each service owns exactly one named schema and **never** writes
+`public`. Trail Builder owns **`trailbuilder`**. To compose without collision on a fresh shared DB,
+both the migration tool and the ORM metadata are explicitly pinned to that schema — nothing is left
+to PostgreSQL's default `public` placement.
+
+- **First migration creates the schema (idempotent).** The very first Alembic revision
+  (`0001_create_schema`) issues `CREATE SCHEMA IF NOT EXISTS trailbuilder`, so a fresh shared
+  PostgreSQL succeeds on the first `alembic upgrade head` with no manual bootstrap. The `IF NOT
+  EXISTS` makes it safe to re-run (re-deploy, or a second service instance racing the migration).
+  This is Trail Builder's own first migration step — it touches **only** `trailbuilder`, never a
+  global or `public`-schema migration and no shared baseline (single-owner rule).
+
+  ```python
+  # migrations/versions/0001_create_schema.py
+  def upgrade() -> None:
+      op.execute("CREATE SCHEMA IF NOT EXISTS trailbuilder")
+
+  def downgrade() -> None:
+      op.execute("DROP SCHEMA IF EXISTS trailbuilder CASCADE")
+  ```
+
+- **All tables pinned to `trailbuilder` in the ORM metadata.** The SQLAlchemy Core `MetaData` is
+  constructed with `schema='trailbuilder'`, so `trail`, `trail_member`, and `processed_event` are
+  created and addressed as `trailbuilder.<table>` — they never default into `public` and collide in
+  the shared DB. Foreign keys are schema-qualified to the same schema (so
+  `trail_member.trail_id` references `trailbuilder.trail`).
+
+  ```python
+  # db/metadata.py
+  from sqlalchemy import MetaData
+  metadata = MetaData(schema="trailbuilder")   # every Table below inherits schema='trailbuilder'
+  ```
+
+  The three tables are declared against this metadata (column/constraint definitions exactly as in
+  the table descriptions above), e.g.:
+
+  ```python
+  # db/tables.py
+  from sqlalchemy import (
+      Table, Column, Text, BigInteger, Integer, TIMESTAMP,
+      ForeignKey, CheckConstraint, UniqueConstraint, Index,
+  )
+  from .metadata import metadata
+
+  trail = Table(
+      "trail", metadata,                       # -> trailbuilder.trail
+      Column("trail_id", Text, primary_key=True),
+      Column("domain", Text, nullable=False),
+      Column("snapshot_id", Text, nullable=False),
+      Column("seed_managed_object_id", Text, nullable=False),
+      Column("igp_area", Text, nullable=True),
+      Column("srlg_group", Text, nullable=True),
+      Column("member_count", Integer, nullable=False),
+      Column("built_at", TIMESTAMP(timezone=True), nullable=False),
+      CheckConstraint("member_count > 0", name="ck_trail_member_count_positive"),
+      Index("idx_trail_domain_snapshot", "domain", "snapshot_id"),
+  )
+
+  trail_member = Table(
+      "trail_member", metadata,                # -> trailbuilder.trail_member
+      Column("id", BigInteger, primary_key=True, autoincrement=True),
+      # FK schema-qualified to trailbuilder.trail
+      Column("trail_id", Text,
+             ForeignKey("trailbuilder.trail.trail_id", ondelete="CASCADE"),
+             nullable=False),
+      Column("domain", Text, nullable=False),
+      Column("snapshot_id", Text, nullable=False),
+      Column("managed_object_id", Text, nullable=False),
+      Column("object_type", Text, nullable=False),
+      UniqueConstraint("trail_id", "managed_object_id", name="uq_member"),
+      Index("idx_member_domain_object", "domain", "managed_object_id"),
+      Index("idx_member_trail", "trail_id"),
+  )
+
+  processed_event = Table(
+      "processed_event", metadata,             # -> trailbuilder.processed_event
+      Column("event_id", Text, primary_key=True),
+      Column("snapshot_id", Text),
+      Column("domain", Text),
+      Column("processed_at", TIMESTAMP(timezone=True), nullable=False),
+  )
+  ```
+
+- **Alembic version table pinned to `trailbuilder`.** Alembic's `env.py` runs with
+  `version_table_schema='trailbuilder'` (so the per-service migration-history table lives **inside**
+  `trailbuilder`, not `public`) and `include_schemas=True` (so autogenerate compares within the
+  owned schema). The runtime connection also sets `search_path=trailbuilder` via
+  `DATABASE_URL`/`currentSchema` per the shared-infra convention — belt-and-suspenders so even
+  unqualified SQL resolves to the owned schema.
+
+  ```python
+  # migrations/env.py (online)
+  context.configure(
+      connection=connection,
+      target_metadata=metadata,                  # MetaData(schema='trailbuilder')
+      version_table="alembic_version",
+      version_table_schema="trailbuilder",       # history table inside trailbuilder, not public
+      include_schemas=True,                       # compare/operate within the owned schema
+  )
+  ```
+
+The `0001_create_schema` revision is ordered **before** the table-creation revision(s) so the schema
+exists when the tables (and the version table) are created. Net effect on a fresh shared DB:
+`CREATE SCHEMA IF NOT EXISTS trailbuilder` then `trailbuilder.alembic_version` plus
+`trailbuilder.trail`/`trail_member`/`processed_event`, with `public` left empty for Trail Builder.
+(Libs: Alembic — MIT; SQLAlchemy — MIT; `psycopg` driver — permissive; all OSS.)
 
 ## Event handling
 
@@ -598,6 +710,8 @@ metric + health signal.
 | 25 | Default-domain fallback applies to the event path only, not the query API (Q1 + Q7) | `test_default_domain_only_on_event_path` | a `topology.changed` with `domain` absent resolves to `core-ip` (records + `trails.built` carry `core-ip`, WARN logged); the same run's query API still returns 400 for a `domain`-less request — the two paths are independent. |
 | 26 | Topology reads pinned to FROZEN shapes + snapshot scoping (Q3) | `test_topology_client_uses_frozen_paths_and_snapshot_scope` | the Topology mock (stubbed from `services/topology/openapi.json`) asserts the client calls `GET /topology/nodes?objectType=&domain=&snapshotId=current` (list-by-type, `NodeListDto`) and `GET /topology/traversal?start=&relation=&maxDepth=&crossDomain=false` (`TraversalDto`); responses decode against the frozen `NodeListDto`/`TraversalDto`/`NodeDto`; the `snapshotId` token passed equals the build's in-scope snapshot. |
 | 27 | Persisted + emitted `snapshotId` comes from the triggering event, not a Topology lookup (Q3) | `test_persisted_snapshot_id_from_event_no_topology_resolution` | a `topology.changed (snapshotId=S, core-ip)` build persists trails tagged `snapshotId=S` and emits `trails.built` with `snapshotId=S`; the Topology mock records zero snapshot-resolution calls (only `snapshotId=current`-scoped graph reads). |
+| 28 | First migration creates the owned schema idempotently (shared-DB readiness) | `test_schema_created_idempotently` | running `alembic upgrade head` against a fresh DB with no `trailbuilder` schema succeeds and creates `trailbuilder` (the `0001_create_schema` `CREATE SCHEMA IF NOT EXISTS` runs first); a second `upgrade`/re-run against an existing schema is a no-op and does not error. |
+| 29 | Tables + version table land in `trailbuilder`, not `public` (no shared-DB collision) | `test_tables_in_trailbuilder_schema` | after migration, `trail`, `trail_member`, `processed_event`, and the Alembic `alembic_version` table all exist in schema `trailbuilder` (queried via `information_schema.tables`) and **none** exists in `public`; the `trail_member.trail_id` FK targets `trailbuilder.trail`; the `member_count > 0` CHECK is present. |
 
 ### Integration assertion on Simulator-generated data (MVP-achievability fix — the load-bearing AC-2 guarantee)
 
@@ -642,6 +756,7 @@ Service-scoped end-to-end paths the integration stage exercises (Trail Builder +
 | 13 | Consumer query with `domain` (Q1 + Q7) vs. without | Enrichment/Codebook clients call `GET /trails/by-object?managedObjectId=&domain=`; a malformed caller omits `domain` | the `domain`-bearing calls (the real consumer shape) return 200 with `{ managedObjectId, domain, trailIds }`; the `domain`-less call returns 400, never silently scoped to `core-ip`. |
 | 14 | Build pinned to frozen Topology shapes + event snapshot (Q3) | `topology.changed (snapshotId=S, core-ip)` against the live Topology Service | the build's graph reads hit the frozen `GET /topology/nodes` (list-by-type, `snapshotId=current`) and `GET /topology/traversal` paths and decode `NodeListDto`/`TraversalDto`; persisted trails and `trails.built` carry `snapshotId=S` taken from the event, with no Topology snapshot-resolution call. |
 | 15 | **IGP-area bound on Simulator-generated data (MVP-achievability fix; assertion INT-IGPAREA)** | A **Simulator-generated** multi-area snapshot (`IGP_AREA_COUNT` ≥ 2, grounded `igpArea` per Node/Interface — NOT injected fixtures) flows `topology.changed` then build against real Topology + real Knowledge `trailPolicy/default` (`boundary.attributeKey=igpArea`) | every built trail's members share one `igpArea` (no cross-area trail); the multi-area topology yields **multiple** area-bounded trails, not one whole-network trail (**AC-2 on real data**); at least two distinct `igpArea` values are present in the consumed snapshot. This is the regression guard that the formerly-inert area-prune now fires on real, `igpArea`-bearing data. |
+| 16 | Fresh shared-DB migration readiness (AC-28/AC-29) | Trail Builder starts against a **fresh shared PostgreSQL** with no `trailbuilder` schema; startup runs `alembic upgrade head` then handles the first `topology.changed` | startup succeeds: `trailbuilder` is created, all three tables + `alembic_version` land in `trailbuilder` (nothing in `public`), and the first build persists/serves trails — proving the service composes on a clean shared DB without collision. |
 
 ## Config & observability
 
@@ -672,7 +787,9 @@ SRLG, dependency-edge set) come from Knowledge at build time — never from conf
 
 - **Layout:** `services/trail-builder/src/` (modules above), `tests/` (pytest), `pyproject.toml`
   (ruff + black + pytest config), `requirements.txt`, `openapi.json` (checked in), `Dockerfile`,
-  `README.md`, Alembic `migrations/`.
+  `README.md`, Alembic `migrations/` (first revision `0001_create_schema` issues
+  `CREATE SCHEMA IF NOT EXISTS trailbuilder`; `env.py` pins `version_table_schema='trailbuilder'` +
+  `include_schemas=True`). `alembic upgrade head` runs on startup before the consumer/API loop.
 - **Lint/format/test:** `ruff check . && black --check . && pytest` (CI gates per `CLAUDE.md`).
 - **OpenAPI:** generated by FastAPI; a `make openapi` target dumps `/openapi.json` to the
   checked-in `services/trail-builder/openapi.json` (CI fails if it drifts).
