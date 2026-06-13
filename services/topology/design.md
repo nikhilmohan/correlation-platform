@@ -166,7 +166,7 @@ flowchart TD
 | `com.acp.topology.ingest` | `SnapshotValidationService` (schema + structural/semantic validation), **`VocabularyValidator`** (validates each node `objectType` + edge `relation` against the snapshot `domain`'s Knowledge-authored vocabulary), `LiftingService` (record-to-typed-graph mapping incl. Site/LOCATED_AT/Interface + `domain` + `attributes`), `SnapshotMetadataService` (mint + PostgreSQL bookkeeping + retention). |
 | `com.acp.topology.graph` | **NebulaGraph abstraction boundary.** The **`GraphRepository`** port (interface) + its single **`NebulaGraphRepository`** implementation (the only class issuing nGQL, over the **nebula-java** `NebulaPool`/`Session`); `GraphWriteService`, `GraphReadService` (domain-scoped reads incl. bounded traversal, site queries, cross-domain opt-in). The space/schema bootstrap (`NebulaSchemaBootstrap`). No NebulaGraph detail (space, host, nGQL, raw result rows) escapes this package. |
 | `com.acp.topology.meta` | `SnapshotRepository` (Spring Data JDBC over PostgreSQL) for the `snapshot` metadata table — the system-of-record for the current/previous `snapshotId` pointers and the ingest audit. |
-| `com.acp.topology.integration` | **`KnowledgeVocabClient`** — config-switchable client for the Knowledge Service's domain-vocabulary API (object-type set + relation vocabulary per `domain`); short-TTL cache; mock from Knowledge's OpenAPI in unit tests, real in integration. |
+| `com.acp.topology.integration` | **`KnowledgeVocabClient`** — config-switchable client for the Knowledge Service's **frozen** domain-vocabulary operation **`GET /domains/{domain}/vocabulary`** → `{domain, objectTypes[], relations[], version}` (object-type set + relation vocabulary per `domain`, gap P1-G11); short-TTL cache; mock (WireMock/Prism stub from Knowledge's published OpenAPI, same frozen path/shape) in unit tests, real Knowledge in integration. Path defaults to `/domains/{domain}/vocabulary` (no override needed to start in isolation). |
 | `com.acp.topology.events` | `TopologyEventPublisher` (build `TypedEnvelope<TopologyChangedEvent>`, idempotent produce), `DlqPublisher`. |
 | `com.acp.topology.config` | `@ConfigurationProperties` beans (Kafka, **NebulaGraph** connection, **PostgreSQL** connection, limits, Knowledge integration toggles), idempotent Kafka producer config, `NebulaPool` bean, JSON Schema loader. |
 | `com.acp.topology.observability` | Health indicators (**NebulaGraph graphd reachable**, **PostgreSQL reachable**, Kafka reachable), Micrometer meters, MDC enrichment (`snapshotId`, `domain`, `traceId`). |
@@ -229,7 +229,7 @@ erDiagram
     string attributes "JSON string, well-known keys plus extensible"
   }
   Edge {
-    string edgeKey PK "src rank dst, rank from sha1 hash"
+    string edgeId PK "opaque, decodes to from relation to snapshotId; rank from sha1 of that tuple"
     string relation "EDGE type declared in file"
     string domain "from snapshot domain"
     string snapshotId
@@ -365,6 +365,12 @@ INSERT EDGE LOCATED_AT (relation, domain, snapshotId, attributes) VALUES
 ```ngql
 -- Get node by managedObjectId (resolve + layer). VID lookup, then read its TAG props.
 FETCH PROP ON * "Node:PE1" YIELD vertex AS v;
+
+-- Get edge by edgeId. The opaque edgeId base64url-decodes to (snapshotId, from, relation, to);
+-- rank = sha1(from, relation, to). Direct keyed FETCH on the decoded (src, dst, rank, edgetype) —
+-- no scan/index needed (realizable from the defined edge key). Example decodes to
+-- ("SNAP-2026-001", "Port:PE1-LC2-P3", "HOSTS", "Interface:PE1-LC2-P3-100"):
+FETCH PROP ON HOSTS "Port:PE1-LC2-P3" -> "Interface:PE1-LC2-P3-100"@0 YIELD edge AS e;
 
 -- Resolve managedObjectId to object + layer for the current snapshot (domain-scoped).
 LOOKUP ON Node WHERE Node.domain == "core-ip" AND Node.snapshotId == "SNAP-2026-001" AND id(vertex) == "Node:PE1"
@@ -580,10 +586,16 @@ All error responses use one structured shape:
 ### Snapshot-file schema — single canonical home (P1-G2)
 
 The **topology-snapshot JSON Schema** — the file the **Simulator produces** and **Topology validates**
-against at ingest — has **exactly ONE canonical, checked-in home**:
+against at ingest — has **exactly ONE canonical, checked-in home**, and this resolves the
+`architecture.md` open item *"where it lives (event-model vs. a `schema/` dir) is a design decision"*:
 
-> **`services/topology/schema/snapshot.schema.json`** (JSON Schema, draft 2020-12), **owned by the
-> Topology Service**.
+> **Ownership (unambiguous, single owner — Q2/P1-G2).** There is **exactly one** canonical
+> topology-snapshot schema file: **`services/topology/schema/snapshot.schema.json`** (JSON Schema,
+> draft 2020-12), **owned solely by the Topology Service** (the validating owner). It is the **single
+> source of truth**, validated by **both** Topology (at ingest) **and** the Simulator (the producer,
+> which references this **same** file). There is **no** independent or lockstep copy — **not** in
+> `libs/event-model/`, **not** under `services/simulator/schema/`, and **not** anywhere else. A CI
+> lockstep guard fails the build on any second copy, fork, or drift.
 
 **Decision + justification (architecture.md says the home is a design decision):** Topology **owns
 ingestion + validation**, so the schema lives **co-located with the validating owner**, not in
@@ -684,7 +696,7 @@ the `attributes` map (returned verbatim).
 | Operation | Method + path | Response (200) | Errors |
 |---|---|---|---|
 | Resolve / get node + layer **(frozen — P1-G9)** | `GET /topology/nodes/{managedObjectId}` | **`NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }`** — **no separate `layer` field**; `layer == objectType` (documented derivation). | 404 unknown id; 400 malformed id |
-| Get edge | `GET /topology/edges/{edgeId}` | `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }` | 404 unknown |
+| Get edge **(realizable lookup — see "Edge identity & lookup")** | `GET /topology/edges/{edgeId}` where `edgeId` is the **opaque composite key** that **decodes to `(from, relation, to, snapshotId)`** | `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }` | 400 malformed `edgeId` (does not decode); 404 unknown (decodes but no such edge in the snapshot) |
 | Neighbors | `GET /topology/nodes/{managedObjectId}/neighbors?relation=RIDES_ON` (relation optional, repeatable; domain inferred from start) | `NeighborsDto { managedObjectId, domain, neighbors: [ { node: NodeDto, via: EdgeDto } ] }` (same-domain only unless `crossDomain=true`) | 404 unknown start |
 | Bounded traversal | `GET /topology/traversal?start={moId}&relation=RIDES_ON&relation=...&maxDepth=K&crossDomain=false` | `TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[] }` | 400 missing start/relation/maxDepth or maxDepth out of `[1..max]`; 404 unknown start |
 | List by type | `GET /topology/nodes?objectType=Port&domain=core-ip&snapshotId=current` | `NodeListDto { domain, objectType?, snapshotId, count, nodes: NodeDto[] }` | 400 unknown objectType |
@@ -720,6 +732,44 @@ operations back the web-ui's site-level visualization. `{siteId}` is a `managedO
 > selects the edges whose `from` and `to` are both in that set (intra-site) union the `LOCATED_AT`
 > edges to the site — all snapshot- and domain-scoped (Algorithm §C).
 
+#### Edge identity & lookup — making `GET /topology/edges/{edgeId}` realizable (Q6)
+
+**Problem.** A NebulaGraph edge has **no standalone `edgeId` key**: it is addressed only by the
+composite **`(src, dst, rank, edgetype)`**. The previous design defined `edgeId = sha1(snapshotId,
+from, relation, to)` *and* used that same hash as the edge **rank** — but a bare sha1 in the URL is a
+**one-way** value: there is no index from a rank-only hash back to `(src, dst, edgetype)`, so
+`GET /topology/edges/{edgeId}` could not actually be resolved to a NebulaGraph fetch. The published
+operation was unrealizable from the defined keys.
+
+**Decision (chosen — option (a): make `edgeId` the resolvable key, not a one-way hash).** `edgeId` is
+redefined as an **opaque-to-callers but service-decodable composite token** that **encodes the full
+NebulaGraph addressing tuple**:
+
+> **`edgeId = base64url( "<snapshotId> <from> <relation> <to>" )`** — a URL-safe,
+> reversible encoding of the four-field key `(snapshotId, from, relation, to)`.
+
+- **It decodes to a NebulaGraph key.** `GET /topology/edges/{edgeId}` base64url-**decodes** the token
+  back to `(snapshotId, from, relation, to)`, derives the deterministic **`rank = sha1(from,
+  relation, to)`** (stable so re-insert overwrites the same edge), and issues a **direct keyed fetch**
+  — no scan, no index needed: `FETCH PROP ON <relation> "<from>" -> "<to>"@<rank> YIELD edge AS e`,
+  scoped to the decoded `snapshotId`. This is realizable from the **defined edge key** `(src, dst,
+  rank, edgetype)`: `src=from`, `dst=to`, `edgetype=relation`, `rank` derived from the same tuple.
+- **It is the same `edgeId` every other response already carries.** `EdgeDto.edgeId` returned by
+  neighbors, traversal, and `GET /topology/sites/{siteId}/objects` is this exact token, so a caller
+  that saw an edge in any list can round-trip it straight back into `GET /topology/edges/{edgeId}` —
+  the published operation is now closed and resolvable end-to-end.
+- **Abstraction-safe (AC-19).** The token is opaque to callers and leaks **no** NebulaGraph internals
+  (no host/space/raw rank/nGQL); only `GraphReadService`/`NebulaGraphRepository` decode it and form the
+  fetch. Encoding/decoding lives behind the `graph/` boundary.
+- **Errors.** A token that does not base64url-decode to the four-field shape yields **400** (malformed
+  `edgeId`); a well-formed token whose edge is absent in the (decoded) snapshot yields **404**.
+
+> Why not keep a sha1 `edgeId` plus an edge index to reverse-resolve it? A sha1 is not reversible, so a
+> reverse lookup would require persisting a separate `edgeId -> (src,dst,relation)` mapping (extra
+> store, extra write, drift risk) **and** an index NebulaGraph would have to scan. The reversible
+> composite token needs **no** extra store or index and resolves by a **direct keyed FETCH**, which is
+> why it is chosen. (See Design alternatives — `edgeId` row.)
+
 **Interface-aware queries (no new endpoints — Interface is just another typed object).** Because
 `Interface`, `HOSTS` and `TERMINATES` are ordinary TAGs/EDGE types, the existing operations already
 serve them: `GET /topology/nodes?objectType=Interface&domain=core-ip` lists interfaces;
@@ -738,7 +788,7 @@ The Topology Service is primarily a **server**, not a client.
 | Direction | Collaborator + operation | Config key(s) | mock vs real |
 |---|---|---|---|
 | **Inbound (server)** | Producers (Simulator) call `POST /topology/snapshots`; consumers (Trail Builder, Codebook Generator, Enrichment, Web UI) call the query API (incl. the **site** operations). They build clients from **this service's** published `openapi.json`. | n/a (we publish; they consume) | n/a |
-| **Outbound (required) — Knowledge domain vocabulary** | **Knowledge Service** — fetch the **object-type set + edge-relation vocabulary** for a `domain` (used by `VocabularyValidator` at ingest). `KnowledgeVocabClient` caches the vocabulary with a short TTL; refreshes on miss/expiry. | `topology.knowledge.base-url`, `topology.knowledge.mode=mock|real`, `topology.knowledge.vocab-ttl-seconds`, `topology.knowledge.vocab-path` | **mock** = WireMock/Prism stub **generated from Knowledge's published OpenAPI** (unit tests, isolated); **real** = live Knowledge on the integration Compose network. No hard-coded URL. |
+| **Outbound (required) — Knowledge domain vocabulary** | **Knowledge Service** — fetch the **object-type set + edge-relation vocabulary** for a `domain` via the **frozen** `GET /domains/{domain}/vocabulary` operation (Knowledge design §A, gap P1-G11), used by `VocabularyValidator` at ingest. `KnowledgeVocabClient` caches the per-domain `{domain, objectTypes[], relations[], version}` response with a short TTL; refreshes on miss/expiry. | `topology.knowledge.base-url`, `topology.knowledge.mode=mock|real`, `topology.knowledge.vocab-ttl-seconds`, `topology.knowledge.vocab-path` (default the frozen `GET /domains/{domain}/vocabulary`) | **mock** = WireMock/Prism stub **generated from Knowledge's published OpenAPI** (unit tests, isolated, against the same frozen path/shape); **real** = live Knowledge on the integration Compose network. No hard-coded URL; the path has a real, startable default. |
 | **Outbound (infra) — graph** | **NebulaGraph** graphd (nGQL on port 9669) via the **nebula-java** `NebulaPool`/`Session` | `topology.nebula.hosts` (host:port list), `topology.nebula.space=topology`, `topology.nebula.username` / `.password` (secret), pool sizing | real in all envs; **Testcontainers NebulaGraph** in integration tests; mocked `GraphRepository` in unit tests. Internal-only; never forwarded to callers. |
 | **Outbound (infra) — metadata** | **PostgreSQL** (snapshot metadata) via JDBC | `topology.postgres.jdbc-url` / `.username` / `.password` (secret) | real in all envs; **Testcontainers PostgreSQL** in integration; mocked `SnapshotRepository` in unit tests. Internal-only. |
 | **Outbound (infra) — bus** | Kafka broker | `topology.kafka.bootstrap-servers` | real in all envs; Testcontainers Kafka in integration; embedded/mock in unit tests. |
@@ -747,6 +797,35 @@ The vocabulary is **not** frozen in this service: each domain's object-type set 
 is **authored in Knowledge** and fetched per `domain` at ingest, against Knowledge's **published
 OpenAPI** (never its source). The Core IP vocabulary is the MVP domain's authored data, used as the
 mock fixture in unit tests.
+
+**Pinned Knowledge endpoint (Q3/Q11 — frozen, concrete path).** The placeholder
+`(from Knowledge OpenAPI)` is replaced with the **frozen concrete operation** Knowledge publishes for
+exactly this purpose:
+
+> **`GET /domains/{domain}/vocabulary`** → **`200 { domain, objectTypes[], relations[], version }`**;
+> **`404`** for an unknown domain. (Knowledge design §A "Topology snapshot pre-validation", gap
+> **P1-G11, FROZEN**.)
+
+`KnowledgeVocabClient` calls this single operation (substituting `{domain}` with the snapshot's
+`domain`), reads `objectTypes[]` as the domain's object-type set and `relations[]` as its relation
+vocabulary, and caches the response keyed by `(domain, version)` with TTL
+`topology.knowledge.vocab-ttl-seconds`. The default of `topology.knowledge.vocab-path` is the literal
+frozen path template `/domains/{domain}/vocabulary` — a **real, resolvable default**, not a
+placeholder — so the client is fully wired with **no per-environment override required**.
+
+**Startable in isolation / test (real default path + mock|real mode).** Because the path default is
+concrete, the service is **startable in isolation** without any Knowledge override:
+- **`topology.knowledge.mode=mock`** (unit/isolated): `KnowledgeVocabClient` resolves the **same**
+  `GET /domains/{domain}/vocabulary` operation against a **WireMock/Prism stub generated from
+  Knowledge's published OpenAPI**, seeded with the `core-ip` `{objectTypes, relations}` fixture. No
+  live Knowledge process is needed; the path, request, and response shape are identical to real.
+- **`topology.knowledge.mode=real`** (integration/prod, the default mode): the client resolves the
+  same path against the live Knowledge base URL on the Compose network.
+
+The mode only switches **where** the request goes (stub vs live), never the **path or response
+shape** — both are the one frozen contract — so a test, CI, and prod all exercise the same operation.
+Fail-closed semantics are unchanged: if the operation is unavailable for the `domain` and no
+non-expired cache entry exists, ingest is rejected `502` (EH-6c) with no write and no event.
 
 ---
 
@@ -779,8 +858,8 @@ sequenceDiagram
     IC-->>Prod: 422 ApiError no write no event
   else structurally valid
     SV->>VV: validate objectTypes and relations for domain
-    VV->>KN: get vocabulary for domain cached
-    KN-->>VV: object-type set plus relation set
+    VV->>KN: GET /domains/{domain}/vocabulary cached
+    KN-->>VV: objectTypes and relations and version
     alt unknown type or relation for domain
       VV-->>IC: ValidationException violations
       IC-->>Prod: 422 ApiError no write no event
@@ -1116,7 +1195,7 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | **Object-type / relation vocabulary** | (a) **de-frozen, Knowledge-authored per `domain`, validated at ingest** via `KnowledgeVocabClient`; (b) frozen hard-coded set; (c) accept any token | **(a) — chosen, per merged contract.** Each domain's vocabulary is Knowledge data so a new domain needs no event-model or topology code change; Topology validates ingest against it (fail closed if unavailable). (b) blocks multi-domain and contradicts the merged invariant. (c) loses the reject-unknown-relation guarantee (AC-7). A short-TTL cache keeps the dependency cheap. |
 | Snapshot validation | (a) **JSON-Schema (`networknt`) for structural + code for semantic** (refs / objectType-prefix); (b) all-in-bean-validation; (c) all-in-code | **(a)**. The structural contract lives in `snapshot.schema.json` (the owned contract) — validate against it directly; cross-record semantics (dangling refs, `objectType` equals prefix) aren't expressible in plain JSON-Schema, so a thin semantic pass follows. `networknt` is already a repo dependency. |
 | `changeType` derivation | (a) **explicit query hint, default full-load (first ingest always full-load)**; (b) diff current vs incoming graph to auto-classify | **(a)**. MVP only distinguishes full-load vs incremental and the spec freezes the convention; auto-diff (b) is costly and unnecessary pre-`delete`. |
-| `edgeId` for `GET /edges/{edgeId}` | (a) **deterministic synthetic `edgeId` = sha1(snapshotId, from, relation, to)** (also the NebulaGraph edge rank); (b) expose a NebulaGraph internal handle | **(a)**. (b) would leak NebulaGraph internals (violates AC-19); a deterministic content-hash id is reproducible, opaque, abstraction-safe, and doubles as the edge rank so re-insert is stable. |
+| **`edgeId` for `GET /edges/{edgeId}` — realizable lookup (Q6)** | (a) **opaque but service-decodable composite token `edgeId = base64url("<snapshotId> <from> <relation> <to>")`** — decodes to the NebulaGraph edge key `(src=from, dst=to, edgetype=relation, rank=sha1(from,relation,to))`, resolved by a **direct keyed FETCH**; (b) a **one-way sha1** `edgeId` (the prior design) used as the edge rank; (c) sha1 `edgeId` plus a persisted `edgeId -> (src,dst,relation)` reverse-map + index; (d) drop the operation and fold edge retrieval into neighbors/traversal; (e) expose a NebulaGraph internal handle | **(a) — chosen.** NebulaGraph edges are keyed only by `(src, dst, rank, edgetype)`, so the URL id must be **resolvable back to that tuple**. **(b) is unrealizable** — a sha1 is one-way, there is no index from a rank-only hash to `(src,dst,edgetype)`, so `GET /topology/edges/{edgeId}` could never resolve (the gap). (a) makes `edgeId` a reversible encoding of exactly that key, so the fetch is a direct keyed `FETCH PROP ON <relation> "<from>" -> "<to>"@<rank>` — no scan, no extra store. The same token is the `edgeId` every `EdgeDto` already carries, so list responses round-trip into this op. It stays opaque to callers (AC-19). (c) needs an extra store/index + adds drift risk; (d) drops a published operation the spec lists; (e) leaks NebulaGraph internals. The `rank` is still the deterministic `sha1(from, relation, to)` so re-insert overwrites the same edge. |
 | Producer-supplied vs minted `snapshotId` | (a) **honour producer-supplied if present, else mint UUID-based**; (b) always mint | **(a)** — spec AC-8/AC-9 require honouring a supplied id and minting when absent. |
 | **Ingestion response status (P1-G1)** | (a) **`200` synchronous, `SnapshotIngestResponse { snapshotId, domain, status, nodeCount, edgeCount, changeType }`**; (b) `202` accepted with a bare `{ snapshotId }` (the Simulator's prior assumption); (c) `201` created | **(a) — chosen + frozen.** The lift is synchronous — `snapshotId` is minted inline, the graph is persisted and the event emitted **before** the response returns — so the truthful status is `200`, not `202` (which implies async/queued). The richer body is additive over the bare `{ snapshotId }`; a producer needs only `snapshotId` + `status`. The Simulator aligns its upload client to the published `openapi.json`. (b) misrepresents a synchronous operation; (c) `201`/`Location` semantics don't fit (the resource is queried by `snapshotId`, not a created URL). |
 | **Snapshot-file schema home (P1-G2)** | (a) **one canonical `services/topology/schema/snapshot.schema.json` owned by Topology (the validator), referenced by the Simulator producer**; (b) the schema under `libs/event-model/`; (c) two lockstep copies (one in `services/topology/`, one in `services/simulator/`) | **(a) — chosen + frozen.** Co-locating the schema with its validating owner gives a single source of truth and contract-gated changes; the Simulator references the same file (CI lockstep guard). (b) wrongly conflates the HTTP-upload file contract with the Kafka event-model payloads. (c) is exactly the drift risk the gap flagged — two copies inevitably diverge. |
@@ -1146,6 +1225,7 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | 11 | Bounded traversal by edge type | `NebulaGraphRepositoryTest#traversalReturnsOnlyRidesOnReachableWithinDepth` (Testcontainers NebulaGraph) | `GO 1 TO K STEPS OVER RIDES_ON` returns exactly the expected RIDES_ON-reachable set within K; excludes nodes reachable only via other edge types. |
 | 12 | `managedObjectId` resolution | `QueryControllerTest#getNodeReturnsObjectAndLayer_404WhenUnknown` | valid id yields NodeDto with layer (from TAG); unknown yields 404. |
 | 13 | List by type + neighbors | `QueryControllerTest#listByTypeReturnsOnlyThatType` + `#neighborsReturnsDirectlyConnected` | `?objectType=Port` (LOOKUP ON Port) yields only Ports; neighbors (GO OVER) returns all directly connected. |
+| 13b | **Get edge by realizable `edgeId` (Q6)** | `GraphReadServiceTest#getEdgeDecodesEdgeIdToKeyedFetch` + `QueryControllerTest#getEdgeRoundTripsAndReturns404And400` + `NebulaGraphRepositoryTest#getEdgeResolvesByDirectKeyedFetch` (Testcontainers NebulaGraph) | the `edgeId` carried in an `EdgeDto` from neighbors/traversal/site-objects **round-trips** straight into `GET /topology/edges/{edgeId}` and returns the same edge; the service base64url-**decodes** `edgeId` to `(snapshotId, from, relation, to)` and resolves it by a **direct keyed `FETCH PROP ON <relation> "<from>" -> "<to>"@<rank>`** (no scan/index); a malformed token yields **400**, a well-formed token with no such edge yields **404**; no NebulaGraph internal/rank/nGQL leaks in the body. |
 | 14 | New `snapshotId` on re-ingest | `SnapshotMetadataServiceTest#reingestMintsNewSnapshotId` + `IngestionQueryIT#currentAndPreviousBothListed` | second ingest is not equal to first id; both listed by `GET /topology/snapshots` (from PostgreSQL); prior current demoted to previous. |
 | 15 | First ingest emits `full-load`; payload conforms; ids match | `TopologyEventPublisherTest#firstIngestEmitsFullLoad_payloadDeserialises_idMatches` | exactly one event, `changeType=full-load`, deserialises to frozen `TopologyChangedEvent`, `snapshotId` equals API response. |
 | 16 | `changeType` within approved set | `TopologyEventPublisherTest#neverEmitsChangeTypeOutsideFullLoadOrIncremental` + `SnapshotRepositoryTest#changeTypeCheckConstraintRejectsDelete` | publisher never produces `delete`/other value; PostgreSQL CHECK constraint also rejects it. |
@@ -1215,7 +1295,7 @@ never forwarded to callers):**
 | `TOPOLOGY_SNAPSHOT_RETENTION` | retained snapshots per domain (current+previous) | `2` |
 | `TOPOLOGY_KNOWLEDGE_BASE_URL` | Knowledge Service base URL (domain-vocabulary API) | (required) |
 | `TOPOLOGY_KNOWLEDGE_MODE` | `mock` (stub from Knowledge OpenAPI) or `real` | `real` |
-| `TOPOLOGY_KNOWLEDGE_VOCAB_PATH` | path of the domain-vocabulary operation on Knowledge | (from Knowledge OpenAPI) |
+| `TOPOLOGY_KNOWLEDGE_VOCAB_PATH` | path template of the **frozen** Knowledge domain-vocabulary operation; `{domain}` is substituted at call time | `/domains/{domain}/vocabulary` |
 | `TOPOLOGY_KNOWLEDGE_VOCAB_TTL_SECONDS` | TTL for the cached per-domain vocabulary | `300` |
 
 Kafka producer is explicitly idempotent: `enable.idempotence=true`, `acks=all`,
@@ -1272,11 +1352,14 @@ Kafka producer is explicitly idempotent: `enable.idempotence=true`, `acks=all`,
    its `domain`. The event-model payload arrays are `additionalProperties:true`, so emitting the typed
    descriptors (incl. `Site`, `LOCATED_AT`, and the `attributes`/`domain` fields) validates against the
    frozen event-model schema — no schema change needed.
-3. **Knowledge domain-vocabulary API shape is design-stage on Knowledge's side.** This design depends on
-   Knowledge exposing a domain-scoped object-type-set + relation-vocabulary operation, but does not
-   invent its exact path/shape. The `KnowledgeVocabClient` and its unit-test mock are built against
-   Knowledge's **published OpenAPI**; `topology.knowledge.vocab-path` is config. This is an
-   existing-contract dependency, **not** a new contract change.
+3. **Knowledge domain-vocabulary API shape is now FROZEN (was design-stage).** The earlier open item
+   *"exact path/shape is design-stage on Knowledge's side"* is **resolved**: Knowledge has frozen the
+   operation as **`GET /domains/{domain}/vocabulary`** → **`200 { domain, objectTypes[], relations[],
+   version }`** (`404` unknown domain) — Knowledge design §A, gap **P1-G11**. The `KnowledgeVocabClient`
+   and its unit-test mock are built against this frozen shape (and validated by Knowledge's provider-side
+   `VocabularyEndpointContractTest`); `topology.knowledge.vocab-path` defaults to that concrete path
+   template. This is an **existing-contract dependency** on an already-frozen Knowledge surface, **not** a
+   new contract change.
 4. **NebulaGraph attribute storage as a JSON string.** NebulaGraph has no native map/JSON property type,
    so the open `attributes` map is stored as a serialized JSON **string** property and parsed back on
    read. This is purely internal (behind `GraphRepository`); it does not change the API `attributes`
