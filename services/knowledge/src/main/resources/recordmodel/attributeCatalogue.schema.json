@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/knowledge/recordmodel/attributeCatalogue.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["deviceKeys", "connectionKeys"],
+  "properties": {
+    "deviceKeys": { "type": "array", "items": { "$ref": "#/$defs/key" } },
+    "connectionKeys": { "type": "array", "items": { "$ref": "#/$defs/key" } }
+  },
+  "$defs": {
+    "key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+        "valueForm": { "enum": ["string", "number", "enum", "boolean"] },
+        "allowed": { "type": "array", "items": { "type": "string" } },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}

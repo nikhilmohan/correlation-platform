@@ -1,0 +1,36 @@
+# Integration thresholds — the platform-level evaluation metrics the integration harness asserts.
+# The Simulator OWNS these definitions (spec "Integration thresholds"); the numeric MVP targets
+# are CONFIG, not literals in service code (criterion 20). The integration-test harness reads this
+# file and asserts the metrics; the Simulator only surfaces it. A change here is a tuning decision,
+# not a contract change.
+
+rca_accuracy_min: 0.80
+alarm_reduction_ratio_min: 5.0
+noise_filter_removal_min: 0.90
+noise_filter_retention_min: 0.95
+pattern_quality_min: 0.80
+
+# Distinct patterns x per-pattern span (fix B1)
+distinct_patterns_min: 8
+distinct_patterns_max: 10
+per_pattern_type_span_min: 10
+per_pattern_type_span_max: 20
+
+# Pattern coverage of volume (fix B1)
+pattern_coverage_min: 0.50
+pattern_coverage_max: 0.60
+
+# Demo volume bands (fix B3) — pinned so the demo numbers are repeatable + gated.
+p2_demo:
+  topic: alarms.history
+  total_alarms_target: 1000
+  total_alarms_tolerance: 0.15   # +/-15%
+  noise_fraction: 0.20
+p3_demo:
+  topic: alarms.live
+  total_alarms_target: 500
+  total_alarms_tolerance: 0.15
+  noise_fraction: 0.20
+
+# Distinct grounded sites (fix B4)
+distinct_grounded_sites_at_site_count_10: 10

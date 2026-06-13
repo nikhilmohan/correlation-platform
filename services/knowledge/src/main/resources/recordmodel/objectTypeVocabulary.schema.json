@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/knowledge/recordmodel/objectTypeVocabulary.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["objectTypes"],
+  "properties": {
+    "objectTypes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*$" }
+    }
+  }
+}
