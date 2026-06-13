@@ -20,6 +20,17 @@ task and acceptance criterion in the approved, merged `services/alarm-manager/sp
 > the `reverted-open` transition), while `correlation.results` is re-scoped to ROLE + incident
 > only. Everything else from the prior design is preserved.
 
+> **Design-readiness fix (this revision).** Persist and return the **canonical `alarmType` join
+> token**. The prior design persisted `event_type` and `probable_cause` but silently dropped
+> `alarmType` — a **required** `AlarmEvent` field and the platform canonical alarm-type join key
+> (`architecture.md`). This revision adds a NOT NULL `alarm_type` column to the live alarm store,
+> persists it on ingest, and returns it on the `AlarmSummary` and `AlarmDetail` DTOs, so the join
+> key the web-ui/incident views and the alarm-to-incident join rely on is no longer lost.
+> **No contract change:** `alarmType` is already on `AlarmEvent` in `libs/event-model`; no new
+> topic/payload/field is introduced. Everything else (the `AlarmStatusChange` STATE channel, the
+> lifecycle states incl. `in-progress`, the `correlation.results` ROLE + incident role, and the
+> `{ items, total, limit, offset }` pagination envelope) is unchanged.
+
 ## Stack
 
 - **Language / runtime:** Java 17 (eclipse-temurin), Spring Boot 3.x.
@@ -50,7 +61,7 @@ and flows.
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| 1. Consume `alarms.enriched.live`; persist each `AlarmEvent` with lifecycle `open` (idempotent on `alarmId`); republish the same `AlarmEvent` on `alarms.persisted.live` (idempotent, no second emit on redelivery) | `EnrichedAlarmConsumer` (`@KafkaListener` on `alarms.enriched.live`) then `IngestService.persistAndRepublish` — codec-validate, upsert into `alarm` keyed on `alarmId`, write an `open` row to `state_transition`, then `PersistedAlarmProducer.republish` guarded by the `published` flag so a redelivery never re-emits. See Key flow (a). |
+| 1. Consume `alarms.enriched.live`; persist each `AlarmEvent` with lifecycle `open` (idempotent on `alarmId`); republish the same `AlarmEvent` on `alarms.persisted.live` (idempotent, no second emit on redelivery) | `EnrichedAlarmConsumer` (`@KafkaListener` on `alarms.enriched.live`) then `IngestService.persistAndRepublish` — codec-validate, upsert into `alarm` keyed on `alarmId` (persisting **every** required `AlarmEvent` field, including the canonical `alarmType` join token into `alarm_type`, alongside `event_type`/`probable_cause`), write an `open` row to `state_transition`, then `PersistedAlarmProducer.republish` guarded by the `published` flag so a redelivery never re-emits. See Key flow (a). |
 | 2. Consume `alarms.status.changed` (`AlarmStatusChange`); apply `newStatus` to lifecycle STATE; audit each transition with `source` and `changedAt`; handle `reverted-open` as a transition back to `open` with a reason and clear in-progress role association; dedupe on envelope `eventId` | `AlarmStatusChangeConsumer` (`@KafkaListener` on `alarms.status.changed`) then `StatusSyncService.apply` — codec-validate (reject unknown `schemaVersion`/`newStatus` to `alarms.status.changed.dlq`), guard on `processed_event(eventId)`, apply `newStatus` to `alarm.lifecycle_state` via `LifecycleService`, append a `state_transition` carrying `source`/`changed_at`/`reason`. See Key flow (b) and the lifecycle state machine. |
 | 3. Consume `correlation.results` (`CorrelationResultEvent`); update ROLE + incident linkage only — `root-cause`/`incidentId` for `rootCauseAlarmId`, `child`/same `incidentId` for each `childAlarmIds`; reconcile with STATE by `alarmId`; audit; idempotent on envelope `eventId` | `CorrelationResultConsumer` (`@KafkaListener` on `correlation.results`) then `CorrelationService.applyRoleAndIncident` — guard on `processed_event(eventId)`, update only `role` + `incident_id` (never `lifecycle_state`) on each affected `alarm` row, append a `role-assigned` audit entry per affected alarm. See Key flow (c). |
 | 4. Handle clear events arriving via `alarms.enriched.live` (`AlarmEvent.state = cleared`): transition the matching alarm to lifecycle `cleared` + audit (canonical clear path is `AlarmStatusChange`; both handled consistently and idempotently) | `EnrichedAlarmConsumer` branches on the codec-bound `AlarmEvent.state`: `raised` then persist+republish (task 1); `cleared` then `LifecycleService.clear` sets lifecycle `cleared` and appends a `cleared` `state_transition`. The same `LifecycleService` applies `AlarmStatusChange(newStatus=cleared)` (task 2), so both paths converge on one transition rule. See Key flow (a) and the lifecycle state diagram. |
@@ -101,8 +112,14 @@ flowchart TD
   `AlarmEvent.state`: `raised` then `IngestService.persistAndRepublish`; `cleared` then
   `LifecycleService.clear`. Codec exceptions route to `DlqRouter` (`alarms.enriched.live.dlq`).
 - **`IngestService`** — idempotent upsert of the alarm into `alarm` keyed on `alarmId` with
-  lifecycle `open`, plus a single `open` `state_transition` row on first insert, then calls
-  `PersistedAlarmProducer.republish`. The persist and the republish-guard flip occur in one DB
+  lifecycle `open`, persisting **all** required `AlarmEvent` fields — including the canonical
+  **`alarmType`** join token into the `alarm_type` column (NOT NULL; alongside `event_type` and
+  `probable_cause`) — plus a single `open` `state_transition` row on first insert, then calls
+  `PersistedAlarmProducer.republish`. `alarmType` is the **platform canonical alarm-type join
+  token** the rest of the correlation chain keys off (pattern mining, codebook signatures,
+  `rootCauseAlarmType`, correlation matching); it is **distinct from** `eventType` (the X.733
+  category) and `probableCause` (the X.733 probable cause), so it is persisted as its own column
+  rather than conflated with either. The persist and the republish-guard flip occur in one DB
   transaction; the actual Kafka send happens after commit (transactional-outbox-style guard, see
   Design alternatives) so a redelivery cannot double-persist or double-emit.
 - **`AlarmStatusChangeConsumer`** *(new)* — `@KafkaListener` on `alarms.status.changed`.
@@ -185,6 +202,7 @@ erDiagram
     text managed_object_id
     text event_type
     text probable_cause
+    text alarm_type
     text perceived_severity
     text wire_state
     timestamptz raised_at
@@ -217,8 +235,9 @@ erDiagram
 |---|---|---|
 | `alarm_id` | `text` PK | `AlarmEvent.alarmId`; idempotency key for persist plus republish |
 | `managed_object_id` | `text` NOT NULL | `AlarmEvent.managedObjectId`, canonical `objectType:id` (validated by codec) |
-| `event_type` | `text` NOT NULL | `AlarmEvent.eventType` (X.733) |
-| `probable_cause` | `text` NOT NULL | `AlarmEvent.probableCause` |
+| `event_type` | `text` NOT NULL | `AlarmEvent.eventType` (X.733 category) |
+| `probable_cause` | `text` NOT NULL | `AlarmEvent.probableCause` (X.733 probable cause) |
+| `alarm_type` | `text` NOT NULL | `AlarmEvent.alarmType` — the **platform canonical alarm-type join token** (e.g. `PortDown` / `InterfaceDown` / `LinkDown` / `FiberFault`), required on every ingested `AlarmEvent`. Persisted as its own column, **distinct from** `event_type` and `probable_cause`. NOT NULL because `alarmType` is a required `AlarmEvent` field; the codec rejects an `AlarmEvent` missing it before persistence (so it can never be NULL here). |
 | `perceived_severity` | `text` NOT NULL | `AlarmEvent.perceivedSeverity` |
 | `wire_state` | `text` NOT NULL | last seen `AlarmEvent.state` (`raised` / `cleared`) |
 | `raised_at` | `timestamptz` NOT NULL | `AlarmEvent.raisedAt` (used by the time-window filter) |
@@ -245,6 +264,20 @@ ALTER TABLE alarm ADD CONSTRAINT alarm_lifecycle_state_chk
 -- audit table gains the originating source plus the payload changedAt
 ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS source     text;
 ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS changed_at timestamptz;
+```
+
+**Canonical join key (DDL delta).** The live alarm store **persists the canonical `alarmType`
+join token** in its own `alarm_type` column, alongside `event_type` and `probable_cause`. Because
+`alarmType` is a **required** field on every ingested `AlarmEvent` (the codec rejects an
+`AlarmEvent` missing it to the DLQ before persistence), the column is `NOT NULL`:
+
+```sql
+-- migration V3__add_alarm_type.sql
+-- alarm_type carries AlarmEvent.alarmType, the platform canonical alarm-type join token
+-- (distinct from event_type / probable_cause). Required on every AlarmEvent, so NOT NULL.
+ALTER TABLE alarm ADD COLUMN IF NOT EXISTS alarm_type text;
+-- backfill is N/A for the MVP live-only store (no historical rows); enforce NOT NULL:
+ALTER TABLE alarm ALTER COLUMN alarm_type SET NOT NULL;
 ```
 
 **Table `state_transition`** (append-only audit; one row per lifecycle/role change):
@@ -274,6 +307,10 @@ ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS changed_at timestamptz;
 - `alarm_lifecycle_state_chk` — admits `open` / `in-progress` / `correlated` / `cleared`.
 - `idx_alarm_lifecycle_state` on `(lifecycle_state)` — `state` filter (incl. `in-progress`).
 - `idx_alarm_incident_id` on `(incident_id)` — `incidentId` filter.
+- `idx_alarm_alarm_type` on `(alarm_type)` — supports incident-view / cross-service queries that
+  group or join on the canonical `alarmType` token (no `alarmType` query-filter is exposed by this
+  service in the MVP, but the column is indexed because `alarm_type` is the canonical join key the
+  incident views and the join to incidents rely on; the index is cheap and forward-looking).
 - `idx_alarm_raised_at` on `(raised_at)` — time-window filter.
 - `gin_alarm_trail_ids` GIN on `(trail_ids)` — `trailId` membership filter.
 - `idx_transition_alarm_id` on `state_transition (alarm_id, occurred_at)` — ordered history.
@@ -363,12 +400,17 @@ This is the **same envelope** the Correlation Engine `GET /incidents` returns an
 Manager `GET /patterns` `PatternPage` returns, so the web-ui streaming view reads **one uniform
 envelope** (`.items` / `.total` / `.limit` / `.offset`) across both polled endpoints — `total`
 is the count matching the filter (for the streaming/progress view), and `limit` / `offset` are
-echoed from the request. The item shape `AlarmSummary` is **unchanged** — only the envelope keys
-change (was `{ items, page, size, totalElements, totalPages }`).
+echoed from the request. The **envelope keys** changed under the pagination fix (was
+`{ items, page, size, totalElements, totalPages }`); the item shape `AlarmSummary` was untouched
+by that fix and, separately, this readiness fix adds the canonical `alarmType` field to it (see
+below) — no other item-shape change.
 
-`AlarmSummary` = `{ alarmId, managedObjectId, eventType, perceivedSeverity, raisedAt,
+`AlarmSummary` = `{ alarmId, managedObjectId, eventType, alarmType, perceivedSeverity, raisedAt,
 lifecycleState, role, incidentId, trailIds }` (`lifecycleState` now ranges over `open` /
-`in-progress` / `correlated` / `cleared`).
+`in-progress` / `correlated` / `cleared`). **`alarmType`** is the canonical alarm-type join token
+(persisted from `AlarmEvent.alarmType`), returned so the web-ui live/incident views and the
+alarm-to-incident join can key off it; it is **distinct from** `eventType` (X.733 category) and
+from `probableCause` (X.733 probable cause, returned in `AlarmDetail`).
 
 Errors: `400` (`ProblemDetail`, RFC 9457) for an invalid `state` enum, malformed `from`/`to`, or
 `from` after `to`; `500` for an unexpected server error.
@@ -376,11 +418,15 @@ Errors: `400` (`ProblemDetail`, RFC 9457) for an invalid `state` enum, malformed
 ### `GET /alarms/{alarmId}` — single alarm full record
 
 Response `200` body (`AlarmDetail`) = all `AlarmEvent` fields (`alarmId`, `managedObjectId`,
-`eventType`, `probableCause`, `perceivedSeverity`, `raisedAt`, `clearedAt`, `state`, `trailIds`,
-`vendorRaw`) plus `lifecycleState` (`open` / `in-progress` / `correlated` / `cleared`), `role`
-(`root-cause` / `child` / `none`), `incidentId`, and `transitions`: an **ordered** array of
+`eventType`, `probableCause`, **`alarmType`**, `perceivedSeverity`, `raisedAt`, `clearedAt`,
+`state`, `trailIds`, `vendorRaw`) plus `lifecycleState` (`open` / `in-progress` / `correlated` /
+`cleared`), `role` (`root-cause` / `child` / `none`), `incidentId`, and `transitions`: an
+**ordered** array of
 `{ toState, reason, source, changedAt, occurredAt }` (ascending `occurredAt`, UTC). `source` and
-`changedAt` are populated for `AlarmStatusChange`-driven transitions, null otherwise.
+`changedAt` are populated for `AlarmStatusChange`-driven transitions, null otherwise. **`alarmType`**
+is the canonical alarm-type join token persisted from `AlarmEvent.alarmType`, surfaced here so the
+detail view and the alarm-to-incident join read it directly; it is reported as its own field,
+distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause).
 
 Errors: `404` (`ProblemDetail`) when `alarmId` is unknown; `500` otherwise.
 
@@ -535,8 +581,10 @@ Decision logic per consumed message:
 1. **Enriched-alarm message.** Deserialize plus validate (codec; rejects unknown major
    `schemaVersion`, malformed `managedObjectId`, missing required fields). If invalid then
    `alarms.enriched.live.dlq`.
-   - If `state = raised`: `INSERT ... ON CONFLICT (alarm_id) DO NOTHING`; if a row was inserted,
-     append the single `open` (`reason = ingest`) transition. Then, if `published = false`, set
+   - If `state = raised`: `INSERT ... ON CONFLICT (alarm_id) DO NOTHING`, writing every required
+     `AlarmEvent` field including `alarm_type` (the canonical `alarmType` join token, NOT NULL);
+     if a row was inserted, append the single `open` (`reason = ingest`) transition. Then, if
+     `published = false`, set
      `published = true` and emit on `alarms.persisted.live` (after commit). A redelivery finds the
      row present and `published = true` then no second persist, no second transition, no second
      emit.
@@ -568,10 +616,37 @@ domain thresholds, so nothing is read from the Knowledge Service.
 
 ## Seed data & examples
 
-N/A — the Alarm Manager generates no seed/fixture/sample data of its own; it derives all state
-from consumed `AlarmEvent`, `AlarmStatusChange`, and `CorrelationResultEvent` messages. Test
-fixtures reuse the frozen `libs/event-model/schema/fixtures/AlarmEvent.json`,
-`AlarmStatusChange.json`, and `CorrelationResultEvent.json`.
+N/A as standalone generation — the Alarm Manager generates no seed/fixture/sample data of its
+own; it derives all state from consumed `AlarmEvent`, `AlarmStatusChange`, and
+`CorrelationResultEvent` messages. Test fixtures reuse the frozen
+`libs/event-model/schema/fixtures/AlarmEvent.json`, `AlarmStatusChange.json`, and
+`CorrelationResultEvent.json`.
+
+**Worked example — persisted alarm record (showing the canonical `alarmType`).** A consumed
+`AlarmEvent` such as:
+
+```json
+{
+  "alarmId": "alm-1001",
+  "managedObjectId": "Port:ne1-1-1",
+  "eventType": "communicationsAlarm",
+  "probableCause": "lossOfSignal",
+  "alarmType": "PortDown",
+  "perceivedSeverity": "critical",
+  "raisedAt": "2026-06-13T09:00:00Z",
+  "state": "raised",
+  "trailIds": ["trail-77"]
+}
+```
+
+persists to one `alarm` row with `lifecycle_state = open`, `event_type = communicationsAlarm`,
+`probable_cause = lossOfSignal`, and **`alarm_type = PortDown`** (the canonical join token,
+distinct from the two X.733 fields), plus one `open` `state_transition`. `GET /alarms/alm-1001`
+then returns an `AlarmDetail` whose `eventType`, `probableCause`, **`alarmType` (`PortDown`)**,
+`lifecycleState`, `role`, `incidentId`, and `transitions` are all populated; the `GET /alarms`
+`AlarmSummary` for it likewise carries `alarmType = PortDown`. A second alarm
+`{ alarmId: alm-1002, alarmType: LinkDown, ... }` persists `alarm_type = LinkDown` — the
+alarm-to-incident join and the codebook/correlation chain key off these `alarmType` tokens.
 
 ## UI wireframes
 
@@ -608,7 +683,7 @@ and logged with the `traceId`.
 | Consideration | Alternatives considered | Chosen plus rationale |
 |---|---|---|
 | STATE source of truth | (a) `AlarmStatusChange` on `alarms.status.changed` as the canonical STATE channel, (b) keep deriving lifecycle STATE from `correlation.results` (the prior design) | **(a) `AlarmStatusChange`.** The merged spec/contract makes `alarms.status.changed` the generic, non-correlation-specific status-sync channel; it carries `in-progress` and `reverted-open` which `correlation.results` cannot express. STATE and ROLE become cleanly separated, and any service (not just the Correlation Engine) can drive STATE. |
-| `GET /alarms` list-pagination envelope (P3-G3) | (a) keep the prior `{ items, page, size, totalElements, totalPages }` Spring-`Page`-style envelope, (b) adopt the **platform-canonical** `{ items, total, limit, offset }` (Pattern Manager `PatternPage`, Correlation Engine `GET /incidents`) | **(b) `{ items, total, limit, offset }`.** The web-ui streaming view polls **both** Correlation Engine `GET /incidents` and Alarm Manager `GET /alarms`; under (a) it had to read two different envelope shapes (a data-integration gap). Standardizing on the one envelope already frozen by Pattern Manager and the Correlation Engine lets the web-ui read one uniform shape (`.items` / `.total` / `.limit` / `.offset`) across both endpoints. Request params move to `limit` / `offset` to match the envelope exactly. The item shape `AlarmSummary` is untouched. |
+| `GET /alarms` list-pagination envelope (P3-G3) | (a) keep the prior `{ items, page, size, totalElements, totalPages }` Spring-`Page`-style envelope, (b) adopt the **platform-canonical** `{ items, total, limit, offset }` (Pattern Manager `PatternPage`, Correlation Engine `GET /incidents`) | **(b) `{ items, total, limit, offset }`.** The web-ui streaming view polls **both** Correlation Engine `GET /incidents` and Alarm Manager `GET /alarms`; under (a) it had to read two different envelope shapes (a data-integration gap). Standardizing on the one envelope already frozen by Pattern Manager and the Correlation Engine lets the web-ui read one uniform shape (`.items` / `.total` / `.limit` / `.offset`) across both endpoints. Request params move to `limit` / `offset` to match the envelope exactly. The item shape `AlarmSummary` is untouched **by this pagination decision** (the separate `alarmType` row below adds the canonical join token to it). |
 | `GET /alarms` request params | (a) keep `page` / `size` request params but return the `{ items, total, limit, offset }` envelope, (b) move request params to **`limit` / `offset`** to match the envelope | **(b) `limit` / `offset`.** Full consistency with the response envelope and with the Pattern Manager `GET /patterns` request params, so the web-ui sends and reads the same vocabulary on every list endpoint; no `page→offset` translation in the client. The existing `state` / `trailId` / `incidentId` / `from` / `to` filters are unchanged. |
 | STATE vs. ROLE separation | Single writer touching both `lifecycle_state` and `role`/`incident_id` vs. **disjoint-column** ownership (STATE channel writes `lifecycle_state` only; ROLE channel writes `role`/`incident_id` only) | **Disjoint-column ownership.** Because the two channels never write the same columns, out-of-order, at-least-once arrival of the two events is naturally idempotent and order-independent — no merge/conflict logic, no total-order requirement. Reconciliation is just both applied. |
 | `reverted-open` modelling | (a) a stored distinct state, (b) a **transition back to `open`** distinguished by an audit `reason` | **(b) transition to `open` with reason.** Matches the spec exactly (`reverted-open` is not a permanent state), keeps the state set minimal (`open` / `in-progress` / `correlated` / `cleared`), and preserves the full revert history in the audit log. |
@@ -618,6 +693,7 @@ and logged with the `traceId`.
 | Republish-once mechanism | (a) `published` boolean flag checked in the same DB tx, send after commit, (b) Kafka EOS exactly-once across consume plus produce, (c) a separate dedupe topic/store | **(a) `published` flag.** Idempotent republish with a single store and simple reasoning; the send-after-commit ordering plus the flag prevents double-emit. Full EOS couples consumer plus producer transactions and the downstream Correlation Engine tolerates at-least-once anyway. |
 | `incidentId` / role storage | Denormalize onto the alarm row vs. a separate `alarm_incident` link table | **Denormalize onto the alarm row.** One incident per alarm in the alarm-centric MVP view; the query API filters/returns by `incidentId` directly. The Correlation Engine remains the incident system-of-record, so this is a read-optimized projection. |
 | Lifecycle vs. wire state | Reuse `AlarmEvent.state` (`raised`/`cleared`) as lifecycle vs. a separate `lifecycle_state` column | **Separate `lifecycle_state`.** The wire enum has only `raised`/`cleared`; the lifecycle now needs `in-progress` and `correlated` as well. Keeping both preserves the faithful wire value for republish while modelling the richer lifecycle. |
+| Persisting `alarmType` | (a) drop it (only persist `event_type` / `probable_cause`, the prior design's gap), (b) conflate it into `event_type` or `probable_cause`, (c) persist it as its own NOT NULL `alarm_type` column and return it on both DTOs | **(c) own `alarm_type` column.** `alarmType` is a **required** `AlarmEvent` field and the **platform canonical alarm-type join token** (the single key pattern mining, codebook signatures, `rootCauseAlarmType`, and correlation matching all join on, per `architecture.md`). Dropping it (a) loses the canonical join key from the live alarm view that the web-ui/incident views and the alarm-to-incident join need; conflating it (b) is wrong because `alarmType` is **distinct from** `eventType` (X.733 category) and `probableCause` (X.733 probable cause). It is `NOT NULL` because the codec rejects an `AlarmEvent` missing it before persistence. No contract change: `alarmType` is already on `AlarmEvent` in `libs/event-model`; this only fixes the store/DTOs to stop silently dropping it. |
 | Out-of-order clear/correlation/status before raise | Reject (DLQ) vs. tolerate (no-op plus metric) | **Tolerate.** At-least-once plus independent topics make out-of-order arrival normal; treating it as poison would lose real signal. Tolerate with observability so the condition is visible but processing continues. |
 
 ## Test plan
@@ -629,12 +705,12 @@ the consumer/producer paths).
 
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
-| 1 | Valid `AlarmEvent` then persisted `open` with all fields plus single `open` audit entry | `IngestServiceTest.persistsAlarmOpenWithAllFieldsAndSingleOpenTransition` | `alarm` row has `lifecycle_state=open`, `alarmId`/`managedObjectId`/`trailIds`/`raisedAt`/`perceivedSeverity` stored; exactly one `state_transition` with `to_state=open` and a UTC `occurred_at` |
+| 1 | Valid `AlarmEvent` then persisted `open` with all fields (incl. the canonical `alarmType`) plus single `open` audit entry | `IngestServiceTest.persistsAlarmOpenWithAllFieldsIncludingAlarmTypeAndSingleOpenTransition` | `alarm` row has `lifecycle_state=open`, `alarmId`/`managedObjectId`/`trailIds`/`raisedAt`/`perceivedSeverity` stored, **`alarm_type` equals `AlarmEvent.alarmType` (NOT NULL) and is stored distinctly from `event_type`/`probable_cause`** (e.g. `alarm_type=PortDown` while `event_type=communicationsAlarm`); exactly one `state_transition` with `to_state=open` and a UTC `occurred_at` |
 | 2 | Same `AlarmEvent` republished on `alarms.persisted.live`, valid against frozen binding | `PersistedAlarmProducerTest.republishesSameAlarmEventValidAgainstBinding` | a message on `alarms.persisted.live` deserializes via `EventCodec` to an equal `AlarmEvent` (round-trips against the frozen `AlarmEvent` schema) |
 | 3 | Same `alarmId` consumed twice then one record plus one republish | `IngestIdempotencyTest.redeliveryProducesNoDoublePersistNoDoubleRepublish` | after two deliveries: exactly one `alarm` row, one `open` transition, exactly one message on `alarms.persisted.live` |
 | 4 | `CorrelationResultEvent` then root-cause `root-cause`/`incidentId`, children `child`/same `incidentId`, `role-assigned` audit per alarm; STATE untouched | `CorrelationServiceTest.appliesRoleAndIncidentOnlyWithAuditLeavingStateUntouched` | root-cause row `role`/`incident_id` correct; each child row `role`/`incident_id` correct; one `role-assigned` transition per affected alarm; `lifecycle_state` unchanged by this event |
 | 5 | Same `eventId` consumed twice then applied once, no duplicate audit | `CorrelationIdempotencyTest.redeliveredEventAppliedExactlyOnce` | after two deliveries: `processed_event` has one row; each affected alarm has exactly one `role-assigned` transition |
-| 6 | `GET /alarms/{alarmId}` for root cause then `correlated`, `root-cause`, `incidentId`, audit has `open` plus `correlated` with distinct UTC timestamps | `AlarmDetailApiTest.returnsCorrelatedRootCauseWithOpenAndCorrelatedTransitions` | response `lifecycleState=correlated`, `role=root-cause`, correct `incidentId`; `transitions` contains an `open` and a `correlated` entry with distinct `occurredAt` |
+| 6 | `GET /alarms/{alarmId}` for root cause then `correlated`, `root-cause`, `incidentId`, the canonical `alarmType`, audit has `open` plus `correlated` with distinct UTC timestamps | `AlarmDetailApiTest.returnsCorrelatedRootCauseWithAlarmTypeAndOpenAndCorrelatedTransitions` | response `lifecycleState=correlated`, `role=root-cause`, correct `incidentId`, **`alarmType` equals the ingested `AlarmEvent.alarmType` and is a field distinct from `eventType`/`probableCause`**; `transitions` contains an `open` and a `correlated` entry with distinct `occurredAt` |
 | 7 | `AlarmEvent` `state=cleared` then lifecycle `cleared` plus `cleared` audit | `LifecycleServiceTest.clearedEventTransitionsAlarmToClearedWithAudit` | alarm `lifecycle_state=cleared`, `cleared_at` set; a `state_transition` with `to_state=cleared` |
 | 8 | `GET /alarms?state=open` then only `open` alarms | `AlarmListApiTest.filtersByLifecycleStateOpen` | `200` body is the canonical `AlarmPage` envelope — a JSON object with `items`, `total`, `limit`, `offset` (NOT `page`/`size`/`totalElements`/`totalPages`, NOT a bare array); `items` contains only `open` alarms (`in-progress`/`correlated`/`cleared` absent) and `total` equals the filtered count |
 | 9 | `GET /alarms?trailId=...` then only alarms whose `trailIds` contain it | `AlarmListApiTest.filtersByTrailIdMembership` | only alarms with the trail in `trailIds`; other-trail alarms excluded |
@@ -642,7 +718,7 @@ the consumer/producer paths).
 | 11 | `GET /alarms?from&to` then only alarms with `raisedAt` in window | `AlarmListApiTest.filtersByRaisedAtTimeWindow` | only alarms with `raisedAt` within the window; outside excluded |
 | 12 | Schema-invalid message (missing `alarmId`) then `alarms.enriched.live.dlq`, no persist, no republish | `EnrichedConsumerDlqTest.schemaInvalidAlarmRoutedToDlqNoPersistNoRepublish` | message appears on `alarms.enriched.live.dlq`; `alarm` table empty; nothing on `alarms.persisted.live` |
 | 13 | Unknown major `schemaVersion` then DLQ, no persist, no state change | `SchemaVersionDlqTest.unknownMajorVersionRejectedToDlq` | message on the matching `<topic>.dlq`; no row persisted; no republish/state change |
-| 14 | `GET /openapi.json` then 200, valid OpenAPI 3.1 with `/alarms` plus `/alarms/{alarmId}` | `OpenApiContractTest.publishesValidOpenApi31WithAlarmPaths` | `200`; body parses as OpenAPI 3.1; contains both path operations; `state` enum includes `in-progress`; the `GET /alarms` response schema is the `AlarmPage` envelope `{ items, total, limit, offset }` and the operation declares `limit` / `offset` query params (not `page`/`size`); equals the checked-in `openapi.json` |
+| 14 | `GET /openapi.json` then 200, valid OpenAPI 3.1 with `/alarms` plus `/alarms/{alarmId}` | `OpenApiContractTest.publishesValidOpenApi31WithAlarmPaths` | `200`; body parses as OpenAPI 3.1; contains both path operations; `state` enum includes `in-progress`; the `GET /alarms` response schema is the `AlarmPage` envelope `{ items, total, limit, offset }` and the operation declares `limit` / `offset` query params (not `page`/`size`); **the `AlarmSummary` and `AlarmDetail` schemas both declare an `alarmType` property distinct from `eventType`/`probableCause`**; equals the checked-in `openapi.json` |
 | 15 | Stored `managedObjectId` conforms to `objectType:id`; malformed then `alarms.enriched.live.dlq` | `ManagedObjectIdValidationTest.malformedManagedObjectIdRoutedToDlqAndStoredIdsConform` | a malformed-`managedObjectId` alarm is DLQ-routed and not persisted; every stored `managed_object_id` matches `ManagedObjectId.PATTERN` |
 | 16 | `AlarmStatusChange(newStatus=in-progress)` for a known alarm then `in-progress` plus audit with `source`/`changedAt` | `AlarmStatusChangeConsumerTest.inProgressSetsStateAndAuditsSourceAndChangedAt` | alarm `lifecycle_state=in-progress`; a `state_transition` `to_state=in-progress` carrying `source` and `changed_at` from the payload and a UTC `occurred_at` |
 | 17 | `AlarmStatusChange(newStatus=reverted-open)` for an `in-progress` alarm then back to `open`, revert-reason audit, in-progress role cleared | `AlarmStatusChangeConsumerTest.revertedOpenReturnsToOpenWithReasonAndClearsProvisionalRole` | alarm `lifecycle_state=open`; a `state_transition` `to_state=open` whose `reason` notes the revert; a provisional in-progress `role` is reset to `none` (a finalised correlation role is preserved) |
@@ -650,6 +726,7 @@ the consumer/producer paths).
 | 19 | `GET /alarms?state=in-progress` then only `in-progress` alarms | `AlarmListApiTest.filtersByLifecycleStateInProgress` | response contains only `in-progress` alarms; `open`/`correlated`/`cleared` absent |
 | 20 | Schema-invalid `AlarmStatusChange` (missing `alarmId` or bad `newStatus`) then `alarms.status.changed.dlq`, store unmodified, processing continues | `AlarmStatusChangeDlqTest.invalidStatusChangeRoutedToDlqStoreUnmodifiedProcessingContinues` | poison message lands on `alarms.status.changed.dlq`; no `alarm` row changed; a subsequent valid `AlarmStatusChange` is still applied |
 | 21 (P3-G3) | `GET /alarms` returns the platform-canonical `{ items, total, limit, offset }` list envelope with `limit`/`offset` request params (same shape as Correlation Engine `GET /incidents` / Pattern Manager `PatternPage`), so the web-ui reads one uniform envelope | `AlarmListApiTest.returnsCanonicalItemsTotalLimitOffsetEnvelopeWithLimitOffsetParams` | for a filter matching N alarms with `?limit=L&offset=O`, the `200` body is a JSON object with exactly `items` (array of `AlarmSummary`), `total` (== N, the full filtered count), `limit` (== L), `offset` (== O); it is NOT a JSON array and does NOT contain `page`/`size`/`totalElements`/`totalPages`; `items.length` respects `limit`/`offset` paging; each item retains the unchanged `AlarmSummary` fields |
+| 22 (canonical join key) | A consumed `AlarmEvent`'s required `alarmType` is **persisted** in the live alarm store **and returned** on both the `GET /alarms` `AlarmSummary` and the `GET /alarms/{alarmId}` `AlarmDetail` (the canonical alarm-type join token, distinct from `eventType`/`probableCause`) | `AlarmTypeRoundTripTest.alarmTypePersistedAndReturnedOnSummaryAndDetail` | after ingesting an `AlarmEvent` with `alarmType=PortDown` (`eventType=communicationsAlarm`, `probableCause=lossOfSignal`): the `alarm` row has `alarm_type=PortDown` (NOT NULL); `GET /alarms` `AlarmSummary` for it has `alarmType=PortDown`; `GET /alarms/{alarmId}` `AlarmDetail` has `alarmType=PortDown`; in both DTOs `alarmType` is a separate field from `eventType` and `probableCause` and matches the ingested value |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -659,7 +736,7 @@ harnesses).
 
 | # | Scenario | Trigger then path | Expected outcome |
 |---|---|---|---|
-| 1 | Live alarm flows in-line to correlation | Produce an enriched `AlarmEvent` (`state=raised`) on `alarms.enriched.live` | Alarm persisted `open` with one `open` transition; the same `AlarmEvent` appears on `alarms.persisted.live` for the Correlation Engine; `GET /alarms?state=open` returns it |
+| 1 | Live alarm flows in-line to correlation | Produce an enriched `AlarmEvent` (`state=raised`, with a canonical `alarmType` e.g. `PortDown`) on `alarms.enriched.live` | Alarm persisted `open` with one `open` transition and `alarm_type` set from `AlarmEvent.alarmType`; the same `AlarmEvent` (incl. `alarmType`) appears on `alarms.persisted.live` for the Correlation Engine; `GET /alarms?state=open` returns it with `alarmType` populated on the `AlarmSummary` |
 | 2 | Active correlation instance — in-progress then correlated | Produce `AlarmStatusChange(in-progress)`, then a `CorrelationResultEvent`, then `AlarmStatusChange(correlated)` for the same alarm | After `in-progress`, `GET /alarms?state=in-progress` returns it; after the correlation result plus `correlated`, the record has `lifecycle_state=correlated`, `role` plus `incidentId` from the result; audit shows `open` then `in-progress` then `correlated` with `source`/`changedAt` populated |
 | 3 | Complementary reconciliation, either arrival order | Produce `CorrelationResultEvent` before `AlarmStatusChange(correlated)` for one alarm, and the reverse order for another | Both alarms end with `lifecycle_state=correlated` AND correct `role`/`incidentId`; STATE never overwrote ROLE and vice-versa |
 | 4 | Reverted-open (instance expired) | Produce `AlarmStatusChange(in-progress)` then `AlarmStatusChange(reverted-open)` for the same alarm | Alarm returns to `lifecycle_state=open`; audit has a revert-reason entry; `GET /alarms?state=open` returns it; `GET /alarms?state=in-progress` no longer returns it; provisional role cleared |
@@ -667,7 +744,7 @@ harnesses).
 | 6 | At-least-once redelivery (partial/duplicate path) | Re-deliver the same `alarms.enriched.live`, `alarms.status.changed`, and `correlation.results` messages | Exactly one alarm row, one republish, one transition per logical change; `processed_event` dedupes the status and correlation events; no duplicates |
 | 7 | Poison message (failure path) | Produce a malformed `AlarmEvent` (missing `alarmId`), an envelope with `schemaVersion=2`, and an `AlarmStatusChange` with an unrecognised `newStatus` | Each lands on the matching `<topic>.dlq` (`alarms.enriched.live.dlq` / `alarms.status.changed.dlq`); no rows persisted/modified; service keeps processing subsequent valid messages |
 | 8 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent`, an `AlarmStatusChange`, and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `status_for_unknown_alarm` / `clear_for_unknown_alarm` metrics increment; a later raise for the same `alarmId` still persists `open` |
-| 9 | web-ui contract (uniform pagination envelope, P3-G3) | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms?limit&offset` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service, alongside its `GET /incidents` poll | `GET /alarms` returns the **same** `{ items, total, limit, offset }` envelope as Correlation Engine `GET /incidents`, so the streaming view reads `.items`/`.total`/`.limit`/`.offset` uniformly across both polled endpoints; detail with transitions incl. `source`/`changedAt`; no drift between running surface and checked-in `openapi.json` |
+| 9 | web-ui contract (uniform pagination envelope, P3-G3) | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms?limit&offset` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service, alongside its `GET /incidents` poll | `GET /alarms` returns the **same** `{ items, total, limit, offset }` envelope as Correlation Engine `GET /incidents`, so the streaming view reads `.items`/`.total`/`.limit`/`.offset` uniformly across both polled endpoints; `AlarmSummary` and `AlarmDetail` both carry the canonical `alarmType` join token (distinct from `eventType`/`probableCause`) for the live/incident views and the alarm-to-incident join; detail with transitions incl. `source`/`changedAt`; no drift between running surface and checked-in `openapi.json` |
 
 ## Config & observability
 
@@ -697,7 +774,8 @@ harnesses).
 - **Compose:** depends on `kafka` and `postgres` (its own schema); all addresses from env.
 - **Local run:** `./gradlew bootRun` with `KAFKA_BOOTSTRAP_SERVERS` and `ALARM_DB_JDBC_URL` set;
   Flyway applies the `alarm` / `state_transition` / `processed_event` migrations (incl. the
-  `in-progress` state and audit `source`/`changed_at` delta) on startup.
+  `in-progress` state and audit `source`/`changed_at` delta, and the `alarm_type` NOT NULL
+  column) on startup.
 - **README:** documents env vars, topics consumed (`alarms.enriched.live`,
   `alarms.status.changed`, `correlation.results`) / produced (`alarms.persisted.live`), the
   query API, and the DLQ topics (`alarms.enriched.live.dlq`, `alarms.status.changed.dlq`,
