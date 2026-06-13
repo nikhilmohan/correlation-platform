@@ -63,7 +63,7 @@ ensuring topology and alarm identities are shared.
   set is the **29-token expanded Core IP `alarmTypeVocabulary`** authored in Knowledge; the pack's
   alarm-shapes and propagation align to that expanded vocabulary and the 28 propagation templates.
   **Every emitted alarm carries the required canonical `alarmType`** token (a member of that
-  vocabulary — e.g. `FiberCut`, `LOS`, `LOF`, `OpticalPowerLow`, `PortDown`, `LineCardFault`,
+  vocabulary — e.g. `FiberFault`, `LOS`, `LOF`, `OpticalPowerLow`, `PortDown`, `LineCardFault`,
   `CRCErrors`, `InterfaceDown`, `LinkDown`, `IPLinkDown`, `ISISAdjacencyDown`, `BGPPeerDown`,
   `LSPDown`, `TETunnelDown`, `ReachabilityLoss`, `ServiceDegraded`, `Congestion`), set from the
   domain pack's alarm shape. `alarmType` is the cross-source
@@ -485,15 +485,26 @@ Each criterion is phrased to map to a single pytest test.
 
 ### MVP-grounding acceptance criteria (fixes B1-B5 — pack content + config + ground-truth)
 
-21. **Pack ships 8-10 distinct grounded scenarios, each spanning 10-20 distinct alarm types.**
+21. **Pack ships 9 grounded scenarios with 7 distinct root-cause `alarmType` tokens, each scenario spanning 10-20 distinct alarm types.**
     The Core IP pack's scenario library contains **9 distinct grounded scenarios** (`fiber-cut`,
     `line-card-fault`, `port-fault`, `interface-fault`, `node-failure`, `ip-link-failure`,
     `lsp-te-failure`, `routing-adjacency-failure`, `srlg-shared-risk-failure`), one per Knowledge
     `faultOriginType` plus SRLG co-failure / line-card fan-out. For each scenario, a single injected
     instance's symptom set spans **at least 10 and at most ~24 distinct canonical `alarmType`
     tokens** (drawn from the 29-token Knowledge `alarmTypeVocabulary`), and each is injected with
-    multiple instances (`SCENARIO_INSTANCES`). The 9 root-cause `alarmType`s are distinct per
-    scenario.
+    multiple instances (`SCENARIO_INSTANCES`). The 9 scenarios produce **7 distinct root-cause
+    `alarmType` tokens**: two pairs of scenarios deliberately share a root token to model realistic
+    variant behavior — `srlg-shared-risk-failure` is a `FiberSpan`-origin variant of `fiber-cut`
+    (both root on `FiberFault`), and `routing-adjacency-failure` is an `Interface`-origin
+    routing-emphasis variant of `interface-fault` (both root on `InterfaceDown`). These variants are
+    intentional: SRLG co-failure and routing-reconvergence represent distinct fault patterns (different
+    propagation topology, different child alarm sets) that realistically share an origin signal; the
+    scenario identity (`scenarioType`) and cascade structure — not the root `alarmType` alone —
+    distinguish them for the pattern-miner and correlation-engine. A test asserting this grouping
+    (`test_ac21_root_alarmtype_token_grouping`) must confirm: `pack.scenario_library()` returns the
+    9 named scenarios; calling each once over the layered fixture topology yields exactly 7 distinct
+    `rootCauseAlarmType` values; `srlg-shared-risk-failure` and `fiber-cut` share `FiberFault`; and
+    `routing-adjacency-failure` and `interface-fault` share `InterfaceDown`.
 
 22. **Each `Node` (and its Interfaces) carries a grounded `igpArea`.** The generated snapshot stamps
     a non-empty `igpArea` device attribute on every `Node` and on every `Interface` it hosts
