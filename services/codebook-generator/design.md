@@ -45,6 +45,11 @@ compiles and serves the model only.
   Access via SQLAlchemy Core (MIT) + a **`pg8000`** (BSD) pure-Python driver (chosen to keep the
   permissive-only invariant strict — `psycopg` is LGPL; selectable only if licence policy is
   relaxed).
+- **Schema migrations:** `yoyo-migrations` (Apache-2.0) — versioned, idempotent plain-SQL
+  migrations applied at container startup, before the consumer/API start. Chosen over Alembic
+  (also permissive, MIT) because this service uses **SQLAlchemy Core, not the ORM** — yoyo runs
+  the literal schema-qualified DDL directly with no ORM/model-metadata dependency; this also
+  matches the sibling Python service **noise-filter**, for cohort consistency.
 - **Kafka client:** `confluent-kafka` (Apache-2.0) consumer/producer.
 - **Event model:** `acp-event-model` (the repo's `libs/event-model` Python/Pydantic binding) —
   the single source of truth for `TrailsBuiltEvent`, `CodebookGeneratedEvent`, the envelope,
@@ -54,7 +59,8 @@ compiles and serves the model only.
 - **Lint / format / test:** ruff + black, pytest (all permissive).
 - **Metrics:** `prometheus-client` (Apache-2.0).
 
-All runtime dependencies are Apache-2.0 / BSD / MIT / PostgreSQL-licensed. No GPL/AGPL/BSL.
+All runtime dependencies are Apache-2.0 / BSD / MIT / PostgreSQL-licensed (incl. `yoyo-migrations`,
+Apache-2.0). No GPL/AGPL/BSL.
 
 ---
 
@@ -141,6 +147,9 @@ flowchart TD
   isolation.
 - **`vocabulary.py`** — the shared alarm-type vocabulary mapping (see OQ-2 note below).
 - **`config.py`** — env-only config; fails fast on missing integration-point URLs.
+- **`migrations/`** — versioned `yoyo` plain-SQL schema migrations (`0001_codebook_schema.sql`:
+  `CREATE SCHEMA IF NOT EXISTS codebook` then the schema-qualified tables/indexes). Applied at
+  container startup before `consumer.py`/`api.py` start (see Data model and Build & run).
 
 ---
 
@@ -148,6 +157,72 @@ flowchart TD
 
 Owned store: PostgreSQL, schema `codebook`. No other service writes it. Three domain tables plus
 an idempotency table.
+
+**Schema creation & migrations.** The schema and tables are created by **versioned `yoyo`
+migrations** (plain SQL) that live in `services/codebook-generator/migrations/` and are applied
+**at container startup, before the Kafka consumer and the FastAPI app start** (the entrypoint runs
+`yoyo apply` against `DATABASE_URL`, then launches the consumer + Uvicorn — see Build & run).
+Migrations are idempotent and re-runnable: yoyo records applied migrations in its own
+`_yoyo_migration` table, and the schema/table/index DDL is written with `IF NOT EXISTS`, so a
+restart is a no-op. **All DDL is schema-qualified to `codebook.`** so nothing ever lands in the
+shared PostgreSQL `public` schema. The first migration creates the schema; subsequent steps create
+tables and indexes under it. The literal migration SQL is the authority for the column/type/key/
+constraint definitions tabulated below (the tables document the same DDL in prose).
+
+Migration `0001_codebook_schema.sql` — schema first, then the schema-qualified tables and indexes:
+
+```sql
+-- Step 0: idempotent schema creation (nothing lands in public)
+CREATE SCHEMA IF NOT EXISTS codebook;
+
+-- Step 1: codebooks
+CREATE TABLE IF NOT EXISTS codebook.codebooks (
+    codebook_id        text        PRIMARY KEY,            -- freshly minted per compilation (cb-{uuid4})
+    snapshot_id        text        NOT NULL,               -- from the triggering trails.built
+    domain             text        NOT NULL,               -- first-class; resolved domain (default core-ip)
+    active             boolean     NOT NULL DEFAULT true,   -- single active codebook per (domain, snapshot_id)
+    scenario_count     integer     NOT NULL,               -- equals count of related scenarios
+    knowledge_version  text,                                -- provenance: fault-origins/templates version
+    compiled_at        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_codebooks_domain_compiled
+    ON codebook.codebooks (domain, compiled_at DESC);
+CREATE INDEX IF NOT EXISTS idx_codebooks_snapshot
+    ON codebook.codebooks (snapshot_id);
+
+-- One-active-codebook contract: exactly one active row per (domain, snapshot_id)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_codebooks_one_active
+    ON codebook.codebooks (domain, snapshot_id)
+    WHERE active = true;
+
+-- Step 2: scenarios
+CREATE TABLE IF NOT EXISTS codebook.scenarios (
+    scenario_id             text   PRIMARY KEY,            -- {codebook_id}:{fault_origin_object_id}
+    codebook_id             text   NOT NULL
+        REFERENCES codebook.codebooks (codebook_id) ON DELETE CASCADE,
+    fault_origin_object_id  text   NOT NULL,               -- candidate-root-cause managedObjectId
+    fault_origin_type       text   NOT NULL,               -- Fiber | LineCard | Port | Interface | Node
+    predicted_symptoms      jsonb  NOT NULL,               -- ordered [{alarmType, managedObjectId}], origin first
+    trail_ids               text[] NOT NULL                -- tagged trails (union across symptom objects)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scenarios_codebook
+    ON codebook.scenarios (codebook_id);
+CREATE INDEX IF NOT EXISTS idx_scenarios_origin
+    ON codebook.scenarios (codebook_id, fault_origin_object_id);
+
+-- Step 3: processed_events (idempotency / dedup on envelope eventId)
+CREATE TABLE IF NOT EXISTS codebook.processed_events (
+    event_id      text        PRIMARY KEY,                 -- envelope eventId
+    codebook_id   text,                                     -- codebook produced by this event (nullable)
+    processed_at  timestamptz NOT NULL DEFAULT now()
+);
+```
+
+This migration is faithful to the column/type/key/constraint/index definitions in the tables that
+follow; it does **not** change the data model — it only makes the previously prose/ER-only DDL a
+literal, runnable, schema-scoped artifact and states how it is applied at deploy time.
 
 ```mermaid
 erDiagram
@@ -192,10 +267,11 @@ Indexes (lead with domain): `idx_codebooks_domain_compiled (domain, compiled_at 
 `idx_codebooks_snapshot (snapshot_id)`.
 
 **One-active-codebook constraint (partial unique index — the hard store-level contract).** A
-PostgreSQL **partial unique index** enforces exactly one active codebook per `(domain, snapshot_id)`:
+PostgreSQL **partial unique index** enforces exactly one active codebook per `(domain, snapshot_id)`
+(created by migration `0001_codebook_schema.sql` above, schema-qualified):
 
 ```sql
-CREATE UNIQUE INDEX uq_codebooks_one_active
+CREATE UNIQUE INDEX IF NOT EXISTS uq_codebooks_one_active
   ON codebook.codebooks (domain, snapshot_id)
   WHERE active = true;
 ```
@@ -639,6 +715,7 @@ and logged with `traceId`, `domain`, and `snapshotId`.
 | Regeneration semantics | (a) upsert by `snapshotId`; (b) always mint a new `codebookId` | (b). Spec requires a new `snapshotId` to mint a new `codebookId` and never overwrite a prior snapshot's codebook; supports historical query and `matchedCodebookId` stability downstream |
 | Supersede mechanism for the one-active-codebook contract (OQ-6) | (a) hard-delete the prior codebook on recompile; (b) `active` boolean flag + DB **partial-unique index** `(domain, snapshot_id) WHERE active=true`, demote-then-insert in one tx | (b). AC-19 requires the superseded codebook to remain **retrievable by its `codebookId`** (content non-mutable), so hard-delete (a) is ruled out. The partial-unique index enforces "exactly one active per `(domain, snapshotId)`" at the **store level** (not just application logic), and the single-transaction demote-then-insert is atomic, giving deterministic active retrieval (AC-18/19/20). No Kafka/event-model impact |
 | Postgres driver | (a) `psycopg` (LGPL); (b) `pg8000` (BSD) | (b) default — keeps the permissive-only invariant strict (LGPL excluded). `psycopg` selectable only if licence policy is relaxed |
+| Schema-creation / migration tool | (a) `yoyo-migrations` (Apache-2.0) — versioned plain-SQL applied at startup; (b) Alembic (MIT) — versioned migrations over SQLAlchemy model metadata; (c) hand-run DDL | (a). The store uses SQLAlchemy **Core, not the ORM**, so yoyo runs the literal schema-qualified DDL with no model-metadata layer (b would add), is idempotent at startup, and matches the sibling Python service **noise-filter** for cohort consistency. (c) is not deploy-safe/idempotent. Permissive (Apache-2.0) |
 | Trail tagging granularity | (a) tag by origin object only; (b) union trails across all symptom objects | (b). A scenario's symptoms span multiple objects/trails; tagging by the full symptom set yields correct trail membership for decode |
 | CE scenario read shape (resolves P1-G5 / P3-G2) | (a) keep only native `/scenarios` and make CE adapt (rename + derive client-side); (b) rename the native field to `expectedSymptoms` and add `rootCauseAlarmType` on the stored scenario; (c) keep the native model and add a separate CE-oriented **projection endpoint** `/trail-signatures` | (c) — the product-owner decision. (a) leaves two contradictory expectations and no checked-in producer contract. (b) churns the native model and the Pattern Manager consumer, and duplicates a derivable field into storage. (c) keeps **one stored truth** (`predicted_symptoms`), serves Pattern Manager unchanged, and gives the CE exactly its `{trailId, rootCauseAlarmType, expectedSymptoms[]}` shape via a pure read projection — both endpoints frozen in one `openapi.json` |
 | `rootCauseAlarmType` source | (a) use `faultOriginType` (object type, e.g. `FiberSpan`); (b) add a separate stored root-cause alarm field; (c) derive the origin's own `alarmType` from the signature (the `predictedSymptoms` entry at the origin object, which is the first/seed) | (c). (a) is wrong value space — `faultOriginType` is an object type, not an `alarmType` token, so it would never match `AlarmEvent.alarmType` / pattern `rootCauseAlarmType`. (b) duplicates derivable data. (c) yields a true `alarmTypeVocabulary` token (e.g. `FiberFault`) from data already in the signature, deterministically, with no storage change |
@@ -649,8 +726,9 @@ and logged with `traceId`, `domain`, and `snapshotId`.
 ## Test plan
 
 Framework: **pytest** (Python cohort). Integration points mocked via `respx`/`httpx` (from
-collaborators' OpenAPI). Codebook Store tested against a Postgres test container (or `pg8000` +
-ephemeral DB). Every acceptance criterion maps 1:1 to a named test.
+collaborators' OpenAPI). Codebook Store (and the `yoyo`
+schema migrations) tested against a Postgres test container (or `pg8000` + ephemeral DB). Every
+acceptance criterion maps 1:1 to a named test.
 
 ### Acceptance criterion → test (unit/contract)
 
@@ -690,6 +768,17 @@ alignment. Each maps 1:1 to a named test; `projection.py` is also unit-tested in
 | 24 | Per-trail fan-out from `trailIds[]` | `test_trail_signatures_fan_out_per_trail` | A scenario with `trailIds = [T1, T2]` yields two signatures (one with `trailId=T1`, one `T2`); `?trailId=T1` returns only the `T1` signature; `?trailId=T_none` returns `200` empty list |
 | 25 | Signature `alarmType` tokens are `alarmTypeVocabulary` members (not eventType/probableCause), validated against the fetched vocabulary | `test_signature_alarm_types_are_vocabulary_tokens` | The compile fetches the domain's `alarmTypeVocabulary` via `GET /domains/{domain}/alarm-type-vocabulary` (mock asserts the call); every `predictedSymptoms[].alarmType` and projected `rootCauseAlarmType` is asserted a member of that fetched `alarmTypes` set; none equals an X.733 `eventType` (e.g. `communicationsAlarm`) or `probableCause` (e.g. `lossOfSignal`) value. A signature token outside the fetched set fails the compile and routes to `trails.built.dlq` (negative assertion via a misauthored-template fixture) |
 | 26 | Both endpoints published in `openapi.json` | `test_openapi_publishes_both_scenarios_and_trail_signatures` | The checked-in `services/codebook-generator/openapi.json` equals the live `/openapi.json` and contains BOTH `/codebooks/{codebookId}/scenarios` and `/codebooks/{codebookId}/trail-signatures` paths with their frozen response schemas |
+
+### Acceptance criterion → test — schema creation & scoping (DB-readiness fix)
+
+These criteria cover the `yoyo` migration artifacts: idempotent schema creation and that all
+objects land in the `codebook` schema (never `public`). Run against a Postgres test container.
+
+| # | Acceptance criterion | Test | Asserts |
+|---|---|---|---|
+| 27 | Schema + tables created idempotently by migrations | `test_schema_created_idempotently` | Applying `migrations/` (`yoyo apply`) against a fresh DB creates schema `codebook` and tables `codebooks`, `scenarios`, `processed_events` plus the indexes (incl. `uq_codebooks_one_active`); applying the migrations **a second time is a no-op** (no error, no duplicate objects) — verifies the `CREATE SCHEMA/TABLE/INDEX IF NOT EXISTS` + yoyo ledger idempotency |
+| 28 | All objects land in the `codebook` schema, not `public` | `test_tables_in_codebook_schema` | After migrations, `information_schema.tables`/`pg_indexes` show `codebooks`, `scenarios`, `processed_events` (and their indexes) under `table_schema='codebook'`; the `public` schema contains **none** of them — verifies every DDL statement is schema-qualified so nothing leaks into the shared PostgreSQL `public` |
+| 29 | Migrations applied at startup before consumer/API | `test_migrations_run_before_consumer_and_api_start` | The container entrypoint applies migrations before the consumer subscribes / the API serves: with an un-migrated DB, startup runs `yoyo apply` and only then the consumer/`/health` become ready; if migrations fail, startup exits non-zero with a structured error (no consume/serve attempted) |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -740,10 +829,18 @@ Q3 item 2 / Q11), `TRAIL_BUILDER_URL`/`_MODE`;
   checked-in document includes BOTH the native `/codebooks/{codebookId}/scenarios` endpoint and
   the CE `/codebooks/{codebookId}/trail-signatures` projection (frozen `TrailScenarioSignature`
   schema); the Correlation Engine builds its codebook client against this file.
+- **Schema migrations:** versioned `yoyo` SQL lives in `services/codebook-generator/migrations/`
+  (`0001_codebook_schema.sql` — `CREATE SCHEMA IF NOT EXISTS codebook` first, then the
+  schema-qualified tables/indexes). The container entrypoint runs `yoyo apply --batch` against
+  `DATABASE_URL` **before** the Kafka consumer and the API start; migrations are idempotent
+  (`IF NOT EXISTS` + yoyo's applied-migration ledger), so restarts are no-ops. Startup aborts
+  (non-zero exit, structured error) if migrations fail.
 - **Dockerfile:** base `python:3.13-slim` (pinned per CLAUDE.md); installs the service +
-  `libs/event-model` Python binding; entrypoint runs the consumer loop + Uvicorn API.
+  `libs/event-model` Python binding + `yoyo-migrations`; entrypoint applies migrations, then runs
+  the consumer loop + Uvicorn API.
 - **Compose:** entry `codebook-generator` depends on `kafka`, `postgres`; integration-point URLs
   point at the real `topology`, `knowledge`, `trail-builder` services on the `integration` stack;
   `*_MODE=REAL` there, `MOCK` in unit-test CI.
-- **Local run:** `uvicorn codebook_generator.api:app` for the API; the consumer is a separate
-  entrypoint (`python -m codebook_generator.consumer`); both share `config.py`.
+- **Local run:** apply migrations first (`yoyo apply --batch services/codebook-generator/migrations`),
+  then `uvicorn codebook_generator.api:app` for the API; the consumer is a separate entrypoint
+  (`python -m codebook_generator.consumer`); both share `config.py`.
