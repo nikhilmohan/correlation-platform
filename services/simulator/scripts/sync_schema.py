@@ -5,9 +5,11 @@ OQ-4 resolution (design): the topology snapshot schema has ONE canonical source,
 ``services/topology/schema/snapshot.schema.json``, owned by the Topology Service. The
 Simulator keeps **no independent copy** — it validates against that same file. Because the
 Topology branch may not be merged into the Simulator's working tree, this script *syncs*
-(copies verbatim) the canonical file into ``services/simulator/_vendor/snapshot.schema.json``
-as a build-time cache, recording provenance. It NEVER re-authors the schema. Run it whenever
-the canonical schema is available in the checkout.
+(copies verbatim) the canonical file into
+``services/simulator/src/simulator/_vendor/snapshot.schema.json`` as a build-time cache. The
+vendor copy lives INSIDE the package so it is bundled into the wheel/container (declared as
+package-data) and resolved at runtime via ``importlib.resources``. It NEVER re-authors the
+schema. Run it whenever the canonical schema is available in the checkout.
 
 Usage:
     python scripts/sync_schema.py [--canonical PATH]
@@ -24,7 +26,7 @@ _SVC_DIR = Path(__file__).resolve().parents[1]
 _DEFAULT_CANONICAL = (
     _SVC_DIR.parents[1] / "services" / "topology" / "schema" / "snapshot.schema.json"
 )
-_VENDOR = _SVC_DIR / "_vendor" / "snapshot.schema.json"
+_VENDOR = _SVC_DIR / "src" / "simulator" / "_vendor" / "snapshot.schema.json"
 
 
 def main() -> int:

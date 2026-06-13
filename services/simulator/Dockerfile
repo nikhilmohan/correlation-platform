@@ -27,13 +27,13 @@ RUN python -m venv "$VIRTUAL_ENV"
 COPY libs/event-model/python /build/event-model
 RUN pip install /build/event-model
 
-# 2) Install the simulator's third-party deps from pyproject (this layer caches across src
-#    edits). The package itself is run from /app/src at runtime so the build-time-synced
-#    canonical snapshot schema under _vendor (services/simulator/_vendor) resolves correctly.
+# 2) Install the simulator package from pyproject. The build-time-synced canonical snapshot
+#    schema lives INSIDE the package (src/simulator/_vendor/snapshot.schema.json) and is
+#    declared as package-data, so a normal install bundles it and snapshot_writer resolves it
+#    at runtime via importlib.resources — no source-tree-relative path required.
 COPY services/simulator/pyproject.toml /build/simulator/pyproject.toml
 COPY services/simulator/README.md /build/simulator/README.md
 COPY services/simulator/src /build/simulator/src
-COPY services/simulator/_vendor /build/simulator/_vendor
 RUN pip install /build/simulator
 
 # ---- runtime ---------------------------------------------------------------------------
@@ -50,12 +50,11 @@ ENV PYTHONUNBUFFERED=1 \
 RUN groupadd --system sim && useradd --system --gid sim --no-create-home --home /app sim
 WORKDIR /app
 
-# The installed venv carries acp-event-model + all third-party deps.
+# The installed venv carries acp-event-model + all third-party deps AND the simulator package
+# (with its bundled _vendor/snapshot.schema.json). The source tree is also copied so the
+# in-place layout still works; either way the schema resolves via importlib.resources.
 COPY --from=builder /opt/venv /opt/venv
-# The service source tree is run in place so snapshot_writer resolves the canonical schema
-# vendor cache at services/simulator/_vendor (parents[3] of snapshot_writer.py).
 COPY --from=builder /build/simulator/src /app/services/simulator/src
-COPY --from=builder /build/simulator/_vendor /app/services/simulator/_vendor
 
 USER sim
 

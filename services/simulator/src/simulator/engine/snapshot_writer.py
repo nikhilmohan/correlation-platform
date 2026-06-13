@@ -12,6 +12,7 @@ Validation is three-layered:
 from __future__ import annotations
 
 import json
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
@@ -23,23 +24,37 @@ SNAPSHOT_SCHEMA_VERSION = 1
 
 # services/simulator/src/simulator/engine/snapshot_writer.py -> services/simulator is parents[3].
 _SVC_DIR = Path(__file__).resolve().parents[3]
-# Canonical, Topology-owned source (preferred when present in the checkout):
+# Canonical, Topology-owned source (preferred when present in the source checkout):
 # services/simulator -> services -> services/topology/schema/snapshot.schema.json.
 _CANONICAL = _SVC_DIR.parent / "topology" / "schema" / "snapshot.schema.json"
-# Build-time synced cache (verbatim copy of the canonical schema — no re-authoring).
-_VENDOR = _SVC_DIR / "_vendor" / "snapshot.schema.json"
+# Build-time synced cache (verbatim copy of the canonical schema — no re-authoring). Lives
+# INSIDE the package (src/simulator/_vendor) and is declared as package-data so it is bundled
+# into the wheel and the container image, not just the source/editable layout. Resolved via
+# importlib.resources so it works for editable, wheel, and container installs alike.
+_VENDOR_RESOURCE = ("_vendor", "snapshot.schema.json")
 
 
 class SnapshotValidationError(ValueError):
     """Raised when the snapshot fails schema, moid, or referential validation."""
 
 
+def _vendor_schema_traversable() -> Any:
+    """Return the importlib.resources traversable for the bundled vendor schema."""
+    return files("simulator").joinpath(*_VENDOR_RESOURCE)
+
+
 def canonical_schema_path() -> Path:
-    """Return the canonical schema path, preferring the Topology source over the synced cache."""
+    """Return the canonical schema path, preferring the Topology source over the synced cache.
+
+    The synced cache is bundled into the installed package (``simulator._vendor``); it is
+    always present in a wheel/container install. The Topology source is only present in a
+    full source checkout, so it is used opportunistically when available.
+    """
     if _CANONICAL.exists():
         return _CANONICAL
-    if _VENDOR.exists():
-        return _VENDOR
+    vendor = _vendor_schema_traversable()
+    if vendor.is_file():
+        return Path(str(vendor))
     raise SnapshotValidationError(
         "canonical snapshot schema not found; run scripts/sync_schema.py to sync it from "
         "services/topology/schema/snapshot.schema.json"
@@ -48,7 +63,15 @@ def canonical_schema_path() -> Path:
 
 def load_schema() -> dict[str, Any]:
     """Load the canonical snapshot JSON Schema."""
-    return json.loads(canonical_schema_path().read_text())
+    if _CANONICAL.exists():
+        return json.loads(_CANONICAL.read_text())
+    vendor = _vendor_schema_traversable()
+    if vendor.is_file():
+        return json.loads(vendor.read_text())
+    raise SnapshotValidationError(
+        "canonical snapshot schema not found; run scripts/sync_schema.py to sync it from "
+        "services/topology/schema/snapshot.schema.json"
+    )
 
 
 def graph_to_snapshot(graph: nx.DiGraph, domain: str) -> dict[str, Any]:

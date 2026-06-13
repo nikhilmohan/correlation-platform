@@ -42,7 +42,10 @@ sim = "simulator.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-simulator = ["py.typed", "domains/coreip/data/*.yaml"]
+# _vendor/snapshot.schema.json is the build-time-synced verbatim copy of Topology's canonical
+# snapshot schema; it MUST be bundled into the wheel/container so snapshot_writer resolves it
+# at runtime (importlib.resources) when no source checkout of services/topology is present.
+simulator = ["py.typed", "domains/coreip/data/*.yaml", "_vendor/*.json"]
 
 [tool.black]
 line-length = 100
