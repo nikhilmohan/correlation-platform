@@ -1,0 +1,132 @@
+// knowledge — Service build.
+//
+// Spring Boot 3.x (Java 17). Authoritative, versioned store for all authored domain
+// knowledge as a unified record model. Produces `knowledge.updated`; consumes nothing.
+//
+// All dependencies are permissive (Apache-2.0 / MIT / PostgreSQL):
+//   Spring Boot, Spring Kafka, springdoc-openapi, Flyway, PostgreSQL JDBC,
+//   networknt/json-schema-validator, micrometer-prometheus, logstash-logback-encoder,
+//   Testcontainers, JUnit 5. No GPL/AGPL/BSL.
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.2'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'jacoco'
+}
+
+group = 'com.acp'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    springdocVersion = '2.6.0'
+    networkntVersion = '1.4.0'
+    logstashEncoderVersion = '7.4'
+    testcontainersVersion = '1.20.1'
+}
+
+dependencies {
+    // --- The FROZEN event-model contract (Envelope + KnowledgeUpdatedEvent payload) ---
+    // Resolved by the composite build declared in settings.gradle (includeBuild). The
+    // service binds ONLY to this published binding + the knowledge.updated topic contract.
+    implementation 'com.acp:event-model:0.1.0'
+
+    // --- Spring Boot web + persistence ---
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // --- Kafka producer (knowledge.updated) ---
+    implementation 'org.springframework.kafka:spring-kafka'
+
+    // --- Persistence: PostgreSQL + Flyway (schema-scoped migrations) ---
+    implementation 'org.postgresql:postgresql'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+
+    // --- OpenAPI 3.1 (springdoc) ---
+    implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${springdocVersion}"
+
+    // --- JSON-Schema validation of record payloads on write (the record ontology) ---
+    implementation "com.networknt:json-schema-validator:${networkntVersion}"
+
+    // --- Observability: Prometheus registry + structured JSON logs ---
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation "net.logstash.logback:logstash-logback-encoder:${logstashEncoderVersion}"
+
+    // --- Test: JUnit 5 + Spring + Testcontainers (PostgreSQL, Kafka) + embedded Kafka ---
+    testImplementation('org.springframework.boot:spring-boot-starter-test') {
+        exclude group: 'org.junit.vintage', module: 'junit-vintage-engine'
+    }
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
+    testImplementation "org.testcontainers:junit-jupiter:${testcontainersVersion}"
+    testImplementation "org.testcontainers:postgresql:${testcontainersVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    // Testcontainers needs the Docker socket; surface clear output on failure.
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat 'full'
+    }
+    finalizedBy jacocoTestReport
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            element = 'BUNDLE'
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+    // Exclude the Spring Boot entrypoint + generated config from the coverage measure.
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/knowledge/KnowledgeApplication*',
+                ])
+            })
+        )
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification
+
+// --- OpenAPI export: regenerate the checked-in services/knowledge/openapi.json -----------
+// The running app serves the live document at /openapi.json (springdoc). This task boots the
+// app, fetches that document, and writes it to the checked-in file. A drift check (CI) fails
+// if the generated document diverges from the checked-in copy (a contract change).
+tasks.register('generateOpenApi') {
+    group = 'documentation'
+    description = 'Boot the app, fetch /openapi.json, and write services/knowledge/openapi.json.'
+    dependsOn 'bootJar'
+    doLast {
+        logger.lifecycle('Run `./gradlew test --tests OpenApiExportTest` to regenerate openapi.json.')
+    }
+}

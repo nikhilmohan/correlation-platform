@@ -1,0 +1,58 @@
+# Knowledge Service — config from env only (no hard-coded secrets). The knowledge records
+# themselves are the authoritative home of domain thresholds/vocabulary/catalogue.
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: knowledge
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/correlation}
+    username: ${DB_USER:correlation}
+    password: ${DB_PASSWORD:correlation}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: true
+    # Schema-scoped: owns ONLY the `knowledge` schema; its own per-schema history table.
+    schemas: knowledge
+    default-schema: knowledge
+    create-schemas: true
+    table: flyway_schema_history
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+# knowledge.updated topic + seed loader + producer toggle (env-bound).
+knowledge:
+  kafka:
+    enabled: ${KAFKA_ENABLED:true}
+    updated-topic: ${KNOWLEDGE_UPDATED_TOPIC:knowledge.updated}
+  seed:
+    on-startup: ${SEED_ON_STARTUP:true}
+
+# springdoc: serve the OpenAPI 3.1 document at /openapi.json (+ Swagger UI at /swagger-ui).
+springdoc:
+  api-docs:
+    path: /openapi.json
+    version: openapi_3_1
+  swagger-ui:
+    path: /swagger-ui
+
+# Observability: /health + Prometheus /metrics; expose actuator endpoints at the root path so
+# /health and /metrics resolve (per the platform invariant), with /prometheus for the registry.
+management:
+  endpoints:
+    web:
+      base-path: /
+      exposure:
+        include: health, info, prometheus, metrics
+      path-mapping:
+        prometheus: metrics
+        metrics: metrics-detail
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      service: knowledge
