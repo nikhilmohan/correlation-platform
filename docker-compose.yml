@@ -162,6 +162,39 @@ services:
     networks:
       - cp-net
 
+  # --- Knowledge Service — authoritative, versioned store for authored domain knowledge.
+  #     Owns ONLY the `knowledge` PostgreSQL schema; produces `knowledge.updated`; consumes
+  #     nothing. Build context is the repo root (composite build includes libs/event-model). ---
+  knowledge:
+    build:
+      context: .
+      dockerfile: services/knowledge/Dockerfile
+    image: acp/knowledge:0.1.0
+    container_name: cp-knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: "8080"
+      DB_URL: "jdbc:postgresql://postgres:5432/correlation"
+      DB_USER: "correlation"
+      DB_PASSWORD: "correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KAFKA_ENABLED: "true"
+      KNOWLEDGE_UPDATED_TOPIC: "knowledge.updated"
+      SEED_ON_STARTUP: "true"
+    ports:
+      - "8081:8080"      # /health + /metrics + /openapi.json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
   # --- Topology Service — sole owner of the NebulaGraph topology graph (nGQL 9669) + the
   #     PostgreSQL topology_meta snapshot metadata. Ingests snapshot files via POST
   #     /topology/snapshots, lifts into NebulaGraph, mints snapshotId, emits topology.changed.
@@ -174,7 +207,7 @@ services:
     image: acp/topology:0.1.0
     container_name: cp-topology
     ports:
-      - "8081:8080"      # HTTP API + /actuator/health + /actuator/prometheus
+      - "8082:8080"      # HTTP API + /actuator/health + /actuator/prometheus (8081 = knowledge)
     environment:
       TOPOLOGY_PORT: "8080"
       TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
@@ -207,7 +240,7 @@ services:
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
-#   simulator, knowledge, trail-builder, codebook-generator, enrichment,
+#   simulator, trail-builder, codebook-generator, enrichment,
 #   noise-filter, pattern-manager, correlation-engine, web-ui
 #
 #   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)

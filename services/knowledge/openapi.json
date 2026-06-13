@@ -1,0 +1,344 @@
+{
+  "openapi" : "3.1.0",
+  "info" : {
+    "title" : "Knowledge Service API",
+    "description" : "Authoritative, versioned store for authored domain knowledge (propagation templates, fault-origin types, trail policy, model params, object-type / edge-relation / alarm-type vocabularies, attribute catalogue). CRUD + versioned read for all record types, a frozen domain vocabulary query, and model-params read/edit.",
+    "version" : "0.1.0"
+  },
+  "servers" : [ {
+    "url" : "http://localhost",
+    "description" : "Generated server url"
+  } ],
+  "tags" : [ {
+    "name" : "knowledge-records",
+    "description" : "CRUD + versioned read for the eight knowledge record types"
+  }, {
+    "name" : "vocabulary",
+    "description" : "Domain vocabulary query for Topology snapshot validation"
+  } ],
+  "paths" : {
+    "/domains/{domain}/{recordType}/{recordId}" : {
+      "get" : {
+        "tags" : [ "knowledge-records" ],
+        "summary" : "Get the current version of a record",
+        "operationId" : "current",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordType",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/RecordResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put" : {
+        "tags" : [ "knowledge-records" ],
+        "summary" : "Update a knowledge record (mints a new version)",
+        "operationId" : "update",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordType",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/UpdateRecordRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/RecordResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/domains/{domain}/{recordType}" : {
+      "get" : {
+        "tags" : [ "knowledge-records" ],
+        "summary" : "List the current records for a domain + record type",
+        "operationId" : "list",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordType",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "type" : "array",
+                  "items" : {
+                    "$ref" : "#/components/schemas/RecordResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post" : {
+        "tags" : [ "knowledge-records" ],
+        "summary" : "Create a knowledge record (initial version v1)",
+        "operationId" : "create",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordType",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/CreateRecordRequest"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/RecordResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/domains/{domain}/{recordType}/{recordId}/versions/{version}" : {
+      "get" : {
+        "tags" : [ "knowledge-records" ],
+        "summary" : "Get a pinned version of a record (version pinning)",
+        "operationId" : "pinned",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordType",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "recordId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "version",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/RecordResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/domains/{domain}/vocabulary" : {
+      "get" : {
+        "tags" : [ "vocabulary" ],
+        "summary" : "Fetch the domain's object-type and edge-relation sets (one call)",
+        "operationId" : "vocabulary",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/VocabularyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components" : {
+    "schemas" : {
+      "JsonNode" : { },
+      "UpdateRecordRequest" : {
+        "properties" : {
+          "payload" : {
+            "$ref" : "#/components/schemas/JsonNode"
+          },
+          "author" : {
+            "type" : "string"
+          }
+        }
+      },
+      "RecordResponse" : {
+        "properties" : {
+          "domain" : {
+            "type" : "string"
+          },
+          "recordType" : {
+            "type" : "string"
+          },
+          "recordId" : {
+            "type" : "string"
+          },
+          "version" : {
+            "type" : "string"
+          },
+          "isCurrent" : {
+            "type" : "boolean"
+          },
+          "payload" : {
+            "$ref" : "#/components/schemas/JsonNode"
+          }
+        }
+      },
+      "CreateRecordRequest" : {
+        "properties" : {
+          "recordId" : {
+            "type" : "string"
+          },
+          "payload" : {
+            "$ref" : "#/components/schemas/JsonNode"
+          },
+          "author" : {
+            "type" : "string"
+          }
+        }
+      },
+      "VocabularyResponse" : {
+        "properties" : {
+          "domain" : {
+            "type" : "string"
+          },
+          "objectTypes" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "relations" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "version" : {
+            "type" : "string"
+          }
+        }
+      }
+    }
+  }
+}
