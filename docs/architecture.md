@@ -126,6 +126,42 @@ A durable historical-alarm corpus is deferred post-MVP.
 `AlarmEvent` on the new `alarms.persisted.live` topic, and exposes the live alarm store via a query
 API.
 
+## Shared infrastructure conventions (build + runtime)
+The PostgreSQL, NebulaGraph, and Kafka **instances are shared** across services — there is **one**
+of each in Compose (`cp-postgres`, the NebulaGraph cluster, `cp-kafka`). Services own **logical
+slices** within the shared instances, never their own instance. Every service build MUST follow
+these conventions so services compose without collision:
+
+- **PostgreSQL — one instance + one database, schema-per-service.** All relational stores live in
+  the single shared `postgres` instance / database. Each owning service gets a **named schema** and
+  writes **only** that schema (the single-owner rule): `topology_meta` (Topology), `knowledge`
+  (Knowledge), `pattern` (Pattern Manager), `incident` (Correlation Engine), `live_alarm`
+  (Alarm Manager), `nf_run_stats` (Noise Filter). A **shared application role**
+  (`correlation`/`correlation`) is used by all services (MVP simplicity); least-privilege
+  per-service roles are a post-MVP hardening. Connection is by env (`<service>` sets
+  `*_DB_URL`/JDBC URL + `currentSchema`/`search_path` to its own schema).
+- **Migrations — per-service, schema-scoped, never global.** Each service runs its **own**
+  migrations (Flyway for Java, Alembic for Python) that touch **only its own schema**, with a
+  **per-schema migration-history table** (e.g. Flyway `schemas=topology_meta`,
+  `table=flyway_schema_history` *inside that schema*; Alembic `version_table_schema=nf_run_stats`).
+  No service runs a global/`public`-schema migration, no shared baseline, no cross-schema DDL.
+  `CREATE SCHEMA IF NOT EXISTS <svc-schema>` is each service's own first migration step (idempotent).
+- **NebulaGraph — Topology only.** Only the Topology Service connects (nGQL, port 9669); it owns the
+  graph SPACE + tag/edge schema and bootstraps them idempotently on startup (`CREATE SPACE/TAG/EDGE
+  IF NOT EXISTS` + the `ADD HOSTS` storaged-registration step). No other service receives NebulaGraph
+  credentials/endpoints.
+- **Kafka — explicit topic provisioning, no auto-create.** `KAFKA_AUTO_CREATE_TOPICS_ENABLE` is
+  **off**. A one-shot **`kafka-init`** Compose job creates the full topic catalog (the topics listed
+  under "Kafka topics" + `*.dlq`, with their partition/retention settings) **before** services
+  start; services depend on it and **never create topics**. Each consumer uses a **conventioned
+  consumer-group id** `"<service>-<topic>"` (e.g. `trail-builder-topology.changed`) so groups never
+  collide on the shared broker. Producers are idempotent; consumers dedupe on `eventId`/`alarmId`
+  (at-least-once).
+- **Compose ownership.** Each service adds its **own app-container entry** to the single shared
+  `docker-compose.yml` (image, env wiring to the shared infra, `depends_on` the infra +
+  `kafka-init`, `/health`); it must not add or fork an infra instance. Infra services
+  (postgres/nebula/kafka/kafka-init) are shared and defined once.
+
 ## Invariants
 Canonical alarm-type join key: `AlarmEvent.alarmType` (mirrored on `TransactionEvent.alarms[].alarmType`)
 is the **single canonical alarm-type token** that the correlation chain joins on — mining sequences,
