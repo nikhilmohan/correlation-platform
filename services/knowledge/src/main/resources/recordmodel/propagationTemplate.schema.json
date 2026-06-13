@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/knowledge/recordmodel/propagationTemplate.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["edgeType", "trigger", "effect", "traversal"],
+  "properties": {
+    "edgeType": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" },
+    "trigger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objectType", "alarmType"],
+      "properties": {
+        "objectType": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*$" },
+        "alarmType": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*$" }
+      }
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["objectType", "alarmType"],
+      "properties": {
+        "objectType": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*$" },
+        "alarmType": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*$" }
+      }
+    },
+    "traversal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["direction", "cardinality"],
+      "properties": {
+        "direction": { "enum": ["forward", "reverse"] },
+        "cardinality": { "enum": ["each-target", "single-target", "co-failure-group"] }
+      }
+    },
+    "ordering": { "type": "integer", "minimum": 0 },
+    "description": { "type": "string" }
+  }
+}
