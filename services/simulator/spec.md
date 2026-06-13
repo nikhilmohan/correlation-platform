@@ -32,8 +32,15 @@ ensuring topology and alarm identities are shared.
 **In scope:**
 
 - Generate a realistic synthetic Core IP topology containing PE/P/RR/peering nodes, line
-  cards, ports, IP links, IGP adjacencies, LSPs over link paths, VPN services over LSPs,
-  fiber spans, and SRLG groupings. Topology size is configurable (e.g., 10–200 nodes).
+  cards, ports, interfaces, IP links, IGP adjacencies, LSPs over link paths, VPN services over LSPs,
+  fiber spans, and SRLG groupings. Topology size is configurable (e.g., 10–200 nodes). Each `Node`
+  (and the `Interface`s it hosts) carries a grounded **`igpArea`** device attribute (a few IGP
+  areas — `area-0` backbone + numbered edge areas) so the Knowledge `trailPolicy` igpArea boundary
+  is a real, populated dimension (the prior gap: the boundary referenced an attribute no producer
+  emitted, leaving area-bounding inert).
+- Place devices into **≥10 distinct grounded telco-PoP geo sites** (`name`/`latitude`/`longitude`/
+  `region`), drawn from a fixed grounded catalogue (no reused or fabricated coordinates), so
+  `SITE_COUNT=10` yields 10 distinct grounded sites and the web-ui site drill-down is non-trivial.
 - Assign stable `managedObjectId`s (per the `libs/event-model` scheme, objectTypes from the
   nine known typed graph layers: `Node`, `LineCard`, `Port`, `IPLink`, `IGPAdjacency`, `LSP`,
   `VPNService`, `FiberSpan`, `SRLG`) that are shared between the topology snapshot file and
@@ -45,12 +52,21 @@ ensuring topology and alarm identities are shared.
   real Topology Service for integration). The topology-snapshot file format is a versioned
   contract.
 - Generate labeled fault scenarios: inject a known root cause, produce a cascade of child
-  alarms per the §5 propagation templates (e.g., fiber cut → `LinkDown` x2 → `AdjDown` →
-  `LSPDown` → `VPNloss`/`ReachabilityLoss`), with configurable timing jitter. At minimum:
-  **fiber-cut**, **line-card-fault**, and **port-fault** scenarios. **Every emitted alarm carries
-  the required canonical `alarmType`** token (a Knowledge `alarmTypeVocabulary` member —
-  `FiberFault`, `LOS`, `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`,
-  `ReachabilityLoss`), set from the domain pack's alarm shape. `alarmType` is the cross-source
+  alarms per the §5 propagation templates (e.g., fiber cut → optical → `LinkDown` → routing →
+  `LSPDown` → service/QoS tail), with configurable timing jitter. The pack ships **8-10 distinct
+  grounded fault scenarios** (one per Knowledge `faultOriginType` plus SRLG co-failure / line-card
+  fan-out): **fiber-cut, line-card-fault, port-fault, interface-fault, node-failure,
+  ip-link-failure, lsp-te-failure, routing-adjacency-failure, srlg-shared-risk-failure** — and each
+  scenario's cascade (over the topology closure with fan-out + SRLG fate-sharing) spans **10-20
+  distinct alarm TYPES**, injected with **multiple instances per scenario** (so the patterns are
+  minable and cover the bulk of the signal — the ~50-60% pattern-coverage target). The alarm-type
+  set is the **29-token expanded Core IP `alarmTypeVocabulary`** authored in Knowledge; the pack's
+  alarm-shapes and propagation align to that expanded vocabulary and the 28 propagation templates.
+  **Every emitted alarm carries the required canonical `alarmType`** token (a member of that
+  vocabulary — e.g. `FiberCut`, `LOS`, `LOF`, `OpticalPowerLow`, `PortDown`, `LineCardFault`,
+  `CRCErrors`, `InterfaceDown`, `LinkDown`, `IPLinkDown`, `ISISAdjacencyDown`, `BGPPeerDown`,
+  `LSPDown`, `TETunnelDown`, `ReachabilityLoss`, `ServiceDegraded`, `Congestion`), set from the
+  domain pack's alarm shape. `alarmType` is the cross-source
   canonical **join key**, distinct from `eventType` (X.733 category) and `probableCause` (X.733
   probable cause); the Simulator is an **origin** of alarms and MUST populate it.
 - Generate background noise alongside injected scenarios: at minimum **3 noise classes**
@@ -63,6 +79,13 @@ ensuring topology and alarm identities are shared.
   space** (like-for-like, not `probableCause`).
 - Replay modes: **history** (batch — emits to `alarms.history`) and **live** (streamed with
   wall-clock pacing — emits to `alarms.live`), as configured.
+- **Configurable demo volume:** a **`TOTAL_ALARMS` target** knob (the Simulator solves
+  scenario-instance / background counts to approximately hit the target total) plus **named,
+  overridable demo profiles** — `p1-demo` (P1 topology: `SITE_COUNT=10`, ~50 nodes), `p2-demo`
+  (~1000 alarms, ~20% noise), `p3-demo` (~500 live alarms) — so the demo volumes are repeatable and
+  asserted. Profiles are config (overridable defaults); a **subset** (1-2 scenarios) or the full set
+  is runnable. The pinned volumes/coverage are asserted via `simulator_alarms_emitted_total` in the
+  integration thresholds.
 - Serve as the integration test oracle: the integration-threshold metrics defined in this spec
   are the numeric targets asserted by the integration test harness.
 - Read scenario configuration (topology size, fault scenario selection, timing jitter, noise
@@ -90,28 +113,36 @@ ensuring topology and alarm identities are shared.
 ## Tasks (high-level)
 
 1. Generate a typed multi-layer topology using the active domain pack — for the Core IP pack:
-   PE/P/RR/peering nodes, line cards, ports, IP links, IGP adjacencies, LSPs, VPN services,
-   fiber spans, SRLG groups — with configurable size, assigning each object a stable
-   `managedObjectId` per the `libs/event-model` scheme.
+   PE/P/RR/peering nodes, line cards, ports, interfaces, IP links, IGP adjacencies, LSPs, VPN
+   services, fiber spans, SRLG groups — with configurable size, assigning each object a stable
+   `managedObjectId` per the `libs/event-model` scheme. Place devices into **≥10 distinct grounded
+   geo sites** (from a fixed grounded catalogue) and stamp a grounded **`igpArea`** device
+   attribute on each `Node` (and its `Interface`s) so the Knowledge igpArea trail-policy boundary is
+   populated.
 2. Generate the domain-grounded topology snapshot **file** (versioned contract; see Contract
    section) and upload it to the Topology Service's **ingestion API** (client built against
    Topology's published OpenAPI 3.1 spec; integration point is config-switchable mock/real).
 3. Load fault scenario configurations (from local files or Knowledge Service) defining which
    root-cause types to inject, their cascade templates, timing jitter parameters, and noise
    mix.
-4. Inject labeled fault scenarios into the alarm stream: for each scenario, produce the
-   root-cause alarm and its causally downstream child alarms per the configured cascade
-   template (supplied by the domain pack), with timing jitter applied. **Every emitted
-   `AlarmEvent` carries the required canonical `alarmType` token** (a Knowledge
-   `alarmTypeVocabulary` member) set from the pack's alarm shape — the cross-source join key,
+4. Inject labeled fault scenarios into the alarm stream: the pack supplies **8-10 distinct
+   grounded scenarios**, each producing the root-cause alarm and its causally downstream child
+   alarms per the configured cascade templates (the 28 Knowledge propagation templates over the
+   topology closure with fan-out + SRLG fate-sharing), spanning **10-20 distinct alarm types**, with
+   **multiple instances per scenario** and timing jitter applied. **Every emitted
+   `AlarmEvent` carries the required canonical `alarmType` token** (a member of the 29-token Knowledge
+   `alarmTypeVocabulary`) set from the pack's alarm shape — the cross-source join key,
    distinct from `eventType`/`probableCause`. Record the ground-truth label
    `{rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}` for each injected
-   scenario.
+   scenario, sufficient for the oracle to measure noise-removal, retention, pattern-quality,
+   alarm-reduction, and RCA accuracy over the richer pack.
 5. Inject background noise alarms (at least 3 noise classes from the domain pack's scenario
    library) interleaved with the labeled scenario alarms, at configurable rates and mix.
 6. Replay the alarm stream in **history** mode (batch, onto `alarms.history` — feeds pattern
    mining and discovery) or **live** mode (streamed with wall-clock pacing, onto `alarms.live`
-   — feeds real-time alarm correlation), as configured.
+   — feeds real-time alarm correlation), as configured. Support a **`TOTAL_ALARMS` target** knob and
+   **named overridable demo profiles** (`p1-demo`/`p2-demo`/`p3-demo`) so the demo volumes
+   (~1000 P2, ~500 P3) are repeatable; allow subset (1-2 scenario) runs.
 7. Make ground-truth labels retrievable for evaluation — the retrieval mechanism (REST API vs.
    file export) is a design decision; see Open questions.
 8. Accept generation parameters from a swappable **domain pack** interface — object/edge
@@ -227,6 +258,10 @@ config/Knowledge Service** — they are never hard-coded in service code.
 | Noise-filter effectiveness (removal) | Fraction of injected noise alarms removed by the Noise Filter | **≥ 0.90** |
 | Noise-filter effectiveness (retention) | Fraction of real (scenario) alarms retained after the Noise Filter | **≥ 0.95** |
 | Pattern quality | Count of injected patterns recovered by the Pattern Miner ÷ total injected patterns | **≥ 0.80** |
+| Distinct patterns × per-pattern span | Distinct labeled scenario signatures and the distinct-`alarmType` span of each | **8-10 patterns, each 10-20 types** |
+| Pattern coverage of volume | Scenario (in-some-label) alarms ÷ total emitted | **~50-60%** |
+| `p2-demo` / `p3-demo` volume | `simulator_alarms_emitted_total` after the named profile run | **~1000 (P2) / ~500 (P3), within tolerance** |
+| Distinct grounded sites | Distinct `Site` nodes with distinct grounded geo at `SITE_COUNT=10` | **= 10 distinct** |
 
 ## Acceptance criteria
 
@@ -362,6 +397,45 @@ Each criterion is phrased to map to a single pytest test.
     noise-filter retention ≥ 0.95; pattern quality ≥ 0.80) are present in the integration
     test harness configuration sourced from this spec, and are not hard-coded as literals in
     service implementation code.
+
+### MVP-grounding acceptance criteria (fixes B1-B5 — pack content + config + ground-truth)
+
+21. **Pack ships 8-10 distinct grounded scenarios, each spanning 10-20 distinct alarm types.**
+    The Core IP pack's scenario library contains **9 distinct grounded scenarios** (`fiber-cut`,
+    `line-card-fault`, `port-fault`, `interface-fault`, `node-failure`, `ip-link-failure`,
+    `lsp-te-failure`, `routing-adjacency-failure`, `srlg-shared-risk-failure`), one per Knowledge
+    `faultOriginType` plus SRLG co-failure / line-card fan-out. For each scenario, a single injected
+    instance's symptom set spans **at least 10 and at most ~24 distinct canonical `alarmType`
+    tokens** (drawn from the 29-token Knowledge `alarmTypeVocabulary`), and each is injected with
+    multiple instances (`SCENARIO_INSTANCES`). The 9 root-cause `alarmType`s are distinct per
+    scenario.
+
+22. **Each `Node` (and its Interfaces) carries a grounded `igpArea`.** The generated snapshot stamps
+    a non-empty `igpArea` device attribute on every `Node` and on every `Interface` it hosts
+    (interface inherits its node's area); at least one `area-0` backbone area and one numbered edge
+    area are present; `IGP_AREA_COUNT=N` yields N distinct areas. `igpArea` is a Knowledge
+    `attributeCatalogue` deviceKey, validated semantically by Topology (no event-model/schema
+    change).
+
+23. **`TOTAL_ALARMS` target and demo profiles hit the demo volumes.** With `TOTAL_ALARMS` set (or a
+    demo profile selected) the emitted alarm total is within tolerance of the target;
+    `DEMO_PROFILE=p2-demo` emits **~1000 alarms at ~20% noise** on `alarms.history`;
+    `DEMO_PROFILE=p3-demo` emits **~500 alarms** on `alarms.live`. Profiles are overridable defaults
+    (an individual env var overrides the profile value) and a `SCENARIOS` subset runs only the
+    selected scenarios.
+
+24. **≥10 distinct grounded geo sites; `SITE_COUNT=10` yields 10 distinct.** The geo catalogue holds
+    at least 10 distinct grounded telco-PoP entries (distinct coordinates); a run with
+    `SITE_COUNT=10` produces exactly 10 `Site` nodes with 10 distinct `{name,latitude,longitude,
+    region}` tuples (no reused or fabricated coordinates). A `SITE_COUNT` above the catalogue size
+    fails fast.
+
+25. **Ground-truth supports the oracle metrics on the richer pack.** For a full demo run, every
+    scenario has a ground-truth label whose `rootCauseAlarmType` is a 29-token-vocabulary member
+    equal to its root alarm's `alarmType`; noise and background alarms appear in no label's
+    `children`; the five integration metrics (noise-removal, retention, pattern-quality,
+    alarm-reduction, RCA accuracy) are computable from the labels plus
+    `simulator_alarms_emitted_total{scenario,alarmType}` over all 9 scenarios.
 
 ## Open questions
 
