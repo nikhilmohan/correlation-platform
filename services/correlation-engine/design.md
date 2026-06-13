@@ -76,8 +76,10 @@ as-is):
   and torn down immediately on full match (see Design alternatives).
 - **HTTP / API:** Spring Web MVC; **springdoc-openapi** generates and serves OpenAPI 3.1 at
   `/openapi.json` and Swagger UI.
-- **Datastore:** PostgreSQL (Incident Store), via Spring Data JDBC / `JdbcTemplate` + Flyway
-  migrations.
+- **Datastore:** PostgreSQL (Incident Store) in the owned schema `incident`, via Spring Data JDBC /
+  `JdbcTemplate` + Flyway (Apache-2.0) migrations. Flyway is scoped to the `incident` schema
+  (`spring.flyway.schemas=incident`, `spring.flyway.default-schema=incident`); the first migration
+  is `V1__create_incident_schema.sql` = `CREATE SCHEMA IF NOT EXISTS incident;`.
 - **Outbound HTTP clients:** Spring `RestClient` (config-driven base URLs) to Pattern Manager,
   Codebook Generator, Knowledge Service.
 - **Observability:** Spring Boot Actuator (`/health` liveness+readiness), Micrometer +
@@ -328,9 +330,23 @@ is the structural realization of the spec's isolation invariant (AC2, AC8).
 
 ### B. Incident Store (PostgreSQL) — durable system of record
 
-The Correlation Engine **owns** the Incident Store (dedicated schema `correlation`). No other
-service reads/writes it directly; the Alarm Manager learns of correlation via `correlation.results`
-and denormalizes role onto its own live-alarm store (it does not duplicate the incident here).
+The Correlation Engine **owns** the Incident Store — a dedicated PostgreSQL schema named
+`incident` in the shared PostgreSQL instance (per the `architecture.md` separation-by-schema
+convention). All three tables are qualified into it: `incident.incident` (the incident
+system-of-record table), `incident.incident_alarm`, and `incident.processed_event`. **Naming
+note:** the **schema** is `incident` and one of its **tables** is also `incident`; the
+system-of-record table is therefore always written `incident.incident` (schema.table), and every
+reference below is schema-qualified so the schema and the table are never confused. No other
+service reads/writes this schema directly; the Alarm Manager learns of correlation via the
+`correlation.results` topic and denormalizes role onto its own live-alarm store (it does not
+duplicate the incident here).
+
+**Schema creation & Flyway placement.** Flyway runs on startup configured to this schema only —
+`spring.flyway.schemas=incident` and `spring.flyway.default-schema=incident`, so the migration
+baseline and the per-schema `incident.flyway_schema_history` ledger live in `incident`, and
+**nothing is created in `public`** in the shared PostgreSQL. The **first migration**
+(`V1__create_incident_schema.sql`) is `CREATE SCHEMA IF NOT EXISTS incident;`; subsequent
+migrations create the three schema-qualified tables, keys, constraints, and indexes below.
 
 ```mermaid
 erDiagram
@@ -360,7 +376,7 @@ erDiagram
   }
 ```
 
-**`correlation.incident`** — one row per incident (system of record).
+**`incident.incident`** (schema `incident`, table `incident`) — one row per incident (system of record).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -384,19 +400,19 @@ P3-G4). The pattern's own `codebookMatchId` (a codebook **scenario** reference u
 Manager reconciliation) is deliberately **not** copied here, to avoid conflating a scenario id with
 a codebook artifact id.
 
-**`correlation.incident_alarm`** — correlation-group membership (root-cause + children).
+**`incident.incident_alarm`** (schema `incident`, table `incident_alarm`) — correlation-group membership (root-cause + children).
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `bigserial` PK | |
-| `incident_id` | `text NOT NULL` FK to `incident.incident_id` ON DELETE CASCADE | |
+| `incident_id` | `text NOT NULL` FK to `incident.incident(incident_id)` (schema `incident`, table `incident`, column `incident_id`) ON DELETE CASCADE | |
 | `alarm_id` | `text NOT NULL` | |
 | `role` | `text NOT NULL` | `root_cause` or `child`. |
 
 Constraint: `UNIQUE(incident_id, alarm_id)`. Index: `(alarm_id)`.
 
 > **`correlatedAlarmCount` derivation (D1).** `StatsAggregator` computes `correlatedAlarmCount` as
-> `COUNT(DISTINCT alarm_id)` over `correlation.incident_alarm` — every distinct alarm that holds a
+> `COUNT(DISTINCT alarm_id)` over `incident.incident_alarm` — every distinct alarm that holds a
 > root-cause or child role in some committed incident, counted once (the `UNIQUE(incident_id,
 > alarm_id)` constraint plus the `DISTINCT` make an alarm appearing in multiple incidents or roles
 > count once toward the correlated set). `totalAlarmsProcessed` is the distinct-`alarmId` ingest
@@ -404,7 +420,7 @@ Constraint: `UNIQUE(incident_id, alarm_id)`. Index: `(alarm_id)`.
 > both numerator and denominator come from the engine's own owned state, so the shown number is
 > self-contained and reproducible.
 
-**`correlation.processed_event`** — idempotency ledger for consumed events deduped on `eventId`
+**`incident.processed_event`** (schema `incident`, table `processed_event`) — idempotency ledger for consumed events deduped on `eventId`
 (`patterns.approved` / `codebook.generated`). `scope` distinguishes topics; `dedupe_key` is the
 `eventId`. Alarm dedupe uses the partition-local RocksDB `alarmDedupeStore` (high volume,
 changelog-recoverable); the table is for low-volume event-side dedupe.
@@ -1179,6 +1195,19 @@ fixture.)
 | 29 | RCA accuracy computable + shown from incident API + labels oracle (D2) | `RcaAccuracyExposureTest#incidentCarriesRootCauseAlarmTypeAndEvalModeStatsAccuracy` | Each `GET /incidents` item and `GET /incidents/{id}` carries `rootCauseAlarmId` **and** `rootCauseAlarmType` (the tagged root cause's `alarmType` token); given a labels fixture, RCA accuracy = matching incidents over total is computable on the token space; with `RCA_EVAL_MODE=on` + the labels-oracle mock wired, `GET /stats.rcaAccuracy` returns that same fraction, and with `RCA_EVAL_MODE=off` `rcaAccuracy` is `null` and no labels feed is consulted; `CorrelationResultEvent` is unchanged (no `rootCauseAlarmType`/`rcaAccuracy` on the wire). |
 | 30 | Rates hold on the noisy live stream against ground truth — train-serve resolution (E1) | `NoisyStreamMatchToleranceTest#seededCascadePlusNoiseFiresIncidentWithinSessionWindow` (unit) + `NoisyStreamRatesIT` (integration) | **Unit:** a seeded cascade interleaved with the default background/noise mix on `alarms.persisted.live` (no DBSCAN pre-clean) still fires exactly one incident within the pattern's `sessionWindow` — unrelated noise is not admitted to the `(trailId, patternId)` instance, a dropped symptom is tolerated by `match.partialMatchTolerance`, the correct `rootCauseAlarmId` is tagged. **Integration:** on a full noisy P3 replay vs the Simulator labels, the auto-correlation rate (AC28) and RCA accuracy (AC29) meet `integration-thresholds.yaml` (`~0.60` auto-correlation, `≥0.80` RCA) — measured on raw noisy data, not cleaned data. |
 
+### Schema migration / DB-placement tests (Flyway, Testcontainers PostgreSQL)
+
+DB-readiness coverage for the owned `incident` schema. These run against a Testcontainers
+PostgreSQL with Flyway applied as on startup; they guard the schema name, the schema-scoped
+migration, and that nothing leaks into `public`.
+
+| # | What it guards | Test (JUnit 5) | Asserts |
+|---|---|---|---|
+| S1 | `incident` schema is created by the first migration | `SchemaMigrationTest#test_schema_incident_created` | After Flyway runs, `information_schema.schemata` contains a schema named `incident` (created by `V1__create_incident_schema.sql`); no schema named `correlation` exists. |
+| S2 | All three tables land in the `incident` schema, not `public` | `SchemaMigrationTest#test_tables_in_incident_schema` | `information_schema.tables` shows `incident.incident`, `incident.incident_alarm`, `incident.processed_event` (`table_schema='incident'`); none of these tables exist in `public`. |
+| S3 | Flyway history ledger is scoped to `incident`, `public` stays empty | `SchemaMigrationTest#test_flyway_history_in_incident_schema_public_empty` | `incident.flyway_schema_history` exists; `public` contains no application tables and no `flyway_schema_history` (confirms `flyway.schemas`/`default-schema`=`incident`). |
+| S4 | The `incident_alarm` FK targets `incident.incident(incident_id)` unambiguously | `SchemaMigrationTest#test_incident_alarm_fk_targets_incident_incident` | The FK on `incident.incident_alarm.incident_id` references `incident.incident(incident_id)` (schema-qualified target), with `ON DELETE CASCADE` — resolving to the table `incident` inside schema `incident`, never the schema as a whole. |
+
 ### E2E scenarios (from this design unit's point of view)
 
 Service-scoped end-to-end paths the integration-test stage exercises (real Kafka + PostgreSQL via
@@ -1219,7 +1248,9 @@ Testcontainers/Compose, real collaborators in `real` mode).
   a threshold; instance deadlines themselves come from each pattern's `sessionWindow`).
 - `INTEGRATION_MODE=mock|real`; `PATTERN_MANAGER_BASE_URL`, `CODEBOOK_GENERATOR_BASE_URL`,
   `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_DOMAIN` (default `core-ip`).
-- `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, schema `correlation`.
+- `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`; owned schema `incident` (Flyway configured
+  with `spring.flyway.schemas=incident` + `spring.flyway.default-schema=incident`, so the
+  `flyway_schema_history` ledger and all objects land in `incident`, never `public`).
 - `KNOWLEDGE_PARAMS_REFRESH_SECONDS` (cache TTL).
 - `RCA_EVAL_MODE=off|on` (default `off`) and `SIMULATOR_LABELS_URL` — **eval/demo only** (D2). When
   `on`, `StatsController` resolves each incident's `root_cause_alarm_type` against the Simulator
@@ -1256,7 +1287,8 @@ Testcontainers/Compose, real collaborators in `real` mode).
   collaborators run as WireMock (CI) or real services (`real` mode, Compose).
 - **Dockerfile:** multi-stage on `eclipse-temurin:17-jdk` (build) to `eclipse-temurin:17-jre`
   (run); exposes the HTTP port; entrypoint runs the Spring Boot jar; Flyway migrations apply on
-  startup.
+  startup into the `incident` schema (`V1__create_incident_schema.sql` first; `flyway.schemas`/
+  `default-schema`=`incident`), so the shared PostgreSQL `public` schema stays empty.
 - **Compose entry:** `correlation-engine` service with `depends_on` Kafka, PostgreSQL, `knowledge`,
   `pattern-manager`, `codebook-generator`; env supplies bootstrap servers, base URLs,
   `INTEGRATION_MODE`, PostgreSQL connection. Kafka Streams state stores (RocksDB) persist to a
