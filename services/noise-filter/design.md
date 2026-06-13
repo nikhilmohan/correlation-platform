@@ -71,7 +71,7 @@ root `noise_filter.*`.
 | 2. Partition into trail-windows | `noise_filter.windowing.TrailWindower`: for each `AlarmEvent` and each `trailId` in its `trailIds[]`, assign to a coarse tumbling time bucket of width `windowSize` (Knowledge param) keyed by `(trailId, bucketIndex)`. A window finalizes on a time/grace trigger then is handed to the pipeline. (Flow 1; Algorithm step A) |
 | 3. Feature-vectorize alarms | `noise_filter.features.FeatureVectorizer` builds a standardized numeric row per alarm from relative timestamp (primary storm-density signal), object-type layer, `eventType`, `perceivedSeverity`; plus — when enabled by Knowledge feature config — (a) device/connection attribute dimensions from `noise_filter.clients.TopologyClient`, and (b) **one soft hop-distance dimension** from the trail seed via `noise_filter.features.HopDistanceResolver` + `noise_filter.clients.TrailBuilderClient`. Active feature set comes solely from `noise_filter.config.FeatureConfig` (Knowledge-sourced); Topology/Trail-Builder calls are skipped when their features are off. (Algorithm steps B, C; Integration points; DA-10) |
 | 4. Run DBSCAN per trail-window | `noise_filter.cluster.Clusterer` runs `DBSCAN(eps, min_samples)` (params from Knowledge) over the per-window feature matrix; labels each row as a storm-cluster member (label at least 0) or noise (label minus 1). `hdbscan` selectable. Dense clusters = storms from one propagating fault. (Algorithm step D; DA-1) |
-| 5. Emit cleaned groups | `noise_filter.emit.TransactionEmitter`: for each dense cluster (storm) build a `TransactionEvent` (`transactionId`=fresh UUID, `trailId`, `snapshotId` resolved via DA-7, `alarmIds[]`=cluster members in arrival order, **`alarms[]`=ordered typed per-alarm detail built from the in-hand enriched AlarmEvents**, `windowStart`/`windowEnd`, optional `domain`), wrap in the envelope, validate, publish to `transactions.clean`. (Flow 1; Algorithm step E; DA-13) |
+| 5. Emit cleaned groups | `noise_filter.emit.TransactionEmitter`: for each dense cluster (storm) build a `TransactionEvent` (`transactionId`=fresh UUID, `trailId`, `snapshotId` resolved via DA-7, `alarmIds[]`=cluster members in arrival order, **`alarms[]`=ordered typed per-alarm detail built from the in-hand enriched AlarmEvents — each entry the full SIX required fields `alarmId`, `alarmType`, `eventType`, `raisedAt`, `managedObjectId`, `perceivedSeverity`, every one copied verbatim from the source AlarmEvent (`alarmType` is a pass-through mirror, never derived or altered)**, `windowStart`/`windowEnd`, optional `domain`), wrap in the envelope, validate, publish to `transactions.clean`. (Flow 1; Algorithm step E; DA-13) |
 | 6. Record run-stats | `noise_filter.stats.RunStatsRecorder` writes ONE aggregate row per finalized trail-window execution to the NF-owned PostgreSQL run-stats table via `noise_filter.stats.RunStatsRepository`. **Best-effort / non-blocking**: the emit in task 5 has already happened; a write failure is logged + metric-counted and the pipeline continues. (Flow 1; Data model; Algorithm step F; DA-12; EH-11) |
 | 7. Refresh Knowledge parameters | `noise_filter.clients.KnowledgeClient` + `noise_filter.config.ParamStore`/`FeatureConfig`: load params + feature config at startup; on `knowledge.updated` (consumed via `noise_filter.ingest.KnowledgeUpdateConsumer`) re-fetch and hot-swap the in-memory stores so subsequent windows use new values without restart. (Flow 2; DA-6, DA-8) |
 | 8. Handle errors | `noise_filter.ingest.DlqPublisher` routes poison/unparseable and unknown-`schemaVersion` messages to `alarms.enriched.dlq`; all drops (noise points, DLQ routes, skipped attribute lookups, stats-write failures) are logged with structured context. (Error handling section) |
@@ -267,18 +267,25 @@ computed.
 
 | Topic | Payload | Producer | Notes |
 |---|---|---|---|
-| `transactions.clean` | `TransactionEvent` (`transactionId`, `trailId`, `snapshotId`, `alarmIds[]`, **`alarms[]` typed**, `windowStart`, `windowEnd`, optional `domain`) | `TransactionEmitter` | ONE event per dense storm cluster per trail-window; `alarmIds` non-empty; **`alarms[]` non-empty, ordered identically to `alarmIds`**, each entry carries alarmId, eventType, raisedAt, managedObjectId, perceivedSeverity mirrored from the in-hand enriched `AlarmEvent`; envelope `eventId`=fresh UUID, `source`=`noise-filter`, `traceId` carried from a representative input alarm. Noise-labeled alarms are dropped, never emitted. |
+| `transactions.clean` | `TransactionEvent` (`transactionId`, `trailId`, `snapshotId`, `alarmIds[]`, **`alarms[]` typed**, `windowStart`, `windowEnd`, optional `domain`) | `TransactionEmitter` | ONE event per dense storm cluster per trail-window; `alarmIds` non-empty; **`alarms[]` non-empty, ordered identically to `alarmIds`**, each entry carries the full SIX required fields `alarmId`, `alarmType`, `eventType`, `raisedAt`, `managedObjectId`, `perceivedSeverity` mirrored verbatim from the in-hand enriched `AlarmEvent` (incl. `alarmType` — the canonical Knowledge `alarmTypeVocabulary` token, copied as-is, never derived); envelope `eventId`=fresh UUID, `source`=`noise-filter`, `traceId` carried from a representative input alarm. Noise-labeled alarms are dropped, never emitted. |
 | `alarms.enriched.dlq` | original message bytes + structured error headers | `DlqPublisher` | poison / unknown-version routing |
 
 **Typed `alarms[]` population (folded from the merged contract).** The NF holds the full enriched
 `AlarmEvent` objects for every alarm in a finalized window (the `TrailWindower` retains them, not
 just their IDs). For each dense storm cluster the `TransactionEmitter` therefore builds **both**
-`alarmIds[]` and the typed `alarms[]` directly — for each cluster member it copies `alarmId`,
-`eventType`, `raisedAt`, `managedObjectId`, `perceivedSeverity` from the source `AlarmEvent`. The
+`alarmIds[]` and the typed `alarms[]` directly — for each cluster member it copies the full SIX
+required fields `alarmId`, `alarmType`, `eventType`, `raisedAt`, `managedObjectId`,
+`perceivedSeverity` from the source `AlarmEvent`. **`alarmType` (a canonical Knowledge
+`alarmTypeVocabulary` token — the single join key the Pattern Miner/codebook/correlation use) is
+copied verbatim from the in-hand enriched `AlarmEvent.alarmType`: the Noise Filter is a
+pass-through mirror and does not derive, infer, or alter it.** The
 two arrays are the **same set in the same order** (sorted by `raisedAt` then `alarmId` for stable
 ordering — the Pattern Miner mines ordered sequences). No separate alarm-detail lookup is needed
-downstream. Both arrays are in `TransactionEvent.required` per the merged schema, so emission
-fails validation (caught as a code bug, EH-3 class) if either is empty or mismatched.
+downstream. Both arrays are in `TransactionEvent.required` per the merged schema, and each
+`alarms[]` item's `required[]` is the SIX fields `alarmId`, `alarmType`, `eventType`, `raisedAt`,
+`managedObjectId`, `perceivedSeverity`; so emission fails the design's own pre-publish schema
+validation (caught as a code bug, EH-3 class) if either array is empty/mismatched OR if any
+`alarms[]` entry omits a required field — `alarmType` included.
 
 `domain` on `TransactionEvent` is **optional**. It is carried/derived from the trail context
 (the same `getTrail(trailId)` source as `snapshotId`, DA-7); when unknown it is omitted and
@@ -290,7 +297,11 @@ downstream consumers default to the single MVP domain. The Noise Filter never in
 a **read-only run-stats API**, published as **OpenAPI 3.1** at `GET /openapi.json` and checked
 into `services/noise-filter/openapi.json` as the single source of truth. FastAPI generates the
 spec from the typed Pydantic response models; the service's own contract test validates live
-responses against the checked-in spec (AC-12), and web-ui builds its client against it.
+responses against the checked-in spec (AC-12), and web-ui builds its client against it. The
+**`services/noise-filter/openapi.json` file is a build-time artifact**: it is generated from the
+Pydantic models and checked in at build time — the design freezes the run-stats read-API SHAPE
+(operations, query params, and response schemas) in the prose/tables below, which is the
+authoritative contract at design stage; the file itself need not exist at design time.
 
 **Operations** (resolving spec design-stage OQ #5 — endpoint shape):
 
@@ -396,7 +407,7 @@ sequenceDiagram
     D->>D: label rows, storm-cluster member or noise
     D->>E: labels per alarm
     E->>E: drop noise, group dense storms, resolve snapshotId and domain
-    E->>E: build alarmIds and typed alarms ordered by raisedAt
+    E->>E: build alarmIds and typed alarms each with alarmId alarmType eventType raisedAt managedObjectId perceivedSeverity ordered by raisedAt
     E->>O: TransactionEvent per dense storm cluster
     E->>R: per-window aggregate counts
     R->>PG: insert run-stats row best-effort
@@ -498,7 +509,7 @@ flowchart TD
     KL -- storm-cluster member --> M[add alarm to its storm group preserving order]
     M --> N[for each dense storm build TransactionEvent]
     N --> O[resolve snapshotId and optional domain]
-    O --> P[build alarmIds and typed alarms, validate, publish to transactions.clean]
+    O --> P[build alarmIds and typed alarms each entry all six fields incl alarmType mirrored from source, validate, publish to transactions.clean]
     P --> Q[record one run-stats row best-effort, never blocks]
 ```
 
@@ -606,7 +617,7 @@ design** and counted in metrics + logged at debug with the dropped `alarmId`s.
 | DA-10 Hop-distance seed resolution + traversal (OQ #7) | (a) explicit seed/root field on `getTrail`; (b) Knowledge fault-origin list; (c) topological DAG root; (d) skip if seed absent | **(a) with (b) then (c) fallback; (d) only via the contract-gap flag.** Resolve the seed from the explicit `getTrail` seed/root field; fall back to the Knowledge fault-origin list, then the DAG root. Hop-distance is a **bounded BFS** capped at `hopTraversalMaxDepth`; unreachable/over-bound nodes get the bound value (kept, never dropped). If `getTrail` exposes neither seed nor edges, that is a flagged **Trail Builder contract gap** for human resolution (feature stays off) — NOT designed around. Strictly SOFT and retention-biased. |
 | DA-11 Run-stats read-API shape (OQ #5) | (a) `GET /api/v1/run-stats` list + `GET /run-stats/{id}` with `trailId`/`from`/`to`/`limit`/`offset`; (b) a single GraphQL endpoint; (c) per-trail nested paths | **(a) REST list+by-id with query filters, newest-first, `limit`/`offset` paging (`limit` capped at 500).** Simple, cache-friendly, trivially expressible in OpenAPI 3.1 for the web-ui client; matches the spec's list/query recent runs, filter by trailId/time range. GraphQL rejected (overkill for one read model). `domain` surfaced as nullable per OQ #5. |
 | DA-12 Run-stats write placement (best-effort) | (a) write synchronously after emit but in a guarded try/except off the critical path; (b) write before emit; (c) async queue/worker | **(a) guarded write strictly AFTER emit.** Spec mandates best-effort/non-blocking — emit must never depend on the DB. Writing after emit guarantees a DB failure cannot block `transactions.clean` (EH-11). An async queue (c) was rejected as over-engineering for one lightweight row per window; the guarded post-emit write is simplest and provably non-blocking. |
-| DA-13 Typed `alarms[]` population | (a) emitter builds `alarms[]` from the in-hand enriched `AlarmEvent`s; (b) downstream lookup of alarm detail by id | **(a) populate directly.** The NF already holds the full enriched alarms in the window (the `TrailWindower` retains them), so it mirrors alarmId, eventType, raisedAt, managedObjectId, perceivedSeverity into the ordered `alarms[]` with zero extra lookups — exactly the intent of the merged contract. `alarmIds[]` retained, same order. |
+| DA-13 Typed `alarms[]` population | (a) emitter builds `alarms[]` from the in-hand enriched `AlarmEvent`s; (b) downstream lookup of alarm detail by id | **(a) populate directly.** The NF already holds the full enriched alarms in the window (the `TrailWindower` retains them), so it mirrors the full SIX required fields `alarmId`, `alarmType`, `eventType`, `raisedAt`, `managedObjectId`, `perceivedSeverity` into the ordered `alarms[]` with zero extra lookups — `alarmType` (the canonical Knowledge `alarmTypeVocabulary` token) copied verbatim from the source `AlarmEvent.alarmType` as a pass-through mirror — exactly the intent of the merged contract. `alarmIds[]` retained, same order. |
 | DA-14 PostgreSQL driver | (a) `psycopg3`; (b) `asyncpg`; (c) `psycopg2` | **(b) asyncpg (Apache-2.0).** psycopg3 is LGPL; the licensing invariant prefers strictly permissive deps, so asyncpg is chosen. Connection pooling + simple parameterized SQL (no ORM) keeps the one-table store minimal. |
 | DA-15 Schema migration | (a) `yoyo-migrations` versioned SQL at startup; (b) hand-run DDL; (c) Alembic | **(a) yoyo (Apache-2.0).** Versioned, idempotent, runs at startup; lighter than Alembic for a single-table schema; avoids the SQLAlchemy ORM dependency. |
 
@@ -621,7 +632,7 @@ Every spec acceptance criterion (1–18) maps 1:1 to a named pytest test.
 | 1 | Noise drop — chatty alarm removed | `test_chatty_alarm_dropped_from_cascade` | Window = fiber-cut cascade (LOS, LinkDown, AdjDown, LSPDown) + 1 coincidental chatty alarm; exactly one `TransactionEvent` whose `alarmIds` contains the four cascade ids and **not** the chatty id. |
 | 2 | Cluster preserved intact | `test_cascade_cluster_preserved_intact` | Window = only the cascade alarms; one `TransactionEvent` whose `alarmIds` contains **every** cascade alarm; none dropped. |
 | 3 | DBSCAN params from Knowledge change results | `test_dbscan_params_from_knowledge_change_results` | Same input window, two mock-Knowledge param sets: tight (small `eps`, high `minSamples`) yields fewer/no dense clusters; loose yields at least one. Proves no hard-coded threshold; Knowledge is sole source. |
-| 4 | `TransactionEvent` schema validity (incl. typed `alarms[]`) | `test_transaction_event_validates_against_schema` | Every emitted `TransactionEvent` validates against the `libs/event-model` `TransactionEvent` JSON Schema; all required fields present incl. non-empty `alarmIds` AND non-empty typed `alarms[]`. |
+| 4 | `TransactionEvent` schema validity (incl. typed `alarms[]`) | `test_transaction_event_validates_against_schema` | Every emitted `TransactionEvent` validates against the `libs/event-model` `TransactionEvent` JSON Schema; all top-level required fields present incl. non-empty `alarmIds` AND non-empty typed `alarms[]`, AND **every `alarms[]` entry carries all SIX required per-alarm fields — `alarmId`, `alarmType`, `eventType`, `raisedAt`, `managedObjectId`, `perceivedSeverity` — each correctly typed, with `alarmType` a non-empty token mirrored from the source `AlarmEvent.alarmType`** (a payload missing `alarmType` on any entry fails validation and is never published). |
 | 5 | Idempotency on duplicate `eventId` | `test_duplicate_event_id_processed_once` | Same `AlarmEvent` (identical `eventId`) delivered twice; the alarm id appears exactly once in the output (in `alarmIds[]` and `alarms[]`); `nf_duplicates_dropped_total` increments. |
 | 6 | Poison message to DLQ | `test_poison_message_routed_to_dlq` | Malformed-JSON message routed to `alarms.enriched.dlq` with `reason=deserialize_error`; consumer continues without crashing. |
 | 7 | Unknown `schemaVersion` to DLQ | `test_unknown_schema_version_routed_to_dlq` | Envelope with unsupported major `schemaVersion` routed to DLQ with `reason=unsupported_schema_version` + structured log; continues. |
@@ -639,7 +650,10 @@ Every spec acceptance criterion (1–18) maps 1:1 to a named pytest test.
 
 **Supporting unit tests** (design behaviour, not 1:1 to a criterion):
 `test_typed_alarms_array_populated_and_ordered` (DA-13: `alarms[]` mirrors `alarmIds[]` 1:1 in the
-same order, each entry carries the five typed fields from the source `AlarmEvent`),
+same order, each entry carries the SIX typed required fields — `alarmId`, `alarmType`, `eventType`,
+`raisedAt`, `managedObjectId`, `perceivedSeverity` — round-tripped verbatim from the source
+`AlarmEvent`, and specifically asserts each entry's `alarmType` equals the source
+`AlarmEvent.alarmType` (pass-through mirror, not derived)),
 `test_topology_unavailable_degrades_skips_attribute` (EH-5),
 `test_trail_builder_unavailable_degrades_skips_hop_dim` (EH-12),
 `test_snapshot_unresolved_not_emitted` (EH-8),
@@ -662,7 +676,7 @@ run-stats read API.
 
 | # | Scenario | Trigger then path | Expected outcome |
 |---|---|---|---|
-| 1 | Storm in, ONE clean transaction out, run-stats recorded | Enriched fiber-cut storm (at least 10 alarms) on `alarms.enriched` then windowing then DBSCAN then emit then record | ONE `TransactionEvent` on `transactions.clean` with the cascade `alarmIds[]` AND ordered typed `alarms[]`; schema-valid; chatty alarms dropped; ONE run-stats row with `clustersFormed=1`, `storm_reduction_ratio` at least 5; visible via the read API. |
+| 1 | Storm in, ONE clean transaction out, run-stats recorded | Enriched fiber-cut storm (at least 10 alarms) on `alarms.enriched` then windowing then DBSCAN then emit then record | ONE `TransactionEvent` on `transactions.clean` with the cascade `alarmIds[]` AND ordered typed `alarms[]` (every entry carrying all six required fields incl. a valid `alarmType` mirrored from the source enriched `AlarmEvent`); schema-valid; chatty alarms dropped; ONE run-stats row with `clustersFormed=1`, `storm_reduction_ratio` at least 5; visible via the read API. |
 | 2 | Concurrent faults separated by hop-distance (real Trail Builder) | Hop feature enabled in real Knowledge; window with two near-simultaneous faults (distinct origins) on one trail; service calls `getTrail` and computes hop-distance | TWO distinct `TransactionEvent`s, one per fault, sharing no alarm ids; retention of valid cascade members at least 0.95 (read-API `retentionVsOracle` confirms). |
 | 3 | Attribute-feature separation (real Topology) | Knowledge enables `equipmentType`; window of alarms on objects with distinct `equipmentType`; service fetches `GET /topology/nodes/{moId}` | Clusters split along `equipmentType`; with the feature disabled in Knowledge, Topology not called and the split disappears. |
 | 4 | Runtime param refresh | Edit DBSCAN params in real Knowledge then `knowledge.updated` emitted then next windows | Cluster labeling for an equivalent input changes without restart; new params recorded in subsequent run-stats rows. |

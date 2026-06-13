@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 from pydantic import ValidationError
@@ -54,6 +55,23 @@ def test_optional_fields_absent() -> None:
     out = json.loads(m.serialize(result))
     assert "clearedAt" not in out["payload"]
     assert "vendorRaw" not in out["payload"]
+
+
+# Canonical alarm-type join key (alarmType)
+def test_alarm_type_present_round_trips() -> None:
+    """`alarmType` (canonical vocabulary join key) round-trips from the fixture."""
+    result = m.deserialize(_alarm())
+    assert result.payload.alarmType == "LinkDown"
+    out = json.loads(m.serialize(result))
+    assert out["payload"]["alarmType"] == "LinkDown"
+
+
+def test_alarm_type_required() -> None:
+    """`alarmType` is REQUIRED on AlarmEvent — absence raises a validation error."""
+    env = _alarm()
+    del env["payload"]["alarmType"]
+    with pytest.raises(ValidationError):
+        m.deserialize(env)
 
 
 def test_managed_object_id_pattern_enforced_on_alarm() -> None:

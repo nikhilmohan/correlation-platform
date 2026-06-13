@@ -178,8 +178,17 @@ module.
    or noise (sparse outlier).
 5. **Emit cleaned groups** — for each dense cluster (storm) in a trail-window, construct a
    `TransactionEvent` (with a fresh `transactionId`, the `trailId`, the `snapshotId` in
-   scope, the `alarmIds[]` of cluster members, and `windowStart`/`windowEnd`) and publish
-   it to `transactions.clean`. One dense cluster -> one `TransactionEvent`.
+   scope, the `alarmIds[]` of cluster members, the typed `alarms[]` of cluster members, and
+   `windowStart`/`windowEnd`) and publish it to `transactions.clean`. One dense cluster ->
+   one `TransactionEvent`. The typed `alarms[]` array (already present and required on the
+   merged `TransactionEvent` contract) is populated from the in-hand enriched `AlarmEvent`s:
+   each `alarms[]` entry carries the SIX required per-alarm fields — `alarmId`, `alarmType`,
+   `eventType`, `raisedAt`, `managedObjectId`, `perceivedSeverity` — each copied verbatim
+   from the source `AlarmEvent`. In particular `alarmType` (the canonical Knowledge
+   `alarmTypeVocabulary` join token) is a pass-through mirror of `AlarmEvent.alarmType`: the
+   Noise Filter does not derive, infer, or alter it. `alarms[]` is ordered identically to
+   `alarmIds[]`. This populates an existing required field of the already-merged contract; it
+   introduces no new Kafka topic and no event-model change.
 6. **Record run-stats** — after finalizing each trail-window execution, write one aggregate
    row to the owned PostgreSQL run-stats table capturing: `runId` (unique), `runTimestamp`,
    `trailId`, `snapshotId`, `domain` (if available), `windowStart`, `windowEnd`, the params
@@ -331,10 +340,16 @@ Each criterion maps to one pytest test.
    clusters; the loose params produce at least one cluster. Demonstrates that no threshold
    is hard-coded and that the Knowledge Service is the sole source of DBSCAN configuration.
 
-4. **TransactionEvent schema validity.** Every `TransactionEvent` emitted by the service
-   validates against the `TransactionEvent` JSON Schema from `libs/event-model` (all
-   required fields present: `transactionId`, `trailId`, `snapshotId`, `alarmIds`,
-   `windowStart`, `windowEnd`; `alarmIds` is non-empty for emitted events).
+4. **TransactionEvent schema validity (incl. typed `alarms[]`).** Every `TransactionEvent`
+   emitted by the service validates against the `TransactionEvent` JSON Schema from
+   `libs/event-model` (all top-level required fields present: `transactionId`, `trailId`,
+   `snapshotId`, `alarmIds`, `alarms`, `windowStart`, `windowEnd`; `alarmIds` and `alarms`
+   are non-empty for emitted events). Additionally, **every `alarms[]` entry carries all SIX
+   required per-alarm fields — `alarmId`, `alarmType`, `eventType`, `raisedAt`,
+   `managedObjectId`, `perceivedSeverity` — each correctly typed, and each `alarmType` is a
+   valid non-empty token mirrored verbatim from the corresponding source `AlarmEvent.alarmType`.**
+   A payload that omits `alarmType` (or any other required per-alarm field) on any entry fails
+   validation and is never published.
 
 5. **Idempotency on duplicate eventId.** Given the same `AlarmEvent` delivered twice on
    `alarms.enriched` (identical `eventId`), the service processes it once and the output
