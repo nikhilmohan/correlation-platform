@@ -80,13 +80,25 @@ jobs:
         run: |
           ran=0
           mkdir -p "$GITHUB_WORKSPACE/reports/junit"
+          # The frozen contract binding is a local path dependency (not on PyPI); install it
+          # once so each service's `acp-event-model` requirement resolves.
+          if [ -f libs/event-model/python/pyproject.toml ]; then
+            python -m pip install ./libs/event-model/python
+          fi
+          # Pin linters to a stable minor (matches the event-model dev extras) so a new
+          # ruff/black release can't fail CI on previously-clean service code.
+          python -m pip install 'ruff~=0.15.0' 'black~=26.5.0'
           for d in services/simulator services/trail-builder services/codebook-generator services/noise-filter services/pattern-miner; do
             if [ -f "$d/pyproject.toml" ] || [ -f "$d/requirements.txt" ]; then
               ran=1
-              # Pin linters to a stable minor (matches the event-model dev extras) so a new
-              # ruff/black release can't fail CI on previously-clean service code.
-              python -m pip install 'ruff~=0.15.0' 'black~=26.5.0' pytest pytest-cov
               svc=$(basename "$d")
+              # Install the service WITH its dev extras (pytest, respx, pytest-asyncio, …) so the
+              # test suite's imports resolve in CI's clean env — linters stay pinned (above).
+              if [ -f "$d/pyproject.toml" ]; then
+                python -m pip install "./$d[dev]"
+              else
+                python -m pip install -r "$d/requirements.txt" pytest pytest-cov
+              fi
               (cd "$d" && ruff check . && black --check . && \
                 pytest --cov --cov-fail-under=80 --junitxml="$GITHUB_WORKSPACE/reports/junit/$svc.xml")
             fi
