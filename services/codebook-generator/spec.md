@@ -317,15 +317,20 @@ the Correlation Engine (matching) respectively.
     propagation templates (per-edge-type cascade rules, including HOSTS, TERMINATES,
     ADJACENCY_OVER for interface cascades) for the specified `domain`. Integration point name:
     `knowledge-propagation-templates`.
+  - **Knowledge Service — domain-scoped alarm-type vocabulary:** retrieve the domain's canonical
+    `alarmTypeVocabulary` token set for the specified `domain`, used to validate that every
+    `predictedSymptoms[].alarmType` and the projected `rootCauseAlarmType` is a member of that
+    set (the same value space as `AlarmEvent.alarmType`). Integration point name:
+    `knowledge-alarm-type-vocabulary`.
   - **Trail Builder Service — trail membership:** `getTrailsForObject(managedObjectId)` and
     `getTrail(trailId)` to resolve trail tags for each scenario (trails are domain-scoped by
-    the Trail Builder).
+    the Trail Builder, and the `getTrailsForObject` call passes `domain` as a required parameter).
     Integration point name: `trail-builder-trails`.
 
 - **Integration points (mock vs. real):**
-  - Each of the four outbound integration points (`topology-query`, `knowledge-fault-origins`,
-    `knowledge-propagation-templates`, `trail-builder-trails`) is configured by environment
-    variable: a base URL and a `MOCK|REAL` toggle.
+  - Each of the five outbound integration points (`topology-query`, `knowledge-fault-origins`,
+    `knowledge-propagation-templates`, `knowledge-alarm-type-vocabulary`, `trail-builder-trails`)
+    is configured by environment variable: a base URL and a `MOCK|REAL` toggle.
   - Unit tests use mocks/stubs generated from the respective producer's published OpenAPI spec
     (e.g. `respx` or `httpx` mock transport for Python) so tests run without live dependencies.
     Domain-parameterized mock responses (different fault-origin lists / templates per domain,
