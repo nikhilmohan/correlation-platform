@@ -82,6 +82,13 @@ test {
         events 'passed', 'skipped', 'failed'
         exceptionFormat 'full'
     }
+    // Propagate the OpenAPI regenerate flag (set by the generateOpenApi task) to the test JVM.
+    // When UNSET (a normal `build` / CI run) OpenApiExportTest runs as a drift GATE that FAILS
+    // the build if the served document diverges from the checked-in openapi.json. When set
+    // (generateOpenApi) the same test rewrites the checked-in file instead of asserting.
+    if (System.getProperty('updateOpenApi') != null) {
+        systemProperty 'updateOpenApi', System.getProperty('updateOpenApi')
+    }
     finalizedBy jacocoTestReport
 }
 
@@ -118,15 +125,31 @@ jacocoTestCoverageVerification {
 
 check.dependsOn jacocoTestCoverageVerification
 
-// --- OpenAPI export: regenerate the checked-in services/knowledge/openapi.json -----------
-// The running app serves the live document at /openapi.json (springdoc). This task boots the
-// app, fetches that document, and writes it to the checked-in file. A drift check (CI) fails
-// if the generated document diverges from the checked-in copy (a contract change).
-tasks.register('generateOpenApi') {
+// --- OpenAPI export + drift gate -----------------------------------------------------------
+// The running app serves the live document at /openapi.json (springdoc). OpenApiExportTest boots
+// the app, fetches that document, and:
+//   * on a normal `build`/CI run (updateOpenApi unset) ASSERTS it matches the checked-in
+//     services/knowledge/openapi.json and FAILS the build on any drift (contract change);
+//   * under `generateOpenApi` (updateOpenApi=true) REWRITES the checked-in file.
+// `generateOpenApi` runs only that test, in update mode, so a reviewed contract change can be
+// regenerated and committed. The checked-in openapi.json remains the single source of truth.
+tasks.register('generateOpenApi', Test) {
     group = 'documentation'
-    description = 'Boot the app, fetch /openapi.json, and write services/knowledge/openapi.json.'
-    dependsOn 'bootJar'
+    description = 'Regenerate the checked-in services/knowledge/openapi.json from the live document.'
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    filter {
+        includeTestsMatching 'com.acp.knowledge.OpenApiExportTest'
+    }
+    systemProperty 'updateOpenApi', 'true'
+    // Independent of the gating `test` task's up-to-date state / JaCoCo wiring.
+    outputs.upToDateWhen { false }
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat 'full'
+    }
     doLast {
-        logger.lifecycle('Run `./gradlew test --tests OpenApiExportTest` to regenerate openapi.json.')
+        logger.lifecycle('Regenerated services/knowledge/openapi.json — review and commit it.')
     }
 }

@@ -23,13 +23,10 @@ class OpenApiContractTest extends AbstractKnowledgeIT {
 
         JsonNode doc = objectMapper.readTree(body);
 
-        // Export the served document to the checked-in services/knowledge/openapi.json (the
-        // provider contract collaborating services build their clients against). Written
-        // pretty-printed + with a trailing newline so the checked-in file is stable across runs.
-        java.nio.file.Path target = java.nio.file.Paths.get("openapi.json");
-        objectMapper.writerWithDefaultPrettyPrinter().writeValue(target.toFile(), doc);
-        java.nio.file.Files.writeString(target,
-                System.lineSeparator(), java.nio.file.StandardOpenOption.APPEND);
+        // NOTE: this provider-contract test is intentionally READ-ONLY — it asserts the served
+        // document's shape but never writes the checked-in openapi.json. Generating the file and
+        // failing the build on drift from the checked-in copy is the job of OpenApiExportTest,
+        // which keeps the checked-in services/knowledge/openapi.json the single source of truth.
 
         // Valid OpenAPI 3.1 document.
         Assertions.assertTrue(doc.path("openapi").asText().startsWith("3.1"),
