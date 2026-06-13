@@ -8,7 +8,7 @@ codebook reconciliation and explainability metadata, **derives a per-pattern ses
 emitter of `PatternDiscoveredEvent` and `PatternApprovedEvent` (both now carrying `sessionWindow`).
 It contains **no ML** — mining is wholly owned by the Pattern Miner.
 
-This design realizes the approved `services/pattern-manager/spec.md` (14 tasks, 21 acceptance
+This design realizes the approved `services/pattern-manager/spec.md` (14 tasks, 22 acceptance
 criteria) and honours the canonical phase map in `docs/architecture.md` (P1 Idle / P2 Active /
 P3 Passive). It introduces **no contract change**: all consumed/produced payloads
 (`PatternMinedEvent`, `PatternDiscoveredEvent`, `PatternApprovedEvent`) and topics
@@ -35,10 +35,14 @@ gaps from `docs/design-gaps.md` are resolved here, all within the Pattern Manage
 - **P2-GAP-04** — `rootCauseAlarmType` (events + `PatternView` + RCA output) is bound to the
   canonical **`alarmType` vocabulary** (Knowledge `alarmTypeVocabulary`), the same join key as
   `AlarmEvent.alarmType` and codebook `predictedSymptoms[].alarmType`.
-- **P2-GAP-05** — the `sessionWindow` derivation pins exact `timing` keys/units, fixes
-  `cv = stddev/median`, and gives a self-consistent worked example (resolving OQ-5); a Pattern Miner
-  follow-up to emit the pinned ms keys is flagged (contract-of-shape on the open `timing` object,
-  not an event-model change).
+- **P2-GAP-05 / Q11** — the `sessionWindow` derivation pins exact `timing` keys/units, fixes
+  `cv = stddevInterArrivalMs / medianInterArrivalMs`, and gives a self-consistent worked example
+  (resolving OQ-5). The Pattern Miner now emits the four pinned ms keys natively
+  (`timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `stddevInterArrivalMs`) and the merged
+  `PatternMinedEvent.json` fixture matches, so the deriver reads them **directly** — the
+  `SESSION_WINDOW_TIMING_ALIASES` default is **empty/identity** (no aliasing or unit conversion by
+  default; the alias map is an optional escape hatch only). The open `timing` object is unchanged,
+  so this is not an event-model change.
 - **P2-GAP-06** — the `PATCH /patterns/{id}` body is frozen as
   `{ sequenceFlags: [{ index, optional }], reviewer, notes? }` in `openapi.json`.
 - **P2-GAP-08** — `GET /patterns` is frozen to return the **`PatternPage` envelope**
@@ -104,7 +108,7 @@ steps; the emit/serve tasks now additionally carry/serve `sessionWindow`.
 | 8. Persist to Pattern Store with lifecycle `draft`; assign stable `patternId` | `PatternStoreService.persistDraft(...)` writes the `pattern` row (lifecycle `draft`, including the structural-validation columns and the two new **`session_window_ms`** / **`session_window_type`** columns), its `supporting_instance` rows, and a `lifecycle_transition` audit row; `patternId` is a deterministic UUIDv5 over `(trailId, sequence, sourceWindowId, snapshotId)` for upsert idempotency. The persisted `sessionWindow` is the single source reused by both emitted events. |
 | 9. Emit `patterns.discovered`: one `PatternDiscoveredEvent` per persisted draft, carrying `sessionWindow` | `PatternEventPublisher.publishDiscovered(...)` builds a `TypedEnvelope` of `PatternDiscoveredEvent` (`lifecycle = draft`, **`sessionWindow = {windowMs, type}`** read from the persisted record) via `EventCodec.serialize` and sends to `patterns.discovered`. `EventCodec.serialize` validates `sessionWindow` against the merged schema before send (criterion 19). The event **does not** carry the structural-validation flag (frozen schema). |
 | 10. Serve the pattern read API (list draft with XAI incl. `sessionWindow`, get by id incl. `sessionWindow`, list approved incl. `sessionWindow`, filter by lifecycle); serve approved to Correlation Engine | `PatternQueryController` — `GET /patterns` (filter `lifecycle`, pagination), `GET /patterns/{patternId}`; backed by `PatternQueryService` reading the Pattern Store. The response and XAI metadata now include `structurallyValidated` + `structuralValidationReason` and **`sessionWindow`** ({`windowMs`, `type`}) (criterion 21). The same `GET /patterns?lifecycle=approved` serves the Correlation Engine the `sessionWindow` it uses to govern correlation-instance lifetime. |
-| 11. Process approval intent: validate `draft`, transition to `approved`, record timestamp | `POST /patterns/{patternId}/approve` calls `LifecycleService.approve(...)` which validates current state `draft`, transitions to `approved`, writes a `lifecycle_transition` audit row, then triggers task 13. |
+| 11. Process approval intent (`decision: approve or reject`): validate `draft`; on **approve** transition to `approved` and record timestamp; on **reject** transition to the terminal `rejected` state and record timestamp (Q1) | `POST /patterns/{patternId}/approve` calls `LifecycleService.decide(...)` which validates current state `draft`. On `decision = approve` it transitions to `approved`, writes a `lifecycle_transition` audit row (`draft` to `approved`), then triggers task 13 (emit `PatternApprovedEvent`). On `decision = reject` (Q1) it transitions to the distinct terminal state **`rejected`**, writes a `lifecycle_transition` audit row (`draft` to `rejected`, with `reviewer`/`notes`), and **emits no event** — the reject is an internal Pattern-Store + read-API outcome only. A rejected pattern is never served by `GET /patterns?lifecycle=approved`. Either decision on a non-`draft` pattern is `409`. |
 | 12. Process operator edits (placeholder): per-position `optional` flags on a `draft` pattern via the **frozen** `PatternEdit` body `{ sequenceFlags: [{ index, optional }], reviewer, notes? }` | `PATCH /patterns/{patternId}` calls `PatternEditService.applyEdit(...)` which validates `draft`, maps each `sequenceFlags[].index` to a `sequence_element.position` and sets that element's `optional` (plus reviewer/notes into edit metadata), returns the updated record. Out-of-range `index` gives `422`. Edit metadata stays internal — never added to `PatternApprovedEvent`. **`sessionWindow` is read-only — this endpoint never edits it** (OQ-6 post-MVP). |
 | 13. Emit `patterns.approved`: one `PatternApprovedEvent` per approval transition, carrying `sessionWindow` | `PatternEventPublisher.publishApproved(...)` builds a `TypedEnvelope` of `PatternApprovedEvent` (`lifecycle = approved`, **`sessionWindow` read from the persisted record — the same value emitted at discovery**) and sends to `patterns.approved`. `EventCodec.serialize` validates `sessionWindow` before send (criterion 20). Sole producer; the web-ui only signals via the API. The event **does not** carry the structural-validation flag (frozen schema). |
 | 14. Support deprecation: `draft` or `approved` to `deprecated`, record timestamp | `POST /patterns/{patternId}/deprecate` calls `LifecycleService.deprecate(...)` which validates current state in (`draft`, `approved`), transitions to `deprecated`, writes a `lifecycle_transition` audit row. Unchanged. |
@@ -136,7 +140,7 @@ flowchart TB
   end
   subgraph http["HTTP surface"]
     QRY["PatternQueryController"]
-    LIFE["LifecycleService approve and deprecate"]
+    LIFE["LifecycleService approve reject and deprecate"]
     EDIT["PatternEditService PATCH"]
   end
   subgraph clients["Outbound clients config-switchable"]
@@ -208,7 +212,10 @@ flowchart TB
   `EventCodec.serialize` validates `sessionWindow` against the merged schema before send. Neither
   event carries the structural-validation flag.
 - **PatternQueryController / LifecycleService / PatternEditService** — the HTTP surface
-  (read, approve, deprecate, edit). The read path serves the structural-validation flag.
+  (read, approve/reject, deprecate, edit). The read path serves the structural-validation flag.
+  `LifecycleService.decide(...)` handles the `approve`/`reject` decision: approve transitions
+  `draft` to `approved` and emits `PatternApprovedEvent`; **reject transitions `draft` to the
+  terminal `rejected` state and emits no event** (Q1).
 - **TopologyClient / CodebookClient / KnowledgeClient** — outbound `RestClient` instances,
   config-switchable (mock from collaborator OpenAPI in unit tests; real in integration). The
   **same** `TopologyClient` serves both RCA and structural validation.
@@ -304,7 +311,9 @@ Concrete columns, keys, constraints and indexes:
   (session_window_ms > 0)`** and **`session_window_type TEXT NOT NULL CHECK IN (gap-based, fixed)`**
   (the derived `sessionWindow`; persisted once at intake; read-only in MVP); `instance_count INT
   NOT NULL CHECK greater than 0`;
-  `lifecycle TEXT NOT NULL CHECK IN (draft, approved, deprecated) DEFAULT draft`; `domain TEXT
+  `lifecycle TEXT NOT NULL CHECK IN (draft, approved, deprecated, rejected) DEFAULT draft`
+  (**`rejected`** added per Q1 — a draft the operator rejected at review; a distinct terminal
+  state, never served and emitting no event); `domain TEXT
   NULL` (from provenance.domain; null defaults to the MVP domain); `edit_meta JSONB NULL`
   (reviewer/notes for the last edit, internal only); `created_at/updated_at TIMESTAMPTZ NOT NULL`.
   Indexes: `idx_pattern_lifecycle (lifecycle)` for `GET /patterns?lifecycle=...`;
@@ -314,8 +323,9 @@ Concrete columns, keys, constraints and indexes:
 - **`supporting_instance`** — example occurrences from the Miner provenance (may be zero rows);
   `occurrence JSONB` holds the raw provenance occurrence reference.
 - **`lifecycle_transition`** — audit log; one row per transition (draft to approved, draft to
-  deprecated, approved to deprecated) with `transitioned_at` non-null; index
-  `idx_transition_pattern (pattern_id)`.
+  rejected, draft to deprecated, approved to deprecated) with `transitioned_at` non-null; index
+  `idx_transition_pattern (pattern_id)`. The **draft to rejected** row is the persisted audit
+  outcome of a reject decision (Q1).
 - **`processed_event`** — `event_id UUID PK` is the idempotency set; written in the same
   transaction as the `pattern` upsert so a redelivered `eventId` is a no-op (criterion 10).
 
@@ -332,14 +342,39 @@ serializing them is using the existing contract, not changing it.
 A failed structural validation does **not** affect the lifecycle: the pattern still enters
 `draft` (flag-and-persist for MVP). The flag only annotates the record for operator review.
 
+**Reject outcome (Q1 — `rejected` is a distinct terminal state).** The approval-intent body
+exposes `decision: approve or reject`. A **reject** decision on a `draft` pattern transitions it to
+a distinct terminal lifecycle state **`rejected`** (not to `approved`, and not to `deprecated`).
+`rejected` is chosen as a separate terminal state — rather than reusing `deprecated` — because it
+records a different, audit-meaningful operator judgement: the operator reviewed a *draft* and
+decided the pattern is **not valid / should never be served**, whereas `deprecated` means a
+**previously-approved** (or draft) pattern is being retired. Keeping them distinct makes the review
+audit trail unambiguous (rejected-at-review vs retired) and lets the read API filter the two apart.
+Semantics of `rejected`:
+- It is **terminal** — no transition leaves it (no approve, no deprecate, no edit).
+- It is **never served to the Correlation Engine** — `GET /patterns?lifecycle=approved` excludes it
+  (only `approved` patterns are served), exactly as `draft` and `deprecated` are excluded.
+- It is **visible in the read API for audit** — `GET /patterns?lifecycle=rejected` lists rejected
+  patterns and `GET /patterns/{id}` returns one, with the reject recorded as a
+  `lifecycle_transition` audit row (`from_state = draft`, `to_state = rejected`, plus `reviewer`,
+  `notes`, `transitioned_at`).
+- It **emits no Kafka event** — reject produces **no `PatternApprovedEvent`** (and no other event),
+  so it is purely an internal Pattern-Store lifecycle change plus a read-API value. The frozen
+  `PatternApprovedEvent` and `PatternDiscoveredEvent` schemas are therefore **unchanged** —
+  `rejected` is never a value carried on a frozen event (a rejected pattern was only ever a `draft`,
+  which already emitted its `PatternDiscoveredEvent`, and approval is the only thing that emits
+  `PatternApprovedEvent`). **No contract change.**
+
 ```mermaid
 stateDiagram-v2
   [*] --> draft : persist enriched pattern, validated true or flagged false
-  draft --> approved : POST approve decision approve
+  draft --> approved : POST approve decision approve, emits event
+  draft --> rejected : POST approve decision reject, no event
   draft --> deprecated : POST deprecate
   approved --> deprecated : POST deprecate
   approved --> [*]
   deprecated --> [*]
+  rejected --> [*]
 ```
 
 ## Event handling
@@ -423,7 +458,7 @@ PatternView {
   structuralValidationReason: string|null   # non-null exactly when structurallyValidated is false
   instanceCount: integer (greater than 0)
   supportingInstances: SupportingInstance[]   # each {sourceWindowId, snapshotId, occurrence}
-  lifecycle: "draft"|"approved"|"deprecated"
+  lifecycle: "draft"|"approved"|"deprecated"|"rejected"   # rejected = a draft rejected at review (Q1), terminal, never served
   domain: string|null
   createdAt: string (date-time)
   updatedAt: string (date-time)
@@ -476,9 +511,9 @@ future per-element flags without another contract change. The web-ui aligns to t
 
 | Method plus path | Request body | Success response | Errors |
 |---|---|---|---|
-| `GET /patterns` | query: `lifecycle?` (`draft`/`approved`/`deprecated`), `limit?` (default 50), `offset?` (default 0), `sort?` (`createdAt`/`lift`, default `-createdAt`) | `200 PatternPage { items: PatternView[], total: integer, limit, offset }` (the frozen **envelope** — not a bare array; each item is a full `PatternView` incl. `trailId`, `rootCauseAlarmType` vocab token, `sessionWindow`, `structurallyValidated`/`structuralValidationReason`) | `400` invalid `lifecycle`/`sort` enum |
+| `GET /patterns` | query: `lifecycle?` (`draft`/`approved`/`deprecated`/`rejected` — `rejected` exposes rejected drafts for audit, Q1), `limit?` (default 50), `offset?` (default 0), `sort?` (`createdAt`/`lift`, default `-createdAt`) | `200 PatternPage { items: PatternView[], total: integer, limit, offset }` (the frozen **envelope** — not a bare array; each item is a full `PatternView` incl. `trailId`, `rootCauseAlarmType` vocab token, `sessionWindow`, `structurallyValidated`/`structuralValidationReason`) | `400` invalid `lifecycle`/`sort` enum |
 | `GET /patterns/{patternId}` | — | `200 PatternView` (full XAI incl. `trailId`, `supportingInstances`, `structurallyValidated`, `structuralValidationReason`, `sessionWindow`) | `404` unknown `patternId` |
-| `POST /patterns/{patternId}/approve` | `ApprovalIntent { decision: approve or reject, reviewer: string, notes?: string }` | `200 PatternView` (lifecycle `approved` when `approve`; unchanged plus rejection recorded when `reject`) | `404` unknown id, `409` not in `draft`, `422` invalid decision/missing reviewer |
+| `POST /patterns/{patternId}/approve` | `ApprovalIntent { decision: approve or reject, reviewer: string, notes?: string }` | `200 PatternView` — lifecycle `approved` when `decision = approve` (and one `PatternApprovedEvent` emitted); lifecycle **`rejected`** when `decision = reject` (Q1 — terminal, audit row written, **no event emitted**) | `404` unknown id, `409` not in `draft`, `422` invalid decision/missing reviewer |
 | `PATCH /patterns/{patternId}` | **frozen** `PatternEdit { sequenceFlags: [{ index: integer (at least 0), optional: boolean }], reviewer: string, notes?: string }` (per-position optional markers; no `sessionWindow` field — read-only in MVP, OQ-6) | `200 PatternView` (`optional` markers reflected per `index`; `sessionWindow` unchanged) | `404` unknown id, `409` not in `draft`, `422` invalid `index` (out of range)/missing reviewer |
 | `POST /patterns/{patternId}/deprecate` | `DeprecateIntent { reviewer: string, notes?: string }` | `200 PatternView` (lifecycle `deprecated`) | `404` unknown id, `409` not in (`draft`, `approved`) |
 
@@ -566,7 +601,7 @@ sequenceDiagram
   end
 ```
 
-### Flow B — UI approval intent to patterns.approved
+### Flow B — UI approval intent (approve or reject) to patterns.approved
 
 ```mermaid
 sequenceDiagram
@@ -577,20 +612,24 @@ sequenceDiagram
   participant E as PatternEventPublisher
   participant Q as patterns.approved topic
   U->>A: POST approve with decision reviewer notes
-  A->>L: approve id intent
+  A->>L: decide id intent
   L->>S: load pattern
   alt not found
     S-->>A: 404
   else not in draft
     S-->>A: 409 conflict
-  else draft
+  else draft and decision approve
     L->>S: transition draft to approved plus audit row
     L->>S: read persisted sessionWindow for pattern
     S-->>L: sessionWindow windowMs and type
     L->>E: publishApproved PatternApprovedEvent lifecycle approved with persisted sessionWindow
     E->>Q: one PatternApprovedEvent with sessionWindow same as discovered, no struct flag
-    L-->>A: updated PatternView incl sessionWindow
+    L-->>A: updated PatternView lifecycle approved incl sessionWindow
     A-->>U: 200 PatternView lifecycle approved
+  else draft and decision reject
+    L->>S: transition draft to rejected plus audit row, no event
+    L-->>A: updated PatternView lifecycle rejected
+    A-->>U: 200 PatternView lifecycle rejected, never served to Correlation Engine
   end
 ```
 
@@ -759,30 +798,35 @@ populate. These are the canonical keys the deriver reads, **all in milliseconds 
 | `maxInterArrivalMs` | number ms | Largest observed inter-arrival gap — the gap-floor input. | Optional |
 | `stddevInterArrivalMs` | number ms | Standard deviation of inter-arrival gaps — the `cv` numerator. | Optional |
 
-> **Cross-service shape gap — Pattern Miner follow-up required (P2-GAP-05).** The repo's frozen
-> `PatternMinedEvent.json` fixture currently carries `timing = { meanInterArrivalSeconds,
-> stdDevSeconds }` — i.e. **different key names AND different units** (seconds, not ms; **mean**,
-> not **median**; and **no** `timeframeMs` or `maxInterArrivalMs` at all). Because `timing` is an
-> open object the schema does not enforce any shape, so this is **not a schema/contract change** —
-> but the Pattern Manager's derivation as designed will not find its inputs unless the Pattern
-> Miner populates the pinned ms keys above. **This is logged as a Pattern-Miner-owned follow-up:**
-> the Pattern Miner design must populate `PatternMinedEvent.timing` with at least
-> `timeframeMs` + `medianInterArrivalMs` (and ideally `maxInterArrivalMs` + `stddevInterArrivalMs`),
-> in **milliseconds**, with **median** (not mean). It is a contract-**of-shape** on the open
-> `timing` object, not an event-model field change — no new field, no `additionalProperties` flip,
-> so **no event-model/contract change is introduced here**; the alignment is a Pattern Miner design
-> fix tracked separately.
+> **Producer / consumer agreement on the ms keys (Q11 — the alias map default is now identity).**
+> The Pattern Miner's design (`services/pattern-miner/design.md`, P2-GAP-10) now emits
+> **exactly** these four canonical sub-fields on the open `timing` object —
+> `timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `stddevInterArrivalMs`, **all in
+> milliseconds**, with **median** (not mean) — and the merged `libs/event-model`
+> `PatternMinedEvent.json` fixture carries the same four ms keys. **Producer, consumer, and fixture
+> therefore agree on the real key names and units**, so the deriver reads these four keys
+> **directly**, with **no aliasing and no seconds-to-ms conversion required** (this matches the
+> Pattern Miner's own E2E check that the consumer derives a valid `sessionWindow` "without a
+> key-alias remap and without any seconds-to-ms conversion"). Because `timing` is an open object
+> (`additionalProperties: true`) and these are the keys both sides emit/read, this is **not a
+> schema/contract change** — the deriver simply reads the agreed ms keys.
 >
-> **Resilience until the Miner aligns.** The deriver tolerates this via (a) a documented,
-> env-configurable **key-alias map** (`SESSION_WINDOW_TIMING_ALIASES`, default maps
-> `meanInterArrivalSeconds`→treat-as-median-after-×1000, `stdDevSeconds`→×1000) and (b) a
-> **unit-normalisation** step: any key whose name ends `Seconds` is multiplied by `1000` to ms
-> before use. If `timeframeMs` is still absent, the documented fallback below applies. These knobs
-> are internal implementation detail, not contract. The **target** state (and what the Pattern
-> Miner follow-up should deliver) is the native pinned ms keys above so no aliasing is needed.
+> **`SESSION_WINDOW_TIMING_ALIASES` — default empty (identity).** The legacy
+> `{ meanInterArrivalSeconds, stdDevSeconds }` (seconds, mean) shape is **no longer emitted by the
+> Pattern Miner**, so the deriver needs **no aliasing for the live contract**. The
+> `SESSION_WINDOW_TIMING_ALIASES` config key therefore **defaults to empty `{}` (identity)** — the
+> deriver reads `timeframeMs` / `medianInterArrivalMs` / `maxInterArrivalMs` / `stddevInterArrivalMs`
+> verbatim. The alias map remains an **escape hatch only**: an operator may, via config, supply a
+> mapping (e.g. `{"meanInterArrivalSeconds":"medianInterArrivalMs", "stdDevSeconds":"stddevInterArrivalMs"}`
+> plus the `*Seconds`-to-ms `×1000` normalisation) if some non-conformant producer ever emits the
+> legacy shape — but by **default no aliasing or unit conversion is applied** because the producer
+> and consumer already agree. This makes the documented default correct against the real Miner
+> output. The `cv` basis (`cv = stddevInterArrivalMs / medianInterArrivalMs`) and the formula below
+> read these same real keys directly.
 
 Missing **optional** keys degrade gracefully via the documented fallbacks below; `timeframeMs` and
-`medianInterArrivalMs` (after alias/unit normalisation) are the two relied-on signals.
+`medianInterArrivalMs` (read directly — no aliasing needed by default) are the two relied-on
+signals.
 
 **Derivation parameters (documented; defaults; env-overridable — NOT hard-coded magic numbers).**
 
@@ -892,20 +936,23 @@ clock, randomness, or external call participates. The same `timing` therefore al
 same `sessionWindow` (criterion 18). Derivation runs **once** at intake; approval and read never
 re-derive — they read the persisted value (criterion 20).
 
-**Pinned shape + Pattern Miner follow-up (P2-GAP-05).** The deriver's required `timing` keys are
-**pinned** above: `timeframeMs` + `medianInterArrivalMs` (primary, ms, **median**) and optional
-`maxInterArrivalMs` + `stddevInterArrivalMs` (ms). Because the frozen `PatternMinedEvent.timing`
-schema is an **open object** with no declared sub-fields and the current fixture instead carries
-`{ meanInterArrivalSeconds, stdDevSeconds }` (seconds, **mean**, no timeframe), there is a
-**cross-service shape mismatch**. It is resolved on the Pattern Manager side here by (a) the pinned
-target keys, (b) the env-configurable alias map + `*Seconds`→×1000 unit normalisation, and (c) the
-insufficient-timing fallback. The **owning follow-up is on the Pattern Miner design**: populate
-`timing` with the pinned ms keys (`timeframeMs`, `medianInterArrivalMs`, ideally
-`maxInterArrivalMs`, `stddevInterArrivalMs`). That is a contract-**of-shape** on the open `timing`
-object — **no event-model field/schema change** (no new field, `additionalProperties` stays `true`)
-— so it introduces no contract change; only the Pattern Miner's emitted `timing` content changes.
-Until then the alias/normalisation layer keeps the derivation deterministic and correct; once the
-Miner emits the native keys, the alias map becomes a no-op. This fully resolves OQ-5.
+**Pinned shape — producer and consumer agree (P2-GAP-05 / Q11).** The deriver's required `timing`
+keys are **pinned** above: `timeframeMs` + `medianInterArrivalMs` (primary, ms, **median**) and
+optional `maxInterArrivalMs` + `stddevInterArrivalMs` (ms). The Pattern Miner (`pattern-miner`
+design, P2-GAP-10) **now emits exactly these four ms keys** with **median** (not mean), and the
+merged `libs/event-model` `PatternMinedEvent.json` fixture carries the same four ms keys — so the
+producer, the consumer, and the contract fixture **agree** on key names and units. The deriver
+therefore reads `timeframeMs` / `medianInterArrivalMs` / `maxInterArrivalMs` / `stddevInterArrivalMs`
+**directly**, with **no aliasing and no seconds-to-ms conversion by default**
+(`SESSION_WINDOW_TIMING_ALIASES` defaults to empty/identity — see above). The `cv` basis is
+`cv = stddevInterArrivalMs / medianInterArrivalMs` and the `windowMs` formula reads these same real
+keys, so the documented derivation, the worked example, and the configured default are all correct
+against the real Miner output. Because `timing` stays an **open object** (`additionalProperties:
+true`) and these are the keys both sides emit/read, **no event-model field/schema change is
+introduced** — no new field, no `additionalProperties` flip. The alias map remains only an
+optional escape hatch for a hypothetical non-conformant producer; under the live contract it is a
+no-op. The insufficient-timing fallback (below) still covers thin `timing`. This fully resolves
+OQ-5.
 
 ## Seed data & examples
 
@@ -932,7 +979,8 @@ statistical artifact). The Pattern Manager only serves the structured data
 | Topology cannot resolve an alarm type to an object | RCA falls back to **earliest-timestamp** tie-break alone for that element; if no object resolves at all, the graph-ordering candidate defaults to the earliest-timestamp alarm type; logged. Structural validation treats an unresolved object as **not connected** (it cannot be in the visited set), contributing `structurallyValidated = false` with a reason naming it | WARN log; pattern still persisted |
 | **Structural validation fails** (objects not dependency-connected within max-hops) | **Not an error** under MVP flag policy — persist the pattern with `structurally_validated = false` and a non-null reason; surfaced in XAI for operator review | INFO log structural validation outcome; pattern persisted as draft |
 | **Session-window timing insufficient** (e.g. `timeframeMs` absent/zero, single-instance pattern) | **Not an error** — the deriver applies the documented fallback (`base = SESSION_WINDOW_MIN_MS`, then gap-floor + clamp), always yielding a valid `windowMs greater than 0` and a valid `type` (`gap-based` default). Derivation never throws and never blocks persistence | DEBUG log session-window derivation result incl. fallback note; pattern persisted with a valid `sessionWindow` |
-| `approve`/`deprecate`/`edit` on **wrong lifecycle state** | `LifecycleService`/`PatternEditService` reject: not `draft` for approve/edit gives `409`; invalid decision/positions/missing reviewer gives `422` | Structured JSON error body; no state change, no event emitted |
+| `approve`/`reject`/`deprecate`/`edit` on **wrong lifecycle state** | `LifecycleService`/`PatternEditService` reject: not `draft` for approve/reject/edit gives `409` (including any decision on an already `approved`/`rejected`/`deprecated` pattern — `rejected` is terminal); invalid decision/positions/missing reviewer gives `422` | Structured JSON error body; no state change, no event emitted |
+| **Reject decision** on a `draft` pattern (Q1) | **Not an error** — `LifecycleService.decide` transitions `draft` to the terminal `rejected` state, writes a `draft` to `rejected` audit row, emits **no** event; the pattern is excluded from `GET /patterns?lifecycle=approved` and surfaced under `GET /patterns?lifecycle=rejected` for audit | INFO log reject outcome; `200 PatternView` lifecycle `rejected`; no `PatternApprovedEvent` |
 | `GET /patterns/{patternId}` unknown id | `404` with structured error body | JSON error |
 | Invalid `lifecycle`/`sort` query enum | `400` with structured error body | JSON error |
 | Off-contract outbound event (in-memory POJO violates schema) | `EventCodec.serialize` validates before send and throws, so the publish aborts and the message is not emitted | ERROR log; alerted via metric |
@@ -965,10 +1013,11 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | **PATCH edit body shape** (P2-GAP-06) | (A) `optionalAlarms: integer[]` (flat positions); (B) `sequenceFlags: [{ index, optional }]` (per-position objects) | **B** — frozen as THE body. It is the shape the web-ui already sends, and it is more expressive/extensible: it can both set and clear `optional` per position (a flat `int[]` only sets-true and is ambiguous about clears) and can carry future per-element flags without another contract change. The web-ui aligns to it; `sessionWindow` stays non-editable. |
 | **Source of per-pattern `trailId` for the CE** (P3-G1) | (A) add `trailId` to `PatternApprovedEvent`; (B) surface `trailId` on the `PatternView` read API | **B** — the events are frozen (`additionalProperties:false`); adding `trailId` is a contract change. The Pattern Manager already has `trailId` from `PatternMinedEvent.trailId` (persisted as `pattern.trail_id`), so it exposes it on `PatternView` and the CE reads it at bootstrap from `GET /patterns?lifecycle=approved`. Solves the CE's `(trailId, patternId)` keying with no event-model change. |
 | **`rootCauseAlarmType` value space** (P2-GAP-04) | (A) `probableCause`-style token (`lossOfSignal`); (B) X.733 `eventType` category; (C) the canonical `alarmType` vocabulary token | **C** — must be the same join key as `AlarmEvent.alarmType` (merged #134) and the codebook `predictedSymptoms[].alarmType`, or pattern↔codebook reconciliation/override and CE RCA tagging silently fail to join. RCA emits the designated root-cause alarm's `alarmType` token verbatim; fixtures/examples use vocab tokens. No new field — the value space was fixed by the merged contract. |
-| **`timing` sub-field shape for derivation** (P2-GAP-05) | (A) read whatever the open `timing` object happens to contain; (B) pin required ms keys (`timeframeMs`, `medianInterArrivalMs`, optional `maxInterArrivalMs`/`stddevInterArrivalMs`) as a contract-of-shape + alias/unit-normalisation bridge + Pattern Miner follow-up | **B** — `PatternMinedEvent.timing` is an open object with no declared sub-fields and the current fixture uses different names/units (`meanInterArrivalSeconds`/`stdDevSeconds`). Pinning the keys makes the derivation deterministic and testable; the alias map + `*Seconds`→ms normalisation bridge the gap today, and the Pattern Miner design owns the follow-up to emit the native ms keys. No event-model field/schema change (the open `timing` object is unchanged). |
+| **`timing` sub-field shape for derivation** (P2-GAP-05 / Q11) | (A) read whatever the open `timing` object happens to contain; (B) pin the four required ms keys (`timeframeMs`, `medianInterArrivalMs`, optional `maxInterArrivalMs`/`stddevInterArrivalMs`, `cv = stddev/median`) as the contract-of-shape and read them directly, with the alias map as an opt-in escape hatch | **B** — `PatternMinedEvent.timing` is an open object with no declared sub-fields, and the Pattern Miner now emits **exactly** these four ms keys (median, not mean), matched by the merged `PatternMinedEvent.json` fixture. Producer, consumer and fixture agree, so the deriver reads the ms keys **directly with no aliasing or seconds-to-ms conversion** — `SESSION_WINDOW_TIMING_ALIASES` defaults to empty/identity, so the documented default is correct against the real Miner output; the alias map remains only as an optional escape hatch for a hypothetical non-conformant producer. Pinning the keys keeps the derivation deterministic and testable. No event-model field/schema change (the open `timing` object is unchanged). |
 | Pagination (OQ-2 / issue 46) | (A) cursor-based; (B) offset-based `limit`/`offset` with a `PatternPage` envelope | **B** — the pattern corpus is small (human-reviewable counts), the UI needs `total` for review progress, offset paging is simpler for the table. The envelope `{ items, total, limit, offset }` is frozen as SSoT (P2-GAP-08); consumers read `.items`, never a bare array. |
 | Approval plus emit atomicity | (A) emit then transition; (B) transition then emit in the same action; (C) transactional outbox | **B** for the MVP — transition then publish in the same action; outbox (C) is post-MVP hardening if exactly-once across DB and Kafka becomes mandatory. |
 | Kafka offset commit | (A) auto-commit; (B) manual ack after persist plus emit | **B** — manual ack guarantees the pattern is persisted and `patterns.discovered` emitted before the offset advances; a crash mid-processing redelivers and idempotency dedupes. |
+| **Reject decision outcome** (Q1) | (A) leave the reject with no persisted state change (just record notes, lifecycle stays `draft`); (B) reuse the existing `deprecated` terminal state for a reject; (C) add a distinct terminal `rejected` lifecycle state | **C** — the approval-intent enum already exposes `reject`, so the reject must have a concrete persisted outcome. (A) is unacceptable — a rejected pattern would stay `draft` and keep showing up in the review queue, with no terminal record. (B) conflates two different operator judgements: `deprecated` means a previously-approved (or draft) pattern is being retired, whereas a reject means a draft was judged invalid at review and should never be served — collapsing them loses audit meaning and makes the review queue ambiguous. **(C)** adds `rejected` to the `pattern.lifecycle` CHECK constraint and the state machine (`draft` to `rejected`, terminal); it is never served to the Correlation Engine (`GET /patterns?lifecycle=approved` excludes it) and is visible via `GET /patterns?lifecycle=rejected` for audit. It emits **no** Kafka event (reject produces no `PatternApprovedEvent`), so the frozen events are unchanged and there is **no contract change** — `rejected` is purely internal Pattern-Store state plus a read-API value. |
 
 ## Test plan
 
@@ -984,6 +1033,7 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | 5 | Processed without approval gives `lifecycle = draft` and is returned by `GET /patterns?lifecycle=draft` | `PatternQueryControllerTest.draftPatternReturnedByLifecycleDraftFilter` | Persisted `lifecycle` is draft; the filter response contains the `patternId` |
 | 6 | Emitted `PatternDiscoveredEvent` deserializes via Java binding; required fields non-null incl. `sessionWindow`; `lifecycle` is draft (and carries no structural-validation field) | `PatternEventPublisherTest.discoveredEventRoundTripsAndIsDraftNoStructField` | `EventCodec.deserialize` succeeds; `patternId`/`sequence`/`rootCauseAlarmType`/`support`/`confidence`/`lift`/`timing`/`sessionWindow`/`lifecycle` non-null; `lifecycle` equals draft; serialized JSON has no `structurallyValidated` key |
 | 7 | `POST /approve` with approve on a `draft` pattern gives lifecycle approved plus exactly one `PatternApprovedEvent` in the same action | `LifecycleServiceTest.approveTransitionsToApprovedAndEmitsExactlyOneEvent` | Store `lifecycle` is approved; exactly one record on `patterns.approved` (mock producer captor) |
+| 22 (Q1) | `POST /approve` with `decision = reject` on a `draft` pattern transitions it to the terminal `rejected` state, records the transition timestamp, emits **no** `PatternApprovedEvent`, the pattern is **not** returned by `GET /patterns?lifecycle=approved`, and is returned by `GET /patterns?lifecycle=rejected` | `LifecycleServiceTest.rejectTransitionsToRejectedTerminalNoEventNotServed` | After `decision = reject` on a draft, store `lifecycle` is `rejected`; a `lifecycle_transition` row `draft` to `rejected` with non-null `transitioned_at`; **zero** records on `patterns.approved` (mock producer captor); `GET ?lifecycle=approved` excludes the `patternId`; `GET ?lifecycle=rejected` includes it; a subsequent approve/reject/deprecate/edit on the rejected pattern returns `409` (terminal) |
 | 8 | Emitted `PatternApprovedEvent` deserializes via Java binding; `lifecycle` is approved; required fields non-null incl. `sessionWindow` (and carries no structural-validation field) | `PatternEventPublisherTest.approvedEventRoundTripsAndIsApprovedNoStructField` | `EventCodec.deserialize` succeeds; `lifecycle` equals approved; all required fields non-null incl. `sessionWindow`; serialized JSON has no `structurallyValidated` key |
 | 9 | `POST /deprecate` on an approved pattern gives deprecated plus non-null transition timestamp; subsequent `GET ?lifecycle=approved` excludes it | `LifecycleServiceTest.deprecateApprovedRemovesFromApprovedListing` | Store `lifecycle` is deprecated; `lifecycle_transition.transitioned_at` non-null; not in approved query result |
 | 10 | Two identical `patterns.mined` with the same `eventId` give exactly one pattern row after both | `MinedPatternConsumerIdempotencyTest.duplicateEventIdProducesSingleRow` | Pattern row count for that mining origin is 1; the second message acked without re-emit |
@@ -999,7 +1049,8 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | 17 | For a fixed mined pattern and fixed Topology mock, changing the Knowledge structural-validation params (e.g. reducing max-hops) flips the outcome true to false — no hard-coded threshold | `StructuralValidationServiceTest.knowledgeMaxHopsChangeFlipsValidationOutcome` | Same pattern + Topology mock: with the larger max-hops from Knowledge mock the outcome is `structurallyValidated=true`; reducing max-hops via the Knowledge mock yields `structurallyValidated=false` — confirming the threshold comes from Knowledge, not code |
 | 18 | Given known timing, derived `sessionWindow` has `windowMs` positive integer and `type` in {gap-based, fixed}; re-deriving the identical timing gives the identical window (deterministic) | `SessionWindowDeriverTest.derivesPositiveWindowAndValidTypeDeterministically` | `derive(timing)` returns `windowMs greater than 0` (integer) and `type` in {gap-based, fixed}; calling `derive` twice with the same `timing` returns equal `windowMs` and equal `type` |
 | 18b (P2-GAP-05) | Derivation reads the **pinned ms timing keys** (`timeframeMs`, `medianInterArrivalMs`, optional `maxInterArrivalMs`, `stddevInterArrivalMs`) and the worked example is internally consistent: `timing {timeframeMs:3000, maxInterArrivalMs:2000, medianInterArrivalMs:1000, stddevInterArrivalMs:500}` gives `windowMs = clamp(max(ceil(3000×1.5)=4500, ceil(2000×2.0)=4000), 5000, 1800000) = 5000` and `cv = 500/1000 = 0.5`, strict `< 0.5` false, so `type = gap-based` | `SessionWindowDeriverTest.pinnedTimingKeysProduceConsistentWorkedExampleAndBoundaryCv` | `derive` on the pinned-key fixture returns exactly `{ windowMs: 5000, type: "gap-based" }`; `cv` is computed as `stddevInterArrivalMs/medianInterArrivalMs`; the `cv == 0.5` boundary resolves to `gap-based` (strict `<`) |
-| 18c (P2-GAP-05) | The deriver tolerates the current Pattern-Miner `timing` shape `{ meanInterArrivalSeconds, stdDevSeconds }` via the alias map + `*Seconds`→ms normalisation, still producing a deterministic, valid `sessionWindow` | `SessionWindowDeriverTest.secondsAliasedTimingNormalisedToMsAndDerivesDeterministically` | Given `{ meanInterArrivalSeconds:4.5, stdDevSeconds:1.2 }` (no `timeframeMs`), the deriver normalises to ms, applies the `timeframeMs`-absent fallback (`base = MIN_MS`), and returns a `windowMs greater than 0` with a valid `type`; identical input yields identical output (deterministic) |
+| 18c (Q11) | With the **default** (empty/identity) `SESSION_WINDOW_TIMING_ALIASES`, the deriver reads the Pattern Miner's real ms keys (`timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `stddevInterArrivalMs`) **directly — no aliasing, no seconds-to-ms conversion** — and derives a valid `sessionWindow` | `SessionWindowDeriverTest.realMinerMsKeysReadDirectlyWithDefaultEmptyAliasMap` | Given the canonical Miner `timing` (the four ms keys, e.g. the merged `PatternMinedEvent.json` fixture values) and the **default empty alias map**, `derive` returns a `windowMs greater than 0` and valid `type` computed straight from those keys, with `cv = stddevInterArrivalMs/medianInterArrivalMs`; **no alias substitution and no `×1000` conversion** is applied; identical input yields identical output (deterministic) |
+| 18d (Q11 — escape hatch) | The seconds-alias remap applies **only when explicitly configured** (it is off by default); a configured legacy alias map normalises `{ meanInterArrivalSeconds, stdDevSeconds }` to ms and still derives a valid `sessionWindow` | `SessionWindowDeriverTest.legacySecondsAliasAppliesOnlyWhenConfigured` | With `SESSION_WINDOW_TIMING_ALIASES` left at its **default empty**, a `{ meanInterArrivalSeconds, stdDevSeconds }` payload yields **no** aliased keys (those names are ignored, `timeframeMs`-absent fallback applies); when the alias map is **explicitly configured** to map those legacy names plus `*Seconds`-to-ms `×1000`, the same payload normalises to ms and derives a deterministic valid `windowMs greater than 0` / `type` — proving aliasing is opt-in, not the default |
 | 19 | Any processed `PatternMinedEvent` gives a `PatternDiscoveredEvent` carrying `sessionWindow` ({`windowMs` integer greater than 0, `type` gap-based or fixed) that validates against the frozen `PatternDiscoveredEvent` JSON Schema | `PatternEventPublisherTest.discoveredEventCarriesValidSessionWindow` | Emitted event has non-null `sessionWindow` with `windowMs greater than 0` and valid `type`; `EventCodec.serialize`/schema validation against `PatternDiscoveredEvent.schema.json` (and `common/sessionWindow.schema.json`) passes |
 | 20 | An approved pattern's emitted `PatternApprovedEvent` `sessionWindow` equals the persisted Pattern Store value (`windowMs greater than 0`, valid `type`) and validates against the frozen `PatternApprovedEvent` JSON Schema | `PatternEventPublisherTest.approvedEventSessionWindowEqualsPersistedAndValidates` | The `sessionWindow` on the approved event equals the row's `session_window_ms`/`session_window_type` (also equal to the value on the discovered event for the same pattern); `windowMs greater than 0`, valid `type`; schema validation against `PatternApprovedEvent.schema.json` passes |
 | 21 | `GET /patterns/{id}` for an existing pattern returns `sessionWindow` ({`windowMs`, `type`}) in the record and XAI metadata; response validates against the published OpenAPI 3.1 schema | `PatternQueryControllerTest.getByIdReturnsSessionWindowAndValidatesAgainstOpenApi` | The 200 body includes `sessionWindow` with `windowMs` and `type` (and it appears in the XAI metadata block) plus `trailId` and a vocab-token `rootCauseAlarmType`; the body validates against the published `openapi.json` `PatternView` schema |
@@ -1050,7 +1101,8 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
 | 13 | Session-window fallback for thin timing (partial path) | `patterns.mined` whose `timing` has no/zero `timeframeMs` (single-instance) | The pattern is persisted with a valid `sessionWindow` (`windowMs` equals the clamped MIN-MS fallback, `type` gap-based default); both emitted events carry the valid `sessionWindow`; nothing is DLQ-ed or dropped |
 | 14 | CE bootstrap reads `trailId` from the read API (P3-G1) | approve a pattern, then `GET /patterns?lifecycle=approved` as the Correlation Engine would at bootstrap | The `PatternPage.items[]` each carry `trailId` (= the mined `PatternMinedEvent.trailId`), plus `patternId`, `sequence`, `rootCauseAlarmType` (vocab token), `confidence`, `sessionWindow` — the exact set the CE keys `(trailId, patternId)` on; no `PatternApprovedEvent` was relied on for `trailId` |
 | 15 | Frozen PATCH body + PatternPage envelope (P2-GAP-06 / P2-GAP-08) | `GET /patterns?lifecycle=draft` then `PATCH /patterns/{id}` with `{ sequenceFlags:[{index,optional}], reviewer, notes }` | List response is the `PatternPage` envelope (`items`/`total`/`limit`/`offset`); the PATCH with the frozen `sequenceFlags` body is accepted and reflected on a subsequent `GET /patterns/{id}`; both bodies validate against the checked-in `openapi.json` |
-| 16 | Timing-shape alias bridge (P2-GAP-05 partial path) | `patterns.mined` whose `timing` is the current Miner shape `{ meanInterArrivalSeconds, stdDevSeconds }` | The deriver normalises seconds→ms via the alias map, derives a deterministic valid `sessionWindow`, persists and emits it; pattern flows end-to-end with no DLQ — confirming the bridge holds until the Pattern Miner emits the pinned ms keys |
+| 16 | Real Miner ms timing keys read directly (Q11) | `patterns.mined` whose `timing` is the canonical Miner shape — the four ms keys `{ timeframeMs, medianInterArrivalMs, maxInterArrivalMs, stddevInterArrivalMs }` (as the merged `PatternMinedEvent.json` fixture / live Pattern Miner emit) — with the **default empty** alias map | The deriver reads the four ms keys **directly, with no aliasing and no seconds-to-ms conversion**, derives a deterministic valid `sessionWindow` (`cv = stddev/median`), persists and emits it; pattern flows end-to-end with no DLQ — confirming producer/consumer byte-alignment on the real ms keys (no alias remap needed) |
+| 17 | Reject decision lifecycle (Q1, partial path) | After scenario 1: `POST /patterns/{id}/approve` with `decision = reject` | `lifecycle` becomes `rejected` (terminal); a `draft` to `rejected` audit row is written; **no `PatternApprovedEvent`** is emitted; `GET ?lifecycle=approved` does not list it (never served to the Correlation Engine); `GET ?lifecycle=rejected` lists it for audit; a subsequent approve/reject/deprecate/edit returns `409` |
 
 ## Config & observability
 
@@ -1065,14 +1117,19 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
   (default `1.5`), `SESSION_WINDOW_MIN_MS` (default `5000`), `SESSION_WINDOW_MAX_MS` (default
   `1800000`), `SESSION_WINDOW_GAP_FLOOR_FACTOR` (default `2.0`),
   `SESSION_WINDOW_CV_FIXED_THRESHOLD` (default `0.5`, strict `<` boundary), and
-  `SESSION_WINDOW_TIMING_ALIASES` (default maps the current Miner keys
-  `meanInterArrivalSeconds`→`medianInterArrivalMs` and `stdDevSeconds`→`stddevInterArrivalMs`, with
-  `*Seconds`→×1000 unit normalisation). These are documented derivation constants / shape-bridge
-  knobs with the defaults above — env-overridable but never Knowledge-sourced, keeping session-window
-  derivation data-driven from the mined `timing` alone. The **pinned required timing keys** the
-  formula reads are `timeframeMs` + `medianInterArrivalMs` (and optional `maxInterArrivalMs` +
-  `stddevInterArrivalMs`), all ms; the alias map exists only to bridge the Pattern Miner shape
-  until its follow-up emits these natively (P2-GAP-05).
+  `SESSION_WINDOW_TIMING_ALIASES` (**default empty `{}` / identity — Q11**). The Pattern Miner now
+  emits the four canonical ms keys natively (`timeframeMs`, `medianInterArrivalMs`,
+  `maxInterArrivalMs`, `stddevInterArrivalMs`) and the merged `PatternMinedEvent.json` fixture
+  matches, so **the deriver reads them directly with no aliasing or unit conversion** — the default
+  alias map is therefore **empty/identity** (correct against the real Miner output). The map is
+  retained only as an optional escape hatch (an operator may configure a mapping plus
+  `*Seconds`-to-ms `×1000` normalisation if a non-conformant producer ever emits the legacy
+  `{ meanInterArrivalSeconds, stdDevSeconds }` shape); it applies **nothing by default**. These are
+  documented derivation constants with the defaults above — env-overridable but never
+  Knowledge-sourced, keeping session-window derivation data-driven from the mined `timing` alone. The
+  **pinned required timing keys** the formula reads are `timeframeMs` + `medianInterArrivalMs` (and
+  optional `maxInterArrivalMs` + `stddevInterArrivalMs`), all ms, and the `cv` basis is
+  `stddevInterArrivalMs / medianInterArrivalMs` (P2-GAP-05 / Q11).
 - **Health:** `/health` (Actuator liveness plus readiness; readiness gates on DB plus Kafka).
 - **Metrics:** `/metrics` (Prometheus via Micrometer): `pm_mined_consumed_total`,
   `pm_dlq_total`, `pm_duplicate_skipped_total`, `pm_patterns_discovered_total`,
