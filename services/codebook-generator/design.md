@@ -6,6 +6,18 @@
 > §5 Interface fault-origin model. This is a fresh design; the earlier skeleton PR #79 was
 > closed as stale (predated multi-domain / Interface).
 >
+> **Revision (design-readiness fixes — Q1/Q3/Q6/Q7/Q11):** aligns all outbound calls to the
+> now-frozen collaborator producer shapes — Knowledge `GET /domains/{domain}/fault-origin-types`,
+> `/propagation-templates`, and the **added** `/alarm-type-vocabulary`; Trail Builder
+> `GET /trails/by-object?managedObjectId=&domain=` with `domain` **required**; Topology frozen
+> list-by-type `GET /topology/nodes?objectType=&domain=&snapshotId=current|previous` and
+> bounded-traverse `GET /topology/traversal` with their `NodeListDto`/`TraversalDto` DTOs. Adds the
+> `active` column + the partial-unique one-active-codebook constraint per `(domain, snapshotId)` to
+> the `codebooks` DDL and the atomic supersede-on-recompile in persistence. Confirms codebook
+> `predictedSymptoms[].alarmType` and the projected `rootCauseAlarmType` are `alarmTypeVocabulary`
+> tokens, validated against the fetched vocabulary, and pins the Pattern Manager RCA-override
+> reconcile read. **No Kafka topic or event-model schema change.**
+>
 > **Revision (data-integration fix, P1-G5 / P3-G2):** adds a Correlation-Engine-oriented
 > scenario-signature **projection endpoint** `GET /codebooks/{codebookId}/trail-signatures`
 > (frozen `TrailScenarioSignature` shape) alongside the native `/scenarios` endpoint, freezes the
@@ -55,11 +67,11 @@ and flow.
 |---|---|
 | **1. Consume `trails.built` and trigger compilation** | `consumer.py` (confluent-kafka consumer, group `codebook-generator`) deserializes via `acp_event_model.deserialize`, dedups on envelope `eventId` in `processed_events` table, and invokes `pipeline.compile_codebook(...)`. Unprocessable messages route to `trails.built.dlq` via `dlq.py`. |
 | **2. Resolve domain from the event payload** | `domain.py::resolve_domain(event)` reads `payload.domain`; when absent, returns the configured default `core-ip` (env `DEFAULT_DOMAIN`). No Topology snapshot-metadata call is made for domain resolution (OQ-4 resolved by contract #90). |
-| **3. Fetch domain-scoped fault-origins + templates from Knowledge** | `clients/knowledge.py` — two integration points: `knowledge-fault-origins` (`GET /domains/{domain}/fault-origins`) and `knowledge-propagation-templates` (`GET /domains/{domain}/propagation-templates`); both pass `domain` as a path/query param. Responses cached per `(domain, knowledgeVersion)`; never authored here. |
-| **4. Enumerate domain-scoped fault-origin instances from Topology** | `clients/topology.py::list_objects_by_type(snapshotId, domain, objectType)` — integration point `topology-query`. Iterates the fault-origin type list (incl. **Interface**); every request carries both `snapshotId` and `domain`. |
-| **5. Propagate forward, collect predicted symptom sets** | `propagation.py` (networkx engine) — for each fault-origin instance, fetch its bounded graph closure from Topology, build a typed directed graph, run the domain templates forward, accumulate the ordered predicted symptom set (incl. the origin alarm). Handles Fiber, LineCard, Port, **Interface**, Node distinctly (Algorithm logical flow below). |
-| **6. Tag each scenario with its trail(s)** | `tagging.py` — for each symptom `managedObjectId`, call `clients/trail_builder.py::get_trails_for_object(...)`; union the `trailIds`; attach to the scenario. Integration point `trail-builder-trails`. |
-| **7. Persist codebook with domain** | `store.py` — inserts one `codebooks` row (fresh `codebookId`, `snapshotId`, `domain` non-null, `scenarioCount`) and N `scenarios` rows in one transaction. New `snapshotId` mints a new `codebookId`; never overwrites a prior snapshot's codebook. |
+| **3. Fetch domain-scoped fault-origin types + templates + alarm-type vocabulary from Knowledge** | `clients/knowledge.py` — **three** integration points against the FROZEN Knowledge `recordType`-generic routes (`GET /domains/{domain}/{recordType}`): `knowledge-fault-origins` (`GET /domains/{domain}/fault-origin-types`), `knowledge-propagation-templates` (`GET /domains/{domain}/propagation-templates`), and **`knowledge-alarm-type-vocabulary` (`GET /domains/{domain}/alarm-type-vocabulary`)** — the last fetched so the engine can **validate** every `predictedSymptoms[].alarmType` and the derived `rootCauseAlarmType` against the domain's `alarmTypeVocabulary` token set (AC-22/25). All three pass `domain` as the path param. Responses cached per `(domain, knowledgeVersion)`; never authored here. |
+| **4. Enumerate domain-scoped fault-origin instances from Topology** | `clients/topology.py::list_objects_by_type(objectType, domain, snapshotId)` — integration point `topology-query`, FROZEN list-by-type path `GET /topology/nodes?objectType={objectType}&domain={domain}&snapshotId={current\|previous}` returning `NodeListDto { domain, objectType?, snapshotId, count, nodes: NodeDto[] }`. Iterates the fault-origin type list (incl. **Interface**); every request carries `objectType`, `domain`, and the `snapshotId` scoping token (`current`/`previous`; the trigger's snapshot is the **current** snapshot for the domain). |
+| **5. Propagate forward, collect predicted symptom sets** | `propagation.py` (networkx engine) — for each fault-origin instance, fetch its bounded graph closure from Topology via the FROZEN bounded-traverse path `GET /topology/traversal?start={moId}&relation={r}&...&maxDepth={K}&crossDomain=false` returning `TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[] }` (one `relation` repeated per closure edge type from the templates), build a typed directed graph, run the domain templates forward, accumulate the ordered predicted symptom set (incl. the origin alarm). Handles Fiber, LineCard, Port, **Interface**, Node distinctly (Algorithm logical flow below). |
+| **6. Tag each scenario with its trail(s)** | `tagging.py` — for each symptom `managedObjectId`, call `clients/trail_builder.py::get_trails_for_object(managedObjectId, domain)` against the FROZEN Trail Builder path `GET /trails/by-object?managedObjectId={moId}&domain={domain}` (**`domain` REQUIRED**) returning `TrailsForObjectResponse { managedObjectId, domain, trailIds }`; union the `trailIds`; attach to the scenario. Integration point `trail-builder-trails`. |
+| **7. Persist codebook and set it active for its `(domain, snapshotId)`** | `store.py` — in **one transaction**: (a) demote any current active row for the same `(domain, snapshot_id)` to `active=false`; (b) insert one `codebooks` row (fresh `codebookId`, `snapshotId`, `domain` non-null, `active=true`, `scenarioCount`) and N `scenarios` rows. The partial-unique index `uq_codebooks_one_active` guarantees exactly one active per `(domain, snapshot_id)`. New `snapshotId` mints a new `codebookId`; supersede never mutates/deletes the prior codebook (it stays queryable as `active=false`). |
 | **8. Emit `codebook.generated` with domain** | `producer.py` builds a `CodebookGeneratedEvent` (`snapshotId`, `scenarioCount`, `codebookId`, `domain`) via the Pydantic binding, wraps in the envelope, publishes to `codebook.generated`. Failed publish routes to `codebook.generated.dlq`. |
 | **9. Serve the domain-scoped query API** | `api.py` (FastAPI) — `GET /codebooks/{codebookId}`, `/codebooks/{codebookId}/scenarios`, `/codebooks/{codebookId}/scenarios/{scenarioId}`, **`/codebooks/{codebookId}/trail-signatures` (CE projection)**, `/codebooks?snapshotId=`, `/codebooks?domain=`, `/codebooks/active?domain=&snapshotId=`, plus `/health` and `/metrics`. `projection.py` builds the CE-oriented `TrailScenarioSignature` from stored scenarios (derive `rootCauseAlarmType`, alias `expectedSymptoms`, fan out per `trailId`). Reads the Codebook Store; every response carries `domain`. OpenAPI 3.1 published + checked in (both `/scenarios` and `/trail-signatures` in it). |
 
@@ -72,7 +84,7 @@ Consistent with the canonical phase map (`architecture.md`) and the spec's Phase
 
 | Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
 |---|---|---|---|
-| P1 — Topology onboarding | **Active** | `consumer.py` (trails.built), `domain.py`, `clients/knowledge.py`, `clients/topology.py`, `propagation.py`, `tagging.py`, `clients/trail_builder.py`, `store.py` (write), `producer.py` | In: `trails.built` (snapshotId, trailIds, domain), Topology query API (domain-scoped enumerate + closure), Knowledge fault-origins API, Knowledge templates API, Trail Builder API reads. Out: `codebook.generated` (snapshotId, scenarioCount, codebookId, domain); Codebook Store writes |
+| P1 — Topology onboarding | **Active** | `consumer.py` (trails.built), `domain.py`, `clients/knowledge.py`, `clients/topology.py`, `propagation.py`, `tagging.py`, `clients/trail_builder.py`, `store.py` (write), `producer.py` | In: `trails.built` (snapshotId, trailIds, domain), Topology query API (domain + snapshotId-scoped list-by-type `GET /topology/nodes` + bounded-traverse `GET /topology/traversal`), Knowledge `GET /domains/{domain}/fault-origin-types`, `GET /domains/{domain}/propagation-templates`, `GET /domains/{domain}/alarm-type-vocabulary`, Trail Builder `GET /trails/by-object` reads. Out: `codebook.generated` (snapshotId, scenarioCount, codebookId, domain); Codebook Store writes |
 | P2 — Pattern learning | **Passive** | `api.py` read endpoints, `store.py` (read). Compilation pipeline dormant unless a new `trails.built` arrives | In: codebook query API requests from Pattern Manager (reconcile; may filter by domain). Out: codebook query API responses (scenario signatures, trail tags, RCA-per-scenario, domain). No topic output |
 | P3 — Real-time correlation | **Passive** | `api.py` read endpoints (esp. the CE `trail-signatures` projection + `projection.py` for closest-match decode), `store.py` (read). Compilation pipeline dormant | In: codebook query API requests from Correlation Engine (`GET /codebooks/{id}/trail-signatures` indexed by `trailId`; may filter by domain; codebook id also delivered via `codebook.generated`). Out: `TrailScenarioSignature` responses (`trailId`, `rootCauseAlarmType` vocab token, `expectedSymptoms`), domain, scoped by trail/snapshot. No topic output |
 
@@ -104,11 +116,22 @@ flowchart TD
   emits the event last.
 - **`domain.py`** — `resolve_domain` (task 2).
 - **`clients/knowledge.py`, `clients/topology.py`, `clients/trail_builder.py`** — config-switchable
-  HTTP clients (mock/real); built against each producer's published OpenAPI.
+  HTTP clients (mock/real); built against each producer's published OpenAPI. `clients/knowledge.py`
+  exposes three calls — `get_fault_origin_types(domain)`, `get_propagation_templates(domain)`, and
+  `get_alarm_type_vocabulary(domain)` (the FROZEN `GET /domains/{domain}/fault-origin-types`,
+  `/propagation-templates`, `/alarm-type-vocabulary`). `clients/topology.py` exposes
+  `list_objects_by_type(objectType, domain, snapshotId)` (`GET /topology/nodes`) and
+  `traverse(start, relations, maxDepth, domain)` (`GET /topology/traversal`).
+  `clients/trail_builder.py` exposes `get_trails_for_object(managedObjectId, domain)`
+  (`GET /trails/by-object`, domain required) and `get_trail(trailId)` (`GET /trails/{trailId}`).
 - **`propagation.py`** — networkx forward-propagation engine; pure function of (closure graph,
   templates, origin) to ordered symptom signature. No I/O.
 - **`tagging.py`** — trail-tag resolution per scenario.
-- **`store.py`** — Codebook Store reader/writer (SQLAlchemy Core).
+- **`store.py`** — Codebook Store reader/writer (SQLAlchemy Core). The writer's `persist_codebook`
+  runs the atomic supersede-then-insert (demote prior `active=true` row for the
+  `(domain, snapshot_id)` key to `active=false`, then insert the new `active=true` codebook + its
+  scenarios) in a single transaction; the reader's `get_active(domain, snapshot_id)` backs the
+  `GET /codebooks/active` endpoint by selecting the single `active=true` row for the key.
 - **`producer.py`** — `codebook.generated` producer + DLQ fallback.
 - **`api.py`** — FastAPI app, query endpoints (incl. the CE `trail-signatures` projection),
   `/health`, `/metrics`, `/openapi.json`.
@@ -133,6 +156,7 @@ erDiagram
     text codebook_id PK
     text snapshot_id
     text domain
+    boolean active
     int scenario_count
     text knowledge_version
     timestamptz compiled_at
@@ -159,13 +183,32 @@ erDiagram
 | `codebook_id` | `text` PK | freshly minted per compilation (`cb-{uuid4}`) |
 | `snapshot_id` | `text` NOT NULL | from the triggering `trails.built` |
 | `domain` | `text` NOT NULL | first-class; from resolved domain (default `core-ip`) |
+| `active` | `boolean` NOT NULL DEFAULT true | **true for the single active codebook per `(domain, snapshot_id)` key**; set `false` on superseded codebooks. Backs the one-active-codebook contract (spec Tasks 7, NFR, AC-18/19/20) |
 | `scenario_count` | `integer` NOT NULL | equals count of related `scenarios` |
 | `knowledge_version` | `text` | version of fault-origins/templates used (provenance) |
 | `compiled_at` | `timestamptz` NOT NULL DEFAULT now() | |
 
 Indexes (lead with domain): `idx_codebooks_domain_compiled (domain, compiled_at DESC)`,
-`idx_codebooks_snapshot (snapshot_id)`. **Regeneration mints a new `codebook_id`** — a new
-`snapshot_id` never overwrites a prior snapshot's codebook (no upsert on snapshot).
+`idx_codebooks_snapshot (snapshot_id)`.
+
+**One-active-codebook constraint (partial unique index — the hard store-level contract).** A
+PostgreSQL **partial unique index** enforces exactly one active codebook per `(domain, snapshot_id)`:
+
+```sql
+CREATE UNIQUE INDEX uq_codebooks_one_active
+  ON codebook.codebooks (domain, snapshot_id)
+  WHERE active = true;
+```
+
+So `(domain, snapshot_id, active=true)` is unique in the store — a second active row for the same
+key is rejected by the database, not merely by application logic. There is **no upsert on snapshot**:
+regeneration always mints a fresh `codebook_id`; a new `snapshot_id` never overwrites a prior
+snapshot's codebook. **Supersede mechanism (OQ-6 resolved — inactive-flag, not hard-delete):**
+recompiling an existing `(domain, snapshot_id)` does **not** mutate or delete the prior codebook's
+content; the persist step (Task 7) demotes the prior active row to `active=false` and inserts the new
+row with `active=true`, **atomically in one transaction** (see persistence logic below), so AC-19's
+"prior codebook still retrievable by its `codebookId`" holds. The `inactive-flag` mechanism is chosen
+over hard-delete precisely because AC-19 requires the superseded codebook to remain queryable.
 
 **`codebook.scenarios`**
 
@@ -213,7 +256,8 @@ set. The two read APIs surface it under two names for their two consumers:
     Malformed/undeserializable or missing `snapshotId` to `trails.built.dlq`. Offset committed
     only after a successful compile + emit (at-least-once; dedup makes redelivery safe).
   - `knowledge.updated` (**design decision: SUBSCRIBED, as a cache-invalidation trigger**). On a
-    `KnowledgeUpdatedEvent`, invalidate the cached fault-origins/templates for that event's
+    `KnowledgeUpdatedEvent`, invalidate the cached fault-origin-types / propagation-templates /
+    alarm-type-vocabulary for that event's
     `domain` only (domain-scoped invalidation; the next compile re-fetches). Dedup on `eventId`;
     unprocessable to `knowledge.updated.dlq`. This does **not** trigger recompilation (compilation
     is triggered only by `trails.built`) — it just keeps the per-domain cache fresh. Rationale in
@@ -305,6 +349,29 @@ consumer**; CE-side client wiring is owned by the correlation-engine's own fix, 
   (no `trailId`) returns every scenario fanned across each of its `trailIds[]`. This is exactly
   the per-`trailId` index the CE wants.
 
+**Pattern Manager codebook RCA-override reconcile (Q1 — pinned).** Pattern Manager's P2 reconcile
+use case is served by **both** read views over the one stored truth, and depends on the same
+`rootCauseAlarmType` token semantics:
+
+- **Overlap reconcile** — PM lists this codebook's scenarios (`GET /codebooks/{codebookId}/scenarios`,
+  or `GET /codebooks/active?domain=&snapshotId=` to resolve the codebook deterministically, then its
+  scenarios) and overlaps each mined pattern's symptom set against a scenario's `predictedSymptoms`
+  (`{alarmType, managedObjectId}` items). A mined pattern that matches a scenario is confirmed; one
+  with no scenario explanation is flagged. This is exactly what the native `/scenarios` view serves —
+  it is retained unchanged for PM (the CE-only projection is additive).
+- **RCA override** — where a mined pattern overlaps a scenario, the scenario's **root cause overrides**
+  PM's ordering-based RCA. The authoritative root-cause token is the scenario's
+  `rootCauseAlarmType` — **the origin's own `alarmType` vocabulary token** (the `predictedSymptoms`
+  entry whose `managedObjectId == faultOriginObjectId`, i.e. the first/seed symptom), **not** the
+  object-type `faultOriginType`. Because that token is drawn from the same `alarmTypeVocabulary` as
+  the Pattern Manager's own `rootCauseAlarmType` and live `AlarmEvent.alarmType`, codebook-vs-pattern
+  reconciliation joins on **one** token space with no remapping. PM can read it either via the
+  `trail-signatures` projection's `rootCauseAlarmType` field, or derive it from the native scenario's
+  first/seed `predictedSymptoms` entry — both yield the identical token by construction.
+
+So the scenario data + the `rootCauseAlarmType` semantics fully support PM's codebook RCA-override
+reconcile; no PM-specific endpoint or stored field is added (one stored truth).
+
 **OpenAPI publication.** The service publishes `openapi.json` (OpenAPI 3.1) at `/openapi.json`,
 checked in at `services/codebook-generator/openapi.json`; a CI check asserts the checked-in file
 equals the live document. **Both** the native `GET /codebooks/{codebookId}/scenarios` endpoint
@@ -317,29 +384,34 @@ CE-side client wiring is handled in the correlation-engine's own fix.
 
 ## Integration points (mock vs. real)
 
-Four outbound integration points, each resolved by env (no hard-coded URLs). Each has a base-URL
+**Five** outbound integration points, each resolved by env (no hard-coded URLs). Each has a base-URL
 var and a `MODE` toggle (`MOCK` or `REAL`). Mocks are `respx`/`httpx` mock transports generated
 from the collaborator's **published OpenAPI** (used in unit tests); real points to the live
-Docker Compose service (integration tests). Same code in both modes.
+Docker Compose service (integration tests). Same code in both modes. All paths below are the
+collaborators' **now-frozen** producer shapes (Knowledge, Trail Builder, Topology designs merged).
 
-| Integration point | Collaborator / operation | Config keys | Mock (unit) / Real (integration) |
+| Integration point | Collaborator / operation (frozen path + DTO) | Config keys | Mock (unit) / Real (integration) |
 |---|---|---|---|
-| `topology-query` | Topology Service — list objects by type (snapshotId + domain scoped) and bounded traverse by edge type (closure) | `TOPOLOGY_QUERY_URL`, `TOPOLOGY_QUERY_MODE` | Mock = respx stub from Topology OpenAPI / Real = live Topology |
-| `knowledge-fault-origins` | Knowledge — domain fault-origin type list | `KNOWLEDGE_FAULT_ORIGINS_URL`, `KNOWLEDGE_FAULT_ORIGINS_MODE` | Mock from Knowledge OpenAPI / Real |
-| `knowledge-propagation-templates` | Knowledge — domain propagation templates | `KNOWLEDGE_PROPAGATION_TEMPLATES_URL`, `KNOWLEDGE_PROPAGATION_TEMPLATES_MODE` | Mock / Real |
-| `trail-builder-trails` | Trail Builder — `getTrailsForObject(managedObjectId)`, `getTrail(trailId)` | `TRAIL_BUILDER_URL`, `TRAIL_BUILDER_MODE` | Mock / Real |
+| `topology-query` | Topology Service — **list by type** `GET /topology/nodes?objectType={t}&domain={d}&snapshotId={current\|previous}` to `NodeListDto { domain, objectType?, snapshotId, count, nodes: NodeDto[] }`; **bounded traverse** `GET /topology/traversal?start={moId}&relation={r}&...&maxDepth={K}&crossDomain=false` to `TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[] }`. `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }`; closure edge endpoints resolved via `NodeDto.managedObjectId`/`objectType` | `TOPOLOGY_QUERY_URL`, `TOPOLOGY_QUERY_MODE` | Mock = respx stub from Topology OpenAPI / Real = live Topology |
+| `knowledge-fault-origins` | Knowledge — domain fault-origin type list, **`GET /domains/{domain}/fault-origin-types`** (frozen `recordType`-generic route) to list of `faultOriginType` records `{ objectType, originAlarmType?, description? }` | `KNOWLEDGE_FAULT_ORIGINS_URL`, `KNOWLEDGE_FAULT_ORIGINS_MODE` | Mock from Knowledge OpenAPI / Real |
+| `knowledge-propagation-templates` | Knowledge — domain propagation templates, **`GET /domains/{domain}/propagation-templates`** to list of `propagationTemplate` records `{ edgeType, trigger{objectType,alarmType}, effect{objectType,alarmType}, traversal{direction,cardinality}, ordering? }` | `KNOWLEDGE_PROPAGATION_TEMPLATES_URL`, `KNOWLEDGE_PROPAGATION_TEMPLATES_MODE` | Mock / Real |
+| `knowledge-alarm-type-vocabulary` | Knowledge — domain canonical alarm-type token set, **`GET /domains/{domain}/alarm-type-vocabulary`** to the `alarmTypeVocabulary` record `{ alarmTypes: string[] }` (the value space validated against in AC-22/25) | `KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL`, `KNOWLEDGE_ALARM_TYPE_VOCABULARY_MODE` | Mock / Real |
+| `trail-builder-trails` | Trail Builder — **`GET /trails/by-object?managedObjectId={moId}&domain={domain}`** (`domain` REQUIRED) to `TrailsForObjectResponse { managedObjectId, domain, trailIds: string[] }`; `getTrail` `GET /trails/{trailId}` to `TrailDetail` | `TRAIL_BUILDER_URL`, `TRAIL_BUILDER_MODE` | Mock / Real |
 
-Topology reads are **API-only** — this service never holds AGE credentials or runs openCypher
+Topology reads are **API-only** — this service never holds NebulaGraph credentials or runs nGQL
 (single-owner invariant). Mock responses are **domain-parameterized** (Core IP mock returns
 Fiber/LineCard/Port/Interface/Node; a `transport` mock returns its own types) so domain-scoped
 behaviour is verified without live services.
 
-**OQ dependencies (design-stage):** the exact Topology `list objects` + `traverse` endpoint
-shapes (OQ-3, issue #31) and the Trail Builder `getTrailsForObject` shape (OQ-1, issue #28)
-resolve when those services' OpenAPI specs are frozen; the client + mock are then built against
-those specs. The integration-point contract (domain-scoped enumerate + closure; trail-per-object
-lookup) is firm. If Topology cannot scope by `domain`, the codebook-generator filters client-side
-by `objectType` namespace and the constraint is recorded — no behaviour change visible to tests.
+**Frozen-producer alignment (resolves design-stage OQ-1/OQ-3).** All five integration paths above
+are the collaborators' merged, frozen producer shapes — no longer open. The Topology `list-by-type`
+and `traversal` operations carry `domain` + `snapshotId` scoping natively (`snapshotId=current` is
+the active snapshot for the domain), so the earlier OQ-3 client-side `objectType`-namespace fallback
+is **not** needed. The Trail Builder `getTrailsForObject` is the frozen `GET /trails/by-object` with
+`domain` **required** (OQ-1 resolved). The Knowledge fault-origin and template `recordType` path
+segments are the frozen `fault-origin-types` / `propagation-templates` (not `fault-origins`), and the
+new `alarm-type-vocabulary` segment supplies the canonical token set. Clients + mocks are built
+against each collaborator's checked-in `openapi.json`.
 
 ---
 
@@ -358,23 +430,25 @@ sequenceDiagram
   participant OUT as codebook.generated topic
   K->>C: TrailsBuiltEvent, snapshotId, trailIds, domain
   C->>C: dedup on eventId, resolve domain or default core-ip
-  C->>KN: GET fault-origins, domain param
+  C->>KN: GET domains domain fault-origin-types
   KN-->>C: type list, Fiber LineCard Port Interface Node
-  C->>KN: GET propagation-templates, domain param
-  KN-->>C: edge cascade rules
+  C->>KN: GET domains domain propagation-templates
+  KN-->>C: edge cascade rules with trigger and effect alarmType tokens
+  C->>KN: GET domains domain alarm-type-vocabulary
+  KN-->>C: alarmTypes token set for validation
   loop for each fault-origin type
-    C->>TO: list objects by type, snapshotId and domain
-    TO-->>C: instances
+    C->>TO: GET topology nodes objectType domain snapshotId current
+    TO-->>C: NodeListDto instances
   end
   loop for each instance
-    C->>TO: traverse closure, bounded by edge types
-    TO-->>C: typed subgraph
-    C->>C: forward-propagate, build ordered symptom signature
-    C->>TB: getTrailsForObject for each symptom object
-    TB-->>C: trailIds
+    C->>TO: GET topology traversal start relation maxDepth crossDomain false
+    TO-->>C: TraversalDto reached NodeDto list
+    C->>C: forward-propagate, build ordered symptom signature, validate alarmType tokens
+    C->>TB: GET trails by-object managedObjectId and domain for each symptom object
+    TB-->>C: TrailsForObjectResponse trailIds
   end
-  C->>DB: insert codebook plus scenarios, mint codebookId, domain
-  DB-->>C: committed
+  C->>DB: tx demote prior active row for domain snapshotId then insert codebook plus scenarios active true, mint codebookId, domain
+  DB-->>C: committed, one active per domain snapshotId
   C->>OUT: CodebookGeneratedEvent, snapshotId scenarioCount codebookId domain
 ```
 
@@ -485,12 +559,30 @@ are drawn from the canonical **`alarmType` vocabulary**: the Knowledge-authored,
 (X.733 probable cause, e.g. `lossOfSignal`); the earlier OQ-2 note that effects mapped to
 `eventType` is superseded by the merged `alarmType` contract and no longer applies.
 
-The propagation templates Codebook fetches from Knowledge already carry their
-`trigger.alarmType` / `effect.alarmType` as `alarmTypeVocabulary` tokens (the same set the
-templates author against per the architecture invariant), so the `predicted_symptoms[].alarmType`
-the engine accumulates **are** vocabulary tokens by construction — `vocabulary.py` holds only the
-convention that an effect/trigger name is read straight through as the `alarmType` token (no
-remapping to `eventType`/`probableCause`). Consequently the projected `rootCauseAlarmType` (the
+**Templates carry `effect.alarmType` / `trigger.alarmType` as vocabulary tokens (Q7 — confirmed
+and enforced).** The frozen Knowledge `propagationTemplate` record (merged Knowledge design) carries
+`trigger: { objectType, alarmType }` and `effect: { objectType, alarmType }`, and Knowledge
+**validates on write** that every `trigger.alarmType`/`effect.alarmType` is a member of the domain's
+`alarmTypeVocabulary`. The `faultOriginType` record likewise carries `originAlarmType` (the origin's
+own self-emitted alarm token, e.g. `InterfaceDown` for an `Interface`, `FiberFault` for a `Fiber`),
+also vocabulary-validated. Forward propagation therefore reads each cascade step's
+`effect.alarmType` straight through, and seeds the signature with the origin's `originAlarmType` —
+so the `predicted_symptoms[].alarmType` the engine accumulates **are** `alarmTypeVocabulary` tokens
+**by construction** (the same value space as `AlarmEvent.alarmType`, the canonical join key).
+
+**Validation against the fetched `alarm-type-vocabulary` (Q7 / Q3 item 2).** As a belt-and-braces
+check, the engine fetches the domain's `alarmTypeVocabulary` (integration point
+`knowledge-alarm-type-vocabulary`, `GET /domains/{domain}/alarm-type-vocabulary`) and **asserts that
+every** `predicted_symptoms[].alarmType` and the derived `rootCauseAlarmType` is a member of that
+fetched `alarmTypes` set. A token outside the set (e.g. a template misauthored to emit an X.733
+`eventType`/`probableCause` value) is a compile-time error for that scenario, logged with structured
+detail and routed to `trails.built.dlq` (no malformed signature is persisted). This is the producer
+guarantee the Correlation Engine and Pattern Manager rely on: every codebook signature token, and
+the `rootCauseAlarmType`, live in the same `alarmTypeVocabulary` token space as live
+`AlarmEvent.alarmType` and the Pattern Manager's `rootCauseAlarmType` — one shared join key.
+`vocabulary.py` holds the convention that an effect/trigger name is read straight through as the
+`alarmType` token (no remapping to `eventType`/`probableCause`), plus this membership check against
+the fetched vocabulary. Consequently the projected `rootCauseAlarmType` (the
 origin's own `alarmType`) is a vocabulary token too — e.g. `FiberFault` for a `FiberSpan` origin,
 `InterfaceDown` for an `Interface` origin — and matches `AlarmEvent.alarmType`, the Pattern
 Manager's `rootCauseAlarmType`, and the mined sequence tokens, so codebook-vs-pattern
@@ -520,7 +612,8 @@ N/A — no UI; back-end service.
 | Undeserializable / malformed `trails.built` (e.g. missing `snapshotId`) | Route raw message to `trails.built.dlq` with error metadata; log structured error; commit offset; continue with next message (no infinite retry) |
 | Unknown major `schemaVersion` (at least 2) | `check_schema_version` raises; message rejected (not processed) to `trails.built.dlq`; service does not crash |
 | Duplicate `eventId` | No-op: existing codebook preserved; prior `codebook.generated` re-emitted; compile runs at most once |
-| Integration point unavailable / 5xx (Topology, Knowledge, Trail Builder) | Retry with bounded exponential backoff (config `INTEGRATION_MAX_RETRIES`, `INTEGRATION_BACKOFF_MS`); on exhaustion log structured error and route the triggering `trails.built` to `trails.built.dlq` (no partial codebook persisted — the persist is transactional and only runs on full success) |
+| Integration point unavailable / 5xx (Topology, Knowledge fault-origin-types/propagation-templates/alarm-type-vocabulary, Trail Builder) | Retry with bounded exponential backoff (config `INTEGRATION_MAX_RETRIES`, `INTEGRATION_BACKOFF_MS`); on exhaustion log structured error and route the triggering `trails.built` to `trails.built.dlq` (no partial codebook persisted — the persist is transactional and only runs on full success) |
+| Signature `alarmType` token not in the fetched `alarmTypeVocabulary` | Compile-time validation error for that scenario; structured error logged with the offending token; triggering `trails.built` routed to `trails.built.dlq`; no malformed signature persisted (Q7/AC-25 negative path) |
 | Integration point 4xx (bad request / not found) | Treated as unrecoverable for that compile, route to `trails.built.dlq` with detail; logged |
 | `domain` absent on event | Default to `core-ip` (env `DEFAULT_DOMAIN`); logged at info with `domain` field |
 | Trail Builder returns no trails for a symptom object | Scenario keeps the union of trails found across its symptoms; if none, `trailIds` is empty (logged as a warning; not fatal). Criterion 4 asserts non-empty when the mock returns at least one |
@@ -544,6 +637,7 @@ and logged with `traceId`, `domain`, and `snapshotId`.
 | `knowledge.updated` subscription | (a) ignore (re-fetch every compile); (b) subscribe for domain-scoped cache invalidation; (c) subscribe and eagerly recompile | (b). Caching fault-origins/templates avoids re-fetching on every compile; domain-scoped invalidation keeps the cache correct without coupling compilation to Knowledge changes. (c) rejected — recompilation is triggered only by `trails.built` (spec), not by Knowledge changes |
 | Signature element shape | (a) alarm-type string only; (b) pair of `alarmType` and `managedObjectId` | (b). Correlation needs object identity for trail-scoped decode and Pattern Manager for RCA-per-object; the alarm-type-only view is derivable from (b) |
 | Regeneration semantics | (a) upsert by `snapshotId`; (b) always mint a new `codebookId` | (b). Spec requires a new `snapshotId` to mint a new `codebookId` and never overwrite a prior snapshot's codebook; supports historical query and `matchedCodebookId` stability downstream |
+| Supersede mechanism for the one-active-codebook contract (OQ-6) | (a) hard-delete the prior codebook on recompile; (b) `active` boolean flag + DB **partial-unique index** `(domain, snapshot_id) WHERE active=true`, demote-then-insert in one tx | (b). AC-19 requires the superseded codebook to remain **retrievable by its `codebookId`** (content non-mutable), so hard-delete (a) is ruled out. The partial-unique index enforces "exactly one active per `(domain, snapshotId)`" at the **store level** (not just application logic), and the single-transaction demote-then-insert is atomic, giving deterministic active retrieval (AC-18/19/20). No Kafka/event-model impact |
 | Postgres driver | (a) `psycopg` (LGPL); (b) `pg8000` (BSD) | (b) default — keeps the permissive-only invariant strict (LGPL excluded). `psycopg` selectable only if licence policy is relaxed |
 | Trail tagging granularity | (a) tag by origin object only; (b) union trails across all symptom objects | (b). A scenario's symptoms span multiple objects/trails; tagging by the full symptom set yields correct trail membership for decode |
 | CE scenario read shape (resolves P1-G5 / P3-G2) | (a) keep only native `/scenarios` and make CE adapt (rename + derive client-side); (b) rename the native field to `expectedSymptoms` and add `rootCauseAlarmType` on the stored scenario; (c) keep the native model and add a separate CE-oriented **projection endpoint** `/trail-signatures` | (c) — the product-owner decision. (a) leaves two contradictory expectations and no checked-in producer contract. (b) churns the native model and the Pattern Manager consumer, and duplicates a derivable field into storage. (c) keeps **one stored truth** (`predicted_symptoms`), serves Pattern Manager unchanged, and gives the CE exactly its `{trailId, rootCauseAlarmType, expectedSymptoms[]}` shape via a pure read projection — both endpoints frozen in one `openapi.json` |
@@ -565,18 +659,18 @@ ephemeral DB). Every acceptance criterion maps 1:1 to a named test.
 | 1 | Fiber-cut signature matches expected cascade | `test_fiber_cut_signature_matches_expected_cascade` | Scenario for `FiberSpan:f1` has ordered symptoms `[FiberFault, LinkDown(IPLink), LSPDown(LSP), ReachabilityLoss(VPN)]` (no `InterfaceDown`); all alarm tokens are `alarmTypeVocabulary` members |
 | 2 | Line-card vs port faults produce distinguishable signatures | `test_linecard_and_port_signatures_distinguishable` | LineCard scenario has multiple `PortDown` entries absent from the Port scenario; Port scenario has its port-layer discriminator absent from the LineCard top-level signature |
 | 3 | Interface fault-origin scenario matches the interface cascade | `test_interface_fault_signature_matches_expected_cascade` | Scenario for `Interface:i1` has `faultOriginType` of `Interface` and ordered symptoms `[InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss]`; differs from fiber-cut (no InterfaceDown) and port-fault (PortDown precedes InterfaceDown there) |
-| 4 | Every scenario tagged to at least one trail | `test_every_scenario_has_nonempty_trailids` | With a mock Trail Builder returning at least one trailId per object, every scenario has non-empty `trailIds` |
+| 4 | Every scenario tagged to at least one trail | `test_every_scenario_has_nonempty_trailids` | With a mock Trail Builder serving the frozen `GET /trails/by-object?managedObjectId=&domain=` (domain required) returning `TrailsForObjectResponse` with at least one trailId per object, every scenario has non-empty `trailIds`; the mock asserts each call carried both `managedObjectId` and `domain` |
 | 5 | Regeneration produces a new codebook tied to the new snapshotId | `test_regeneration_mints_new_codebook_per_snapshot` | Two events (`snap-A`, `snap-B`) give two records, distinct `codebookId`; `snap-B` record carries `snapshotId` of `snap-B`; two `codebook.generated` events emitted, each validating against `CodebookGeneratedEvent` |
 | 6 | Duplicate `trails.built` deduplicated | `test_duplicate_eventid_compiles_once` | Same `eventId` twice gives compile once, emit `codebook.generated` once |
-| 7 | All outbound calls via config-switchable integration points | `test_full_cycle_in_mock_mode_no_real_http` + `test_missing_integration_url_fails_startup` | With all `*_MODE=MOCK`, full compile uses mocks (no real HTTP); with any integration URL unset, startup refuses + logs structured config error |
+| 7 | All outbound calls via config-switchable integration points | `test_full_cycle_in_mock_mode_no_real_http` + `test_missing_integration_url_fails_startup` | With all five `*_MODE=MOCK` (incl. `KNOWLEDGE_ALARM_TYPE_VOCABULARY_MODE`), full compile uses mocks (no real HTTP); with any integration URL unset — **including `KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL`** — startup refuses + logs structured config error |
 | 8 | Query API returns signature + trail tags by codebookId | `test_get_scenario_returns_signature_and_trails` | `GET /codebooks/{id}/scenarios/{sid}` returns correct `predictedSymptoms` + `trailIds`, `200`, validates against published `openapi.json` |
 | 9 | `codebook.generated` carries domain + validates against binding | `test_codebook_generated_event_carries_domain_and_validates` | Emitted payload deserializes via `CodebookGeneratedEvent`; `scenarioCount` matches persisted scenarios; non-empty `codebookId`; `domain` matches triggering event |
 | 10 | `domain` read from event — no Topology lookup | `test_domain_read_from_event_no_topology_metadata_call` | With `domain` of `core-ip` on event, snapshot-metadata endpoint receives zero calls (mock assertion) |
 | 11 | Unknown `schemaVersion` rejected | `test_unknown_schemaversion_routed_to_dlq` | `schemaVersion` of at least 2 not processed, routed to `trails.built.dlq`, no crash |
 | 12 | Unprocessable `trails.built` to DLQ | `test_malformed_trailsbuilt_routed_to_dlq` | Missing `snapshotId` routed to `trails.built.dlq`, not retried indefinitely, consumer continues |
 | 13 | Compiled record carries the snapshot's domain | `test_persisted_codebook_and_metadata_carry_domain` | Persisted record `domain` of `core-ip` (non-null); `GET /codebooks/{id}` includes `domain` of `core-ip`, validates against `openapi.json` |
-| 14 | Knowledge calls carry domain param | `test_knowledge_calls_include_domain_param` | Both Knowledge integration points called with `domain=core-ip`; no domain-specific data hard-coded |
-| 15 | Domain-scoped enumeration to Topology | `test_topology_enumeration_includes_snapshot_and_domain` | Topology `list objects` called with `snapshotId=snap-X` AND `domain=core-ip` (mock assertion) |
+| 14 | Knowledge calls carry domain param | `test_knowledge_calls_include_domain_param` | All **three** Knowledge integration points (`GET /domains/{domain}/fault-origin-types`, `/propagation-templates`, `/alarm-type-vocabulary`) called with `domain=core-ip` in the path; no domain-specific data hard-coded |
+| 15 | Domain-scoped enumeration to Topology | `test_topology_enumeration_includes_snapshot_and_domain` | Topology frozen list-by-type `GET /topology/nodes` called with `objectType=`, `domain=core-ip`, AND `snapshotId=current` (mock assertion); bounded-traverse `GET /topology/traversal` called with `start`, repeated `relation`, `maxDepth`, `crossDomain=false` |
 | 16 | Domain-scoped query API filters by domain | `test_codebooks_query_filters_by_domain` | Two codebooks (`core-ip` CB-1, `transport` CB-2); `GET /codebooks?domain=core-ip` returns only CB-1; validates against `openapi.json` |
 | 17 | Different domain compiles without code change | `test_transport_domain_compiles_with_its_inputs` | With `transport` mock fault-origins/templates/topology, a full `transport` codebook compiles with no code change; persisted `domain` of `transport` |
 | 18 | ONE-ACTIVE: one active codebook per `(domain, snapshotId)` | `test_one_active_codebook_per_domain_snapshot` | After compile for `(core-ip, snap-X)`, exactly one active record; `GET /codebooks/active?domain=core-ip&snapshotId=snap-X` returns `200` with the emitted `codebookId`; validates against `openapi.json` |
@@ -594,7 +688,7 @@ alignment. Each maps 1:1 to a named test; `projection.py` is also unit-tested in
 | 22 | `rootCauseAlarmType` is the origin's own `alarmType` vocab token | `test_root_cause_alarm_type_is_origin_vocab_token` | For a `FiberSpan:f1` origin, `rootCauseAlarmType == "FiberFault"` (the `alarmType` of the `predictedSymptoms` entry whose `managedObjectId == faultOriginObjectId`); it is NOT `faultOriginType` (`FiberSpan`) and is a member of the domain's `alarmTypeVocabulary` |
 | 23 | `expectedSymptoms` equals the scenario's `predictedSymptoms` | `test_expected_symptoms_equals_predicted_symptoms` | For each projected signature, `expectedSymptoms` is item-for-item equal to the source scenario's `predictedSymptoms` (same `alarmType` + `managedObjectId` list, same order) returned by `GET .../scenarios/{scenarioId}` — one underlying truth, just renamed |
 | 24 | Per-trail fan-out from `trailIds[]` | `test_trail_signatures_fan_out_per_trail` | A scenario with `trailIds = [T1, T2]` yields two signatures (one with `trailId=T1`, one `T2`); `?trailId=T1` returns only the `T1` signature; `?trailId=T_none` returns `200` empty list |
-| 25 | Signature `alarmType` tokens are `alarmTypeVocabulary` members (not eventType/probableCause) | `test_signature_alarm_types_are_vocabulary_tokens` | Every `predictedSymptoms[].alarmType` and projected `rootCauseAlarmType` is a member of the mock domain's `alarmTypeVocabulary`; none equals an X.733 `eventType` (e.g. `communicationsAlarm`) or `probableCause` (e.g. `lossOfSignal`) value |
+| 25 | Signature `alarmType` tokens are `alarmTypeVocabulary` members (not eventType/probableCause), validated against the fetched vocabulary | `test_signature_alarm_types_are_vocabulary_tokens` | The compile fetches the domain's `alarmTypeVocabulary` via `GET /domains/{domain}/alarm-type-vocabulary` (mock asserts the call); every `predictedSymptoms[].alarmType` and projected `rootCauseAlarmType` is asserted a member of that fetched `alarmTypes` set; none equals an X.733 `eventType` (e.g. `communicationsAlarm`) or `probableCause` (e.g. `lossOfSignal`) value. A signature token outside the fetched set fails the compile and routes to `trails.built.dlq` (negative assertion via a misauthored-template fixture) |
 | 26 | Both endpoints published in `openapi.json` | `test_openapi_publishes_both_scenarios_and_trail_signatures` | The checked-in `services/codebook-generator/openapi.json` equals the live `/openapi.json` and contains BOTH `/codebooks/{codebookId}/scenarios` and `/codebooks/{codebookId}/trail-signatures` paths with their frozen response schemas |
 
 ### E2E scenarios (from this design unit's point of view)
@@ -623,9 +717,12 @@ collaborators in Docker Compose), including failure/partial paths.
 `TRAILS_BUILT_TOPIC`, `CODEBOOK_GENERATED_TOPIC`, `KNOWLEDGE_UPDATED_TOPIC` (optional subscribe),
 DLQ topic names; `DATABASE_URL` (Postgres); `DEFAULT_DOMAIN` (default `core-ip`);
 `TOPOLOGY_QUERY_URL`/`_MODE`, `KNOWLEDGE_FAULT_ORIGINS_URL`/`_MODE`,
-`KNOWLEDGE_PROPAGATION_TEMPLATES_URL`/`_MODE`, `TRAIL_BUILDER_URL`/`_MODE`;
+`KNOWLEDGE_PROPAGATION_TEMPLATES_URL`/`_MODE`,
+**`KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL`/`_MODE`** (the alarm-type-vocabulary integration point —
+Q3 item 2 / Q11), `TRAIL_BUILDER_URL`/`_MODE`;
 `INTEGRATION_MAX_RETRIES`, `INTEGRATION_BACKOFF_MS`; `LOG_LEVEL`. Startup fails fast (exit non-zero
-+ structured error) if any required integration-point URL is unset (criterion 7).
++ structured error) if any required integration-point URL is unset — including
+`KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL` (criterion 7).
 
 **Observability:**
 - `/health` — liveness + readiness (DB reachable, Kafka consumer assigned).
