@@ -206,6 +206,11 @@ rows, feature vectors, or dropped-alarm IDs. Both are lightweight operational te
 counts and signature keys + counts), not a historical alarm corpus, and do not violate the
 "live-only, no historical corpus" rule (they store zero alarm payloads).
 
+> **Schema-name provenance.** The schema name `noise_filter` (holding `nf_run_stats` and
+> `nf_observed_chatter`) is the authoritative assignment for this service in the shared-infra
+> schema-ownership list in `docs/architecture.md`; it is reconciled with that list, not a stray
+> local choice.
+
 The ephemeral in-process window/dedupe state (the `TrailWindower` open windows and the
 `DedupeCache`) is separate and **not** persisted; durability/replay of the input stream is Kafka's
 (at-least-once delivery + consumer offsets).
