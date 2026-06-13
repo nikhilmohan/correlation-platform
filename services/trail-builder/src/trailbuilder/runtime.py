@@ -18,10 +18,10 @@ _log = get_logger("trailbuilder.runtime")
 
 def run_migrations(settings: Settings) -> None:
     """Run ``alembic upgrade head`` before serving (creates the schema + tables)."""
+    import pathlib
+
     from alembic import command
     from alembic.config import Config
-
-    import pathlib
 
     root = pathlib.Path(__file__).resolve().parent.parent.parent
     cfg = Config(str(root / "alembic.ini"))

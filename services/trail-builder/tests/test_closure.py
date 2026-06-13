@@ -125,9 +125,7 @@ def test_trail_includes_interface_between_port_and_iplink() -> None:
     with_iface = [
         t
         for t in trails
-        if "Interface:P1.100" in t.members
-        and "Port:P1" in t.members
-        and "IPLink:L1" in t.members
+        if "Interface:P1.100" in t.members and "Port:P1" in t.members and "IPLink:L1" in t.members
     ]
     assert with_iface, "expected a trail containing Port, Interface and IPLink together"
     assert any("Interface:" in m for t in with_iface for m in t.members)

@@ -17,6 +17,7 @@ from .clients.policy_client import KnowledgePolicyClient
 from .clients.topology_client import TopologyClient
 from .closure import TrailClosure
 from .config import Settings
+from .event_publisher import TrailsBuiltPublisher
 from .models import TrailPolicy
 from .observability import (
     BUILD_DURATION,
@@ -27,7 +28,6 @@ from .observability import (
     get_logger,
 )
 from .repository import TrailRepository
-from .event_publisher import TrailsBuiltPublisher
 
 _log = get_logger("trailbuilder.build")
 
@@ -77,9 +77,7 @@ class BuildService:
         self._closure = closure
         self._publisher = publisher
 
-    def build(
-        self, snapshot_id: str, domain: str, trace_id: str, emit: bool = True
-    ) -> BuildResult:
+    def build(self, snapshot_id: str, domain: str, trace_id: str, emit: bool = True) -> BuildResult:
         """Run a full build for ``(snapshot_id, domain)``.
 
         Raises:

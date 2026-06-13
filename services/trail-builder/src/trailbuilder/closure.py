@@ -16,7 +16,7 @@ import hashlib
 
 import networkx as nx
 
-from .models import GraphSlice, TrailPolicy, Trail
+from .models import GraphSlice, Trail, TrailPolicy
 
 
 class TrailClosure:
@@ -126,9 +126,7 @@ class TrailClosure:
             if len(co_members) < 2:
                 continue
             # Find every trail that contains any co-member link; union them.
-            touched_idx = [
-                i for i, ms in enumerate(merged) if ms & co_members
-            ]
+            touched_idx = [i for i, ms in enumerate(merged) if ms & co_members]
             if len(touched_idx) < 1:
                 continue
             union: set[str] = set()
@@ -182,7 +180,5 @@ class TrailClosure:
 
 def _deterministic_id(domain: str, snapshot_id: str, members: tuple[str, ...]) -> str:
     """Content-derived, reproducible trail id (domain + snapshot + sorted members)."""
-    digest = hashlib.sha256(
-        "|".join([domain, snapshot_id, *members]).encode("utf-8")
-    ).hexdigest()
+    digest = hashlib.sha256("|".join([domain, snapshot_id, *members]).encode("utf-8")).hexdigest()
     return f"trail-{digest[:24]}"

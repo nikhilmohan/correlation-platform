@@ -32,9 +32,7 @@ def upgrade() -> None:
         sa.CheckConstraint("member_count > 0", name="ck_trail_member_count_positive"),
         schema=SCHEMA,
     )
-    op.create_index(
-        "idx_trail_domain_snapshot", "trail", ["domain", "snapshot_id"], schema=SCHEMA
-    )
+    op.create_index("idx_trail_domain_snapshot", "trail", ["domain", "snapshot_id"], schema=SCHEMA)
     op.create_table(
         "trail_member",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),

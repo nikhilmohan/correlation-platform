@@ -1,9 +1,11 @@
 """``TopologyClient`` — graph closure against the FROZEN Topology query API.
 
 Pinned to Topology's frozen paths / params / DTOs (Q3):
-  - list-by-type  ``GET /topology/nodes?objectType=&domain=&snapshotId=``  -> NodeListDto
-  - neighbors     ``GET /topology/nodes/{moId}/neighbors?relation=&domain=&snapshotId=`` -> NeighborsDto
-  - bounded trav. ``GET /topology/traversal?start=&relation=&maxDepth=&crossDomain=false`` -> TraversalDto
+  - list-by-type  ``GET /topology/nodes?objectType=&domain=&snapshotId=`` -> NodeListDto
+  - neighbors     ``GET /topology/nodes/{moId}/neighbors?relation=&domain=&snapshotId=``
+    -> NeighborsDto
+  - bounded trav. ``GET /topology/traversal?start=&relation=&maxDepth=&crossDomain=false``
+    -> TraversalDto
 
 Every read is domain- AND snapshot-scoped: the ``snapshotId`` token is always the
 build's in-scope snapshot scope (``current``), so the graph slice matches the
@@ -48,7 +50,9 @@ class TopologyClient:
         traversal call per seed pins the read to the frozen traversal path and the
         in-scope snapshot scope (Q3 / AC-26).
         """
-        relations = list(dict.fromkeys([*closure_relations, *([srlg_edge_type] if srlg_edge_type else [])]))
+        relations = list(
+            dict.fromkeys([*closure_relations, *([srlg_edge_type] if srlg_edge_type else [])])
+        )
         slice_ = GraphSlice(domain=domain, snapshot_id=snapshot_scope)
 
         # 1. Enumerate seed nodes per fault-capable type (also seeds the node set).

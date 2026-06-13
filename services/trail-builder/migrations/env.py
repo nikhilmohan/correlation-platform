@@ -10,8 +10,8 @@ from __future__ import annotations
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from trailbuilder.db.metadata import SCHEMA, metadata
 from trailbuilder.db import tables  # noqa: F401  (registers tables on metadata)
+from trailbuilder.db.metadata import SCHEMA, metadata
 
 config = context.config
 target_metadata = metadata

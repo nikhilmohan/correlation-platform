@@ -64,7 +64,9 @@ def create_app(container: Container) -> FastAPI:
         try:
             object_type_of(managedObjectId)
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=f"malformed managedObjectId: {exc}")
+            raise HTTPException(
+                status_code=422, detail=f"malformed managedObjectId: {exc}"
+            ) from exc
         trail_ids = c.repository.trail_ids_for_object(managedObjectId, domain)
         return TrailsForObjectResponse(
             managedObjectId=managedObjectId, domain=domain, trailIds=trail_ids
@@ -131,7 +133,9 @@ def create_app(container: Container) -> FastAPI:
                 request.snapshotId, request.domain, trace_id="rebuild-api", emit=True
             )
         except IntegrationError as exc:
-            raise HTTPException(status_code=502, detail=f"dependency unavailable: {exc.reason}")
+            raise HTTPException(
+                status_code=502, detail=f"dependency unavailable: {exc.reason}"
+            ) from exc
         return TrailsBuiltSummary(
             snapshotId=result.snapshot_id,
             domain=result.domain,
@@ -160,9 +164,7 @@ def create_app(container: Container) -> FastAPI:
 
 
 def _to_detail(trail: Trail) -> TrailDetail:
-    members = [
-        TrailMember(managedObjectId=m, objectType=object_type_of(m)) for m in trail.members
-    ]
+    members = [TrailMember(managedObjectId=m, objectType=object_type_of(m)) for m in trail.members]
     return TrailDetail(
         trailId=trail.trail_id,
         domain=trail.domain,

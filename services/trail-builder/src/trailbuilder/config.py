@@ -8,13 +8,13 @@ Service at build time per the design.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class ServiceMode(str, Enum):
+class ServiceMode(StrEnum):
     """Integration-point toggle: stubbed vs. live collaborator."""
 
     mock = "mock"
@@ -33,7 +33,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
     # --- Integration points (no hard-coded URLs) ---
-    topology_service_base_url: str = Field("http://topology:8080", alias="TOPOLOGY_SERVICE_BASE_URL")
+    topology_service_base_url: str = Field(
+        "http://topology:8080", alias="TOPOLOGY_SERVICE_BASE_URL"
+    )
     topology_service_mode: ServiceMode = Field(ServiceMode.mock, alias="TOPOLOGY_SERVICE_MODE")
     knowledge_service_base_url: str = Field(
         "http://knowledge:8080", alias="KNOWLEDGE_SERVICE_BASE_URL"

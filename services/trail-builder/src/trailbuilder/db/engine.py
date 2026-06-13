@@ -10,8 +10,8 @@ from __future__ import annotations
 from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.pool import StaticPool
 
-from .metadata import SCHEMA, metadata
 from . import tables  # noqa: F401  (registers the tables on `metadata`)
+from .metadata import SCHEMA, metadata
 
 
 def make_engine(database_url: str) -> Engine:
@@ -35,12 +35,19 @@ def make_engine(database_url: str) -> Engine:
 
 
 def _attach_sqlite_schema(engine: Engine) -> None:
-    """Attach an in-memory schema database named ``trailbuilder`` to SQLite."""
+    """Attach an in-memory schema database named ``trailbuilder`` to SQLite.
+
+    Also enables ``PRAGMA foreign_keys=ON`` so the ``trail_member`` ON DELETE
+    CASCADE fires when a trail is superseded — matching PostgreSQL semantics (SQLite
+    leaves FK enforcement off by default, which would otherwise orphan members and
+    break the supersede-on-rebuild idempotency path).
+    """
 
     @event.listens_for(engine, "connect")
     def _attach(dbapi_conn, _rec):  # type: ignore[no-untyped-def]
         cur = dbapi_conn.cursor()
         cur.execute(f"ATTACH DATABASE ':memory:' AS {SCHEMA}")
+        cur.execute("PRAGMA foreign_keys=ON")
         cur.close()
 
 
