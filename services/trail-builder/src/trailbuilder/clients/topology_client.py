@@ -19,6 +19,7 @@ import httpx
 
 from ..config import Settings
 from ..models import GraphEdge, GraphNode, GraphSlice
+from ._retry import backoff_before_retry
 from .errors import IntegrationError
 
 
@@ -146,8 +147,9 @@ class TopologyClient:
 
     def _get(self, path: str, params: dict) -> dict:
         attempts = max(1, self._settings.http_retry_max)
+        backoff_ms = self._settings.http_retry_backoff_ms
         last: Exception | None = None
-        for _ in range(attempts):
+        for i in range(attempts):
             try:
                 resp = self._client.get(path, params=params)
                 resp.raise_for_status()
@@ -157,6 +159,7 @@ class TopologyClient:
                 return body
             except (httpx.HTTPError, ValueError) as exc:
                 last = exc
+                backoff_before_retry(i, attempts, backoff_ms)
         raise IntegrationError("topology", f"topology call {path} failed: {last}")
 
 

@@ -57,38 +57,57 @@ class _ConfluentProducerAdapter:
         return self._producer.flush(timeout)
 
 
-def _consume_loop(settings: Settings, container: Container) -> None:
+def _consume_topic(settings: Settings, topic: str, handle) -> None:  # type: ignore[no-untyped-def]
+    """Poll one topic under its OWN consumer + ``<service>-<topic>`` group id.
+
+    Each consumed topic gets its own group — so ``topology.changed`` is consumed
+    under ``trail-builder-topology.changed`` and ``knowledge.updated`` under
+    ``trail-builder-knowledge.updated`` (not one shared group). The two topics
+    serve unrelated purposes (build trigger vs. policy-refresh), so independent
+    groups keep their offset commits and rebalances decoupled — the convention
+    the reviewer flagged.
+    """
     from confluent_kafka import Consumer
 
-    topo_topic = settings.topology_changed_topic
-    know_topic = settings.knowledge_updated_topic
+    group_id = f"{settings.kafka_consumer_group}-{topic}"
     consumer = Consumer(
         {
             "bootstrap.servers": settings.kafka_bootstrap_servers,
-            # Conventioned group id: "<service>-<topic>" per shared-infra.
-            "group.id": f"{settings.kafka_consumer_group}-{topo_topic}",
+            "group.id": group_id,
             "enable.auto.commit": True,
             "auto.offset.reset": "earliest",
         }
     )
-    consumer.subscribe([topo_topic, know_topic])
-    _log.info("kafka consumer started", extra={"topics": [topo_topic, know_topic]})
+    consumer.subscribe([topic])
+    _log.info("kafka consumer started", extra={"topic": topic, "group": group_id})
     try:
         while True:
             msg = consumer.poll(1.0)
             if msg is None or msg.error():
                 continue
-            raw = msg.value()
-            if msg.topic() == topo_topic:
-                container.topology_changed_handler.handle(raw)
-            elif msg.topic() == know_topic:
-                container.knowledge_updated_handler.handle(raw)
+            handle(msg.value())
     finally:
         consumer.close()
 
 
+def start_consumers(settings: Settings, container: Container) -> list[threading.Thread]:
+    """Start one daemon consumer thread per consumed topic (own group each)."""
+    plan = [
+        (settings.topology_changed_topic, container.topology_changed_handler.handle),
+        (settings.knowledge_updated_topic, container.knowledge_updated_handler.handle),
+    ]
+    threads: list[threading.Thread] = []
+    for topic, handle in plan:
+        thread = threading.Thread(
+            target=_consume_topic, args=(settings, topic, handle), daemon=True
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
+
+
 def main() -> None:
-    """Entrypoint: migrate, start the consumer thread, serve the API."""
+    """Entrypoint: migrate, start the per-topic consumer threads, serve the API."""
     import uvicorn
 
     from .api import create_app
@@ -98,10 +117,7 @@ def main() -> None:
     run_migrations(settings)
     container = make_runtime_container(settings)
 
-    consumer_thread = threading.Thread(
-        target=_consume_loop, args=(settings, container), daemon=True
-    )
-    consumer_thread.start()
+    start_consumers(settings, container)
 
     app = create_app(container)
     uvicorn.run(app, host="0.0.0.0", port=8000)  # noqa: S104

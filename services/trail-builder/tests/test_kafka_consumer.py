@@ -15,6 +15,7 @@ Maps to:
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -161,6 +162,20 @@ def test_unexpected_event_type_routed_to_dlq(settings, engine, producer) -> None
     status = _handler(settings, engine, build, producer).handle(_knowledge_updated_raw())
     assert status == "dlq"
     assert producer.for_topic(settings.topology_changed_dlq_topic)
+
+
+def test_unknown_major_schema_version_routed_to_dlq(settings, engine, producer) -> None:
+    """AC-14: a topology.changed whose envelope carries an UNKNOWN major
+    ``schemaVersion`` (>= 2, the binding supports major 1 only) is a contract-defined
+    poison -> ``SchemaVersionError`` -> routed to the DLQ, no build, no crash."""
+    valid = json.loads(_topology_changed_raw(snapshot_id="snap-v2"))
+    valid["schemaVersion"] = 2  # bump to an unsupported future major
+    raw = json.dumps(valid)
+    build = FakeBuildService()
+    status = _handler(settings, engine, build, producer).handle(raw)
+    assert status == "dlq"
+    assert producer.for_topic(settings.topology_changed_dlq_topic)
+    assert build.calls == []
 
 
 def test_poison_does_not_block_subsequent_message(settings, engine, producer) -> None:

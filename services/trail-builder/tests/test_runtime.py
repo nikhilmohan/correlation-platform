@@ -80,55 +80,27 @@ def test_run_migrations_invokes_alembic_upgrade_head(monkeypatch, settings) -> N
     assert calls["url"] == settings.database_url
 
 
-def test_consume_loop_dispatches_to_correct_handler(monkeypatch, settings) -> None:
-    """The consume loop routes topology vs knowledge messages to the right handler
-    and uses the <service>-<topic> group-id convention."""
-    topo_calls: list[bytes] = []
-    know_calls: list[bytes] = []
+class _Msg:
+    """Minimal confluent-kafka message stand-in."""
 
-    class _Handler:
-        def __init__(self, sink: list[bytes]) -> None:
-            self._sink = sink
+    def __init__(self, value: bytes) -> None:
+        self._value = value
 
-        def handle(self, raw: bytes) -> None:
-            self._sink.append(raw)
+    def value(self) -> bytes:
+        return self._value
 
-    container = types.SimpleNamespace(
-        topology_changed_handler=_Handler(topo_calls),
-        knowledge_updated_handler=_Handler(know_calls),
-    )
+    def error(self):  # type: ignore[no-untyped-def]
+        return None
 
-    topo_topic = settings.topology_changed_topic
-    know_topic = settings.knowledge_updated_topic
 
-    class _Msg:
-        def __init__(self, topic: str, value: bytes) -> None:
-            self._topic = topic
-            self._value = value
-
-        def topic(self) -> str:
-            return self._topic
-
-        def value(self) -> bytes:
-            return self._value
-
-        def error(self):  # type: ignore[no-untyped-def]
-            return None
-
-    msgs = [
-        _Msg(topo_topic, b"topo-1"),
-        _Msg(know_topic, b"know-1"),
-        None,  # idle poll -> skipped
-    ]
-    captured_conf: dict[str, dict] = {}
-
+def _install_fake_consumer(monkeypatch, queue, captured) -> None:  # type: ignore[no-untyped-def]
     class _FakeConsumer:
         def __init__(self, conf: dict) -> None:
-            captured_conf["conf"] = conf
-            self._queue = list(msgs)
+            captured["conf"] = conf
+            self._queue = list(queue)
 
         def subscribe(self, topics):  # type: ignore[no-untyped-def]
-            captured_conf["topics"] = topics
+            captured["topics"] = topics
 
         def poll(self, timeout):  # type: ignore[no-untyped-def]
             if not self._queue:
@@ -136,17 +108,67 @@ def test_consume_loop_dispatches_to_correct_handler(monkeypatch, settings) -> No
             return self._queue.pop(0)
 
         def close(self) -> None:
-            captured_conf["closed"] = True
+            captured["closed"] = True
 
     fake_module = types.ModuleType("confluent_kafka")
     fake_module.Consumer = _FakeConsumer  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "confluent_kafka", fake_module)
 
-    with pytest.raises(KeyboardInterrupt):
-        runtime._consume_loop(settings, container)  # type: ignore[arg-type]
 
-    assert topo_calls == [b"topo-1"]
-    assert know_calls == [b"know-1"]
-    assert captured_conf["conf"]["group.id"] == f"{settings.kafka_consumer_group}-{topo_topic}"
-    assert set(captured_conf["topics"]) == {topo_topic, know_topic}
-    assert captured_conf["closed"] is True
+def test_consume_topic_dispatches_under_conventioned_group(monkeypatch, settings) -> None:
+    """Each topic is consumed under its OWN ``<service>-<topic>`` group id and
+    its messages are routed to the supplied handler."""
+    topo_topic = settings.topology_changed_topic
+    seen: list[bytes] = []
+    captured: dict[str, object] = {}
+    _install_fake_consumer(monkeypatch, [_Msg(b"topo-1"), None, _Msg(b"topo-2")], captured)
+
+    with pytest.raises(KeyboardInterrupt):
+        runtime._consume_topic(settings, topo_topic, seen.append)
+
+    # The idle (None) poll is skipped, not a terminator: both real messages dispatch.
+    assert seen == [b"topo-1", b"topo-2"]
+    assert captured["conf"]["group.id"] == f"{settings.kafka_consumer_group}-{topo_topic}"
+    assert captured["topics"] == [topo_topic]
+    assert captured["closed"] is True
+
+
+def test_knowledge_topic_uses_its_own_group(monkeypatch, settings) -> None:
+    """``knowledge.updated`` is consumed under ``trail-builder-knowledge.updated``,
+    NOT the topology group (per-topic group-id convention)."""
+    know_topic = settings.knowledge_updated_topic
+    seen: list[bytes] = []
+    captured: dict[str, object] = {}
+    _install_fake_consumer(monkeypatch, [_Msg(b"know-1"), None], captured)
+
+    with pytest.raises(KeyboardInterrupt):
+        runtime._consume_topic(settings, know_topic, seen.append)
+
+    assert seen == [b"know-1"]
+    assert captured["conf"]["group.id"] == f"{settings.kafka_consumer_group}-{know_topic}"
+    assert captured["conf"]["group.id"] != f"{settings.kafka_consumer_group}-topology.changed"
+    assert captured["topics"] == [know_topic]
+
+
+def test_start_consumers_spawns_one_thread_per_topic(monkeypatch, settings) -> None:
+    """start_consumers launches one daemon consumer thread per consumed topic,
+    each bound to its own topic + handler."""
+    started: list[tuple[str, object]] = []
+
+    def _fake_consume(s, topic, handle):  # type: ignore[no-untyped-def]
+        started.append((topic, handle))
+
+    monkeypatch.setattr(runtime, "_consume_topic", _fake_consume)
+
+    container = types.SimpleNamespace(
+        topology_changed_handler=types.SimpleNamespace(handle=lambda raw: None),
+        knowledge_updated_handler=types.SimpleNamespace(handle=lambda raw: None),
+    )
+    threads = runtime.start_consumers(settings, container)  # type: ignore[arg-type]
+    for t in threads:
+        t.join(timeout=2.0)
+
+    topics = {topic for topic, _ in started}
+    assert topics == {settings.topology_changed_topic, settings.knowledge_updated_topic}
+    assert len(threads) == 2
+    assert all(t.daemon for t in threads)

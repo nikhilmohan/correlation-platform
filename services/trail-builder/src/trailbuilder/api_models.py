@@ -68,12 +68,17 @@ class ListTrailsResponse(BaseModel):
 
 
 class RebuildRequest(BaseModel):
-    """POST /trails/rebuild — both fields required."""
+    """POST /trails/rebuild — both fields required (non-blank).
+
+    ``min_length=1`` makes a blank body field a ``string_too_short`` validation
+    error, which the API's ``RequestValidationError`` handler maps to a 400
+    alongside an outright-missing field (design API table: "400 missing field").
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    snapshotId: str
-    domain: str
+    snapshotId: str = Field(..., min_length=1)
+    domain: str = Field(..., min_length=1)
 
 
 class TrailsBuiltSummary(BaseModel):

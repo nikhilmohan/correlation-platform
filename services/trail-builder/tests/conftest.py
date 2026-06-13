@@ -75,7 +75,12 @@ def settings() -> Settings:
 def engine(settings: Settings):
     eng = make_engine(settings.database_url)
     create_all_in_schema(eng)
-    return eng
+    try:
+        yield eng
+    finally:
+        # Dispose the connection pool so the in-memory SQLite connection is
+        # closed deterministically (silences ResourceWarnings in the suite).
+        eng.dispose()
 
 
 @pytest.fixture

@@ -96,13 +96,15 @@
       },
       "RebuildRequest": {
         "additionalProperties": false,
-        "description": "POST /trails/rebuild \u2014 both fields required.",
+        "description": "POST /trails/rebuild \u2014 both fields required (non-blank).\n\n``min_length=1`` makes a blank body field a ``string_too_short`` validation\nerror, which the API's ``RequestValidationError`` handler maps to a 400\nalongside an outright-missing field (design API table: \"400 missing field\").",
         "properties": {
           "domain": {
+            "minLength": 1,
             "title": "Domain",
             "type": "string"
           },
           "snapshotId": {
+            "minLength": 1,
             "title": "Snapshotid",
             "type": "string"
           }
@@ -404,6 +406,7 @@
             "required": true,
             "schema": {
               "description": "The snapshot the trails were built from.",
+              "minLength": 1,
               "title": "Snapshotid",
               "type": "string"
             }
@@ -415,6 +418,7 @@
             "required": true,
             "schema": {
               "description": "REQUIRED \u2014 the domain that scopes the trails.",
+              "minLength": 1,
               "title": "Domain",
               "type": "string"
             }
@@ -460,6 +464,9 @@
             },
             "description": "Successful Response"
           },
+          "400": {
+            "description": "Missing/blank required query parameter"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -488,6 +495,7 @@
             "required": true,
             "schema": {
               "description": "Typed <objectType>:<id>.",
+              "minLength": 1,
               "title": "Managedobjectid",
               "type": "string"
             }
@@ -499,6 +507,7 @@
             "required": true,
             "schema": {
               "description": "REQUIRED \u2014 the domain that scopes the trails.",
+              "minLength": 1,
               "title": "Domain",
               "type": "string"
             }
@@ -514,6 +523,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "description": "Missing/blank required query parameter"
           },
           "422": {
             "content": {
@@ -573,6 +585,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "description": "Missing/blank required body field"
           },
           "422": {
             "content": {

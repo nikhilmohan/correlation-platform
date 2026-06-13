@@ -13,6 +13,7 @@ import httpx
 
 from ..config import Settings
 from ..models import Boundary, SrlgRule, TrailPolicy
+from ._retry import backoff_before_retry
 from .errors import IntegrationError
 
 _RECORD_ID = "default"
@@ -58,8 +59,9 @@ class KnowledgePolicyClient:
 
     def _fetch(self, domain: str) -> TrailPolicy:
         attempts = max(1, self._settings.http_retry_max)
+        backoff_ms = self._settings.http_retry_backoff_ms
         last: Exception | None = None
-        for _ in range(attempts):
+        for i in range(attempts):
             try:
                 resp = self._client.get(f"/domains/{domain}/trailPolicy/{_RECORD_ID}")
                 resp.raise_for_status()
@@ -67,6 +69,7 @@ class KnowledgePolicyClient:
                 return _policy_from_record(body)
             except (httpx.HTTPError, ValueError, KeyError) as exc:
                 last = exc
+                backoff_before_retry(i, attempts, backoff_ms)
         raise IntegrationError("knowledge", f"trailPolicy fetch for {domain!r} failed: {last}")
 
 

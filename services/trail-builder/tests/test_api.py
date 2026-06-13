@@ -7,7 +7,8 @@ Maps the API-facing acceptance criteria:
 - AC-4  getTrailsForObject completeness (exact set per object).
 - AC-5  getTrail correctness: members, snapshotId, domain; typed <objectType>:<id>.
 - AC-10 trails carry domain; listTrails is domain-scoped (no cross-domain leakage).
-- AC-16 OpenAPI contract: required-param 422 paths + response-body shapes.
+- AC-16 OpenAPI contract: missing/blank required-param -> 400; present-but-invalid
+        -> 422; response-body shapes; frozen paths/operationIds.
 - AC-17 listTrails enumerates all trails for snapshot+domain.
 - AC-18 getTrail members are typed managedObjectIds (visualization-ready).
 - POST /trails/rebuild happy-path + 502 dependency-unavailable.
@@ -160,9 +161,22 @@ def test_get_trails_for_object_domain_scoped(client) -> None:
 
 
 def test_get_trails_for_object_requires_domain(client) -> None:
-    """AC-16: domain is REQUIRED — 422 when omitted."""
+    """AC-16: domain is strictly REQUIRED — a missing ``domain`` is a 400
+    (spec/design Q1+Q7), NOT FastAPI's default 422 and never silently defaulted."""
     resp = client.get("/trails/by-object", params={"managedObjectId": "Port:X"})
-    assert resp.status_code == 422
+    assert resp.status_code == 400
+    body = resp.json()
+    # Structured error body identifying the missing required input.
+    assert any(
+        err.get("type") == "missing" and "domain" in err.get("loc", []) for err in body["detail"]
+    )
+
+
+def test_get_trails_for_object_blank_domain_is_400(client) -> None:
+    """AC-16: a BLANK ``domain`` is treated as effectively missing -> 400
+    (never silently accepted as an empty-domain query)."""
+    resp = client.get("/trails/by-object", params={"managedObjectId": "Port:X", "domain": ""})
+    assert resp.status_code == 400
 
 
 def test_get_trails_for_object_malformed_id_422(client) -> None:
@@ -243,13 +257,25 @@ def test_list_trails_pagination(client) -> None:
 
 
 def test_list_trails_requires_domain(client) -> None:
-    """AC-16: domain is REQUIRED on listTrails -> 422 when omitted."""
+    """AC-16: domain is strictly REQUIRED on listTrails -> 400 when omitted
+    (spec/design Q1+Q7), not the default 422."""
     resp = client.get("/trails", params={"snapshotId": "snap-1"})
-    assert resp.status_code == 422
+    assert resp.status_code == 400
+    assert any(
+        err.get("type") == "missing" and "domain" in err.get("loc", [])
+        for err in resp.json()["detail"]
+    )
+
+
+def test_list_trails_requires_snapshot_id(client) -> None:
+    """AC-16: snapshotId is also a required query param on listTrails -> 400."""
+    resp = client.get("/trails", params={"domain": "core-ip"})
+    assert resp.status_code == 400
 
 
 def test_list_trails_invalid_limit_422(client) -> None:
-    """AC-16: limit out of bounds is rejected (request-schema validation)."""
+    """AC-16: a present-but-invalid input (limit out of bounds) stays a 422 —
+    the 400 mapping is for MISSING/blank required inputs only, not bad values."""
     resp = client.get("/trails", params={"snapshotId": "snap-1", "domain": "core-ip", "limit": 0})
     assert resp.status_code == 422
 
@@ -288,8 +314,9 @@ def test_rebuild_happy_path(settings, engine, producer) -> None:
     assert body["trailIds"]
 
 
-def test_rebuild_missing_domain_422(settings, engine, producer) -> None:
-    """AC-16: rebuild requires both snapshotId and domain -> 422 when domain missing."""
+def test_rebuild_missing_domain_400(settings, engine, producer) -> None:
+    """AC-16: rebuild requires both snapshotId and domain -> 400 when domain is
+    missing from the body (design API table: "400 missing field")."""
     graph = FakeGraph(domain="core-ip")
     with (
         install_topology_stub(TOPO_BASE, graph),
@@ -297,7 +324,23 @@ def test_rebuild_missing_domain_422(settings, engine, producer) -> None:
     ):
         client = _rebuild_client(settings, engine, producer, graph)
         resp = client.post("/trails/rebuild", json={"snapshotId": "snap-9"})
-    assert resp.status_code == 422
+    assert resp.status_code == 400
+    assert any(
+        err.get("type") == "missing" and "domain" in err.get("loc", [])
+        for err in resp.json()["detail"]
+    )
+
+
+def test_rebuild_blank_domain_400(settings, engine, producer) -> None:
+    """AC-16: a blank ``domain`` in the rebuild body is also a 400 (min_length=1)."""
+    graph = FakeGraph(domain="core-ip")
+    with (
+        install_topology_stub(TOPO_BASE, graph),
+        install_knowledge_stub(KNOW_BASE, {"core-ip": DEFAULT_POLICY}),
+    ):
+        client = _rebuild_client(settings, engine, producer, graph)
+        resp = client.post("/trails/rebuild", json={"snapshotId": "snap-9", "domain": ""})
+    assert resp.status_code == 400
 
 
 def test_rebuild_502_on_dependency_unavailable(settings, engine, producer) -> None:

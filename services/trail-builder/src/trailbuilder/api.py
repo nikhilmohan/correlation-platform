@@ -2,14 +2,19 @@
 
 The three trail-query operations have FROZEN paths + response schemas (P1-G4,
 P1-G10, P2-GAP-09). ``domain`` is strictly REQUIRED on ``getTrailsForObject`` and
-``listTrails`` (clear 400 when missing, no default — Q1 + Q7).
+``listTrails`` (clear **400** when missing/blank, no default — Q1 + Q7); a
+``RequestValidationError`` handler maps a missing/blank required input to 400
+(see ``_validation_handler``), leaving present-but-malformed inputs at 422.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from .api_models import (
@@ -43,6 +48,33 @@ def create_app(container: Container) -> FastAPI:
     )
     app.state.container = container
 
+    # Inputs whose absence/blankness is a contract-mandated 400 (vs. a generic
+    # 422). ``missing`` => the required input was not supplied at all;
+    # ``string_too_short`` => a required string was supplied blank (the required
+    # string params carry ``min_length=1``).
+    _MISSING_REQUIRED_KINDS = frozenset({"missing", "string_too_short"})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """Map a *missing/blank required input* to HTTP 400; everything else 422.
+
+        The frozen spec (AC-16) and design (Q1 + Q7, API table) require a **400**
+        when a strictly-required input is omitted or blank — ``domain`` on
+        ``getTrailsForObject``/``listTrails``, ``snapshotId`` on ``listTrails``,
+        and the ``snapshotId``/``domain`` body fields on ``rebuild``. A clear 400
+        surfaces the bug at the caller; it is never silently defaulted. A
+        *present-but-malformed* input (e.g. a ``limit`` out of bounds, or a
+        non-typed ``managedObjectId``) is a different error class and keeps
+        FastAPI's default 422. The two are told apart by the per-error ``type``
+        Pydantic assigns.
+        """
+        errors = exc.errors()
+        missing_required = bool(errors) and all(
+            e.get("type") in _MISSING_REQUIRED_KINDS for e in errors
+        )
+        status = 400 if missing_required else 422
+        return JSONResponse(status_code=status, content={"detail": jsonable_encoder(errors)})
+
     def get_container() -> Container:
         return app.state.container
 
@@ -59,10 +91,16 @@ def create_app(container: Container) -> FastAPI:
         response_model=TrailsForObjectResponse,
         operation_id="getTrailsForObject",
         tags=["trails"],
+        responses={400: {"description": "Missing/blank required query parameter"}},
     )
     def get_trails_for_object(
-        managedObjectId: Annotated[str, Query(description="Typed <objectType>:<id>.")],
-        domain: Annotated[str, Query(description="REQUIRED — the domain that scopes the trails.")],
+        managedObjectId: Annotated[
+            str, Query(min_length=1, description="Typed <objectType>:<id>.")
+        ],
+        domain: Annotated[
+            str,
+            Query(min_length=1, description="REQUIRED — the domain that scopes the trails."),
+        ],
         c: Container = Depends(get_container),
     ) -> TrailsForObjectResponse:
         QUERY_REQUESTS_TOTAL.labels(op="getTrailsForObject").inc()
@@ -83,10 +121,16 @@ def create_app(container: Container) -> FastAPI:
         response_model=ListTrailsResponse,
         operation_id="listTrails",
         tags=["trails"],
+        responses={400: {"description": "Missing/blank required query parameter"}},
     )
     def list_trails(
-        snapshotId: Annotated[str, Query(description="The snapshot the trails were built from.")],
-        domain: Annotated[str, Query(description="REQUIRED — the domain that scopes the trails.")],
+        snapshotId: Annotated[
+            str, Query(min_length=1, description="The snapshot the trails were built from.")
+        ],
+        domain: Annotated[
+            str,
+            Query(min_length=1, description="REQUIRED — the domain that scopes the trails."),
+        ],
         limit: Annotated[int | None, Query(ge=1, le=1000)] = None,
         offset: Annotated[int, Query(ge=0)] = 0,
         c: Container = Depends(get_container),
@@ -126,7 +170,10 @@ def create_app(container: Container) -> FastAPI:
         response_model=TrailsBuiltSummary,
         operation_id="rebuildTrails",
         tags=["trails"],
-        responses={502: {"description": "Topology/Knowledge unavailable"}},
+        responses={
+            400: {"description": "Missing/blank required body field"},
+            502: {"description": "Topology/Knowledge unavailable"},
+        },
     )
     def rebuild(
         request: RebuildRequest,
