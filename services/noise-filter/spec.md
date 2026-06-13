@@ -43,6 +43,24 @@ now persists one aggregate stats record per finalized trail-window clustering ex
 and exposes a read API so the web-ui can present run history in its correlation-stats
 module.
 
+**[MVP] Observed-noise / chatter feedback loop (producer side).** The service learns (via
+DBSCAN) which alarms are noise/chatter in P2, but historically that insight was discarded —
+the sparse outliers it labels as noise were only counted and debug-logged, then dropped, and
+the knowledge was never reused on the live path. This spec adds the PRODUCER side of an
+operator-mediated noise-to-live feedback loop: in addition to the aggregate per-run counts,
+the service now records the recurring **observed-noise / chatter SIGNATURES** it identifies
+— the `(managedObjectId, alarmType)` pairs (the chatter key) that DBSCAN repeatedly labeled
+as noise across runs/windows — each with an occurrence count and last-seen timestamp, and
+exposes them through the run-stats read API. These are the candidate chatter entries an
+operator would later promote into Enrichment's per-source known-chatter list (Enrichment-owned,
+applied live). The loop is: **NF observes noise -> records aggregate signatures -> serves them
+read-only -> the web-ui chatter-management page reads them -> the operator promotes selected
+entries into Enrichment's known-chatter list.** The Noise Filter is strictly the PRODUCER and
+REPORTER: it only writes signatures from its own clustering and serves them read-only. It does
+**not** write to Enrichment, does not auto-promote, and does not change the live path. The
+signatures are aggregate noise telemetry (signature keys + counts), NOT a per-alarm corpus, so
+they stay within the "live-only, no historical corpus" rule (no alarm payloads are stored).
+
 ## Scope
 
 **In scope:**
@@ -97,6 +115,27 @@ module.
   `services/noise-filter/`, per the `architecture.md` API-contract convention. Exact endpoint
   paths, query-parameter names, and response schema are a design-stage decision (see Open
   questions #5).
+- **[MVP] Record observed-noise / chatter SIGNATURES (aggregate).** In addition to the per-run
+  aggregate counts above, when DBSCAN labels an alarm as noise (a sparse outlier dropped from
+  `transactions.clean`), the service records the alarm's **chatter signature** — the
+  `(managedObjectId, alarmType)` pair (plus the alarm's `eventType` and the `trailId` in scope)
+  — into an NF-owned aggregate observed-chatter store. The store keeps ONE row per distinct
+  signature with an **occurrence count** (how many times that signature has been dropped as
+  noise across runs/windows), a `firstSeen` and `lastSeen` timestamp. This is an aggregation over
+  the noise the service already identifies — it stores signature keys + counts, NOT individual
+  alarm records, NOT feature vectors, NOT a per-alarm corpus. It is lightweight noise telemetry
+  consistent with the "live-only, no historical corpus" rule. The write is best-effort and
+  non-blocking on the same terms as the run-stats write: a failure must not prevent the pipeline
+  from emitting `TransactionEvent`s.
+- **[MVP] Expose observed-chatter signatures via the read API.** Extend the read-only run-stats
+  API with an endpoint that returns the recorded observed-chatter signatures ranked by occurrence
+  count (most-frequent noise first), each row exposing `managedObjectId` (optional), `alarmType`,
+  `eventType`, `trailId` (optional), `occurrenceCount`, `firstSeen`, and `lastSeen`. These are the
+  candidate chatter entries an operator would review and promote into Enrichment's known-chatter
+  list via the web-ui. The endpoint is READ-ONLY: the Noise Filter writes signatures only from its
+  own clustering, and the operator-mediated promotion happens elsewhere (web-ui -> Enrichment),
+  not via this service. Exact endpoint path, query-parameter names, and response schema are a
+  design-stage decision (see Open questions #8).
 
 ## Out of scope
 
@@ -138,16 +177,27 @@ module.
   feature config.
 - **Per-alarm persistence** — the service does not persist individual alarm records,
   feature vectors, or the IDs of dropped alarms. The run-stats table stores aggregate
+  counts only, and the observed-chatter table stores aggregate signature keys + occurrence
   counts only. This is lightweight operational telemetry, not a historical alarm corpus,
   and does not violate the architecture's "live-only, no historical corpus" rule (the
-  table stores no alarms — only aggregate run counts).
+  tables store no alarms — only aggregate run counts and chatter signatures + counts).
+- **Promoting observed-chatter into the live known-chatter list / writing to Enrichment** —
+  the service does NOT write to the Enrichment Service, does NOT call any Enrichment API, and
+  does NOT auto-promote any observed-chatter signature into the live path. Enrichment owns the
+  per-source known-chatter list (its own config). Promotion is an OPERATOR-MEDIATED action
+  performed in the web-ui chatter-management page (which reads NF's observed-chatter signatures)
+  and applied to Enrichment's config; the Noise Filter is only the read-only producer/reporter
+  of candidate signatures. The clustering write path (DBSCAN -> `transactions.clean`) is
+  unchanged by this capability.
 - **Write API / mutation of run-stats** — the exposed API is read-only. Run-stats rows
   are written exclusively by the service's own pipeline; no external caller may create,
   update, or delete them.
-- **New Kafka topics or event-model changes** — the run-stats capability adds a
-  service-owned store and a read API. It introduces no new Kafka topic and no change to
-  `AlarmEvent`, `TransactionEvent`, or any other `acp-event-model` payload. The topology
-  hop-distance feature likewise introduces no new topic or payload field.
+- **New Kafka topics or event-model changes** — the run-stats capability and the
+  observed-chatter signature capability each add a service-owned store and read-API surface
+  only. They introduce no new Kafka topic and no change to `AlarmEvent`, `TransactionEvent`, or
+  any other `acp-event-model` payload. The topology hop-distance feature likewise introduces no
+  new topic or payload field. The operator-mediated promotion to Enrichment's known-chatter list
+  is a web-ui-to-Enrichment interaction, not a Kafka topic or event-model change here.
 - **Codebook reconciliation or RCA** — owned by Pattern Manager.
 - **UI implementation** — the web-ui presents NF run stats in its existing
   correlation-stats module; that module's implementation is a web-ui spec/design concern.
@@ -205,14 +255,27 @@ module.
    optional filtering by `trailId` and/or time range (`runTimestamp`). Return aggregate
    stats rows from the owned PostgreSQL table. Validate responses against the service's
    published OpenAPI 3.1 spec.
+10. **Record observed-noise / chatter signatures** — when DBSCAN labels alarms as noise in a
+    finalized trail-window, upsert each dropped alarm's chatter signature
+    (`(managedObjectId, alarmType)` plus `eventType` and `trailId`) into the NF-owned aggregate
+    observed-chatter store: increment its `occurrenceCount`, set `firstSeen` on first sight and
+    advance `lastSeen`. Store ONE row per distinct signature — no per-alarm records. The write is
+    best-effort and non-blocking on the same terms as the run-stats write (task 6): a failure is
+    logged + metric-counted and never blocks `TransactionEvent` emission.
+11. **Serve observed-chatter read API** — respond to read requests for the recorded
+    observed-chatter signatures, ranked by `occurrenceCount` (most-frequent noise first),
+    returning `managedObjectId`, `alarmType`, `eventType`, `trailId`, `occurrenceCount`,
+    `firstSeen`, `lastSeen` per signature. Read-only: the service writes signatures only from its
+    own clustering; promotion into Enrichment's known-chatter list is operator-mediated via the
+    web-ui and out of scope here. Validate responses against the published OpenAPI 3.1 spec.
 
 ## Phase applicability
 
 | Phase | Role | Active/Passive/Idle | Inputs / Outputs in this phase |
 |---|---|---|---|
 | P1 — Topology onboarding | Not involved; topology and trail construction are underway but no alarms are processed by this service. | Idle | — |
-| P2 — Pattern learning | Core worker: collapses post-dedup alarm storms from propagating faults into clean transaction groups so the Pattern Miner receives storm-reduced, incident-dense sequences; records aggregate run-stats per execution for operational visibility. | Active | Consumes: `alarms.enriched`. Produces: `transactions.clean`. Calls: Knowledge Service (DBSCAN params + feature config via its published API); Topology Service (attribute features, when enabled); Trail Builder (hop-distance feature, when enabled). Writes: run-stats table (best-effort). |
-| P3 — Real-time correlation | Not involved in the clustering pipeline. Live alarms are still **deterministically** filtered by Enrichment (dedup/self-clear/flap/chatter) on the live path; only this service's **statistical DBSCAN** stage is skipped live. DBSCAN's job is to clean Phase-2 *training* data for the Miner; real-time noise rejection is handled instead by the Correlation Engine's noise-tolerant pattern/codebook matching (tolerates missing, penalises spurious). The run-stats read API remains available for web-ui queries. | Idle (pipeline); Passive (read API) | Serves: run-stats read API (queried by web-ui). |
+| P2 — Pattern learning | Core worker: collapses post-dedup alarm storms from propagating faults into clean transaction groups so the Pattern Miner receives storm-reduced, incident-dense sequences; records aggregate run-stats per execution for operational visibility; records observed-noise/chatter signatures (aggregate) from the alarms DBSCAN labels as noise. | Active | Consumes: `alarms.enriched`. Produces: `transactions.clean`. Calls: Knowledge Service (DBSCAN params + feature config via its published API); Topology Service (attribute features, when enabled); Trail Builder (hop-distance feature, when enabled). Writes: run-stats table and observed-chatter table (both best-effort). |
+| P3 — Real-time correlation | Not involved in the clustering pipeline. Live alarms are still **deterministically** filtered by Enrichment (dedup/self-clear/flap/chatter) on the live path; only this service's **statistical DBSCAN** stage is skipped live. DBSCAN's job is to clean Phase-2 *training* data for the Miner; real-time noise rejection is handled instead by the Correlation Engine's noise-tolerant pattern/codebook matching (tolerates missing, penalises spurious). The run-stats and observed-chatter read API remains available for web-ui queries (an operator can review P2-accumulated chatter candidates in P3). | Idle (pipeline); Passive (read API) | Serves: run-stats + observed-chatter read API (queried by web-ui). |
 
 ## Contract
 
@@ -230,6 +293,14 @@ module.
     questions #5). Fields exposed per row: `runId`, `runTimestamp`, `trailId`, `snapshotId`,
     `domain`, `windowStart`, `windowEnd`, `eps`, `minSamples`, `windowSize`, `algorithm`,
     `alarmsIn`, `clustersFormed`, `alarmsKept`, `alarmsDropped`, `noiseRatio`.
+  - **[MVP] Observed-chatter read endpoint** — part of the same read-only run-stats API
+    surface (same `/openapi.json`). Returns the recorded observed-noise/chatter signatures
+    ranked by occurrence count. Read-only; NF writes signatures only from its own clustering.
+    Fields exposed per signature: `managedObjectId` (optional), `alarmType`, `eventType`,
+    `trailId` (optional), `occurrenceCount`, `firstSeen`, `lastSeen`. These are the candidate
+    chatter entries the web-ui presents for operator-mediated promotion into Enrichment's
+    known-chatter list. Exact endpoint path, query params, and response schema are a
+    **design-stage decision** (see Open questions #8).
   - A change to this API surface is a contract change requiring an `architecture.md`/spec
     update and human approval, per the architecture convention.
 - **APIs / data consumed from other services:**
@@ -276,6 +347,13 @@ module.
     ephemeral in-process window/dedupe state is separate and unchanged. This is lightweight
     operational telemetry; it stores no alarm payloads and does not constitute a historical
     alarm corpus.
+  - **[MVP] PostgreSQL observed-chatter schema** (NF-owned, internal, single-owner) — one
+    lightweight aggregate table holding ONE row per distinct observed-noise/chatter signature
+    (`(managedObjectId, alarmType)` + `eventType` + `trailId`) with an `occurrenceCount`,
+    `firstSeen`, and `lastSeen`. It stores signature keys + counts only — no individual alarm
+    records, no feature vectors. This is aggregate noise telemetry, not a historical alarm
+    corpus, and stays within the "live-only, no historical corpus" rule. Written only by the
+    service's own clustering pipeline (best-effort); read only via the read API.
 
 ## Non-functional
 
@@ -445,12 +523,47 @@ Each criterion maps to one pytest test.
     `TransactionEvent`s — one per fault cluster — rather than one conflated group. The
     two transaction groups do not share alarm IDs.
 
+19. **Observed-chatter signature recorded from dropped noise.** Given a trail-window
+    containing a cascade cluster plus a coincidental chatty alarm with `managedObjectId` MO,
+    `alarmType` AT and `eventType` ET that DBSCAN labels as noise (dropped from
+    `transactions.clean`), the service records an observed-chatter signature row for
+    `(managedObjectId=MO, alarmType=AT, eventType=ET, trailId=the window trail)` with
+    `occurrenceCount >= 1`, a `firstSeen` and a `lastSeen` timestamp. Alarms that remained in
+    a dense cluster (kept, emitted) do NOT produce an observed-chatter signature.
+
+20. **Observed-chatter occurrence count aggregates across runs.** Given the SAME chatter
+    signature `(managedObjectId, alarmType)` is labeled as noise in N separate trail-window
+    executions, the observed-chatter store holds exactly ONE row for that signature with
+    `occurrenceCount == N` (aggregated, not N separate rows), with `firstSeen` set from the
+    first sighting and `lastSeen` advanced to the most recent sighting.
+
+21. **Observed-chatter read endpoint returns ranked signatures and validates against OpenAPI.**
+    Given recorded observed-chatter signatures with differing occurrence counts, a GET request
+    to the observed-chatter endpoint returns the signatures ranked by `occurrenceCount`
+    descending (most-frequent noise first), each row carrying `managedObjectId` (or null),
+    `alarmType`, `eventType`, `trailId` (or null), `occurrenceCount`, `firstSeen`, and
+    `lastSeen`; the response validates against the service's published OpenAPI 3.1 spec (all
+    required fields present and correctly typed).
+
+22. **Observed-chatter endpoint is read-only.** The observed-chatter endpoint accepts only GET;
+    a POST/PUT/PATCH/DELETE to it returns `405` (or `404` for an undefined route). The service
+    exposes no API that creates, mutates, or promotes observed-chatter signatures — signatures
+    are written exclusively by the clustering pipeline, and promotion into the live known-chatter
+    list is operator-mediated (web-ui -> Enrichment), never performed by this service.
+
+23. **Observed-chatter write failure does not block TransactionEvent emission.** Given a
+    trail-window execution where the observed-chatter write is configured to fail (DB
+    unavailable / simulated write error), the service still emits the expected
+    `TransactionEvent`(s) to `transactions.clean`, logs a structured error, increments the
+    chatter-write-failure metric counter, and raises no unhandled exception / does not stall.
+
 ## Open questions
 
 Items 2–4 are carried forward from the prior spec revision (design-stage, not blockers).
 Items 5–6 are from the run-stats capability addition.
 Item 1 is resolved (see below). Item 7 is new (design-stage note for the hop-distance
-feature, not a blocker).
+feature, not a blocker). Item 8 is new (design-stage note for the observed-chatter
+signature capability, not a blocker).
 
 1. **[RESOLVED] Feature vectorization — topology hop-distance** (was tracked: #48).
    Previously deferred as a design-stage modeling decision, this feature is now promoted
@@ -519,3 +632,14 @@ feature, not a blocker).
    can be implemented (a Trail Builder spec change, not a noise-filter spec change); (c)
    document the chosen traversal mechanism in `design.md`. No new Kafka topic or
    `AlarmEvent`/`TransactionEvent` field is introduced by this feature.
+
+8. **[DESIGN-STAGE] Observed-chatter signature store + endpoint shape.** The spec states the
+   requirement (record `(managedObjectId, alarmType)` chatter signatures from DBSCAN-labeled
+   noise, aggregate an occurrence count + first/last seen, expose them read-only ranked by
+   occurrence) and the fields to expose, but the exact chatter-key definition (whether
+   `managedObjectId` is part of the key or nullable for source-level chatter), the table schema
+   (column names/types, the upsert key, indices), the endpoint path / query params / pagination /
+   ranking tie-break, and the handling of null `managedObjectId` are a **design-stage decision**
+   for the designer to specify in `design.md` and publish in `openapi.json`. No new Kafka topic
+   or event-model change is required, and the service introduces no write path to Enrichment —
+   promotion is operator-mediated via the web-ui.
