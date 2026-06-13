@@ -180,10 +180,15 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
   - The topology service is primarily a **server** (not a client). Its consumers — Trail
     Builder, Codebook Generator, Enrichment, Web UI, and the Simulator (as ingestion client) —
     build their clients against the topology service's published OpenAPI.
-  - If a Knowledge Service integration point is introduced (e.g., to fetch lifting parameters),
-    it must be config-switchable: mock (generated from Knowledge Service's published OpenAPI)
-    for unit tests; real Knowledge Service for integration. The base URL and mock/real toggle
-    must be settable via environment variable.
+  - If a Knowledge Service integration point is introduced (e.g., to fetch lifting parameters
+    such as the per-domain object-type / edge-relation vocabulary), it must be config-switchable:
+    mock (generated from Knowledge Service's published OpenAPI) for unit tests; real Knowledge
+    Service for integration. The base URL and mock/real toggle must be settable via environment
+    variable. The concrete operation this keys off is Knowledge's **frozen**
+    `GET /domains/{domain}/vocabulary` → `{ domain, objectTypes[], relations[], version }`
+    (`404` for an unknown domain); the integration must carry a **real, startable default path**
+    for that operation so the service starts in isolation/test with no per-environment override
+    (see `design.md` for the wired client + default).
 
 - **Data owned:**
   - **NebulaGraph topology graph** — the typed multi-layer topology graph; sole owner; internal
