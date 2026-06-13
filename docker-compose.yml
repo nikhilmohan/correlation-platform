@@ -237,6 +237,94 @@ services:
     networks:
       - cp-net
 
+  # --- Trail Builder — builds policy-bounded correlation trails. Consumes `topology.changed`
+  #     (+ `knowledge.updated` for policy refresh), reads the Topology + Knowledge APIs, persists
+  #     trails durably in its own `trailbuilder` PostgreSQL schema, emits `trails.built`, and
+  #     serves the trail query API. Reads Topology via API only — never NebulaGraph. ---
+  trail-builder:
+    build:
+      context: .
+      dockerfile: services/trail-builder/Dockerfile
+    image: acp/trail-builder:0.1.0
+    container_name: cp-trail-builder
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgresql+psycopg://correlation:correlation@postgres:5432/correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      TOPOLOGY_SERVICE_BASE_URL: "http://topology:8080"
+      TOPOLOGY_SERVICE_MODE: "real"
+      KNOWLEDGE_SERVICE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_SERVICE_MODE: "real"
+      LOG_LEVEL: "INFO"
+    ports:
+      - "8083:8000"      # trail query API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
+  # --- Codebook Generator — compiles the forward-propagation codebook. Consumes `trails.built`,
+  #     reads Knowledge (propagation templates / fault origins / vocabulary) + Topology query API,
+  #     persists the codebook in its own `codebook` PostgreSQL schema, emits `codebook.generated`.
+  #     Per the service design, the consumer and the read API run as SEPARATE processes sharing
+  #     one image: this `codebook-generator` runs `python -m codebook_generator` (yoyo migrate
+  #     then the consumer loop — no HTTP); the `codebook-api` below serves the read API. ---
+  codebook-generator:
+    build:
+      context: .
+      dockerfile: services/codebook-generator/Dockerfile
+    image: acp/codebook-generator:0.1.0
+    container_name: cp-codebook-generator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment: &codebook-env
+      DATABASE_URL: "postgresql+pg8000://correlation:correlation@postgres:5432/correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KNOWLEDGE_PROPAGATION_TEMPLATES_MODE: "real"
+      KNOWLEDGE_PROPAGATION_TEMPLATES_URL: "http://knowledge:8080"
+      KNOWLEDGE_FAULT_ORIGINS_MODE: "real"
+      KNOWLEDGE_FAULT_ORIGINS_URL: "http://knowledge:8080"
+      KNOWLEDGE_ALARM_TYPE_VOCABULARY_MODE: "real"
+      KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL: "http://knowledge:8080"
+      TOPOLOGY_QUERY_MODE: "real"
+      TOPOLOGY_QUERY_URL: "http://topology:8080"
+      TRAIL_BUILDER_MODE: "real"
+      TRAIL_BUILDER_URL: "http://trail-builder:8000"
+      LOG_LEVEL: "INFO"
+    # default CMD = `python -m codebook_generator` (migrate + consumer loop), per the Dockerfile.
+    networks:
+      - cp-net
+
+  # Codebook read API (same image, the FastAPI app) — serves /codebooks/active + /health + /metrics
+  # for the Correlation Engine. Migrations are applied by the consumer service above.
+  codebook-api:
+    image: acp/codebook-generator:0.1.0
+    container_name: cp-codebook-api
+    depends_on:
+      codebook-generator:
+        condition: service_started
+    environment: *codebook-env
+    command: ["uvicorn", "codebook_generator.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8084:8000"      # codebook read API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
   # Simulator — synthetic topology + labeled alarm streams (pure Kafka producer +
   # Topology ingestion API client). Build context is the repo root so the image gets both
   # libs/event-model and the service source. Defaults to a P2 (history) generate run; override
@@ -277,7 +365,7 @@ services:
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
-#   trail-builder, codebook-generator, enrichment,
+#   enrichment,
 #   noise-filter, pattern-manager, correlation-engine, web-ui
 #
 #   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)

@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trail-builder"
+version = "0.1.0"
+description = "Trail Builder Service — policy-bounded correlation trails from the topology graph."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ACP Platform Team" }]
+dependencies = [
+    # Frozen event contract (the repo's Python/Pydantic binding). In dev/CI it is
+    # installed from the local sibling path (see the `dev` extra + tests/conftest.py
+    # bootstrap); pinned by name+version here for the published-package shape.
+    "acp-event-model==0.1.0",
+    "fastapi>=0.111,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "httpx>=0.27,<1",
+    "networkx>=3.3,<4",
+    "SQLAlchemy>=2.0,<3",
+    "psycopg[binary]>=3.1,<4",
+    "alembic>=1.13,<2",
+    "confluent-kafka>=2.4,<3",
+    "prometheus-client>=0.20,<1",
+]
+
+[project.optional-dependencies]
+# Dev/test deps EXCLUDING acp-event-model — that sibling package is installed from
+# its local path by `make dev` / the README install command / tests/conftest.py, since
+# a relative path dependency is not portable inside pyproject metadata.
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+    "ruff>=0.5",
+    "black>=24",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom requires `Depends(...)` as a parameter
+# default; B008 (no function-call defaults) is the documented exception for it.
+"src/trailbuilder/api.py" = ["B008"]
+# The poison-exception tuple is defined before the local imports on purpose (it
+# documents the DLQ contract up-front); E402 is intentional here.
+"src/trailbuilder/kafka_consumer.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "--cov=trailbuilder --cov-report=term-missing"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+omit = ["src/trailbuilder/__main__.py", "src/trailbuilder/migrations/*"]
