@@ -34,14 +34,14 @@ Every spec Task (1–9) is realized below and traceable to concrete modules/flow
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the object types + layer-construction rules. The pack now also emits **`Site` nodes** (the domain-agnostic Site object type, geo attributes) and places each device in a site via a **`LOCATED_AT`** edge, emits **`Interface` nodes** (L3 endpoints) on ports via **`HOSTS`** (Port→Interface) with each interface **`TERMINATES`**-ing its `IPLink` and the IGP adjacency generated **between interfaces** (`ADJACENCY_OVER` Interface→IGPAdjacency, per §5 #91), and populates the well-known **device/connection `attributes`** keys (grounded values). IDs minted via `acp_event_model.ManagedObjectId` → generic `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`; site count / devices-per-site from `SITE_COUNT` / `DEVICES_PER_SITE`; interfaces-per-port from `INTERFACES_PER_PORT` (default 1). |
+| **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the object types + layer-construction rules. The pack emits **`Site` nodes** (the domain-agnostic Site object type, geo attributes) drawn from a **grounded geo catalogue of ≥10 distinct telco PoP cities** (`domains/coreip/geo_catalogue.py` — fix B4) and places each device in a site via a **`LOCATED_AT`** edge, emits **`Interface` nodes** (L3 endpoints) on ports via **`HOSTS`** (Port→Interface) with each interface **`TERMINATES`**-ing its `IPLink` and the IGP adjacency generated **between interfaces** (`ADJACENCY_OVER` Interface→IGPAdjacency, per §5 #91). It populates the well-known **device/connection `attributes`** keys (grounded values) **including the catalogued `igpArea` device key** (fix B2) — each `Node` (and the `Interface`s it hosts) is assigned a grounded IGP area (`area-0` backbone + `area-1`/`area-2`/… edge areas), so the Knowledge `trailPolicy/default` `boundary={type:'igp-area', attributeKey:'igpArea'}` resolves to a real, populated dimension. IDs minted via `acp_event_model.ManagedObjectId` → generic `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`; site count / devices-per-site from `SITE_COUNT` / `DEVICES_PER_SITE`; interfaces-per-port from `INTERFACES_PER_PORT` (default 1); IGP-area count from `IGP_AREA_COUNT`. |
 | **2. Generate snapshot file (versioned contract) + upload to Topology ingestion API (client from OpenAPI; config-switchable mock/real)** | `engine/snapshot_writer.py` serializes the graph to the snapshot JSON, validated against the **single canonical `services/topology/schema/snapshot.schema.json`** (Topology-owned; no independent Simulator copy); `integrations/topology_client.py` is an `httpx` client generated from Topology's published OpenAPI, `POST /topology/snapshots`, reading `snapshotId` from the frozen **200 `SnapshotIngestResponse`**, selected by `TOPOLOGY_API_MODE` (`mock`/`real`) + `TOPOLOGY_API_BASE_URL`. |
-| **3. Load fault-scenario configs (local files or Knowledge Service)** | `config/scenario_loader.py` resolves scenario defs, jitter, noise mix from local files (default/mock) or the Knowledge Service (`integrations/knowledge_client.py`), switchable by `KNOWLEDGE_MODE`. Validated at startup. |
-| **4. Inject labeled fault scenarios (root cause → cascade per §5 templates, jitter); record `{rootCause, children}`** | `engine/scenario_runner.py` + `engine/cascade.py` run the pack's propagation templates forward over the graph closure with jitter; `engine/labels.py` records the ground-truth label per scenario, **incl. the root-cause `alarmType` token (`rootCauseAlarmType`)** so the RCA oracle compares on the canonical join token. Every emitted `AlarmEvent` carries its **canonical `alarmType`** token (a Knowledge `alarmTypeVocabulary` member — `FiberFault`, `LOS`, `LinkDown`, `InterfaceDown`, `AdjDown`, `LSPDown`, `ReachabilityLoss`, `PortDown`) set from the pack's alarm shape; `alarmType` is the cross-source canonical join key, **distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause)**. Templates + per-alarm `alarmType` supplied by `domains/coreip/propagation.py` + `domains/coreip/alarm_shapes.py`. |
+| **3. Load fault-scenario configs (local files or Knowledge Service); demo volume profiles** | `config/scenario_loader.py` resolves scenario defs, jitter, noise mix from local files (default/mock) or the Knowledge Service (`integrations/knowledge_client.py`), switchable by `KNOWLEDGE_MODE`. `config/demo_profiles.py` (fix B3) supplies the **named demo profiles** `p1-demo`/`p2-demo`/`p3-demo` — each a bundle of overridable DEFAULTS (a `TOTAL_ALARMS` target + scenario set + node/site/noise/background settings) selected by `DEMO_PROFILE`; any individual env var still overrides the profile value. Validated at startup. |
+| **4. Inject labeled fault scenarios (root cause → cascade per §5 templates, jitter); record `{rootCause, children}`** | `engine/scenario_runner.py` + `engine/cascade.py` run the pack's propagation templates forward over the graph closure with jitter, **fan-out (`each-target`) and SRLG fate-sharing (`co-failure-group`)**, producing a **10-20-distinct-`alarmType` symptom set per scenario** (fix B1). `engine/labels.py` records the ground-truth label per scenario, **incl. the root-cause `alarmType` token (`rootCauseAlarmType`)** so the RCA oracle compares on the canonical join token. Every emitted `AlarmEvent` carries its **canonical `alarmType`** token drawn from the pack's `alarm_type_vocabulary()` (the **29-token expanded Core IP set** authored in Knowledge — `FiberCut`/`LOS`/`LOF`/`OpticalPowerLow`/`FiberFault`, `PortDown`/`LineCardFault`/`CRCErrors`/`PortFlapping`/`LinkBundleDegraded`, `InterfaceDown`/`InterfaceErrors`/`IPLinkDown`/`LinkDown`, `ISISAdjacencyDown`/`AdjDown`/`OSPFAdjacencyDown`/`BGPPeerDown`/`RouteFlap`/`LDPSessionDown`, `LSPDown`/`FRRSwitchover`/`TETunnelDown`, `VPNReachabilityLoss`/`ReachabilityLoss`/`ServiceDegraded`, `Congestion`/`QueueDrop`/`HighLatency`) set from the pack's alarm shape; `alarmType` is the cross-source canonical join key, **distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause)**. Templates (the 28 Knowledge `propagationTemplate` records) + per-alarm `alarmType` supplied by `domains/coreip/propagation.py` + `domains/coreip/alarm_shapes.py`. |
 | **5. Inject background noise (≥3 noise classes), configurable rate/mix** | `engine/noise.py` interleaves noise alarms from the pack's noise generators (`domains/coreip/noise.py`); rate/mix from config. Noise alarms are excluded from every label's `children` set. |
 | **6. Replay in history (batch → `alarms.history`) or live (wall-clock paced → `alarms.live`)** | `engine/replay.py` with two strategies: `BatchReplay` (fire-and-flush) and `LiveReplay` (wall-clock paced via `PACING_MULTIPLIER`). Topic selected by mode. `integrations/kafka_producer.py` emits `TypedEnvelope[AlarmEvent]`. |
 | **7. Make ground-truth labels retrievable for evaluation** | **Decision (OQ-2): both** — labels are written to a **flat JSONL file** at end-of-run (`labels.export_to_file`) **and** served by a small read-only **FastAPI** surface (`api/labels_api.py`). File export is the canonical, no-broker oracle source; REST is convenience. OpenAPI 3.1 published + `openapi.json` checked in. |
-| **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The pack **declares the domain vocabulary** the snapshot is built from: its **object-type set** (the Core-IP layers — incl. **`Interface`** — **plus the domain-agnostic `Site`**), its **edge-relation vocabulary** (the Core-IP relations — incl. **`HOSTS`** and **`TERMINATES`** — **plus `LOCATED_AT`**), the **`domain` identifier** (`core-ip`) stamped on the snapshot, and the **well-known `attributes` keys** it populates on devices/connections — the same vocabulary Topology validates against (authored canonically in Knowledge; the pack must align). The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
+| **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The pack **declares the domain vocabulary** the snapshot is built from: its **object-type set** (the Core-IP layers — incl. **`Interface`** — **plus the domain-agnostic `Site`**), its **edge-relation vocabulary** (the Core-IP relations — incl. **`HOSTS`** and **`TERMINATES`** — **plus `LOCATED_AT`**), the **`domain` identifier** (`core-ip`) stamped on the snapshot, and the **well-known `attributes` keys** it populates on devices/connections — the same vocabulary Topology validates against (authored canonically in Knowledge; the pack must align — its object-type/relation set matches the seeded `core-ip` `objectTypeVocabulary`/`edgeRelationVocabulary`, its `alarm_type_vocabulary()` is a subset of the **29-token** `core-ip/alarmTypeVocabulary/default`, its propagation templates mirror the **28** `core-ip/propagationTemplate` records, and its `attribute_keys()` include the catalogued **`igpArea`** device key). `domains/coreip/scenario_library.py` declares the **9 grounded fault scenarios** (one per Knowledge `faultOriginType` + SRLG co-failure) and `domains/coreip/geo_catalogue.py` the **≥10 grounded telco sites**. The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
 | **9. `/health` + `/metrics` + structured JSON logs** | `api/health.py`, `api/metrics.py` (FastAPI routes); `obs/logging.py` JSON formatter; `obs/metrics.py` Prometheus registry. |
 
 ## Phase applicability (design view)
@@ -93,8 +93,10 @@ flowchart TB
   subgraph pack["domains/coreip (the ONLY pack for MVP)"]
     tm["topology_model.py<br/>(9 typed layers + edges)"]
     prop["propagation.py<br/>(§5 templates)"]
-    shapes["alarm_shapes.py<br/>(canonical alarmType plus X.733 per alarm type)"]
-    lib["scenario_library.py<br/>(fiber-cut, line-card, port, interface + noise)"]
+    shapes["alarm_shapes.py<br/>(29 canonical alarmTypes plus X.733 per alarm type)"]
+    lib["scenario_library.py<br/>(9 grounded fault scenarios + 4 noise classes)"]
+    geo["geo_catalogue.py<br/>(at least 10 grounded telco PoP sites)"]
+    profiles["demo_profiles.py<br/>(p1-demo / p2-demo / p3-demo)"]
   end
   subgraph integ["integrations (config-switchable mock/real)"]
     topo["topology_client.py<br/>(from Topology OpenAPI)"]
@@ -112,8 +114,10 @@ flowchart TB
   end
 
   main --> settings --> sloader
+  settings --> profiles
   main --> tb --> dp
   tb --> tm
+  tm --> geo
   tb --> sw --> topo
   main --> sr --> casc --> prop
   sr --> noise --> lib
@@ -130,7 +134,9 @@ flowchart TB
   `HOSTS`, `TERMINATES`, and `LOCATED_AT`), `attribute_keys()` (the well-known device/connection keys the pack populates),
   `build_topology(graph, size, rng)`, `propagation_templates()`, `alarm_shape(alarm_type)`,
   `alarm_type_vocabulary()` (the canonical `alarmType` token set the pack emits — must be a subset
-  of the domain's Knowledge `alarmTypeVocabulary`), `scenario_library()`, `noise_classes()`.
+  of the domain's **29-token** Knowledge `alarmTypeVocabulary`), `scenario_library()` (the **9
+  grounded fault scenarios**), `noise_classes()`, `geo_sites()` (the **≥10 grounded telco PoP
+  sites**), and `igp_areas(node_count)` (the grounded IGP-area assignment).
   `object_types()`/`edge_relations()`/`attribute_keys()`/`alarm_type_vocabulary()`/`domain_id()` are
   the **domain vocabulary** the snapshot + alarms are stamped/validated with; the engine depends only
   on this Protocol. `alarm_shape(alarm_type)` returns the full shape for one canonical `alarmType`
@@ -138,9 +144,10 @@ flowchart TB
   — so every alarm the engine emits carries the required `alarmType`.
 - **`engine/topology_builder.py`** — asks the pack to populate a `networkx` `DiGraph` of typed nodes
   and typed edges (including `Site` nodes + `LOCATED_AT` edges and `Interface` nodes + `HOSTS`/
-  `TERMINATES` edges), copying each node/edge's `attributes` map through; mints `managedObjectId`s.
-  Domain-agnostic: it never names a Core-IP type, the `Site`/`Interface` type, or a relation literal
-  — it iterates `pack.object_types()`/`pack.edge_relations()`.
+  `TERMINATES` edges), copying each node/edge's `attributes` map through (incl. the per-`Node`/
+  per-`Interface` **`igpArea`** the pack assigns via `pack.igp_areas(...)`); mints `managedObjectId`s.
+  Domain-agnostic: it never names a Core-IP type, the `Site`/`Interface` type, a relation literal, or
+  an attribute key — it iterates `pack.object_types()`/`pack.edge_relations()`/`pack.attribute_keys()`.
 - **`engine/cascade.py`** — given a root-cause node + the pack's propagation templates, walks the
   graph closure (BFS over the template-relevant edge relations) producing the ordered child alarm
   set. The §5 logic (see Algorithm logical flow) lives in template *data* from the pack; the
@@ -155,19 +162,89 @@ flowchart TB
   nodes and `LOCATED_AT` edges and `Interface` nodes + `HOSTS`/`TERMINATES` edges** (Port HOSTS
   Interface; Interface TERMINATES IPLink; `ADJACENCY_OVER` runs Interface→IGPAdjacency, per §5 #91),
   the well-known `attributes` keys on devices (`vendor`, `model`,
-  `equipmentType`, `role`, `capacity`) and connections (`linkType`, `capacity`, `protectionRole`),
-  the §5 propagation templates, the **canonical `alarmType` tokens** + their X.733 alarm shapes (each
+  `equipmentType`, `role`, `capacity`, **`igpArea`**) and connections (`linkType`, `capacity`,
+  `protectionRole`), the **28** §5 propagation templates (mirroring the seeded
+  `core-ip/propagationTemplate` records — the original 8 + the 20 co-symptom/sub-chain records that
+  lengthen each cascade), the **canonical `alarmType` tokens** + their X.733 alarm shapes (each
   shape pairs an `alarmType` join token with its X.733 `eventType`/`probableCause`/`perceivedSeverity`),
-  the scenario library (fiber-cut, line-card-fault, port-fault, **interface-fault** + ≥3 noise
-  classes). It declares `domain_id() == "core-ip"`, the full object-type/relation/attribute vocabulary
-  stamped on the snapshot (Core-IP object types now include `Interface`; relations include
-  `HOSTS`/`TERMINATES`), and the canonical **`alarm_type_vocabulary()`** = `{FiberFault, LOS,
-  PortDown, InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss}` (a subset of the domain's
-  Knowledge `alarmTypeVocabulary` — the value space every emitted `AlarmEvent.alarmType` is drawn
-  from). These `alarmType` tokens are the canonical join tokens, **not** the lowercase X.733
-  `probableCause` tokens (`lossOfSignal`/`linkDown`) and **not** the X.733 `eventType` categories.
+  the **9-scenario library** (`fiber-cut`, `line-card-fault`, `port-fault`, `interface-fault`,
+  `node-failure`, `ip-link-failure`, `lsp-te-failure`, `routing-adjacency-failure`,
+  `srlg-shared-risk-failure` + ≥3 noise classes — see *Scenario library* below), the
+  **`geo_catalogue.py`** of ≥10 grounded telco PoP sites, and the **`igp_areas`** assignment. It
+  declares `domain_id() == "core-ip"`, the full object-type/relation/attribute vocabulary stamped on
+  the snapshot (object types incl. `Interface`/`Site`; relations incl. `HOSTS`/`TERMINATES`/
+  `LOCATED_AT`; attribute keys incl. `igpArea`), and the canonical **`alarm_type_vocabulary()`** =
+  the **29 expanded tokens** `{LOS, LOF, OpticalPowerLow, FiberCut, FiberFault, PortDown,
+  LineCardFault, CRCErrors, PortFlapping, LinkBundleDegraded, InterfaceDown, InterfaceErrors,
+  IPLinkDown, LinkDown, ISISAdjacencyDown, AdjDown, OSPFAdjacencyDown, BGPPeerDown, RouteFlap,
+  LDPSessionDown, LSPDown, FRRSwitchover, TETunnelDown, VPNReachabilityLoss, ReachabilityLoss,
+  ServiceDegraded, Congestion, QueueDrop, HighLatency}` (= the domain's Knowledge
+  `alarmTypeVocabulary` — the value space every emitted `AlarmEvent.alarmType` is drawn from). These
+  `alarmType` tokens are the canonical join tokens, **not** the lowercase X.733 `probableCause`
+  tokens (`lossOfSignal`/`linkDown`) and **not** the X.733 `eventType` categories.
   `Site`/`LOCATED_AT` are domain-agnostic and reused by any future pack; the geo/attribute *values*
   are Core-IP grounded.
+
+### Scenario library — 9 grounded fault scenarios, each spanning 10-20 alarm types (fix B1)
+
+The pack ships **9 distinct grounded Core IP fault scenarios** (the mvp-achievability gate flagged the
+prior 4 as too small to *demonstrate* the "8-10 patterns each spanning 10-20 alarm types" target).
+Each scenario is **one fault origin** drawn from a Knowledge `faultOriginType` record (the 7
+single-origin records) plus the two structural composites the Codebook Generator instantiates over the
+topology (`srlg-shared-risk-failure` via `MEMBER_OF` co-failure, and the multi-port `line-card-fault`
+fan-out). Each cascade walks the **28 propagation templates** forward over the bounded closure with
+fan-out (`each-target`) and SRLG fate-sharing, yielding a **10-20-distinct-`alarmType` symptom set**
+(the deepest, `fiber-cut`, makes up to ~24 types available; the demo profile's closure depth / IGP-area
+bound selects a 10-20-type slice). The scenarios collectively cover the bulk of the signal volume —
+the **~50-60% pattern-coverage** target (the rest is `BACKGROUND_FRACTION` + `NOISE_RATE`).
+
+| # | Scenario (`scenarioType`) | Fault origin (Knowledge `faultOriginType`) | Root `alarmType` | Cascade head (canonical `alarmType`s, abbreviated) | Distinct-type span |
+|---|---|---|---|---|---|
+| 1 | `fiber-cut` | `FiberSpan` | `FiberCut` | `FiberCut` to `LOS`/`LOF`/`OpticalPowerLow` to `LinkDown`/`IPLinkDown`/`LinkBundleDegraded` to routing fan-out to `LSPDown`/`FRRSwitchover`/`TETunnelDown` to service/QoS tail | ~18-24 (deepest) |
+| 2 | `line-card-fault` | `LineCard` | `LineCardFault` | `LineCardFault` to `PortDown`/`PortFlapping` (each hosted port) to `InterfaceDown`/`CRCErrors`/`InterfaceErrors` to `LinkDown` to routing to LSP to service | ~14-20 (multi-port fan-out) |
+| 3 | `port-fault` | `Port` | `PortDown` | `PortDown` to `InterfaceDown`/`CRCErrors`/`InterfaceErrors` to `LinkDown`/`IPLinkDown` to routing to LSP to service | ~10-15 |
+| 4 | `interface-fault` | `Interface` | `InterfaceDown` | `InterfaceDown` to `LinkDown`/`IPLinkDown` and `ISISAdjacencyDown`/`OSPFAdjacencyDown`/`AdjDown` to `LSPDown` to service | ~10-15 |
+| 5 | `node-failure` | `Node` | `LOS` | node-level `LOS` to all hosted line cards/ports to `InterfaceDown` to `LinkDown` to routing to LSP to service (widest fan-out) | ~14-20 |
+| 6 | `ip-link-failure` | `IPLink` | `IPLinkDown` | `IPLinkDown`/`LinkDown` to `LinkBundleDegraded` (SRLG/bundle) and `LSPDown`/`FRRSwitchover`/`TETunnelDown` to `VPNReachabilityLoss`/`ServiceDegraded`/`Congestion`/`QueueDrop`/`HighLatency` | ~10-14 (routing entry) |
+| 7 | `lsp-te-failure` | `LSP` | `LSPDown` | `LSPDown`/`FRRSwitchover`/`TETunnelDown` to `ReachabilityLoss`/`VPNReachabilityLoss`/`ServiceDegraded`/`Congestion`/`QueueDrop`/`HighLatency` | ~6-10 (service entry) |
+| 8 | `routing-adjacency-failure` | `Interface` (routing-emphasis) | `InterfaceDown` | `InterfaceDown` to the **full routing fan-out** `ISISAdjacencyDown`/`OSPFAdjacencyDown`/`AdjDown`/`BGPPeerDown`/`RouteFlap`/`LDPSessionDown` to `LSPDown` to service | ~12-16 (IGP/BGP/LDP) |
+| 9 | `srlg-shared-risk-failure` | `FiberSpan` + `SRLG` (`MEMBER_OF` co-failure) | `FiberCut` | `FiberCut` fate-shares to **all SRLG co-member** `IPLink`s (`LinkDown`/`LinkBundleDegraded`) to multi-link routing/LSP/service cascade (broadest co-failure) | ~16-22 (fate-sharing) |
+
+Each scenario is injected `SCENARIO_INSTANCES` times (multiple grounded instances → minable support);
+each instance is an independent cascade (fresh ids, possibly a different fault-origin instance) but the
+**same ordered canonical `alarmType` signature** the downstream chain mines on. `SCENARIOS` selects a
+subset (1-9) for subset runs; the default is all 9. Scenario 8 (`routing-adjacency-failure`) is an
+`Interface`-origin scenario whose template selection emphasizes the multi-protocol routing templates
+(`#isis`/`#ospf`/`#bgp`/`#route` + `LDPSessionDown`) so it is distinct from `interface-fault` (which
+emphasizes the link/LSP path). The pack keeps every scenario's emitted token set a subset of its
+`alarm_type_vocabulary()` — and therefore of the seeded Knowledge `alarmTypeVocabulary`.
+
+### Geo-site catalogue — ≥10 grounded telco PoP sites (fix B4)
+
+`domains/coreip/geo_catalogue.py` holds a fixed catalogue of **at least 10 distinct, grounded telco
+PoP cities**, each with a real-ish `{name, latitude, longitude, region}` (no reused or fabricated
+coords). The catalogue is the value source for `Site` node attributes; `SITE_COUNT=N` selects the
+**first N distinct** catalogue entries (N ≤ catalogue size), so `SITE_COUNT=10` yields **10 distinct
+grounded sites** (asserted by criterion 30). Illustrative entries:
+
+| `name` | `latitude` | `longitude` | `region` |
+|---|---|---|---|
+| London Docklands | 51.5033 | -0.0195 | UK-South |
+| Manchester Central | 53.4779 | -2.2426 | UK-North |
+| Amsterdam Zuidoost | 52.3105 | 4.9447 | EU-West |
+| Frankfurt am Main | 50.1109 | 8.6821 | EU-Central |
+| Paris Aubervilliers | 48.9145 | 2.3819 | EU-West |
+| Madrid Alcobendas | 40.5400 | -3.6420 | EU-South |
+| Milan Caldera | 45.4642 | 9.1900 | EU-South |
+| Stockholm Kista | 59.4030 | 17.9510 | EU-North |
+| Dublin Citywest | 53.2870 | -6.4290 | IE |
+| Warsaw Wola | 52.2330 | 20.9840 | EU-East |
+| Zurich Glattbrugg | 47.4290 | 8.5640 | CH |
+| Vienna Floridsdorf | 48.2570 | 16.4000 | AT |
+
+The catalogue holds **12 entries** (≥10 with headroom), all distinct cities with distinct
+coordinates. If a configured `SITE_COUNT` exceeds the catalogue size, startup validation fails fast
+(criterion 18) rather than reusing/fabricating coordinates.
 
 ## Data model / DB schema
 
@@ -214,10 +291,13 @@ classDiagram
   GroundTruthLabel "1" --> "*" EmittedAlarm : rootCause + children
 ```
 
-- `scenarioType` ∈ `{fiber-cut, line-card-fault, port-fault, interface-fault}`; `rootCause` is the root-cause
+- `scenarioType` ∈ the **9-scenario** set `{fiber-cut, line-card-fault, port-fault, interface-fault,
+  node-failure, ip-link-failure, lsp-te-failure, routing-adjacency-failure, srlg-shared-risk-failure}`;
+  `rootCause` is the root-cause
   alarm's `alarmId`; `rootCauseAlarmType` is the root-cause alarm's **canonical `alarmType`** token
-  (a Knowledge `alarmTypeVocabulary` member — e.g. `FiberFault` for fiber-cut, `InterfaceDown` for
-  interface-fault), recorded so the RCA-accuracy oracle compares the injected root cause to
+  (a Knowledge `alarmTypeVocabulary` member — e.g. `FiberCut` for fiber-cut, `InterfaceDown` for
+  interface-fault, `LineCardFault` for line-card-fault, `IPLinkDown` for ip-link-failure,
+  `LSPDown` for lsp-te-failure, `LOS` for node-failure), recorded so the RCA-accuracy oracle compares the injected root cause to
   `correlation.results.rootCauseAlarmType` on the **same token space** (not on `probableCause`);
   `children` is the list of causally-downstream alarm `alarmId`s. Each `EmittedAlarm.alarmType` is
   the alarm's canonical join token, so the oracle can also key the minable signature / ground-truth
@@ -278,13 +358,33 @@ emits (incl. the domain-agnostic **`Site`** / **`LOCATED_AT`** and the Core-IP *
 type with the **`HOSTS`**/**`TERMINATES`** relations) and the well-known `attributes` keys come from
 the **domain pack's vocabulary**, the same vocabulary Topology validates the upload against (authored
 canonically in Knowledge). **Well-known `attributes` keys** — devices: `vendor`, `model`,
-`equipmentType`, `role`, `capacity`; connections: `linkType`, `capacity`, `protectionRole`; `Site`:
-`name`, `latitude`, `longitude`, `region`. The set is open (extensible per domain), so `attributes`
-stays an open object. Referential integrity (every edge endpoint resolves to a node in `nodes[]`;
+`equipmentType`, `role`, `capacity`, **`igpArea`** (the catalogued IGP-area device key — fix B2,
+emitted on each `Node` and the `Interface`s it hosts); connections: `linkType`, `capacity`,
+`protectionRole`; `Site`: `name`, `latitude`, `longitude`, `region`. The set is open (extensible per
+domain), so `attributes` stays an open object. Referential integrity (every edge endpoint resolves to
+a node in `nodes[]`;
 every device has exactly one `LOCATED_AT` edge to a `Site`; every `Port` `HOSTS` ≥1 `Interface` and
 each `Interface` `TERMINATES` exactly one `IPLink`; the IGP adjacency is `ADJACENCY_OVER` an
 `Interface`, never a `Port`/`IPLink` directly; no dangling references) is enforced by
 `snapshot_writer` post-build validation (criteria 1, 14, 25, 26, 28).
+
+#### `igpArea` emission (fix B2 — makes the Knowledge area-bound real)
+
+The pack partitions the topology into a few grounded **IGP areas** and stamps an **`igpArea` device
+attribute** on every `Node` (and on each `Interface` that node hosts), e.g. one `area-0` backbone plus
+`area-1`/`area-2`/… edge areas (`IGP_AREA_COUNT`, default 3). Assignment is grounded: backbone-role
+nodes (`P`/`RR`) land in `area-0`; PE/peering nodes land in a numbered edge area; an interface inherits
+its host node's area (an interface that crosses an area boundary takes the lower-numbered area, the
+backbone convention). Without this, `igpArea` was **inert** — the mvp-achievability gate flagged that
+the seeded `trailPolicy/default` bounds closure on `boundary={type:'igp-area', attributeKey:'igpArea'}`
+but **no P1 producer populated `igpArea`**, so Trail Builder's load-bearing area-prune could not fire
+and trails spanned the whole connected component (AC-2 "no whole-network trail" violated on real data).
+Emitting a grounded `igpArea` (now a catalogued device key in the Knowledge `attributeCatalogue`)
+closes that cross-service inconsistency: Topology carries it as a generic node/interface attribute, and
+Trail Builder bounds closure on it against **Simulator-generated** data (not igpArea-injected
+fixtures). `igpArea` is a **descriptive attribute value**, not an event-model surface — no contract
+change. Criterion 31 asserts every `Node` (and its `Interface`s) carries a non-empty `igpArea` and that
+at least one `area-0` backbone area plus at least one numbered edge area are present.
 
 ## Event handling
 
@@ -458,30 +558,37 @@ abstraction** boundary.
 
 ### Cascade / scenario generation (forward propagation per §5 templates)
 
-Inputs: a chosen `rootCauseNode` (type ∈ fault-origins `{Fiber, LineCard, Port, Interface, Node}`
-from the pack — `Interface` is a first-class fault origin per §5 #91), the pack's per-edge-relation
-propagation templates, the `networkx` graph, and jitter params (from config/Knowledge — never
-hard-coded). Output: an ordered alarm list + a `{rootCause, children}` label.
+Inputs: a chosen `rootCauseNode` (type ∈ fault-origins `{FiberSpan, LineCard, Port, Interface, Node,
+IPLink, LSP}` from the pack — the 7 Knowledge `faultOriginType` records), the pack's per-edge-relation
+propagation templates (the **28** records — multiple records may share one edge relation and emit
+different effect `alarmType`s, so one hop adds several co-symptom types), the `networkx` graph, and
+jitter params (from config/Knowledge — never hard-coded). Output: an ordered alarm list + a
+`{rootCause, children}` label.
 
 ```mermaid
 flowchart TD
-  A[Pick scenario from library:<br/>fiber-cut / line-card-fault / port-fault / interface-fault] --> B[Select root-cause object<br/>of the scenario fault-origin type]
-  B --> C["Emit root-cause alarm<br/>pack.alarm_shape sets canonical alarmType plus X.733 fields<br/>(FiberFault or LOS for fiber-cut, InterfaceDown for interface-fault, ...)"]
+  A["Pick one of 9 scenarios from library:<br/>fiber-cut, line-card-fault, port-fault, interface-fault, node-failure,<br/>ip-link-failure, lsp-te-failure, routing-adjacency-failure, srlg-shared-risk-failure"] --> B[Select root-cause object<br/>of the scenario fault-origin type]
+  B --> C["Emit root-cause alarm<br/>pack.alarm_shape sets canonical alarmType plus X.733 fields<br/>(FiberCut for fiber-cut, InterfaceDown for interface-fault, LineCardFault, IPLinkDown, LSPDown, LOS ...)"]
   C --> D[Seed BFS frontier with root-cause node]
   D --> E{Frontier empty?}
   E -- yes --> Z["Return ordered alarms plus<br/>label rootCause, rootCauseAlarmType, children"]
-  E -- no --> F[Pop node, find outgoing edges<br/>whose relation has a template]
-  F --> G["Apply template per edge relation, child carries the canonical effect alarmType:<br/>RIDES_ON Fiber to LinkDown IPLink<br/>HOSTED_ON LineCard to PortDown<br/>HOSTS PortDown to InterfaceDown<br/>TERMINATES InterfaceDown to LinkDown<br/>ADJACENCY_OVER InterfaceDown to AdjDown<br/>TRAVERSES LinkDown to LSPDown<br/>SERVES LSPDown to ReachabilityLoss VPN"]
-  G --> H[Emit child alarm with the effect alarmType plus its X.733 shape;<br/>raisedAt equals parent.raisedAt plus base_delay plus jitter]
+  E -- no --> F[Pop node, find outgoing edges<br/>whose relation has at least one template]
+  F --> G["Apply ALL templates on each edge relation, each child carries a canonical effect alarmType:<br/>RIDES_ON FiberCut to LOS, LOF, OpticalPowerLow, LinkDown<br/>HOSTED_ON LineCardFault to PortDown, PortFlapping<br/>HOSTS PortDown to InterfaceDown, CRCErrors, InterfaceErrors<br/>TERMINATES InterfaceDown to LinkDown, IPLinkDown<br/>ADJACENCY_OVER to ISISAdjacencyDown, OSPFAdjacencyDown, AdjDown, BGPPeerDown, RouteFlap<br/>TRAVERSES LinkDown to LSPDown, FRRSwitchover, TETunnelDown<br/>SERVES to ReachabilityLoss, VPNReachabilityLoss, ServiceDegraded, Congestion, QueueDrop, HighLatency<br/>MEMBER_OF SRLG fate-sharing to co-member LinkDown, LinkBundleDegraded"]
+  G --> H[Emit each child alarm with the effect alarmType plus its X.733 shape;<br/>raisedAt equals parent.raisedAt plus base_delay plus jitter]
   H --> I[Add child node to frontier;<br/>append child alarmId to label.children]
   I --> E
 ```
 
 Notes:
-- The template effect names (`LinkDown`, `PortDown`, `InterfaceDown`, `AdjDown`, `LSPDown`,
-  `ReachabilityLoss`) **are the canonical `alarmType` tokens** — each is set on the emitted
-  `AlarmEvent.alarmType` (the join key), alongside the X.733 `eventType`/`probableCause` the pack's
-  `alarm_shape` returns. `rootCauseAlarmType` on the label is the root alarm's `alarmType` token.
+- The template effect names (the **29-token** set — `FiberCut`/`LOS`/`LOF`/`OpticalPowerLow`,
+  `PortDown`/`PortFlapping`/`CRCErrors`, `InterfaceDown`/`InterfaceErrors`/`LinkDown`/`IPLinkDown`/
+  `LinkBundleDegraded`, `ISISAdjacencyDown`/`OSPFAdjacencyDown`/`AdjDown`/`BGPPeerDown`/`RouteFlap`/
+  `LDPSessionDown`, `LSPDown`/`FRRSwitchover`/`TETunnelDown`, `ReachabilityLoss`/`VPNReachabilityLoss`/
+  `ServiceDegraded`/`Congestion`/`QueueDrop`/`HighLatency`) **are the canonical `alarmType` tokens** —
+  each is set on the emitted `AlarmEvent.alarmType` (the join key), alongside the X.733
+  `eventType`/`probableCause` the pack's `alarm_shape` returns. `rootCauseAlarmType` on the label is
+  the root alarm's `alarmType` token. Because multiple templates share one edge relation, a single hop
+  contributes several distinct effect types — this is what lets one cascade span 10-20 types.
 - Jitter is applied per inter-alarm gap: `delay = base_delay + gauss(0, jitter_stddev_ms)`. With
   `jitter_stddev_ms=0` the cascade is deterministic (criterion 12). `MEMBER_OF` (SRLG) fate-sharing
   expands a single fiber/link fault to all co-grouped links before propagating onward.
@@ -498,7 +605,7 @@ is **bounded by the pack's grounded model** so the §5 propagation grounding is 
 
 | What is randomized | How | Grounding constraint (never violated) |
 |---|---|---|
-| **Fault-origin instance** per scenario | RNG picks uniformly among the **valid fault-origin-type instances** the pack exposes for that scenario (e.g. a `FiberSpan` for fiber-cut, a `LineCard` for line-card-fault, a `Port` for port-fault, an `Interface` for interface-fault) | only object instances of the scenario's declared fault-origin type are eligible; cascade then follows the pack templates — no impossible origin |
+| **Fault-origin instance** per scenario | RNG picks uniformly among the **valid fault-origin-type instances** the pack exposes for that scenario (a `FiberSpan` for fiber-cut/srlg-shared-risk, a `LineCard` for line-card-fault, a `Port` for port-fault, an `Interface` for interface-fault/routing-adjacency-failure, a `Node` for node-failure, an `IPLink` for ip-link-failure, an `LSP` for lsp-te-failure) | only object instances of the scenario's declared fault-origin type are eligible; cascade then follows the pack templates — no impossible origin |
 | **Child-alarm timing** | `delay = BASE_INTERVAL_MS + gauss(0, JITTER_STDDEV_MS)` per inter-alarm gap | delay clamped ≥ 0; ordering still respects the causal BFS — a child never precedes its parent |
 | **Noise placement / object / class / timing** | RNG selects noise class per `NOISE_MIX`, the target object, and the time offset; `HARD_NOISE_FRACTION` decides near-cascade vs. clearly-separate placement | noise objects/shapes come from the pack's noise library; a noise alarm is **never** added to any label's `children` (criterion 6) |
 | **Scenario-instance ordering / interleaving** | the `SCENARIO_INSTANCES` copies of each scenario and the background alarms are interleaved on the timeline by the RNG | each instance is an independent cascade with its own ids; interleaving never merges two scenarios' children |
@@ -516,7 +623,7 @@ The synthesizer does **not** emit an arbitrary alarm soup — it deliberately pr
 §10 thresholds meaningfully**. Three properties are engineered in, all config-driven with smart
 defaults (a default run is evaluation-grade without tuning):
 
-1. **Repeated pattern instances (minable support).** Each selected scenario is injected
+1. **Repeated pattern instances (minable support).** Each of the **9 selected scenarios** is injected
    `SCENARIO_INSTANCES` times (**default 8**, range 5–10). The **Pattern Miner uses PrefixSpan**,
    which only mines a sequence whose support clears a minimum-support threshold — a *single*
    instance of a cascade can never be mined. Injecting N≈8 grounded repetitions of each scenario
@@ -524,7 +631,9 @@ defaults (a default run is evaluation-grade without tuning):
    (recovered ÷ injected, §10 ≥ 0.80) is measurable rather than vacuously zero. Each instance is an
    independent cascade (fresh ids, possibly different fault-origin instance) but the **same ordered
    canonical `alarmType` signature** (the join token the downstream chain mines on — not
-   `probableCause`), which is exactly what PrefixSpan recovers.
+   `probableCause`), which is exactly what PrefixSpan recovers. With 9 distinct scenarios each
+   spanning 10-20 distinct `alarmType`s, the corpus presents **8-10 distinct minable patterns of
+   10-20 types** — the MVP P2 magnitude target the gate flagged as a Gap under the old 4-scenario pack.
 
 2. **Fair share of non-pattern / background alarms.** `BACKGROUND_FRACTION` (**default 0.3**) of
    emitted alarms belong to **no injected pattern** — valid alarms on real objects that appear in
@@ -548,6 +657,48 @@ score root-cause matches (RCA accuracy), enough *background volume* to reduce (a
 and enough *hard+easy noise* to remove while retaining signal (noise-filter removal/retention). The
 ground-truth labels (§ Data model) and the per-class noise tagging are the oracle that lets the
 integration harness compute each metric.
+
+### Volume control — `TOTAL_ALARMS` target + named demo profiles (fix B3)
+
+The mvp-achievability gate flagged the volume as **un-pinned**: total alarm count was the emergent
+product of scenario count × `SCENARIO_INSTANCES` × fan-out ÷ `signal_fraction`, with shipped defaults
+landing ~350 rather than the demo's ~1000 (P2) / ~500 (P3), and no single knob to hit a target. Two
+mechanisms close this:
+
+1. **`TOTAL_ALARMS` target knob.** When set, the synthesizer **solves for the synthesis parameters that
+   approximately hit the target total**. It computes the expected per-scenario cascade size from the
+   selected scenarios' template fan-out over the chosen topology (a deterministic estimate from the
+   pack model + node/interface counts), then chooses `SCENARIO_INSTANCES` and the background/noise
+   counts so that
+   `total ≈ Σ(scenario_instances × expected_cascade_size) ÷ signal_fraction`
+   where `signal_fraction = 1 − BACKGROUND_FRACTION − NOISE_RATE`. The solve clamps
+   `SCENARIO_INSTANCES` to its valid range (≥5 so support stays minable) and logs the resolved
+   parameters. The emitted `simulator_alarms_emitted_total` metric is then asserted to be within a
+   tolerance band of `TOTAL_ALARMS` (criterion 32). `TOTAL_ALARMS` unset → behaviour is the prior
+   emergent product (back-compatible).
+
+2. **Named, configurable demo profiles.** `config/demo_profiles.py` ships three checked-in profiles —
+   bundles of **overridable** DEFAULTS selected by `DEMO_PROFILE`. A profile sets `TOTAL_ALARMS`, the
+   scenario set, node/site/interface counts, and noise/background fractions to **repeatably hit the
+   demo numbers**; **any individual env var still overrides** the profile's value (profiles are
+   defaults, not locks), and `SCENARIOS` can select a **subset** (1-2 scenarios) for a focused run.
+
+| Profile (`DEMO_PROFILE`) | Phase | `TOTAL_ALARMS` | Noise | Scenarios | Topology pins |
+|---|---|---|---|---|---|
+| `p1-demo` | P1 | — (no alarms) | — | — | `SITE_COUNT=10`, `TOPOLOGY_NODE_COUNT=50`, `INTERFACES_PER_PORT=2`, `IGP_AREA_COUNT=3` — 10 distinct grounded sites with ~5 devices each (non-trivial site drill-down) |
+| `p2-demo` | P2 | **~1000** | **~20%** (`NOISE_RATE=0.2`, `HARD_NOISE_FRACTION=0.4`) | all 9 | `TOPOLOGY_NODE_COUNT=50`, `SITE_COUNT=10`, `BACKGROUND_FRACTION=0.25`, `SCENARIO_INSTANCES` solved for the target, 24h history window |
+| `p3-demo` | P3 | **~500** | ~20% | all 9 | same topology; live-paced (`PACING_MULTIPLIER=1.0`); `SCENARIO_INSTANCES` solved for ~500 |
+
+`p2-demo` lands **~1000 alarms with ~20% noise** and ~55% of volume covered by the 9 mined patterns;
+`p3-demo` lands **~500 live alarms** reusing the same scenario signatures so the Correlation Engine has
+the learned patterns to match. The profiles are **pinned in `integration-thresholds.yaml`** (the
+resolved `TOTAL_ALARMS` band + noise fraction) so the demo volumes are repeatable and asserted by the
+integration harness (criteria 32, 33). A run with **no profile + no `TOTAL_ALARMS`** still produces an
+evaluation-grade default corpus (back-compatible); a **subset run** (`SCENARIOS=fiber-cut` +
+`DEMO_PROFILE` overridden or unset) synthesizes a different, smaller dataset — different syntheses are
+first-class. `p1-demo` is the P1 topology profile: `SITE_COUNT=10` over 50 nodes yields **10 distinct
+grounded sites with a few devices each**, so the web-ui site drill-down to the device graph is
+non-trivial (fix B4).
 
 ```mermaid
 flowchart TD
@@ -667,10 +818,14 @@ env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 
 `settings` / `scenario_loader` validate (fail-fast, criterion 18): jitter ≥ 0, base/background
 interval > 0, noise rate ∈ [0,1], `BACKGROUND_FRACTION` ∈ [0,1], `HARD_NOISE_FRACTION` ∈ [0,1],
-`SCENARIO_INSTANCES` ≥ 1, scenarios ⊆ pack library (incl. `interface-fault`), node count ∈
-[10,200], `SITE_COUNT` ∈ [1, node count] (and `DEVICES_PER_SITE` ≥ 1 when set),
-`INTERFACES_PER_PORT` ∈ [1,8], and (P2)
-`HISTORY_START` < `HISTORY_END`. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal
+`SCENARIO_INSTANCES` ≥ 1 (≥5 when solved for `TOTAL_ALARMS`), scenarios ⊆ the 9-scenario pack
+library, node count ∈ [10,200], `SITE_COUNT` ∈ [1, min(node count, geo-catalogue size = 12)] (and
+`DEVICES_PER_SITE` ≥ 1 when set), `INTERFACES_PER_PORT` ∈ [1,8], `IGP_AREA_COUNT` ∈ [1,8],
+`TOTAL_ALARMS` (when set) ≥ the minable floor (`5 × selected-scenario-count × min-cascade-size ÷
+signal_fraction`), `DEMO_PROFILE` ∈ {`p1-demo`,`p2-demo`,`p3-demo`}, and (P2)
+`HISTORY_START` < `HISTORY_END`. A `SITE_COUNT` above the geo-catalogue size or an infeasible
+`TOTAL_ALARMS` fails fast rather than reusing/fabricating coordinates or producing a sub-minable
+corpus. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal
 structured-log error + non-zero exit (`3`) before any emission (criterion 18).
 
 ### Worked example — topology snapshot file fragment (small N, fiber-cut-ready)
@@ -686,13 +841,13 @@ present (ids in the generic `<objectType>:<id>` scheme):
   "nodes": [
     { "managedObjectId": "Site:LON-01",         "objectType": "Site",         "attributes": {"name": "London Docklands", "latitude": 51.5033, "longitude": -0.0195, "region": "UK-South"} },
     { "managedObjectId": "Site:MAN-01",         "objectType": "Site",         "attributes": {"name": "Manchester Central", "latitude": 53.4779, "longitude": -2.2426, "region": "UK-North"} },
-    { "managedObjectId": "Node:PE1",            "objectType": "Node",         "attributes": {"vendor": "Acme", "model": "XR-9000", "equipmentType": "router", "role": "PE", "capacity": "1.6Tbps"} },
-    { "managedObjectId": "Node:P1",             "objectType": "Node",         "attributes": {"vendor": "Acme", "model": "XR-9000", "equipmentType": "router", "role": "P", "capacity": "1.6Tbps"} },
+    { "managedObjectId": "Node:PE1",            "objectType": "Node",         "attributes": {"vendor": "Acme", "model": "XR-9000", "equipmentType": "router", "role": "PE", "capacity": "1.6Tbps", "igpArea": "area-1"} },
+    { "managedObjectId": "Node:P1",             "objectType": "Node",         "attributes": {"vendor": "Acme", "model": "XR-9000", "equipmentType": "router", "role": "P", "capacity": "1.6Tbps", "igpArea": "area-0"} },
     { "managedObjectId": "LineCard:PE1-LC2",    "objectType": "LineCard",     "attributes": {"vendor": "Acme", "model": "LC-48x100G", "equipmentType": "lineCard", "role": "transport", "capacity": "4.8Tbps"} },
     { "managedObjectId": "Port:PE1-LC2-P3",     "objectType": "Port",         "attributes": {"vendor": "Acme", "model": "QSFP28", "equipmentType": "port", "role": "core", "capacity": "100G"} },
     { "managedObjectId": "Port:P1-LC1-P1",      "objectType": "Port",         "attributes": {"vendor": "Acme", "model": "QSFP28", "equipmentType": "port", "role": "core", "capacity": "100G"} },
-    { "managedObjectId": "Interface:PE1-LC2-P3-if0", "objectType": "Interface", "attributes": {"name": "TenGigE0/2/0/3", "addressFamily": "ipv4", "role": "core"} },
-    { "managedObjectId": "Interface:P1-LC1-P1-if0",  "objectType": "Interface", "attributes": {"name": "TenGigE0/1/0/1", "addressFamily": "ipv4", "role": "core"} },
+    { "managedObjectId": "Interface:PE1-LC2-P3-if0", "objectType": "Interface", "attributes": {"name": "TenGigE0/2/0/3", "addressFamily": "ipv4", "role": "core", "igpArea": "area-1"} },
+    { "managedObjectId": "Interface:P1-LC1-P1-if0",  "objectType": "Interface", "attributes": {"name": "TenGigE0/1/0/1", "addressFamily": "ipv4", "role": "core", "igpArea": "area-0"} },
     { "managedObjectId": "IPLink:PE1_P1",       "objectType": "IPLink" },
     { "managedObjectId": "IGPAdjacency:PE1_P1", "objectType": "IGPAdjacency" },
     { "managedObjectId": "LSP:PE1-PE9-1",       "objectType": "LSP" },
@@ -717,12 +872,16 @@ present (ids in the generic `<objectType>:<id>` scheme):
 }
 ```
 
-`Site:LON-01` carries geo attributes (`name`/`latitude`/`longitude`/`region`); each device node
-carries the well-known device keys (`vendor`/`model`/`equipmentType`/`role`/`capacity`) and is
-placed in a site via a `LOCATED_AT` edge; connection edges carry `linkType`/`capacity`/
-`protectionRole` where sensible. `SITE_COUNT`/`DEVICES_PER_SITE` control how many sites are
-generated and how devices distribute across them; attribute *values* are pack-grounded (a small
-catalogue of realistic vendors/models/regions, config-influenced where useful).
+`Site:LON-01` carries geo attributes (`name`/`latitude`/`longitude`/`region`) from the **grounded
+geo catalogue** (≥10 distinct telco PoP cities — fix B4); each device node carries the well-known
+device keys (`vendor`/`model`/`equipmentType`/`role`/`capacity`) **plus the grounded `igpArea`**
+(here `P1` is the backbone `area-0`, the `PE1` PE router is the edge `area-1` — fix B2) and is
+placed in a site via a `LOCATED_AT` edge; the `Interface`s inherit their host node's `igpArea`;
+connection edges carry `linkType`/`capacity`/`protectionRole` where sensible.
+`SITE_COUNT`/`DEVICES_PER_SITE` control how many sites are generated (from the catalogue, distinct
+coords) and how devices distribute across them; `IGP_AREA_COUNT` controls the IGP-area partition;
+attribute *values* are pack-grounded (the geo catalogue + realistic vendors/models/regions,
+config-influenced where useful).
 
 The fragment also shows the §5 #91 **Interface layer**: `Port:PE1-LC2-P3` `HOSTS`
 `Interface:PE1-LC2-P3-if0` (an L3 endpoint, default `INTERFACES_PER_PORT=1`), that interface
@@ -855,9 +1014,15 @@ each metric:
 | Noise-filter removal | noise alarms are tagged (label-absence) so oracle counts injected-noise removed by Noise Filter | ≥ 0.90 |
 | Noise-filter retention | scenario alarms (in some label) retained after Noise Filter | ≥ 0.95 |
 | Pattern quality | injected scenario signatures (from labels) vs. patterns recovered by Pattern Miner | ≥ 0.80 |
+| **Distinct patterns × per-pattern span** (fix B1) | count of distinct labeled scenario signatures and the distinct-`alarmType` span of each (from `/labels` + the per-alarm `alarmType` records) | **8-10 patterns, each 10-20 distinct types** |
+| **`p2-demo` total volume** (fix B3) | `simulator_alarms_emitted_total` after a `DEMO_PROFILE=p2-demo` run | **~1000 (± tolerance), ~20% noise** |
+| **`p3-demo` live volume** (fix B3) | `simulator_alarms_emitted_total{topic="alarms.live"}` after a `DEMO_PROFILE=p3-demo` run | **~500 (± tolerance)** |
+| **Pattern coverage of volume** (fix B1) | scenario (in-some-label) alarms ÷ total emitted | **~50-60%** |
+| **Distinct grounded sites** (fix B4) | distinct `Site` nodes with distinct grounded geo at `SITE_COUNT=10` | **= 10 distinct** |
 
 These thresholds are surfaced to (not asserted by) the simulator; the `integration-test` harness
-reads them from config and asserts them.
+reads them from `integration-thresholds.yaml` and asserts them. The `p2-demo`/`p3-demo` volume bands
+and the noise fraction are **pinned in that file** so the demo numbers are repeatable and gated.
 
 ## Error handling
 
@@ -892,6 +1057,10 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | Interfaces per port (#91) | (a) fixed 1; (b) random; (c) `INTERFACES_PER_PORT` knob (default 1) | **`INTERFACES_PER_PORT` knob, default 1** — one L3 endpoint per port is the realistic Core-IP default and keeps the worked example simple, while the knob lets a run generate multiple sub-interfaces per port for richer cascades without code change. Fixed-1 rejected (no flexibility); fully-random rejected (non-reproducible without a seed and harder to assert). |
 | Canonical join token for ground-truth / minable signature | (a) key off `probableCause` (X.733); (b) key off `eventType` (X.733 category); (c) key off the canonical `alarmType` join token | **(c) `alarmType`.** `architecture.md` pins `alarmType` as the **single canonical join key** the whole mining → codebook → correlation chain joins on (its value space = Knowledge `alarmTypeVocabulary`); `correlation.results.rootCauseAlarmType` is on that token space. Keying the emitted-alarm join token + the label `rootCauseAlarmType` + the minable signature off `alarmType` lets the RCA oracle compare like-for-like. (a)/(b) rejected — `probableCause`/`eventType` are X.733 fields with different meanings and would mis-align the oracle and the mined signature against the canonical chain. |
 | `/labels` carries the root-cause join token (Q1) | (a) keep `{...,children[]}` only; (b) add `rootCauseAlarmType`; (c) embed full per-child `alarmType` arrays | **(b) add `rootCauseAlarmType`** (and each `EmittedAlarm` already carries its `alarmType`). RCA accuracy compares the injected root cause to `correlation.results.rootCauseAlarmType` — the label must expose the root-cause token to compare on the same space. (a) rejected (no token to compare). (c) deferred — children's `alarmType`s are available via the per-alarm records / minable signature; a per-child array on the label is redundant for the RCA oracle, kept out to keep the frozen `/labels` shape minimal. |
+| Scenario-pack size (fix B1) | (a) keep the 4 scenarios; (b) re-baseline the target to "4 patterns of 5-7 types"; (c) extend to 9 grounded scenarios over the expanded 29-token vocabulary / 28 templates | **(c) 9 grounded scenarios.** The mvp-achievability gate marked the 4-scenario pack a hard Gap for the "8-10 patterns × 10-20 types" target (arithmetically impossible on the old 8-token vocab). Per the locked product-owner decision (extend the pack), the pack ships **one scenario per Knowledge `faultOriginType` (7) + SRLG co-failure + line-card fan-out**, each spanning 10-20 distinct types over the seeded 28 templates. (a)/(b) rejected — they leave the demonstration materially thinner than the MVP target. This is **pack content aligned to the already-merged expanded Knowledge vocabulary** — no contract/event-model change. |
+| Volume control (fix B3) | (a) leave volume emergent; (b) one rigid 1000-alarm config; (c) a `TOTAL_ALARMS` target knob + overridable named demo profiles | **(c) target knob + profiles.** The gate flagged volume as un-pinned (defaults landed ~350, never asserted ~1000/~500). A `TOTAL_ALARMS` knob solves `SCENARIO_INSTANCES`/background to approximately hit a target, and `p1-demo`/`p2-demo`/`p3-demo` profiles pin the demo numbers as **overridable** defaults (subset-runnable). (a) rejected (not repeatable, un-assertable); (b) rejected (rigid — no subset/override). Profiles + the band are pinned in `integration-thresholds.yaml`. |
+| Geo-site grounding (fix B4) | (a) reuse a 2-3 site placeholder catalogue; (b) generate random coords; (c) a fixed catalogue of ≥10 distinct grounded telco PoP cities | **(c) ≥10 grounded sites (12 shipped).** The gate flagged that `SITE_COUNT=10` over a 2-3 entry placeholder catalogue would reuse/fabricate coords. A 12-entry catalogue of distinct telco PoP cities (lat/long/region) means `SITE_COUNT=10` yields **10 distinct grounded sites**; `p1-demo` pins `SITE_COUNT=10` over 50 nodes for non-trivial drill-down. (a) rejected (reuse), (b) rejected (not grounded). |
+| `igpArea` emission (fix B2) | (a) leave `igpArea` unpopulated (boundary inert); (b) set `trailPolicy boundary:{type:'none'}` (defer area-bounding); (c) emit a grounded per-`Node`/`Interface` `igpArea` | **(c) emit grounded `igpArea`.** The gate flagged the area-bound as inert — the seeded `trailPolicy` bounds on `igpArea` but no P1 producer populated it, so Trail Builder's area-prune could not fire (whole-network trails on real data). `igpArea` is now a catalogued device key (Knowledge fix A2); the pack emits a grounded area per node/interface (`area-0` backbone + numbered edge areas). (a) rejected (keeps the bug), (b) rejected (loses the designed area-bounding the demo needs). Descriptive attribute value — no contract change. |
 
 ## Test plan
 
@@ -938,6 +1107,17 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 28 | **Generated topology includes `Interface` nodes + `HOSTS`/`TERMINATES` edges (§5 #91, configurable).** The pack emits `Interface` nodes on ports (`Port` `HOSTS` `Interface`), each `Interface` `TERMINATES` its `IPLink`, and the IGP adjacency runs `ADJACENCY_OVER` an `Interface` (not a `Port`/`IPLink`); count per port driven by `INTERFACES_PER_PORT` (default 1). | `test_topology_has_interfaces_and_hosts_terminates` | snapshot has ≥1 `Interface` node; every `Interface` has exactly one incoming `HOSTS` from a `Port` and ≥1 `TERMINATES` to an existing `IPLink`; every `ADJACENCY_OVER` edge originates at an `Interface` (never a `Port`/`IPLink`); `INTERFACES_PER_PORT=N` → N interfaces per port; passes the canonical schema (generic id pattern; `Interface`/`HOSTS`/`TERMINATES` tokens validated semantically by Topology against its domain vocabulary) + `acp_event_model.validate` for every `Interface:*` moid; no dangling refs |
 | 29 | **Interface-fault scenario produces the InterfaceDown→LinkDown→AdjDown cascade with ground-truth label (§5 #91).** The pack's scenario library includes `interface-fault`; injecting it yields a cascade rooted on an `Interface` whose `children` follow `TERMINATES ⇒ ADJACENCY_OVER ⇒ TRAVERSES ⇒ SERVES`. | `test_interface_fault_cascade_matches_templates` | `interface-fault` selectable in `SCENARIOS`; root alarm objectType=`Interface` (`interfaceDown`); children include `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`(VPNService) in causal order; label `rootCause`=Interface alarm, `rootCauseManagedObjectId` an `Interface:*`, `children`=all downstream; distinct from fiber-cut/line-card/port labels by root object type |
 
+**MVP-grounding criteria (fixes B1-B5 — pack content + config + ground-truth; no contract change).**
+
+| # | Acceptance criterion (MVP-grounding) | Test | Asserts |
+|---|---|---|---|
+| 30 | **Pack ships 9 distinct grounded scenarios, each spanning 10-20 distinct `alarmType`s (fix B1).** The scenario library has 9 grounded scenarios (one per Knowledge `faultOriginType` + SRLG + line-card fan-out); each injected scenario's symptom set spans **at least 10 and at most ~24 distinct canonical `alarmType` tokens**. | `test_pack_has_9_scenarios_each_10_to_20_types` | `pack.scenario_library()` returns the 9 named scenarios; for each, a single injected instance's distinct-`alarmType` count over the layered fixture topology is in `[10, 24]` (deepest `fiber-cut`/`srlg-shared-risk` near 18-24, shallower near 10-14); every emitted token ∈ the 29-token `alarm_type_vocabulary()`; the 9 root `alarmType`s are distinct per scenario |
+| 31 | **Every Node (and its Interfaces) carries a grounded `igpArea`; backbone + edge areas present (fix B2).** The pack assigns a grounded `igpArea` device attribute to each `Node` and the `Interface`s it hosts; at least one `area-0` backbone area and one numbered edge area exist. | `test_igp_area_emitted_on_nodes_and_interfaces` | every `Node` node has a non-empty `igpArea` ∈ the pack's area set; every `Interface` inherits its host node's `igpArea`; ≥1 node in `area-0` and ≥1 in a numbered edge area; `IGP_AREA_COUNT=N` → N distinct areas; `igpArea` is in the snapshot `attributes` and passes the canonical schema (descriptive value, validated semantically by Topology against the `attributeCatalogue` deviceKey, not a JSON-Schema enum) |
+| 32 | **`TOTAL_ALARMS` target + `p2-demo`/`p3-demo` profiles hit the demo volumes (fix B3).** With `TOTAL_ALARMS` set (or a demo profile selected) the synthesizer solves synthesis params so the emitted total is within tolerance of the target; `p2-demo`≈1000, `p3-demo`≈500. | `test_total_alarms_and_demo_profiles_hit_targets` | `TOTAL_ALARMS=1000` → `simulator_alarms_emitted_total` within ±15% of 1000 with `SCENARIO_INSTANCES` clamped ≥5; `DEMO_PROFILE=p2-demo` → ~1000 total at ~20% noise on `alarms.history`; `DEMO_PROFILE=p3-demo` → ~500 on `alarms.live`; an individual env var (e.g. `SCENARIO_INSTANCES`) overrides the profile value; `SCENARIOS=fiber-cut` runs the subset only |
+| 33 | **Demo volumes + pattern coverage are pinned in `integration-thresholds.yaml` (fix B1/B3).** The `p2-demo` (~1000)/`p3-demo` (~500) volume bands, the ~20% noise fraction, and the ~50-60% pattern-coverage target are in the harness config (not hard-coded). | `test_demo_volume_thresholds_in_config` | `integration-thresholds.yaml` carries the `p2-demo`/`p3-demo` total bands, noise fraction, distinct-pattern count (8-10), per-pattern span (10-20), and coverage (~0.50-0.60); the harness reads them; none are literals in service code |
+| 34 | **≥10 distinct grounded geo sites; `SITE_COUNT=10` yields 10 distinct (fix B4).** The geo catalogue holds ≥10 distinct grounded telco PoP entries (distinct coords); `SITE_COUNT=10` produces 10 `Site` nodes with 10 distinct `{name,latitude,longitude,region}`. | `test_geo_catalogue_10_distinct_sites` | `pack.geo_sites()` has ≥10 entries, all with distinct `(latitude,longitude)` and distinct `name`; a `SITE_COUNT=10` run yields exactly 10 `Site` nodes, 10 distinct grounded geo tuples (no reused/fabricated coords); `SITE_COUNT` above catalogue size fails fast (criterion 18) |
+| 35 | **Ground-truth supports the oracle metrics on the richer pack (fix B5).** Labels (incl. `rootCauseAlarmType` from the expanded vocab) and per-alarm `alarmType`/noise tags let the oracle compute noise-removal, retention, pattern-quality, alarm-reduction, and RCA accuracy over all 9 scenarios. | `test_ground_truth_supports_oracle_metrics` | for a full `p2-demo` run: every scenario has a label with `rootCauseAlarmType` ∈ the 29-token vocab equal to its root alarm's `alarmType`; noise/background alarms appear in no label `children`; the five §10 metrics are computable from labels + `simulator_alarms_emitted_total{scenario,alarmType}` (oracle dry-run returns finite values for all five) |
+
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
@@ -952,12 +1132,17 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 7 | **Failure — broker unavailable** | `--phase p2`, bad `KAFKA_BOOTSTRAP_SERVERS` | produce errors logged + counted; `/health` non-200; run fails non-zero; no silent drop |
 | 8 | **Failure — invalid scenario config** | unknown scenario / negative jitter | startup validation aborts run with structured error, zero events emitted |
 | 9 | **Noise-only / scenario-only edges** | `NOISE_RATE=0` then high noise | rate 0 → zero noise alarms; high → labels still pure (noise never in `children`) |
-| 10 | **Evaluation-grade default corpus** | `--phase p2` with only `KAFKA_BOOTSTRAP_SERVERS` (all defaults) | corpus has ≥5 instances per scenario (minable), ~30% background, ~20% noise (~40% hard) over a 24h window; sufficient to compute all five §10 thresholds against the labels |
+| 10 | **Evaluation-grade default corpus** | `--phase p2` with only `KAFKA_BOOTSTRAP_SERVERS` (all defaults) | corpus has ≥5 instances per **each of the 9 scenarios** (minable), ~30% background, ~20% noise (~40% hard) over a 24h window; sufficient to compute all five §10 thresholds against the labels |
 | 11 | **Partial path — zero scenarios but background/noise on** | `SCENARIOS=` empty, background/noise > 0 | no labels written; background+noise still emitted; no alarm in any `children`; pattern-quality oracle correctly recovers nothing (no false patterns) |
 | 12 | **P1 snapshot with sites + attributes → Topology** | `--phase p1`, `SITE_COUNT=3`, real/mock Topology | snapshot has 3 `Site` nodes (geo attrs), every device `LOCATED_AT` a site, device/connection well-known `attributes` populated; passes the canonical Topology schema; Topology accepts it (validates types/relations incl. `Site`/`LOCATED_AT` semantically against the domain vocabulary) and returns **200 `SnapshotIngestResponse`** with `snapshotId` |
 | 13 | **Partial path — single site** | `--phase p1`, `SITE_COUNT=1` | all devices `LOCATED_AT` the one `Site`; still schema-valid; no unplaced device, no second site |
 | 14 | **P1 snapshot with Interface layer → Topology** | `--phase p1`, `INTERFACES_PER_PORT=1`, real/mock Topology | snapshot has `Interface` nodes (`Port` HOSTS `Interface`, `Interface` TERMINATES `IPLink`, IGP adjacency `ADJACENCY_OVER` the interface); passes schema; Topology accepts the `Interface`/`HOSTS`/`TERMINATES` vocabulary and mints `snapshotId` |
 | 15 | **P2 interface-fault corpus → oracle** | `--phase p2`, `SCENARIOS=interface-fault` (+ optional others) + noise | interface-fault cascades on `alarms.history` rooted on `Interface` with `InterfaceDown→LinkDown→AdjDown→LSPDown→ReachabilityLoss` children; labels file records the `Interface` root cause; RCA/pattern oracle scores it like any other scenario |
+| 16 | **`p2-demo` full pack → ~1000 alarms / 8-10 patterns of 10-20 types (fix B1/B3)** | `--phase p2`, `DEMO_PROFILE=p2-demo` | ~1000 alarms on `alarms.history` (within band) at ~20% noise; 9 distinct labeled scenario signatures, each spanning 10-20 distinct `alarmType`s; ~50-60% of volume covered by the scenarios; the volume + coverage are within the pinned `integration-thresholds.yaml` bands |
+| 17 | **`p3-demo` live → ~500 alarms reusing learned patterns (fix B3)** | `--phase p3`, `DEMO_PROFILE=p3-demo` | ~500 alarms on `alarms.live` (within band), zero on history; same 9 scenario signatures as P2 (so the Correlation Engine has the learned patterns to match); labels retrievable |
+| 18 | **P1 `p1-demo` → 10 distinct grounded sites + igpArea (fix B2/B4)** | `--phase p1`, `DEMO_PROFILE=p1-demo` (SITE_COUNT=10, 50 nodes), real/mock Topology | snapshot has **10 distinct `Site` nodes** with 10 distinct grounded geo tuples and ~5 devices per site; every `Node` (and its `Interface`s) carries a grounded `igpArea` (`area-0` + numbered edge areas); passes the canonical schema; Topology accepts it and Trail Builder's area-prune fires on this data (non-trivial, area-bounded trails) |
+| 19 | **Subset run — single scenario (fix B3 flexibility)** | `--phase p2`, `SCENARIOS=fiber-cut`, no profile | only `fiber-cut` cascades + background/noise emitted; exactly one labeled scenario type; a different, smaller synthesized dataset than the full pack; still computable against labels |
+| 20 | **Failure — SITE_COUNT above catalogue / TOTAL_ALARMS infeasible** | `SITE_COUNT=20` (catalogue=12) or `TOTAL_ALARMS=5` (below minable floor) | startup validation fails fast (exit 3) with a structured error naming the bad knob; zero events emitted (no reused/fabricated coords, no sub-minable corpus silently produced) |
 
 ## Config & observability
 
@@ -975,13 +1160,16 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | Topology API base URL | `TOPOLOGY_API_BASE_URL` | unset (required only when mode=`real`) | real ingestion endpoint |
 | Knowledge mode | `KNOWLEDGE_MODE` | `local` | scenario config from local file vs Knowledge Service |
 | Knowledge API base URL | `KNOWLEDGE_API_BASE_URL` | unset (required only when mode=`real`) | Knowledge Service endpoint |
-| Topology size | `TOPOLOGY_NODE_COUNT` | `20` | `Node` count (range 10–200); other layers scale per pack |
-| Site count | `SITE_COUNT` | `3` | number of `Site` nodes (geo attrs); devices placed via `LOCATED_AT` (range 1–node count) |
+| **Demo profile** | `DEMO_PROFILE` | unset (no profile) | named bundle of overridable defaults — `p1-demo`/`p2-demo`/`p3-demo` (fix B3); any individual env var overrides the profile value |
+| **Total-alarm target** | `TOTAL_ALARMS` | unset → emergent | when set, synthesizer solves `SCENARIO_INSTANCES`/background to approximately hit the target total (fix B3); `p2-demo`≈1000, `p3-demo`≈500 |
+| Topology size | `TOPOLOGY_NODE_COUNT` | `20` (`p1/p2/p3-demo`: `50`) | `Node` count (range 10–200); other layers scale per pack |
+| Site count | `SITE_COUNT` | `3` (`*-demo`: `10`) | number of `Site` nodes (geo attrs); devices placed via `LOCATED_AT` (range 1–min(node count, geo-catalogue size=12)) |
 | Devices per site | `DEVICES_PER_SITE` | unset → derived (`ceil(devices / SITE_COUNT)`) | target devices per site; when set, `SITE_COUNT` adjusts to fit |
-| Interfaces per port | `INTERFACES_PER_PORT` | `1` | `Interface` nodes hosted per `Port` (§5 #91; range 1–8); each TERMINATES an IPLink + carries the adjacency |
+| Interfaces per port | `INTERFACES_PER_PORT` | `1` (`*-demo`: `2`) | `Interface` nodes hosted per `Port` (§5 #91; range 1–8); each TERMINATES an IPLink + carries the adjacency |
+| **IGP area count** | `IGP_AREA_COUNT` | `3` | number of grounded IGP areas the pack assigns (fix B2; `area-0` backbone + numbered edge areas); range 1–8 |
 | Random seed | `SIM_SEED` | unset → random (logged) | deterministic generation when set; reproducible by re-supplying logged seed |
-| Scenario selection | `SCENARIOS` | `fiber-cut,line-card-fault,port-fault,interface-fault` | which scenarios to inject |
-| Scenario-instance count | `SCENARIO_INSTANCES` | `8` (range 5–10) | injections **per** scenario; default guarantees PrefixSpan-minable support |
+| Scenario selection | `SCENARIOS` | all 9: `fiber-cut,line-card-fault,port-fault,interface-fault,node-failure,ip-link-failure,lsp-te-failure,routing-adjacency-failure,srlg-shared-risk-failure` | which scenarios to inject; subset (1-9) for focused runs |
+| Scenario-instance count | `SCENARIO_INSTANCES` | `8` (range 5–10; solved when `TOTAL_ALARMS`/profile set) | injections **per** scenario; default guarantees PrefixSpan-minable support |
 | Timing jitter | `JITTER_STDDEV_MS` | `300` | Gaussian std-dev of per-gap delay, on top of base interval |
 | Base interval | `BASE_INTERVAL_MS` | `400` | base inter-alarm spacing inside a cascade |
 | Background interval | `BACKGROUND_INTERVAL_MS` | `2000` | mean spacing between background/non-pattern alarms |
@@ -997,21 +1185,29 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | HTTP port | `HTTP_PORT` | `8080` | `/health`, `/metrics`, `/labels` |
 | Log level | `LOG_LEVEL` | `INFO` | structured-log verbosity |
 
-These defaults make a default P2 run produce 8 instances each of **4** scenarios (fiber-cut,
-line-card-fault, port-fault, interface-fault) + ~30% background + 20% noise (40% of it hard) spread
-over a 24h window — an evaluation-grade set with no tuning. The P1 snapshot generated with defaults
-has 3 `Site` nodes with every device `LOCATED_AT` one of them, one `Interface` per `Port`
-(`INTERFACES_PER_PORT=1`) `HOSTS`-ed by the port and `TERMINATES`-ing its `IPLink` with the IGP
-adjacency `ADJACENCY_OVER` the interface, and the well-known device/connection `attributes` keys
-populated from the pack's grounded catalogue.
+These defaults make a default P2 run produce 8 instances each of the **9** scenarios (fiber-cut,
+line-card-fault, port-fault, interface-fault, node-failure, ip-link-failure, lsp-te-failure,
+routing-adjacency-failure, srlg-shared-risk-failure) + ~30% background + 20% noise (40% of it hard)
+spread over a 24h window — an evaluation-grade set with no tuning. Selecting `DEMO_PROFILE=p2-demo`
+pins it to **~1000 alarms at ~20% noise** (and `p3-demo` to **~500** live); `TOTAL_ALARMS` hits an
+arbitrary target. The P1 snapshot generated with defaults
+has 3 `Site` nodes (from the grounded geo catalogue) with every device `LOCATED_AT` one of them, one
+`Interface` per `Port` (`INTERFACES_PER_PORT=1`) `HOSTS`-ed by the port and `TERMINATES`-ing its
+`IPLink` with the IGP adjacency `ADJACENCY_OVER` the interface, every `Node` (and its `Interface`s)
+stamped with a grounded `igpArea` (`IGP_AREA_COUNT=3`), and the well-known device/connection
+`attributes` keys populated from the pack's grounded catalogue. `DEMO_PROFILE=p1-demo` pins
+`SITE_COUNT=10` over 50 nodes → **10 distinct grounded sites** with a few devices each.
 - **`/health`** — 200 when started + Kafka connected; non-200 otherwise.
 - **`/metrics`** — Prometheus exposition incl. `simulator_alarms_emitted_total{topic,scenario,alarmType}`
   (every emitted alarm counted under its canonical `alarmType`),
   `simulator_scenarios_injected_total{scenario}` (counts instances per scenario),
   `simulator_background_alarms_total`, `simulator_noise_alarms_total{class}`,
   `simulator_hard_noise_alarms_total`, `simulator_produce_errors_total`,
-  `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`, `simulator_snapshot_sites`,
-  `simulator_snapshot_interfaces` (count of `Interface` nodes),
+  `simulator_pacing_drift_ms`, `simulator_snapshot_nodes`, `simulator_snapshot_sites`
+  (distinct grounded sites), `simulator_snapshot_interfaces` (count of `Interface` nodes),
+  `simulator_snapshot_igp_areas` (distinct `igpArea` values emitted),
+  `simulator_target_alarms` (the resolved `TOTAL_ALARMS` target when set),
+  `simulator_distinct_scenarios` (count of distinct labeled scenario types),
   `simulator_snapshot_edges{relation}` (incl. `relation="LOCATED_AT"`, `relation="HOSTS"`,
   `relation="TERMINATES"`).
 - **Logging** — structured JSON on stdout (one object per line): `ts, level, event, runId,
@@ -1019,8 +1215,10 @@ populated from the pack's grounded catalogue.
 
 ## Build & run
 
-- **Layout:** `services/simulator/src/simulator/{main.py, config/, engine/, domains/coreip/,
-  integrations/, api/, obs/}`, `services/simulator/openapi.json`, `services/simulator/tests/`. The
+- **Layout:** `services/simulator/src/simulator/{main.py, config/ (incl. demo_profiles.py),
+  engine/, domains/coreip/ (incl. scenario_library.py, geo_catalogue.py), integrations/, api/,
+  obs/}`, `services/simulator/openapi.json`, `services/simulator/integration-thresholds.yaml`,
+  `services/simulator/tests/`. The
   snapshot file is validated against the **single canonical `services/topology/schema/snapshot.schema.json`**
   (Topology-owned; synced/vendored at build time — no independent Simulator schema copy).
 - **Build/test:** `ruff check . && black --check . && pytest` (Python 3.13).
