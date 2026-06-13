@@ -83,7 +83,7 @@ This is a synthesis task. All the information I need is in the provided extracti
 
 ### 8. pattern-miner (Python 3.13 / PySpark, container-only)
 **Goals:** ML-execution-only for P2: apply a dynamic tempo-adaptive session window per trail to DBSCAN-cleaned transactions, then run PrefixSpan (Spark MLlib) to discover frequent ordered alarm-type sequences with support/confidence/lift + provenance. Holds no pattern state (no RCA, reconciliation, XAI, lifecycle, patternId, Pattern Store).
-**Summary:** Stateless container-only PySpark batch job. Consumes `TransactionEvent` from `transactions.clean`, dedupes on envelope eventId, fetches mining/windowing params from Knowledge (no hard-coded thresholds), pools each trail's ordered typed alarms[] and splits into activity sessions via a hybrid adaptive closing gap (data-driven percentile clamped by tempo-class floors/ceiling, baseGap fallback), runs PrefixSpan over per-session eventType sequences, computes support/confidence/lift, emits one `PatternMinedEvent` per discovered sequence. Reads per-alarm eventType/raisedAt from in-band typed alarms[]. Owns no datastore. Idle in P1/P3.
+**Summary:** Stateless container-only PySpark batch job. Consumes `TransactionEvent` from `transactions.clean`, dedupes on envelope eventId, fetches mining/windowing params from Knowledge (no hard-coded thresholds), pools each trail's ordered typed alarms[] and splits into activity sessions via a hybrid adaptive closing gap (data-driven percentile clamped by tempo-class floors/ceiling, baseGap fallback), runs PrefixSpan over per-session `alarmType` sequences (the canonical join tokens, not `eventType`), computes support/confidence/lift, emits one `PatternMinedEvent` per discovered sequence. Reads per-alarm `alarmType`/`raisedAt` from in-band typed alarms[]. Owns no datastore. Idle in P1/P3.
 **Dependent services:**
 - Consumes Kafka: `transactions.clean` (TransactionEvent, from noise-filter).
 - Produces Kafka: `patterns.mined` (PatternMinedEvent) → pattern-manager; DLQ `transactions.clean.dlq`.
@@ -172,10 +172,10 @@ End state: a versioned snapshot in NebulaGraph + PostgreSQL, persisted trails, a
 5. **alarms.enriched → noise-filter (Kafka):** noise-filter (Active) consumes AlarmEvents, partitions per trailId into tumbling windows.
 6. **noise-filter → knowledge (API):** fetches DBSCAN params (eps, minSamples, windowSize, algorithm) + feature config; refreshes on `knowledge.updated`. (knowledge Passive, serving modelParams.)
 7. **noise-filter → topology / trail-builder (API, conditional):** if attribute features enabled, `GET /topology/nodes/{moId}` for attributes; for snapshotId provenance (and hop-distance feature) calls Trail Builder `getTrail(trailId)`. snapshotId on the emitted TransactionEvent is derived here.
-8. **noise-filter** runs DBSCAN per trail-window, drops noise points, and emits each dense storm cluster as ONE `TransactionEvent` (transactionId, trailId, snapshotId, alarmIds[] + typed alarms[{alarmId,eventType,raisedAt,managedObjectId,perceivedSeverity}], windowStart/End, optional domain) on `transactions.clean`. It also writes an aggregate `nf_run_stats` row per finalized window. Poison → `alarms.enriched.dlq`.
+8. **noise-filter** runs DBSCAN per trail-window, drops noise points, and emits each dense storm cluster as ONE `TransactionEvent` (transactionId, trailId, snapshotId, alarmIds[] + typed alarms[{alarmId,alarmType,eventType,raisedAt,managedObjectId,perceivedSeverity}], windowStart/End, optional domain) on `transactions.clean`. It also writes an aggregate `nf_run_stats` row per finalized window. Poison → `alarms.enriched.dlq`.
 9. **transactions.clean → pattern-miner (Kafka):** pattern-miner (Active) consumes TransactionEvents, dedupes on envelope eventId.
 10. **pattern-miner → knowledge (API):** fetches mining-params (minSupport, maxPatternLength, WindowingParams tempo profiles, maxSequenceCount, codebookVersion). Fails fast if unavailable (offsets not advanced, replay later).
-11. **pattern-miner** pools each trail's ordered typed alarms[], splits into activity sessions via the hybrid adaptive closing gap, runs PrefixSpan over per-session eventType sequences, computes support/confidence/lift, and emits one `PatternMinedEvent` per sequence (sequence[], support, confidence, lift, trailId, timing, provenance{sourceWindowId, snapshotId, codebookVersion, domain}) on `patterns.mined`. No RCA/patternId/lifecycle. Poison → `transactions.clean.dlq`.
+11. **pattern-miner** pools each trail's ordered typed alarms[], splits into activity sessions via the hybrid adaptive closing gap, runs PrefixSpan over per-session `alarmType` sequences (canonical join tokens, not `eventType`), computes support/confidence/lift, and emits one `PatternMinedEvent` per sequence (sequence[], support, confidence, lift, trailId, timing, provenance{sourceWindowId, snapshotId, codebookVersion, domain}) on `patterns.mined`. No RCA/patternId/lifecycle. Poison → `transactions.clean.dlq`.
 12. **patterns.mined → pattern-manager (Kafka):** pattern-manager (Active) consumes PatternMinedEvents, dedupes on eventId, computes deterministic UUIDv5 patternId.
 13. **pattern-manager → topology / codebook-generator / knowledge (API):** RCA via Topology `GET /topology/nodes/{moId}` + `GET /topology/traversal` (graph ordering) and structural validation (connectivity from RCA root within maxHops); codebook reconciliation via Codebook Generator `GET /codebooks?domain=` + `GET /codebooks/{codebookId}/scenarios` (an overlapping scenario's scenarioId becomes codebookMatchId and its root cause overrides graph RCA); RCA/reconciliation + structural params from Knowledge. (topology, codebook-generator, knowledge all Passive.)
 14. **pattern-manager** derives the per-pattern sessionWindow{windowMs, type} purely from mined timing (no Knowledge call), assembles XAI, upserts to the Pattern Store as lifecycle=draft, and emits one `PatternDiscoveredEvent` (patternId, sequence[], rootCauseAlarmType, support/confidence/lift, timing, sessionWindow, codebookMatchId?, lifecycle=draft) on `patterns.discovered`.
@@ -454,7 +454,7 @@ Three labeled alarms from the fiber-cut scenario `sc-fiber-001`. Raw/source-form
   "occurredAt": "2026-06-08T10:00:00Z", "source": "nms-alpha", "traceId": "sc-fiber-001",
   "payload": {
     "alarmId": "alm-1001", "managedObjectId": "FiberSpan:fs-12",
-    "eventType": "communicationsAlarm", "probableCause": "lossOfSignal",
+    "eventType": "communicationsAlarm", "probableCause": "lossOfSignal", "alarmType": "FiberFault",
     "perceivedSeverity": "critical", "raisedAt": "2026-06-08T10:00:00Z",
     "state": "raised", "trailIds": [] } }
 ```
@@ -463,7 +463,7 @@ Three labeled alarms from the fiber-cut scenario `sc-fiber-001`. Raw/source-form
   "occurredAt": "2026-06-08T10:00:01Z", "source": "nms-alpha", "traceId": "sc-fiber-001",
   "payload": {
     "alarmId": "alm-1002", "managedObjectId": "Port:p-2",
-    "eventType": "communicationsAlarm", "probableCause": "lossOfSignal",
+    "eventType": "communicationsAlarm", "probableCause": "lossOfSignal", "alarmType": "LOS",
     "perceivedSeverity": "critical", "raisedAt": "2026-06-08T10:00:01Z",
     "state": "raised", "trailIds": [] } }
 ```
@@ -472,7 +472,7 @@ Three labeled alarms from the fiber-cut scenario `sc-fiber-001`. Raw/source-form
   "occurredAt": "2026-06-08T10:00:03Z", "source": "nms-alpha", "traceId": "sc-fiber-001",
   "payload": {
     "alarmId": "alm-1003", "managedObjectId": "IPLink:l-101",
-    "eventType": "communicationsAlarm", "probableCause": "linkDown",
+    "eventType": "communicationsAlarm", "probableCause": "linkDown", "alarmType": "LinkDown",
     "perceivedSeverity": "major", "raisedAt": "2026-06-08T10:00:03Z",
     "state": "raised", "trailIds": [] } }
 ```
@@ -492,8 +492,9 @@ Enrichment selects the `nms-alpha` ruleset by envelope `source`, normalizes via 
   "payload": {
     "alarmId": "alm-1003",
     "managedObjectId": "IPLink:l-101",
-    "eventType": "LinkDown",
+    "eventType": "communicationsAlarm",
     "probableCause": "linkDown",
+    "alarmType": "LinkDown",
     "perceivedSeverity": "major",
     "raisedAt": "2026-06-08T10:00:03Z",
     "state": "raised",
@@ -503,7 +504,7 @@ Enrichment selects the `nms-alpha` ruleset by envelope `source`, normalizes via 
 }
 ```
 
-> **Integration check (the trailIds hop):** `trailIds` is EMPTY on `alarms.history` and POPULATED (`["trail-7a3f"]`) here by Enrichment — this is the exact hop where the field becomes non-empty. Note `eventType` is now the canonical alarm-type token (`LinkDown`) matching the Knowledge `alarmTypeVocabulary`; that is what Pattern Miner mines and what Codebook signatures use.
+> **Integration check (the trailIds + alarmType hop):** `trailIds` is EMPTY on `alarms.history` and POPULATED (`["trail-7a3f"]`) here by Enrichment — this is the exact hop where the field becomes non-empty. Enrichment also populates the canonical **`alarmType`** token (`LinkDown`) from its per-source `alarmTypeMap`; `eventType` stays the X.733 category (`communicationsAlarm`) and `probableCause` the X.733 cause (`linkDown`). `alarmType` is the canonical join key Pattern Miner mines into `sequence`, Codebook signatures use, and Correlation matches on — distinct from `eventType`/`probableCause`.
 
 ### 2.3 Noise Filter → `transactions.clean` (TransactionEvent) [topic: `transactions.clean`]
 
@@ -524,9 +525,9 @@ Noise Filter windows the enriched alarms per `trailId`, DBSCAN-clusters the stor
     "domain": "core-ip",
     "alarmIds": ["alm-1001", "alm-1002", "alm-1003"],
     "alarms": [
-      { "alarmId": "alm-1001", "eventType": "FiberFault", "raisedAt": "2026-06-08T10:00:00Z", "managedObjectId": "FiberSpan:fs-12", "perceivedSeverity": "critical" },
-      { "alarmId": "alm-1002", "eventType": "LOS",        "raisedAt": "2026-06-08T10:00:01Z", "managedObjectId": "Port:p-2",        "perceivedSeverity": "critical" },
-      { "alarmId": "alm-1003", "eventType": "LinkDown",   "raisedAt": "2026-06-08T10:00:03Z", "managedObjectId": "IPLink:l-101",    "perceivedSeverity": "major" }
+      { "alarmId": "alm-1001", "alarmType": "FiberFault", "eventType": "communicationsAlarm", "raisedAt": "2026-06-08T10:00:00Z", "managedObjectId": "FiberSpan:fs-12", "perceivedSeverity": "critical" },
+      { "alarmId": "alm-1002", "alarmType": "LOS",        "eventType": "communicationsAlarm", "raisedAt": "2026-06-08T10:00:01Z", "managedObjectId": "Port:p-2",        "perceivedSeverity": "critical" },
+      { "alarmId": "alm-1003", "alarmType": "LinkDown",   "eventType": "communicationsAlarm", "raisedAt": "2026-06-08T10:00:03Z", "managedObjectId": "IPLink:l-101",    "perceivedSeverity": "major" }
     ],
     "windowStart": "2026-06-08T10:00:00Z",
     "windowEnd": "2026-06-08T10:00:05Z"
@@ -534,11 +535,11 @@ Noise Filter windows the enriched alarms per `trailId`, DBSCAN-clusters the stor
 }
 ```
 
-> **Integration check (Noise Filter → Pattern Miner):** `alarms[]` and `alarmIds[]` are the SAME set in the SAME order. Pattern Miner reads `eventType`/`raisedAt` directly from `alarms[]` (no AlarmDetailResolver), so each entry MUST carry all 5 required fields. `snapshotId` here is NOT on the source `alarms.enriched` AlarmEvent — Noise Filter derived it from `getTrail`; if Trail Builder returned nothing, NF would hold/retry rather than fabricate it.
+> **Integration check (Noise Filter → Pattern Miner):** `alarms[]` and `alarmIds[]` are the SAME set in the SAME order. Each entry carries all SIX required fields (`alarmId, alarmType, eventType, raisedAt, managedObjectId, perceivedSeverity`), mirrored verbatim from the enriched `AlarmEvent`. Pattern Miner builds its `sequence` from `alarms[].alarmType` (the canonical join token) and reads `raisedAt` directly (no AlarmDetailResolver). `snapshotId` here is NOT on the source `alarms.enriched` AlarmEvent — Noise Filter derived it from `getTrail`; if Trail Builder returned nothing, NF would hold/retry rather than fabricate it.
 
 ### 2.4 Pattern Miner → `patterns.mined` (PatternMinedEvent) [topic: `patterns.mined`]
 
-Pattern Miner session-windows by burst tempo, runs PrefixSpan over the ordered `eventType` sequences, computes support/confidence/lift, and emits one event per discovered sequence. Deliberately NO `rootCauseAlarmType`/`patternId`/`lifecycle` (those are Pattern Manager's):
+Pattern Miner session-windows by burst tempo, runs PrefixSpan over the ordered `alarmType` sequences (the canonical join tokens, not `eventType`), computes support/confidence/lift, and emits one event per discovered sequence. Deliberately NO `rootCauseAlarmType`/`patternId`/`lifecycle` (those are Pattern Manager's):
 
 ```json
 {
@@ -554,7 +555,7 @@ Pattern Miner session-windows by burst tempo, runs PrefixSpan over the ordered `
     "confidence": 0.95,
     "lift": 4.7,
     "trailId": "trail-7a3f",
-    "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "interArrivalStddevMs": 500 },
+    "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "stddevInterArrivalMs": 500 },
     "provenance": {
       "sourceWindowId": "win-trail-7a3f-100000",
       "snapshotId": "snap-001",
@@ -565,7 +566,7 @@ Pattern Miner session-windows by burst tempo, runs PrefixSpan over the ordered `
 }
 ```
 
-> **Integration check:** `provenance.snapshotId`/`domain` are copied from `TransactionEvent.snapshotId`/`domain` (same names). `sequence` is an ordered list of canonical `eventType` tokens — these MUST be the canonical alarm-type strings (matching Codebook signatures), which is why Enrichment canonicalized `eventType` upstream. `timing` keys feed Pattern Manager's session-window derivation (its OQ-5 alias map tolerates key-name drift).
+> **Integration check:** `provenance.snapshotId`/`domain` are copied from `TransactionEvent.snapshotId`/`domain` (same names). `sequence` is an ordered list of canonical **`alarmType`** vocabulary tokens (`FiberFault`/`LOS`/`LinkDown`/`InterfaceDown`) — the SAME value space as Codebook signatures and `rootCauseAlarmType`, which is why Enrichment populates `alarmType` upstream. `timing` keys (`timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `stddevInterArrivalMs`) feed Pattern Manager's session-window derivation directly (producer + consumer agree on these ms keys).
 
 ### 2.5 Pattern Manager → `patterns.discovered` (PatternDiscoveredEvent) [topic: `patterns.discovered`]
 
@@ -586,7 +587,7 @@ Pattern Manager consumes `patterns.mined`, runs RCA (graph-ordering + codebook o
     "support": 0.92,
     "confidence": 0.95,
     "lift": 4.7,
-    "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "interArrivalStddevMs": 500 },
+    "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "stddevInterArrivalMs": 500 },
     "sessionWindow": { "windowMs": 5000, "type": "gap-based" },
     "codebookMatchId": "cb-9f2c:FiberSpan:fs-12",
     "lifecycle": "draft"
@@ -606,7 +607,7 @@ Pattern Manager consumes `patterns.mined`, runs RCA (graph-ordering + codebook o
   "support": 0.92,
   "confidence": 0.95,
   "lift": 4.7,
-  "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "interArrivalStddevMs": 500 },
+  "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "stddevInterArrivalMs": 500 },
   "sessionWindow": { "windowMs": 5000, "type": "gap-based" },
   "codebookMatchId": "cb-9f2c:FiberSpan:fs-12",
   "structurallyValidated": true,
@@ -652,7 +653,7 @@ Pattern Manager is the SOLE producer (web-ui only POSTed intent). `sessionWindow
     "support": 0.92,
     "confidence": 0.95,
     "lift": 4.7,
-    "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "interArrivalStddevMs": 500 },
+    "timing": { "timeframeMs": 3000, "medianInterArrivalMs": 1000, "maxInterArrivalMs": 2000, "stddevInterArrivalMs": 500 },
     "sessionWindow": { "windowMs": 5000, "type": "gap-based" },
     "codebookMatchId": "cb-9f2c:FiberSpan:fs-12",
     "lifecycle": "approved"
@@ -674,14 +675,14 @@ The SAME fiber-cut burst, now live, new run → fresh `alarmId`s (`alm-2001..200
 { "eventId": "10000001-0000-4000-8000-000000000001", "type": "AlarmEvent", "schemaVersion": 1,
   "occurredAt": "2026-06-08T12:00:00Z", "source": "nms-alpha", "traceId": "live-fiber-001",
   "payload": { "alarmId": "alm-2001", "managedObjectId": "FiberSpan:fs-12",
-    "eventType": "communicationsAlarm", "probableCause": "lossOfSignal",
+    "eventType": "communicationsAlarm", "probableCause": "lossOfSignal", "alarmType": "FiberFault",
     "perceivedSeverity": "critical", "raisedAt": "2026-06-08T12:00:00Z", "state": "raised", "trailIds": [] } }
 ```
 ```json
 { "eventId": "10000002-0000-4000-8000-000000000002", "type": "AlarmEvent", "schemaVersion": 1,
   "occurredAt": "2026-06-08T12:00:02Z", "source": "nms-alpha", "traceId": "live-fiber-001",
   "payload": { "alarmId": "alm-2002", "managedObjectId": "IPLink:l-101",
-    "eventType": "communicationsAlarm", "probableCause": "linkDown",
+    "eventType": "communicationsAlarm", "probableCause": "linkDown", "alarmType": "LinkDown",
     "perceivedSeverity": "major", "raisedAt": "2026-06-08T12:00:02Z", "state": "raised", "trailIds": [] } }
 ```
 
@@ -700,8 +701,9 @@ Same pipeline/instance as P2, live path. Showing canonicalized `alm-2001`:
   "payload": {
     "alarmId": "alm-2001",
     "managedObjectId": "FiberSpan:fs-12",
-    "eventType": "FiberFault",
+    "eventType": "communicationsAlarm",
     "probableCause": "lossOfSignal",
+    "alarmType": "FiberFault",
     "perceivedSeverity": "critical",
     "raisedAt": "2026-06-08T12:00:00Z",
     "state": "raised",
@@ -726,8 +728,9 @@ Alarm Manager consumes `alarms.enriched.live`, upserts into its live store with 
   "payload": {
     "alarmId": "alm-2001",
     "managedObjectId": "FiberSpan:fs-12",
-    "eventType": "FiberFault",
+    "eventType": "communicationsAlarm",
     "probableCause": "lossOfSignal",
+    "alarmType": "FiberFault",
     "perceivedSeverity": "critical",
     "raisedAt": "2026-06-08T12:00:00Z",
     "state": "raised",
@@ -799,17 +802,17 @@ STATE and ROLE land in DISJOINT columns and reconcile on `alarmId` order-indepen
 ```json
 { "items": [ { "incidentId": "inc-8801", "rootCauseAlarmId": "alm-2001", "childAlarmIds": ["alm-2002"],
   "matchedPatternId": "pat-3b21", "matchedCodebookId": "cb-9f2c", "confidence": 0.95,
-  "trailId": "trail-7a3f", "createdAt": "2026-06-08T12:00:05Z" } ], "page": 0, "size": 50, "total": 1 }
+  "trailId": "trail-7a3f", "createdAt": "2026-06-08T12:00:05Z" } ], "total": 1, "limit": 50, "offset": 0 }
 ```
 
 `GET /alarms?state=correlated&incidentId=inc-8801` (Alarm Manager):
 ```json
 { "items": [
-  { "alarmId": "alm-2001", "managedObjectId": "FiberSpan:fs-12", "eventType": "FiberFault", "perceivedSeverity": "critical",
+  { "alarmId": "alm-2001", "managedObjectId": "FiberSpan:fs-12", "alarmType": "FiberFault", "eventType": "communicationsAlarm", "perceivedSeverity": "critical",
     "raisedAt": "2026-06-08T12:00:00Z", "lifecycleState": "correlated", "role": "root-cause", "incidentId": "inc-8801", "trailIds": ["trail-7a3f"] },
-  { "alarmId": "alm-2002", "managedObjectId": "IPLink:l-101", "eventType": "LinkDown", "perceivedSeverity": "major",
+  { "alarmId": "alm-2002", "managedObjectId": "IPLink:l-101", "alarmType": "LinkDown", "eventType": "communicationsAlarm", "perceivedSeverity": "major",
     "raisedAt": "2026-06-08T12:00:02Z", "lifecycleState": "correlated", "role": "child", "incidentId": "inc-8801", "trailIds": ["trail-7a3f"] }
-  ], "page": 0, "size": 50, "totalElements": 2, "totalPages": 1 }
+  ], "total": 2, "limit": 50, "offset": 0 }
 ```
 
 ### 3.7 web-ui incident-detail drill-down (two services joined)
@@ -826,8 +829,9 @@ STATE and ROLE land in DISJOINT columns and reconcile on `alarmId` order-indepen
 {
   "alarmId": "alm-2001",
   "managedObjectId": "FiberSpan:fs-12",
-  "eventType": "FiberFault",
+  "eventType": "communicationsAlarm",
   "probableCause": "lossOfSignal",
+  "alarmType": "FiberFault",
   "perceivedSeverity": "critical",
   "raisedAt": "2026-06-08T12:00:00Z",
   "clearedAt": null,
