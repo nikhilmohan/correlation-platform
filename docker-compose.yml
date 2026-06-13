@@ -162,10 +162,47 @@ services:
     networks:
       - cp-net
 
+  # Simulator — synthetic topology + labeled alarm streams (pure Kafka producer +
+  # Topology ingestion API client). Build context is the repo root so the image gets both
+  # libs/event-model and the service source. Defaults to a P2 (history) generate run; override
+  # PHASE / SIM_MODE / scenario knobs via env. All config is env-sourced (no hard-coded values).
+  simulator:
+    build:
+      context: .
+      dockerfile: services/simulator/Dockerfile
+    image: acp/simulator:dev
+    container_name: cp-simulator
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PHASE: p2
+      SIM_MODE: generate
+      TOPOLOGY_API_MODE: mock          # switch to "real" + TOPOLOGY_API_BASE_URL for integration
+      KNOWLEDGE_MODE: local
+      TOPOLOGY_NODE_COUNT: "20"
+      SITE_COUNT: "5"
+      SCENARIO_INSTANCES: "8"
+      NOISE_RATE: "0.2"
+      HISTORY_DURATION: "3600"
+      SIM_OUTPUT_DIR: /data/sim        # persistent, configurable artifact path (labels+snapshot+corpus)
+      HTTP_PORT: "8080"
+      LOG_LEVEL: INFO
+    command: ["--phase", "p2"]
+    volumes:
+      - sim-data:/data/sim
+    ports:
+      - "8085:8080"                    # /health (liveness) + /metrics (Prometheus)
+    networks:
+      - cp-net
+
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
-#   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
+#   topology, knowledge, trail-builder, codebook-generator, enrichment,
 #   noise-filter, pattern-manager, correlation-engine, web-ui
 #
 #   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)
@@ -183,6 +220,7 @@ volumes:
   pg-data:
   nebula-meta:
   nebula-storage:
+  sim-data:
 
 networks:
   cp-net:
