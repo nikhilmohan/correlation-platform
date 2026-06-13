@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Node:A", "objectType": "Node", "name": "A" },
+    { "managedObjectId": "Node:B", "objectType": "Node", "name": "B" },
+    { "managedObjectId": "Node:C", "objectType": "Node", "name": "C" },
+    { "managedObjectId": "Node:D", "objectType": "Node", "name": "D" },
+    { "managedObjectId": "Node:X", "objectType": "Node", "name": "X" }
+  ],
+  "edges": [
+    { "from": "Node:A", "to": "Node:B", "relation": "RIDES_ON" },
+    { "from": "Node:B", "to": "Node:C", "relation": "RIDES_ON" },
+    { "from": "Node:C", "to": "Node:D", "relation": "RIDES_ON" },
+    { "from": "Node:A", "to": "Node:X", "relation": "SERVES" }
+  ]
+}
