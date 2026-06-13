@@ -18,8 +18,12 @@ logger = get_logger(__name__)
 
 
 def migrations_dir() -> Path:
-    """Absolute path to the service's ``migrations/`` directory."""
-    return Path(__file__).resolve().parents[3] / "migrations"
+    """Absolute path to the service's ``migrations/`` directory.
+
+    ``migrate.py`` lives at ``<svc>/src/codebook_generator/migrate.py``, so the service root
+    is ``parents[2]`` and the migrations live alongside it under ``<svc>/migrations``.
+    """
+    return Path(__file__).resolve().parents[2] / "migrations"
 
 
 def apply_migrations(database_url: str, path: Path | None = None) -> None:
