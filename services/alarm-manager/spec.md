@@ -21,7 +21,13 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
 **In scope:**
 - Consuming `alarms.enriched.live` and persisting each enriched alarm into the live alarm
   store with initial lifecycle state `open`, recording all `AlarmEvent` fields including
-  `alarmId`, `managedObjectId` (canonical `<objectType>:<id>` scheme), and `trailIds`.
+  `alarmId`, `managedObjectId` (canonical `<objectType>:<id>` scheme), `eventType`,
+  `probableCause`, **`alarmType`**, and `trailIds`. `alarmType` is the **platform canonical
+  alarm-type join token** (a required `AlarmEvent` field — the single key pattern mining,
+  codebook signatures, `rootCauseAlarmType`, and correlation matching all join on); it MUST be
+  persisted in its own field, distinct from `eventType` (X.733 category) and `probableCause`
+  (X.733 probable cause), and surfaced on the query API (see below) so the web-ui/incident views
+  and the alarm-to-incident join can key off it.
 - Republishing each persisted alarm on `alarms.persisted.live` (the same `AlarmEvent`,
   faithful to the consumed message) so the Correlation Engine can consume it; the republish is
   idempotent — a redelivered `alarms.enriched.live` message must not produce a second emit on
@@ -60,8 +66,9 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
   `changedAt` from `AlarmStatusChange` events where available.
 - Serving the **live alarm query API** for the web-ui: list/filter alarms by lifecycle state
   (including `in-progress`), `trailId`, `incidentId`, and time window; retrieve a single
-  alarm's full record including lifecycle state, role, `incidentId`, and ordered state-
-  transition history with UTC timestamps.
+  alarm's full record including lifecycle state, role, `incidentId`, the canonical `alarmType`
+  join token, and ordered state-transition history with UTC timestamps. The list summary and the
+  single-alarm record both return `alarmType` (distinct from `eventType`/`probableCause`).
 - Deduplicating consumed events on `alarmId` (alarm events) and envelope `eventId`
   (`AlarmStatusChange` and `CorrelationResultEvent`) so at-least-once Kafka delivery does not
   produce duplicate records or duplicate state transitions.
@@ -152,10 +159,12 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
       Correlation Engine `GET /incidents` and the Pattern Manager `GET /patterns` (`PatternPage`)
       return, so the web-ui streaming view reads one uniform envelope (`.items` / `.total` /
       `.limit` / `.offset`) across the endpoints it polls. `items` is an array of the per-alarm
-      summary (item shape unchanged); `total` is the count matching the filter; `limit` / `offset`
-      are echoed from the request. This envelope is frozen in `services/alarm-manager/openapi.json`.
+      summary, which includes the canonical `alarmType` join token (distinct from `eventType` /
+      `probableCause`); `total` is the count matching the filter; `limit` / `offset` are echoed
+      from the request. This envelope is frozen in `services/alarm-manager/openapi.json`.
     - `GET /alarms/{alarmId}` — retrieve a single alarm's full record: all `AlarmEvent`
-      fields, lifecycle state, `incidentId`, role tag (`root-cause` / `child` / `none`), and
+      fields (including `eventType`, `probableCause`, and the canonical **`alarmType`** join
+      token), lifecycle state, `incidentId`, role tag (`root-cause` / `child` / `none`), and
       the ordered list of state transitions with UTC timestamps.
 - **APIs/data consumed from other services:** None. The Alarm Manager is a Kafka-consumer and
   HTTP-server only; it does not call other services' HTTP APIs.
@@ -164,7 +173,9 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
   Manager itself has no outbound HTTP integration points; no mock/real switching for outbound
   calls is required.
 - **Data owned:**
-  - **Live alarm store** (PostgreSQL) — enriched alarm records with lifecycle state (`open` /
+  - **Live alarm store** (PostgreSQL) — enriched alarm records (all `AlarmEvent` fields,
+    including `eventType`, `probableCause`, and the canonical **`alarmType`** join token stored
+    in its own column, distinct from the two X.733 fields) with lifecycle state (`open` /
     `in-progress` / `correlated` / `cleared`), role tag (`root-cause` / `child` / `none`),
     `incidentId`, and an ordered audit log of state transitions each with a UTC timestamp (and,
     for `AlarmStatusChange`-driven transitions, the originating `source` and `changedAt`). No
@@ -206,9 +217,10 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
 
 1. Given a valid `AlarmEvent` consumed from `alarms.enriched.live`, the alarm record is
    persisted in the live alarm store with lifecycle state `open`, all `AlarmEvent` fields
-   stored correctly (`alarmId`, `managedObjectId`, `trailIds`, `raisedAt`,
-   `perceivedSeverity`), and a single timestamped `open` state-transition audit entry
-   recorded.
+   stored correctly (`alarmId`, `managedObjectId`, `eventType`, `probableCause`, **`alarmType`**,
+   `trailIds`, `raisedAt`, `perceivedSeverity`) — in particular the canonical `alarmType` join
+   token is persisted in its own field, distinct from `eventType` and `probableCause` — and a
+   single timestamped `open` state-transition audit entry recorded.
 
 2. Given a valid `AlarmEvent` consumed from `alarms.enriched.live`, the same `AlarmEvent` is
    republished on `alarms.persisted.live`; the republished message validates against the
@@ -305,6 +317,13 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
     `alarmId` or an unrecognised `newStatus` value), the message is routed to
     `alarms.status.changed.dlq` and the live alarm store is not modified; processing of
     subsequent messages continues.
+
+21. Given a valid `AlarmEvent` whose `alarmType` is the canonical join token (e.g. `PortDown`,
+    distinct from its `eventType` and `probableCause`), the `alarmType` value is persisted in the
+    live alarm store in its own field AND returned on both the `GET /alarms` per-alarm summary and
+    the `GET /alarms/{alarmId}` full record, as a field distinct from `eventType` and
+    `probableCause`, matching the ingested value. (`alarmType` is the platform canonical
+    alarm-type join key the web-ui/incident views and the alarm-to-incident join rely on.)
 
 ## Open questions
 
