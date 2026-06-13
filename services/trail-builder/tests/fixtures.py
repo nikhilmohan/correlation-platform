@@ -130,12 +130,12 @@ def install_topology_stub(
         relations = request.url.params.get_list("relation")
         return httpx.Response(200, json=graph.traversal_dto(start, relations))
 
-    router.get(url__regex=r".*/topology/nodes$").mock(side_effect=_nodes)
-    router.get(url__regex=r".*/topology/nodes/(?P<managedObjectId>[^/]+)/neighbors$").mock(
-        side_effect=_neighbors
-    )
-    router.get(url__regex=r".*/topology/traversal$").mock(side_effect=_traverse)
-    router.get(url__regex=r".*/topology/snapshots/current$").mock(
+    router.get(url__regex=r".*/topology/nodes(\?.*)?$").mock(side_effect=_nodes)
+    router.get(
+        url__regex=r".*/topology/nodes/(?P<managedObjectId>[^/?]+)/neighbors(\?.*)?$"
+    ).mock(side_effect=_neighbors)
+    router.get(url__regex=r".*/topology/traversal(\?.*)?$").mock(side_effect=_traverse)
+    router.get(url__regex=r".*/topology/snapshots/current(\?.*)?$").mock(
         return_value=httpx.Response(200, json={"snapshotId": "current"})
     )
     return router
@@ -169,6 +169,6 @@ def install_knowledge_stub(
         )
 
     router.get(
-        url__regex=r".*/domains/(?P<domain>[^/]+)/trailPolicy/default$"
+        url__regex=r".*/domains/(?P<domain>[^/?]+)/trailPolicy/default(\?.*)?$"
     ).mock(side_effect=_policy)
     return router

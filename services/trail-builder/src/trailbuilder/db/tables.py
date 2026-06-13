@@ -22,6 +22,10 @@ from sqlalchemy import (
 
 from .metadata import metadata
 
+# BIGSERIAL on PostgreSQL; plain INTEGER (rowid-aliased autoincrement) on SQLite,
+# where only an INTEGER PRIMARY KEY auto-populates. Same logical type, dialect-correct.
+_AUTO_BIGINT = BigInteger().with_variant(Integer(), "sqlite")
+
 trail = Table(
     "trail",
     metadata,  # -> trailbuilder.trail
@@ -40,7 +44,7 @@ trail = Table(
 trail_member = Table(
     "trail_member",
     metadata,  # -> trailbuilder.trail_member
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("id", _AUTO_BIGINT, primary_key=True, autoincrement=True),
     Column(
         "trail_id",
         Text,
