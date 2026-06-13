@@ -45,7 +45,10 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-codebook_generator = ["py.typed"]
+# Ship the marker AND the yoyo schema migrations as package data so the SQL travels inside the
+# wheel/sdist and is resolvable from the installed package (importlib.resources) — works for an
+# editable checkout, a non-editable wheel install, and the Docker image alike.
+codebook_generator = ["py.typed", "migrations/*.sql"]
 
 [tool.black]
 line-length = 100

@@ -2,11 +2,15 @@
 
 Two layers:
 
-1. **Literal DDL** — the checked-in ``migrations/0001_codebook_schema.sql`` carries the exact
-   Postgres DDL the spec requires: ``CREATE SCHEMA IF NOT EXISTS codebook`` (nothing lands in
-   ``public``), the schema-qualified ``codebook.codebooks`` / ``codebook.scenarios`` /
-   ``codebook.processed_events`` tables, and the partial-unique one-active index. This is the
-   authoritative DDL applied against Postgres at container startup.
+1. **Literal DDL** — the packaged ``codebook_generator/migrations/0001_codebook_schema.sql``
+   carries the exact Postgres DDL the spec requires: ``CREATE SCHEMA IF NOT EXISTS codebook``
+   (nothing lands in ``public``), the schema-qualified ``codebook.codebooks`` /
+   ``codebook.scenarios`` / ``codebook.processed_events`` tables, and the partial-unique
+   one-active index. This is the authoritative DDL applied against Postgres at container
+   startup. The SQL ships as **package data** inside the installed ``codebook_generator``
+   package, so it is read here via the same install-robust resolution
+   (:func:`codebook_generator.migrate.migrations_dir`) the runtime uses — passing identically
+   for a source checkout, a non-editable wheel install, and the Docker image.
 
 2. **yoyo apply mechanism** — yoyo discovers the migration, applies it through its backend, and
    records it in the applied-migration ledger so a re-run is a no-op (idempotency). Postgres is
@@ -18,14 +22,19 @@ Two layers:
 
 from __future__ import annotations
 
+import os
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
 from yoyo import get_backend, read_migrations
 
-from codebook_generator.migrate import apply_migrations, migrations_dir
+from codebook_generator.migrate import MIGRATIONS_DIR_ENV, apply_migrations, migrations_dir
 
-_MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations"
+# Resolve the migrations the same install-robust way the runtime does (importlib.resources over
+# the installed package), so these tests pass against a non-editable wheel install where the SQL
+# lives under site-packages — NOT at a fixed source-tree offset.
+_MIGRATIONS = Path(str(files("codebook_generator") / "migrations")).resolve()
 _SQL = (_MIGRATIONS / "0001_codebook_schema.sql").read_text()
 
 
@@ -63,9 +72,29 @@ def test_migration_scenarios_use_jsonb_symptoms_and_text_array_trails() -> None:
     assert "trail_ids               text[] NOT NULL" in _SQL
 
 
-def test_migrations_dir_resolves_to_service_migrations() -> None:
-    """The runtime migrations_dir() points at the service's migrations/ directory."""
-    assert migrations_dir() == _MIGRATIONS
+def test_migrations_dir_resolves_to_packaged_migrations() -> None:
+    """migrations_dir() resolves to the packaged migrations dir for ANY install layout.
+
+    Resolution is via importlib.resources over the installed package, so it holds for an
+    editable checkout, a non-editable wheel install (site-packages), and the Docker image —
+    and the directory actually contains the shipped SQL.
+    """
+    resolved = migrations_dir()
+    assert resolved == _MIGRATIONS
+    assert (resolved / "0001_codebook_schema.sql").is_file()
+
+
+def test_migrations_dir_honours_env_override(tmp_path: Path) -> None:
+    """$CODEBOOK_MIGRATIONS_DIR overrides the packaged location (operator escape hatch)."""
+    prior = os.environ.get(MIGRATIONS_DIR_ENV)
+    os.environ[MIGRATIONS_DIR_ENV] = str(tmp_path)
+    try:
+        assert migrations_dir() == tmp_path.resolve()
+    finally:
+        if prior is None:
+            os.environ.pop(MIGRATIONS_DIR_ENV, None)
+        else:
+            os.environ[MIGRATIONS_DIR_ENV] = prior
 
 
 # --------------------------------------------------------------------------- #

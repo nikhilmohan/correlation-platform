@@ -31,11 +31,13 @@ RUN python -m venv "$VIRTUAL_ENV"
 COPY libs/event-model/python /build/event-model
 RUN pip install /build/event-model
 
-# 2) Install the codebook-generator package + its third-party deps from pyproject.
+# 2) Install the codebook-generator package + its third-party deps from pyproject. The yoyo
+#    schema migrations ship *inside* the package (src/codebook_generator/migrations/*.sql, declared
+#    as [tool.setuptools.package-data]), so installing the package puts the SQL in the venv where
+#    it is resolved at runtime via importlib.resources — no separate migrations COPY needed.
 COPY services/codebook-generator/pyproject.toml /build/codebook-generator/pyproject.toml
 COPY services/codebook-generator/README.md /build/codebook-generator/README.md
 COPY services/codebook-generator/src /build/codebook-generator/src
-COPY services/codebook-generator/migrations /build/codebook-generator/migrations
 RUN pip install /build/codebook-generator
 
 # ---- runtime ---------------------------------------------------------------------------
@@ -50,8 +52,10 @@ RUN useradd --create-home --uid 10001 codebook
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
-# yoyo migrations are applied on startup; ship the SQL with the image.
-COPY --from=builder --chown=codebook:codebook /build/codebook-generator/migrations /app/migrations
+# yoyo migrations are applied on startup; the SQL ships *inside* the installed package (package
+# data under /opt/venv/.../codebook_generator/migrations) and is resolved via importlib.resources,
+# so no separate /app/migrations copy is required. To override with operator-supplied SQL, mount a
+# directory and set CODEBOOK_MIGRATIONS_DIR to it.
 
 USER codebook
 
