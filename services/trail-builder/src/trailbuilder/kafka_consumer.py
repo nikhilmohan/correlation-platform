@@ -12,6 +12,22 @@ from __future__ import annotations
 from typing import Protocol
 
 from acp_event_model import CodecError, SchemaVersionError, UnknownEventTypeError, deserialize
+from pydantic import ValidationError
+
+# Deserialization-stage poison: anything raised while turning raw bytes into a
+# typed envelope. ``CodecError``/``SchemaVersionError``/``UnknownEventTypeError``
+# are the contract-defined failures; ``ValidationError`` is a payload that fails
+# its schema; ``UnicodeDecodeError``/``ValueError`` cover non-UTF8 or non-JSON
+# bytes that ``json.loads`` rejects before the codec can wrap them. Catching the
+# full set guarantees a poison message is DLQ'd, never crashing the consumer (AC-14).
+_POISON: tuple[type[Exception], ...] = (
+    CodecError,
+    SchemaVersionError,
+    UnknownEventTypeError,
+    ValidationError,
+    UnicodeDecodeError,
+    ValueError,
+)
 
 from .build_service import BuildService
 from .clients.errors import IntegrationError
@@ -56,7 +72,7 @@ class TopologyChangedHandler:
         """
         try:
             envelope = deserialize(raw)
-        except (CodecError, SchemaVersionError, UnknownEventTypeError) as exc:
+        except _POISON as exc:
             self._to_dlq(raw, reason=type(exc).__name__)
             return "dlq"
 
@@ -117,7 +133,7 @@ class KnowledgeUpdatedHandler:
         """
         try:
             envelope = deserialize(raw)
-        except (CodecError, SchemaVersionError, UnknownEventTypeError):
+        except _POISON:
             _log.warning("skipping poison knowledge.updated (refresh-only)")
             return "skipped"
 
