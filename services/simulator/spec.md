@@ -93,6 +93,43 @@ ensuring topology and alarm identities are shared.
   hard-coded values.
 - Emitted `AlarmEvent` payloads carry X.733-shaped fields (per the §5 alarm shapes in the
   Solution Design) and reflect realistic Core IP layering.
+- **Ingest mode (skip generation — replay a pre-created dataset verbatim).** In addition to
+  the default *generate* mode, the Simulator can run in an **ingest** mode that **skips the
+  generation stage entirely** and replays a fixed, pre-created dataset:
+  - **Topology:** load a pre-created topology snapshot JSON file (instead of running the topology
+    builder), validate it against the **same single canonical
+    `services/topology/schema/snapshot.schema.json`**, and upload it via the **existing** Topology
+    ingestion client (P1) — reusing the upload path, skipping generation.
+  - **Alarm corpus:** load a pre-created alarm corpus file (an ordered JSONL of the emitted
+    `AlarmEvent` stream — the canonical exported corpus format, below) and replay it **verbatim**
+    via the **existing** replay path (batch → `alarms.history` for P2, live wall-clock-paced →
+    `alarms.live` for P3) — skipping the scenario/cascade/noise synthesizer. Ingested alarms are
+    replayed as-is: their `alarmType`, `managedObjectId`, `trailIds`, `raisedAt`, severity, and
+    ordering are preserved (no re-jittering, no regeneration).
+  - **Labels:** load the matching ground-truth labels file (the JSONL labels format already
+    defined) so the oracle/eval still works on the ingested corpus, exactly as for a generated run.
+  - **Validation, fail-fast:** ingested `AlarmEvent`s validate against the frozen
+    `libs/event-model` `AlarmEvent` binding (incl. the required `alarmType`); the ingested snapshot
+    validates against the canonical `snapshot.schema.json`; malformed input aborts the run before
+    any emission/upload.
+  - Ingest is config/CLI-selected (a mode flag + per-file inputs), reuses the upload and replay
+    paths, and **introduces no new Kafka topic and no event-model change** — it replays the
+    existing `AlarmEvent` on the existing topics.
+- **Generate-and-export round-trip ("generate once, replay many").** A generate run can **export
+  its dataset to files** that the ingest mode can later replay verbatim, producing a fixed,
+  shareable demo dataset:
+  - **Topology snapshot file** — the generated snapshot the Simulator already writes is the
+    ingestible topology file (reused as-is).
+  - **Alarm corpus file** — the generated, ordered `AlarmEvent` stream (in emit order, with topic)
+    is written to a **canonical corpus file** (see Contract) so it can be re-ingested.
+  - **Labels file** — the ground-truth labels export the Simulator already writes is reused as the
+    ingestible labels file.
+  - The round-trip is explicit: **generate → export (snapshot + corpus + labels) → ingest-replay
+    reproduces the same stream** on the same topic(s).
+- **CLI surface for generate / ingest / export.** The generate, ingest, and export capabilities
+  are surfaced as **CLI options** in the Simulator usage (with env-var equivalents), so an operator
+  can `generate --export-corpus …` then later `ingest --topology-file … --alarms-file …
+  --labels-file …`.
 
 ## Out of scope
 
@@ -149,6 +186,24 @@ ensuring topology and alarm identities are shared.
    types, propagation templates, alarm shapes, and scenario library are supplied by the pack,
    not hard-coded in the engine. Domain business logic must not leak into the shared engine.
 9. Expose `/health` and `/metrics` endpoints and emit structured JSON logs.
+10. **Ingest mode — skip generation, replay a pre-created dataset verbatim.** Add a run mode that,
+    instead of generating, **loads pre-created files and skips the generation stage**: a topology
+    snapshot file (P1 — validated against the canonical `snapshot.schema.json`, uploaded via the
+    existing ingestion client), an alarm corpus file (P2 batch → `alarms.history` / P3 live →
+    `alarms.live`, replayed verbatim via the existing replay path — no scenario/cascade/noise
+    synthesis), and the matching ground-truth labels file (so the oracle still works). Each
+    ingested `AlarmEvent` validates against the frozen `libs/event-model` binding (incl. required
+    `alarmType`); the snapshot validates against the canonical schema; malformed input fails fast
+    before any emission/upload. No new topic, no event-model change.
+11. **Export mode — generate-and-export round-trip.** Add a capability so a *generate* run writes
+    its dataset to files the ingest mode (Task 10) can replay verbatim: the generated topology
+    snapshot file (reused), the **alarm corpus file** (the ordered emitted `AlarmEvent` stream with
+    topic, in the canonical corpus format), and the labels file (reused). Round-trip: generate →
+    export → ingest-replay reproduces the same stream.
+12. **Surface generate / ingest / export in the CLI.** Add CLI options (+ env equivalents) for the
+    mode selector and the per-file inputs/outputs (`--ingest`/`SIM_MODE`, `--topology-file`,
+    `--alarms-file`, `--labels-file`, `--export-corpus`), alongside the existing generate CLI, with
+    clear usage (generate vs. ingest, which files, which phase/topic).
 
 ## Phase applicability
 
@@ -162,6 +217,14 @@ harness asserts across the learning and real-time phases.
 | P1 — Topology onboarding | Generates the domain-grounded topology snapshot file and uploads it to the Topology Service ingestion API, establishing the graph that all subsequent phases depend on | Active | Output: topology snapshot file (versioned JSON contract) → Topology ingestion API (HTTP upload, config-switchable mock/real) |
 | P2 — Pattern learning | Replays the labeled historical alarm corpus (batch) onto `alarms.history`, feeding the enrichment → noise-filter → pattern-miner learning pipeline; ground-truth labels serve as the oracle for pattern-quality evaluation | Active | Output: `alarms.history` (`AlarmEvent` payloads, batch) |
 | P3 — Real-time correlation | Replays the labeled live alarm stream (wall-clock paced) onto `alarms.live`, feeding the enrichment → correlation-engine real-time pipeline; ground-truth labels and integration thresholds are the oracle for RCA accuracy and alarm-reduction evaluation | Active | Output: `alarms.live` (`AlarmEvent` payloads, wall-clock paced) |
+
+**Ingest mode is available in every phase** (it replaces the *generation* stage, not the phase
+role): P1 ingests a **topology snapshot file** (validated, uploaded via the existing ingestion API);
+P2 ingests an **alarm corpus file** replayed batch onto `alarms.history`; P3 ingests an **alarm
+corpus file** replayed wall-clock-paced onto `alarms.live`. In all three the matching **labels
+file** is loaded so the oracle still works. The phase role (Active producer/uploader) and the
+outputs (topic/upload) are unchanged — only the *source* of the topology/alarms changes from
+generated to pre-created.
 
 ## Contract
 
@@ -191,6 +254,23 @@ harness asserts across the learning and real-time phases.
     (`POST /topology/snapshots`, returning **HTTP 200** `SnapshotIngestResponse { snapshotId,
     domain, status, nodeCount, edgeCount, changeType }`); the Simulator reads `snapshotId` from the
     **200** response body. It is not a Kafka event.
+- **Alarm corpus file (exported artifact / ingest input — versioned contract):**
+  - A generate run can **export** the ordered emitted alarm stream to an **alarm corpus file**: a
+    JSONL file where each line is the `TypedEnvelope[AlarmEvent]` as emitted, in emit order, with
+    the target topic recorded (so a re-ingest reproduces the same stream on the same topic). The
+    corpus file carries the **already-emitted** events — no new payload shape: each line wraps the
+    frozen `AlarmEvent` payload, so an ingested corpus validates against the **same frozen
+    `libs/event-model` `AlarmEvent` binding** (incl. required `alarmType`). The ingest mode reads
+    this same file and replays each `AlarmEvent` **verbatim** (preserving `alarmType`,
+    `managedObjectId`, `trailIds`, `raisedAt`, severity, ordering). The corpus file format is a
+    **versioned contract owned by the Simulator** (it is a file artifact, not a Kafka topic) — its
+    detailed schema/example lives in `design.md`. **No new Kafka topic and no event-model change**:
+    the corpus is the existing `AlarmEvent` on the existing `alarms.history`/`alarms.live` topics,
+    serialized to a file.
+  - On **ingest**, alarms are replayed verbatim with **fresh envelope `eventId`s** per replay run
+    (so a re-ingest does not collide with a prior run's events) while preserving the `AlarmEvent`
+    payload (incl. `alarmId`, `alarmType`, `managedObjectId`, `raisedAt`) — keeping at-least-once
+    dedupe honest and the dataset replayable many times.
 - **APIs exposed:** The Simulator must make ground-truth labels retrievable for evaluation
   (per §6.1 and §10 of the Solution Design). Whether this is a REST API or a file-based
   export is a **design decision** — see Open questions. If a REST API is exposed, it MUST
@@ -220,6 +300,11 @@ harness asserts across the learning and real-time phases.
     children}` per injected scenario) — persisted in a store or file; medium is a design decision.
   - Scenario definitions (loaded from local config files or Knowledge Service at startup/run
     time; the Simulator does not author them).
+  - Exported **alarm corpus file** (the ordered emitted `AlarmEvent` stream + topic, JSONL) when
+    export is enabled — the Simulator-owned, versioned, re-ingestible dataset artifact.
+- **Files consumed (ingest mode):** a pre-created topology snapshot file, a pre-created alarm
+  corpus file, and a pre-created labels file (the same formats the Simulator exports). These are
+  read from local paths (config/CLI); they are not Kafka inputs and require no DLQ.
 
 ## Non-functional
 
@@ -436,6 +521,54 @@ Each criterion is phrased to map to a single pytest test.
     `children`; the five integration metrics (noise-removal, retention, pattern-quality,
     alarm-reduction, RCA accuracy) are computable from the labels plus
     `simulator_alarms_emitted_total{scenario,alarmType}` over all 9 scenarios.
+
+### Ingest / export / CLI acceptance criteria (no contract change — reuse upload + replay paths)
+
+26. **Ingest a topology snapshot file → uploaded verbatim, generation skipped (P1).** With ingest
+    mode selected and a pre-created topology snapshot file given (`INGEST_TOPOLOGY_FILE` /
+    `--topology-file`), the Simulator **does not run the topology builder**: it loads the file,
+    validates it against the **single canonical `services/topology/schema/snapshot.schema.json`**,
+    and uploads it via the **existing** ingestion client to `POST /topology/snapshots`, reading
+    `snapshotId` from the 200 `SnapshotIngestResponse`. The uploaded body is byte-equivalent to the
+    ingested file (no regeneration, no node/edge mutation). A snapshot that fails schema validation
+    aborts the run before any upload.
+
+27. **Ingest an alarm corpus file → replayed verbatim to history/live (P2/P3).** With ingest mode
+    and a pre-created alarm corpus file (`INGEST_ALARMS_FILE` / `--alarms-file`), the Simulator
+    **does not run the scenario/cascade/noise synthesizer**: it loads the ordered corpus and
+    replays each `AlarmEvent` via the **existing** replay path — batch to `alarms.history` in P2,
+    wall-clock-paced to `alarms.live` in P3. The replayed alarms preserve their `alarmType`,
+    `managedObjectId`, `trailIds`, `raisedAt`, severity, and **order** verbatim (no re-jittering, no
+    regeneration). The replayed count equals the corpus line count; the target topic matches the
+    phase/mode.
+
+28. **Ingested alarms validate against the frozen `AlarmEvent` binding (incl. `alarmType`).** Every
+    `AlarmEvent` read from an ingested corpus file constructs and validates against the frozen
+    `libs/event-model` Python/Pydantic binding without error; all required fields (incl.
+    `alarmType`) are present. A corpus line whose payload is missing `alarmType` or otherwise
+    malformed **fails fast** (the run aborts with a structured error before any emission) — the
+    ingest path never silently emits an off-contract alarm.
+
+29. **Ingested labels file is loaded so the oracle still works.** With a pre-created labels file
+    (`INGEST_LABELS_FILE` / `--labels-file`), the loaded ground-truth labels are retrievable after
+    the run (same `/labels` surface + the frozen
+    `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}`
+    shape) and reference `alarmId`s present in the ingested corpus, so the integration oracle scores
+    the ingested run exactly as a generated run.
+
+30. **Export-then-ingest round-trips identically.** A generate run with export enabled
+    (`EXPORT_CORPUS_FILE` / `--export-corpus`, plus the snapshot + labels files) writes a dataset
+    that, when fed back through ingest mode, **reproduces the same alarm stream** — the same ordered
+    sequence of `(topic, AlarmEvent payload)` pairs (matching on `alarmId`/`alarmType`/
+    `managedObjectId`/`raisedAt`/order), the same uploaded topology snapshot, and the same labels —
+    differing only in fresh envelope `eventId`s per replay run.
+
+31. **CLI exposes generate / ingest / export options.** The CLI usage surfaces the mode selector
+    and per-file inputs/outputs: a generate path with `--export-corpus PATH` and an ingest path with
+    `--topology-file`/`--alarms-file`/`--labels-file` (each with an env-var equivalent —
+    `SIM_MODE`, `EXPORT_CORPUS_FILE`, `INGEST_TOPOLOGY_FILE`, `INGEST_ALARMS_FILE`,
+    `INGEST_LABELS_FILE`). `--help` documents both paths; selecting ingest without the file(s) the
+    phase requires fails fast with a clear usage/config error.
 
 ## Open questions
 
