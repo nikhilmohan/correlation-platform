@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Port:PE1-LC2-P3", "objectType": "Port", "name": "ge-0/0/3" },
+    { "managedObjectId": "Interface:PE1-LC2-P3-100", "objectType": "Interface", "name": "ge-0/0/3.100",
+      "attributes": { "ipAddress": "10.0.0.1" } },
+    { "managedObjectId": "IPLink:PE1-PE2-1", "objectType": "IPLink", "name": "link1" },
+    { "managedObjectId": "IGPAdjacency:PE1-PE2", "objectType": "IGPAdjacency", "name": "isis-adj" }
+  ],
+  "edges": [
+    { "from": "Port:PE1-LC2-P3", "to": "Interface:PE1-LC2-P3-100", "relation": "HOSTS" },
+    { "from": "Interface:PE1-LC2-P3-100", "to": "IPLink:PE1-PE2-1", "relation": "TERMINATES" },
+    { "from": "Interface:PE1-LC2-P3-100", "to": "IGPAdjacency:PE1-PE2", "relation": "ADJACENCY_OVER" }
+  ]
+}

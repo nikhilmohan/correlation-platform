@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Gizmo:g1", "objectType": "Gizmo" }
+  ],
+  "edges": []
+}
