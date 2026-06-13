@@ -47,12 +47,20 @@ ensuring topology and alarm identities are shared.
 - Generate labeled fault scenarios: inject a known root cause, produce a cascade of child
   alarms per the §5 propagation templates (e.g., fiber cut → `LinkDown` x2 → `AdjDown` →
   `LSPDown` → `VPNloss`/`ReachabilityLoss`), with configurable timing jitter. At minimum:
-  **fiber-cut**, **line-card-fault**, and **port-fault** scenarios.
+  **fiber-cut**, **line-card-fault**, and **port-fault** scenarios. **Every emitted alarm carries
+  the required canonical `alarmType`** token (a Knowledge `alarmTypeVocabulary` member —
+  `FiberFault`, `LOS`, `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`,
+  `ReachabilityLoss`), set from the domain pack's alarm shape. `alarmType` is the cross-source
+  canonical **join key**, distinct from `eventType` (X.733 category) and `probableCause` (X.733
+  probable cause); the Simulator is an **origin** of alarms and MUST populate it.
 - Generate background noise alongside injected scenarios: at minimum **3 noise classes**
   (e.g., flapping alarms, self-clearing transients, chatty standing alarms, coincidental
   unrelated alarms — the exact classes are a design/config decision).
 - Persist and expose a **ground-truth label** per injected scenario in the form
-  `{rootCause, children}` for evaluation use.
+  `{rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}` for evaluation use.
+  `rootCauseAlarmType` is the root cause's canonical `alarmType` token, so the RCA-accuracy oracle
+  compares the injected root cause to `correlation.results.rootCauseAlarmType` on the **same token
+  space** (like-for-like, not `probableCause`).
 - Replay modes: **history** (batch — emits to `alarms.history`) and **live** (streamed with
   wall-clock pacing — emits to `alarms.live`), as configured.
 - Serve as the integration test oracle: the integration-threshold metrics defined in this spec
@@ -93,8 +101,12 @@ ensuring topology and alarm identities are shared.
    mix.
 4. Inject labeled fault scenarios into the alarm stream: for each scenario, produce the
    root-cause alarm and its causally downstream child alarms per the configured cascade
-   template (supplied by the domain pack), with timing jitter applied. Record the ground-truth
-   label `{rootCause, children}` for each injected scenario.
+   template (supplied by the domain pack), with timing jitter applied. **Every emitted
+   `AlarmEvent` carries the required canonical `alarmType` token** (a Knowledge
+   `alarmTypeVocabulary` member) set from the pack's alarm shape — the cross-source join key,
+   distinct from `eventType`/`probableCause`. Record the ground-truth label
+   `{rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}` for each injected
+   scenario.
 5. Inject background noise alarms (at least 3 noise classes from the domain pack's scenario
    library) interleaved with the labeled scenario alarms, at configurable rates and mix.
 6. Replay the alarm stream in **history** mode (batch, onto `alarms.history` — feeds pattern
@@ -129,32 +141,52 @@ harness asserts across the learning and real-time phases.
   - `alarms.live` — streamed live alarm replay with wall-clock pacing; feeds enrichment →
     correlation-engine (real-time correlation path). Payload: `AlarmEvent` (frozen
     `libs/event-model`).
+  - Every emitted `AlarmEvent` payload populates the **required canonical `alarmType`** field (a
+    Knowledge `alarmTypeVocabulary` token) — the Simulator is an **origin** of alarms and one of
+    the two `alarmType` populators (with Enrichment) per the `architecture.md` alarmType invariant.
+    `alarmType` is the canonical join key, distinct from `eventType`/`probableCause`. **No
+    event-model change**: `alarmType` is already a required field on the merged `AlarmEvent`
+    schema; this is a population requirement only.
 - **Topology snapshot file (produced artifact — versioned contract):**
   - The Simulator generates a structured JSON topology snapshot file describing the typed
-    nodes and edges of the domain graph (for Core IP: the nine object types and their edges).
+    nodes and edges of the domain graph (for Core IP: the object types and their edges).
   - Every object carries its `managedObjectId` in the canonical `<objectType>:<id>` scheme.
-  - The **topology-snapshot file schema is a versioned contract**: a change to it requires a
-    `docs/architecture.md` update and human approval, exactly like a topic/payload change.
-  - The file is uploaded to the Topology Service's ingestion API (see integration points
-    below); it is not a Kafka event.
+  - The **topology-snapshot file schema is a versioned contract with a single canonical source**,
+    `services/topology/schema/snapshot.schema.json`, **owned by the Topology Service** (the
+    validating owner). The Simulator validates its generated file against **that same schema** — it
+    keeps **no independent copy**. A change to it requires a `docs/architecture.md` update and human
+    approval, exactly like a topic/payload change.
+  - The file is uploaded to the Topology Service's **frozen** ingestion API
+    (`POST /topology/snapshots`, returning **HTTP 200** `SnapshotIngestResponse { snapshotId,
+    domain, status, nodeCount, edgeCount, changeType }`); the Simulator reads `snapshotId` from the
+    **200** response body. It is not a Kafka event.
 - **APIs exposed:** The Simulator must make ground-truth labels retrievable for evaluation
   (per §6.1 and §10 of the Solution Design). Whether this is a REST API or a file-based
   export is a **design decision** — see Open questions. If a REST API is exposed, it MUST
   publish an OpenAPI 3.1 document at `/openapi.json` (and check in `openapi.json` to
-  `services/simulator/`) per the `docs/architecture.md` API contract requirement.
+  `services/simulator/`) per the `docs/architecture.md` API contract requirement. The
+  ground-truth label retrieval surface carries
+  `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}`
+  — including `rootCauseAlarmType` (canonical `alarmType` token) so the RCA oracle compares on the
+  canonical join-token space.
 - **APIs/integration points consumed from other services:**
   - **Topology ingestion API (Topology Service):** The Simulator uploads the topology snapshot
-    file to the Topology Service's published OpenAPI 3.1 ingestion endpoint. The Simulator's
-    upload client is built against Topology's published OpenAPI, never Topology's source.
-    This integration point is **config-switchable**: a mock/stub (generated from Topology's
-    OpenAPI spec) for unit tests; the real Topology Service endpoint for integration. The
-    Topology Service base URL and mock/real mode are controlled by environment variable.
+    file to the Topology Service's published, **frozen** ingestion endpoint
+    **`POST /topology/snapshots`**, which returns **HTTP 200** `SnapshotIngestResponse
+    { snapshotId, domain, status, nodeCount, edgeCount, changeType }` (synchronous — `snapshotId`
+    minted inline, **not** 202/async); the Simulator reads `snapshotId` from the **200** body. The
+    Simulator's upload client is built against Topology's published OpenAPI, never Topology's
+    source, and validates its generated file against the single canonical
+    `services/topology/schema/snapshot.schema.json`. This integration point is
+    **config-switchable**: a mock/stub (generated from Topology's OpenAPI spec) for unit tests; the
+    real Topology Service endpoint for integration. The Topology Service base URL and mock/real
+    mode are controlled by environment variable.
   - **Knowledge Service scenario config endpoint (optional):** read scenario configuration
     parameters. Config-switchable: local-file mode (default/mock for unit tests) vs. real
     Knowledge Service (for integration). URL and mode controlled by environment variable.
 - **Data owned:**
-  - Ground-truth scenario labels (`{rootCause, children}` per injected scenario) — persisted
-    in a store or file; medium is a design decision.
+  - Ground-truth scenario labels (`{rootCause, rootCauseManagedObjectId, rootCauseAlarmType,
+    children}` per injected scenario) — persisted in a store or file; medium is a design decision.
   - Scenario definitions (loaded from local config files or Knowledge Service at startup/run
     time; the Simulator does not author them).
 
@@ -190,7 +222,7 @@ config/Knowledge Service** — they are never hard-coded in service code.
 
 | Metric | Definition | Pass threshold (MVP) |
 |---|---|---|
-| RCA accuracy | Fraction of incidents (in `correlation.results`) whose `rootCauseAlarmId` matches the injected ground-truth root cause for that scenario | **≥ 0.80** |
+| RCA accuracy | Fraction of incidents (in `correlation.results`) whose `rootCauseAlarmId` / `rootCauseAlarmType` matches the injected ground-truth root cause (`rootCause` / `rootCauseAlarmType`) for that scenario — compared on the canonical `alarmType` join-token space | **≥ 0.80** |
 | Alarm-reduction ratio | Raw alarms emitted ÷ correlated incidents produced | **≥ 5×** |
 | Noise-filter effectiveness (removal) | Fraction of injected noise alarms removed by the Noise Filter | **≥ 0.90** |
 | Noise-filter effectiveness (retention) | Fraction of real (scenario) alarms retained after the Noise Filter | **≥ 0.95** |
@@ -218,28 +250,34 @@ Each criterion is phrased to map to a single pytest test.
    by the `libs/event-model` Python binding's `managedObjectId` validator.
 
 4. **Fiber-cut scenario cascade is correct.** When the Simulator injects a fiber-cut scenario,
-   the emitted alarm set contains: the root-cause alarm on the `FiberSpan` object, plus child
-   alarms including `LinkDown` on each affected `IPLink`, `AdjDown` on each affected
-   `IGPAdjacency`, `LSPDown` on affected LSPs, and `ReachabilityLoss` (or `VPNloss`) on
-   affected VPN services — matching the §5 propagation template for `RIDES_ON` /
-   `ADJACENCY_OVER` / `TRAVERSES` / `SERVES` edges. The ground-truth label for this scenario
-   records the `FiberSpan` alarm as root cause and all downstream alarms as children.
+   the emitted alarm set contains: the root-cause alarm on the `FiberSpan` object (canonical
+   `alarmType` = `FiberFault`), plus child alarms carrying the canonical effect `alarmType`s
+   `LinkDown` on each affected `IPLink`, `AdjDown` on each affected `IGPAdjacency`, `LSPDown` on
+   affected LSPs, and `ReachabilityLoss` on affected VPN services — matching the §5 propagation
+   template for `RIDES_ON` / `ADJACENCY_OVER` / `TRAVERSES` / `SERVES` edges. The ground-truth
+   label for this scenario records the `FiberSpan` alarm as root cause (`rootCauseAlarmType` =
+   `FiberFault`) and all downstream alarms as children.
 
 5. **Line-card-fault and port-fault scenarios are producible and distinguishable.** The
    Simulator can produce a `line-card-fault` scenario (root cause on a `LineCard` object,
    cascade per the `HOSTED_ON` template) and a `port-fault` scenario (root cause on a `Port`
    object) as distinct, separately-labeled scenarios. Their ground-truth labels differ in
-   `rootCause` object type.
+   `rootCause` object type and `rootCauseAlarmType`.
 
 6. **At least 3 noise classes are generated.** When noise injection is enabled, the Simulator
    emits alarms belonging to at least 3 distinct configured noise classes. Each noise alarm
    can be identified as noise by its absence from any ground-truth `children` set.
 
-7. **Emitted alarm events validate against the frozen `AlarmEvent` schema.** Every
-   `AlarmEvent` payload emitted by the Simulator passes validation by the
-   `libs/event-model` Python/Pydantic binding without raising a validation error. Required
-   fields (`alarmId`, `managedObjectId`, `eventType`, `probableCause`, `perceivedSeverity`,
-   `raisedAt`, `state`, `trailIds`) are present; `state` is one of `raised` or `cleared`.
+7. **Emitted alarm events validate against the frozen `AlarmEvent` schema (required fields incl.
+   `alarmType`).** Every `AlarmEvent` payload emitted by the Simulator passes validation by the
+   `libs/event-model` Python/Pydantic binding without raising a validation error. **All required
+   fields** (`alarmId`, `managedObjectId`, `eventType`, `probableCause`, **`alarmType`**,
+   `perceivedSeverity`, `raisedAt`, `state`, `trailIds`) are present; `alarmType` is a non-empty
+   canonical token drawn from the domain's Knowledge `alarmTypeVocabulary` (e.g. `FiberFault`,
+   `LOS`, `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`, `ReachabilityLoss`) and is
+   distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause); `state` is
+   one of `raised` or `cleared`. (A payload missing `alarmType` MUST fail validation — `alarmType`
+   is in the merged `AlarmEvent` `required[]`.)
 
 8. **History replay lands on `alarms.history`.** In history mode, all alarm events are
    produced to the `alarms.history` Kafka topic and zero alarm events are produced to
@@ -252,10 +290,18 @@ Each criterion is phrased to map to a single pytest test.
    factor > 0).
 
 10. **Ground-truth labels are retrievable for evaluation.** For each injected scenario, a
-    ground-truth record `{rootCause, children}` can be retrieved after a run (via the
-    mechanism determined in design — REST API or file). The retrieved `rootCause` matches the
-    injected root-cause alarm's `alarmId`, and `children` contains the `alarmId`s of all
-    causally downstream alarms emitted for that scenario.
+    ground-truth record `{rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}` can
+    be retrieved after a run (via the mechanism determined in design — REST API or file). The
+    retrieved `rootCause` matches the injected root-cause alarm's `alarmId`, and `children`
+    contains the `alarmId`s of all causally downstream alarms emitted for that scenario.
+
+10a. **Ground-truth label carries the root-cause canonical `alarmType` (`rootCauseAlarmType`).**
+    For each injected scenario, the retrievable ground-truth record includes `rootCauseAlarmType`,
+    a canonical `alarmTypeVocabulary` token equal to the `alarmType` of the alarm identified by
+    `rootCause`. This lets the RCA-accuracy oracle compare the injected root cause to
+    `correlation.results.rootCauseAlarmType` on the **same token space** (like-for-like, not
+    `probableCause`). The retrieval surface's response shape is frozen at
+    `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children}`.
 
 11. **Topology size is configurable — no hard-coded node count.** Given two separate runs
     configured with node counts N1=10 and N2=50, the topology snapshots produced have
@@ -273,17 +319,25 @@ Each criterion is phrased to map to a single pytest test.
     present. Two runs with different noise mix configurations produce statistically different
     ratios of noise-to-scenario alarms.
 
-14. **Topology snapshot file validates against the topology-file schema.** The topology
-    snapshot file generated by the Simulator in any run validates against the versioned
-    topology-snapshot file schema (the contract between the Simulator and the Topology
-    Service) without schema errors. All required fields are present and all object references
-    are well-formed.
+14. **Topology snapshot file validates against the canonical topology-file schema.** The topology
+    snapshot file generated by the Simulator in any run validates, without schema errors, against
+    the **single canonical `services/topology/schema/snapshot.schema.json`** (the Topology-owned
+    contract between the Simulator and the Topology Service — the Simulator keeps no independent
+    copy). All required fields are present and all object references are well-formed.
 
 15. **Topology ingestion API integration point is config-switchable.** When the
     `TOPOLOGY_API_MODE` env var is set to `mock`, the Simulator's upload client directs
     requests to the mock/stub (generated from Topology's published OpenAPI spec) and does not
     attempt to contact a real Topology Service. When set to `real`, it contacts the configured
-    `TOPOLOGY_API_BASE_URL`. Switching the mode requires no code change.
+    `TOPOLOGY_API_BASE_URL` at `POST /topology/snapshots`. Switching the mode requires no code
+    change.
+
+15a. **Ingestion reads `snapshotId` from the frozen 200 `SnapshotIngestResponse`.** On upload to
+    `POST /topology/snapshots`, the Simulator's client receives **HTTP 200** with body
+    `SnapshotIngestResponse { snapshotId, domain, status, nodeCount, edgeCount, changeType }` (the
+    frozen synchronous shape — **not** a 202 or a bare `{snapshotId}` body) and reads `snapshotId`
+    from that 200 body, recording it on the run so subsequent alarms share the same snapshot
+    identity. The mock stub (generated from Topology's published OpenAPI) returns the same 200 shape.
 
 16. **`/health` returns 200 when the service is running.** A GET request to `/health` returns
     HTTP 200. A service that has not completed startup or has lost its Kafka connection returns
@@ -325,8 +379,9 @@ Each criterion is phrased to map to a single pytest test.
   (useful for regression testing)? The spec requires configurable jitter but does not mandate
   determinism. This is a design-stage decision.
 
-- **OQ-4 (design decision): Topology-snapshot file schema location.** The
-  `docs/architecture.md` notes "where it lives (event-model vs. a `schema/` dir) is a design
-  decision." The designer must decide whether the versioned topology-snapshot file schema
-  lives under `libs/event-model/` (alongside the event-model schemas) or in a separate
-  `schema/` directory, and check it in accordingly.
+- **OQ-4 (design decision — resolved by the frozen Topology contract): Topology-snapshot file
+  schema location.** The `docs/architecture.md` notes "where it lives (event-model vs. a `schema/`
+  dir) is a design decision." This is now **resolved to a single canonical source**: the schema is
+  **`services/topology/schema/snapshot.schema.json`, owned by the Topology Service** (the validating
+  owner), and the Simulator validates its generated file against **that same file** — it keeps **no
+  independent copy** (eliminating producer/validator drift). See `design.md` for the rationale.

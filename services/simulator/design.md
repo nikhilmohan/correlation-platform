@@ -35,9 +35,9 @@ Every spec Task (1–9) is realized below and traceable to concrete modules/flow
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | **1. Generate typed multi-layer topology (Core IP pack), configurable size, stable `managedObjectId`s** | `engine/topology_builder.py` drives a `networkx` `DiGraph`; the **Core IP domain pack** (`domains/coreip/topology_model.py`) supplies the object types + layer-construction rules. The pack now also emits **`Site` nodes** (the domain-agnostic Site object type, geo attributes) and places each device in a site via a **`LOCATED_AT`** edge, emits **`Interface` nodes** (L3 endpoints) on ports via **`HOSTS`** (Port→Interface) with each interface **`TERMINATES`**-ing its `IPLink` and the IGP adjacency generated **between interfaces** (`ADJACENCY_OVER` Interface→IGPAdjacency, per §5 #91), and populates the well-known **device/connection `attributes`** keys (grounded values). IDs minted via `acp_event_model.ManagedObjectId` → generic `<objectType>:<id>`. Size from `TOPOLOGY_NODE_COUNT`; site count / devices-per-site from `SITE_COUNT` / `DEVICES_PER_SITE`; interfaces-per-port from `INTERFACES_PER_PORT` (default 1). |
-| **2. Generate snapshot file (versioned contract) + upload to Topology ingestion API (client from OpenAPI; config-switchable mock/real)** | `engine/snapshot_writer.py` serializes the graph to the snapshot JSON (validated against `schema/topology-snapshot.schema.json`); `integrations/topology_client.py` is an `httpx` client generated from Topology's published OpenAPI, selected by `TOPOLOGY_API_MODE` (`mock`/`real`) + `TOPOLOGY_API_BASE_URL`. |
+| **2. Generate snapshot file (versioned contract) + upload to Topology ingestion API (client from OpenAPI; config-switchable mock/real)** | `engine/snapshot_writer.py` serializes the graph to the snapshot JSON, validated against the **single canonical `services/topology/schema/snapshot.schema.json`** (Topology-owned; no independent Simulator copy); `integrations/topology_client.py` is an `httpx` client generated from Topology's published OpenAPI, `POST /topology/snapshots`, reading `snapshotId` from the frozen **200 `SnapshotIngestResponse`**, selected by `TOPOLOGY_API_MODE` (`mock`/`real`) + `TOPOLOGY_API_BASE_URL`. |
 | **3. Load fault-scenario configs (local files or Knowledge Service)** | `config/scenario_loader.py` resolves scenario defs, jitter, noise mix from local files (default/mock) or the Knowledge Service (`integrations/knowledge_client.py`), switchable by `KNOWLEDGE_MODE`. Validated at startup. |
-| **4. Inject labeled fault scenarios (root cause → cascade per §5 templates, jitter); record `{rootCause, children}`** | `engine/scenario_runner.py` + `engine/cascade.py` run the pack's propagation templates forward over the graph closure with jitter; `engine/labels.py` records the ground-truth label per scenario. Templates supplied by `domains/coreip/propagation.py`. |
+| **4. Inject labeled fault scenarios (root cause → cascade per §5 templates, jitter); record `{rootCause, children}`** | `engine/scenario_runner.py` + `engine/cascade.py` run the pack's propagation templates forward over the graph closure with jitter; `engine/labels.py` records the ground-truth label per scenario, **incl. the root-cause `alarmType` token (`rootCauseAlarmType`)** so the RCA oracle compares on the canonical join token. Every emitted `AlarmEvent` carries its **canonical `alarmType`** token (a Knowledge `alarmTypeVocabulary` member — `FiberFault`, `LOS`, `LinkDown`, `InterfaceDown`, `AdjDown`, `LSPDown`, `ReachabilityLoss`, `PortDown`) set from the pack's alarm shape; `alarmType` is the cross-source canonical join key, **distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause)**. Templates + per-alarm `alarmType` supplied by `domains/coreip/propagation.py` + `domains/coreip/alarm_shapes.py`. |
 | **5. Inject background noise (≥3 noise classes), configurable rate/mix** | `engine/noise.py` interleaves noise alarms from the pack's noise generators (`domains/coreip/noise.py`); rate/mix from config. Noise alarms are excluded from every label's `children` set. |
 | **6. Replay in history (batch → `alarms.history`) or live (wall-clock paced → `alarms.live`)** | `engine/replay.py` with two strategies: `BatchReplay` (fire-and-flush) and `LiveReplay` (wall-clock paced via `PACING_MULTIPLIER`). Topic selected by mode. `integrations/kafka_producer.py` emits `TypedEnvelope[AlarmEvent]`. |
 | **7. Make ground-truth labels retrievable for evaluation** | **Decision (OQ-2): both** — labels are written to a **flat JSONL file** at end-of-run (`labels.export_to_file`) **and** served by a small read-only **FastAPI** surface (`api/labels_api.py`). File export is the canonical, no-broker oracle source; REST is convenience. OpenAPI 3.1 published + `openapi.json` checked in. |
@@ -93,7 +93,7 @@ flowchart TB
   subgraph pack["domains/coreip (the ONLY pack for MVP)"]
     tm["topology_model.py<br/>(9 typed layers + edges)"]
     prop["propagation.py<br/>(§5 templates)"]
-    shapes["alarm_shapes.py<br/>(X.733 per alarm type)"]
+    shapes["alarm_shapes.py<br/>(canonical alarmType plus X.733 per alarm type)"]
     lib["scenario_library.py<br/>(fiber-cut, line-card, port, interface + noise)"]
   end
   subgraph integ["integrations (config-switchable mock/real)"]
@@ -129,9 +129,13 @@ flowchart TB
   `object_types()` (includes `Interface` and the domain-agnostic `Site`), `edge_relations()` (includes
   `HOSTS`, `TERMINATES`, and `LOCATED_AT`), `attribute_keys()` (the well-known device/connection keys the pack populates),
   `build_topology(graph, size, rng)`, `propagation_templates()`, `alarm_shape(alarm_type)`,
-  `scenario_library()`, `noise_classes()`. `object_types()`/`edge_relations()`/`attribute_keys()`/
-  `domain_id()` are the **domain vocabulary** the snapshot is stamped + validated with; the engine
-  depends only on this Protocol.
+  `alarm_type_vocabulary()` (the canonical `alarmType` token set the pack emits — must be a subset
+  of the domain's Knowledge `alarmTypeVocabulary`), `scenario_library()`, `noise_classes()`.
+  `object_types()`/`edge_relations()`/`attribute_keys()`/`alarm_type_vocabulary()`/`domain_id()` are
+  the **domain vocabulary** the snapshot + alarms are stamped/validated with; the engine depends only
+  on this Protocol. `alarm_shape(alarm_type)` returns the full shape for one canonical `alarmType`
+  token — its `alarmType` (the join key), plus the X.733 `eventType`/`probableCause`/`perceivedSeverity`
+  — so every alarm the engine emits carries the required `alarmType`.
 - **`engine/topology_builder.py`** — asks the pack to populate a `networkx` `DiGraph` of typed nodes
   and typed edges (including `Site` nodes + `LOCATED_AT` edges and `Interface` nodes + `HOSTS`/
   `TERMINATES` edges), copying each node/edge's `attributes` map through; mints `managedObjectId`s.
@@ -142,16 +146,26 @@ flowchart TB
   set. The §5 logic (see Algorithm logical flow) lives in template *data* from the pack; the
   traversal is generic.
 - **`engine/labels.py`** — the ground-truth store (see Data model). One record per injected scenario:
-  `{scenarioId, scenarioType, rootCause, children, snapshotId}`.
+  `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children,
+  snapshotId}`. `rootCauseAlarmType` is the root-cause alarm's canonical `alarmType` token (the join
+  key the RCA oracle compares against `correlation.results.rootCauseAlarmType`), recorded from the
+  same alarm-shape the root alarm was emitted with — so the oracle compares like-for-like on the
+  canonical token, not on `probableCause`.
 - **`domains/coreip/`** — the only concrete pack: the typed Core-IP layers + edges **plus `Site`
   nodes and `LOCATED_AT` edges and `Interface` nodes + `HOSTS`/`TERMINATES` edges** (Port HOSTS
   Interface; Interface TERMINATES IPLink; `ADJACENCY_OVER` runs Interface→IGPAdjacency, per §5 #91),
   the well-known `attributes` keys on devices (`vendor`, `model`,
   `equipmentType`, `role`, `capacity`) and connections (`linkType`, `capacity`, `protectionRole`),
-  the §5 propagation templates, the X.733 alarm shapes, the scenario library (fiber-cut,
-  line-card-fault, port-fault, **interface-fault** + ≥3 noise classes). It declares
-  `domain_id() == "core-ip"` and the full object-type/relation/attribute vocabulary stamped on the
-  snapshot (Core-IP object types now include `Interface`; relations include `HOSTS`/`TERMINATES`).
+  the §5 propagation templates, the **canonical `alarmType` tokens** + their X.733 alarm shapes (each
+  shape pairs an `alarmType` join token with its X.733 `eventType`/`probableCause`/`perceivedSeverity`),
+  the scenario library (fiber-cut, line-card-fault, port-fault, **interface-fault** + ≥3 noise
+  classes). It declares `domain_id() == "core-ip"`, the full object-type/relation/attribute vocabulary
+  stamped on the snapshot (Core-IP object types now include `Interface`; relations include
+  `HOSTS`/`TERMINATES`), and the canonical **`alarm_type_vocabulary()`** = `{FiberFault, LOS,
+  PortDown, InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss}` (a subset of the domain's
+  Knowledge `alarmTypeVocabulary` — the value space every emitted `AlarmEvent.alarmType` is drawn
+  from). These `alarmType` tokens are the canonical join tokens, **not** the lowercase X.733
+  `probableCause` tokens (`lossOfSignal`/`linkDown`) and **not** the X.733 `eventType` categories.
   `Site`/`LOCATED_AT` are domain-agnostic and reused by any future pack; the geo/attribute *values*
   are Core-IP grounded.
 
@@ -182,6 +196,7 @@ classDiagram
     +string scenarioType
     +string rootCause
     +string rootCauseManagedObjectId
+    +string rootCauseAlarmType
     +string[] children
     +datetime injectedAt
   }
@@ -189,6 +204,7 @@ classDiagram
     +string eventId
     +string alarmId
     +string managedObjectId
+    +string alarmType
     +string scenarioId
     +bool isNoise
     +string noiseClass
@@ -199,83 +215,69 @@ classDiagram
 ```
 
 - `scenarioType` ∈ `{fiber-cut, line-card-fault, port-fault, interface-fault}`; `rootCause` is the root-cause
-  alarm's `alarmId`; `children` is the list of causally-downstream alarm `alarmId`s.
+  alarm's `alarmId`; `rootCauseAlarmType` is the root-cause alarm's **canonical `alarmType`** token
+  (a Knowledge `alarmTypeVocabulary` member — e.g. `FiberFault` for fiber-cut, `InterfaceDown` for
+  interface-fault), recorded so the RCA-accuracy oracle compares the injected root cause to
+  `correlation.results.rootCauseAlarmType` on the **same token space** (not on `probableCause`);
+  `children` is the list of causally-downstream alarm `alarmId`s. Each `EmittedAlarm.alarmType` is
+  the alarm's canonical join token, so the oracle can also key the minable signature / ground-truth
+  off `alarmType` rather than `probableCause`.
 - `EmittedAlarm.scenarioId` is null for noise; `isNoise=true` ⇒ `noiseClass` set; noise alarms
   (`isNoise=true`) appear in no label's `children`, which is what makes them identifiable as noise
   (criterion 6).
 
-### Topology snapshot file schema (versioned contract)
+### Topology snapshot file schema (versioned contract — single canonical source)
 
-**Decision (OQ-4): the snapshot schema lives in a per-producer `schema/` dir,
-`services/simulator/schema/topology-snapshot.schema.json`**, *not* under `libs/event-model/`.
-Rationale: the event-model is the Kafka envelope/payload contract; the snapshot is a file/API
-hand-off (not a topic), so co-locating it with the producer keeps event-model focused while still
-versioning the contract. The Topology Service consumes the same schema as its ingestion contract;
-any change to it remains a contract change requiring an `architecture.md` update + human approval
-(per spec Contract section).
+**Decision (OQ-4 — resolved to the frozen Topology contract): the snapshot file schema has ONE
+canonical source, `services/topology/schema/snapshot.schema.json`, owned by the Topology Service
+(the validating owner). The Simulator validates its generated snapshot file against THAT same file
+— it keeps NO independent copy of the schema.** Rationale: the event-model is the Kafka
+envelope/payload contract; the snapshot is a file/API hand-off (not a topic), and the consuming
+owner (Topology) already publishes the single schema its ingestion endpoint validates against.
+Co-locating a second copy under the Simulator would risk drift between producer and validator, so
+the Simulator's `snapshot_writer` loads and validates against the **canonical Topology schema**
+(vendored/synced from `services/topology/schema/snapshot.schema.json` at build time, never
+re-authored). Any change to that schema remains a contract change requiring an `architecture.md`
+update + human approval (per spec Contract section).
 
-> **No new contract change here.** `Site`, the `LOCATED_AT` relation, the new **`Interface`** object
-> type, the **`HOSTS`/`TERMINATES`** relations (and `ADJACENCY_OVER` running between interfaces), the
+> **No new contract change here.** The required **`AlarmEvent.alarmType`** field is **already merged**
+> on `main` (`libs/event-model/schema/payloads/AlarmEvent.schema.json` lists `alarmType` in
+> `required[]`; `architecture.md` Invariants pin it as the canonical join key with value space =
+> Knowledge `alarmTypeVocabulary`). This design only makes the Simulator **populate** that existing
+> required field — it adds no topic, payload, field, or OpenAPI surface. The frozen Topology ingestion
+> contract (`POST /topology/snapshots` → **200 `SnapshotIngestResponse`**) and the single canonical
+> snapshot schema are **also already merged/frozen** (Topology design P1-G1); the Simulator aligns to
+> them. `Site`, the `LOCATED_AT` relation, the **`Interface`** object type, the
+> **`HOSTS`/`TERMINATES`** relations (and `ADJACENCY_OVER` running between interfaces), the
 > domain-agnostic `managedObjectId` scheme, and the well-known device/connection `attributes` keys are
 > all already in the **merged multi-domain + Interface contract** (event-model #81 + the §5 Interface
 > model #91 + the `architecture.md` "Topology snapshot file" / "Domain extensibility" sections).
+> `alarmType` is the canonical join key (value space = Knowledge `alarmTypeVocabulary`);
 > `Interface`/`HOSTS`/`TERMINATES` are **domain vocabulary** (authored in Knowledge, validated by
 > Topology), not an event-model surface — the produced `AlarmEvent` and snapshot file stay conforming.
-> This design only generates **conforming** data and updates the snapshot schema's enums to match the
-> contract's already-published vocabulary — it adds no topic, payload, field, or OpenAPI surface
-> beyond the merged contract.
+> This design only generates **conforming** data against the contract's already-published vocabulary —
+> it adds no topic, payload, field, or OpenAPI surface beyond the merged contract.
 
-The schema mirrors the structure the Topology Service ingestion API expects:
+The canonical schema (`services/topology/schema/snapshot.schema.json`, owned by Topology) is the
+structure the ingestion API expects — `required: [schemaVersion, domain, nodes, edges]`, each node
+`{managedObjectId, objectType, name?, attributes?}` and each edge `{from, to, relation, attributes?}`
+under the generic `^[A-Za-z][A-Za-z0-9]*:[^:]+$` `managedObjectId` pattern. The schema deliberately
+**does NOT enum the `objectType`/`relation` tokens** (it requires only the generic id pattern and a
+non-empty `objectType`/`relation`); the per-domain object-type/relation vocabulary (incl. `Site`,
+`Interface`, `LOCATED_AT`, `HOSTS`, `TERMINATES`) is validated **semantically by Topology against the
+domain's Knowledge vocabulary** at ingest, not by this JSON Schema. The Simulator therefore (a)
+JSON-Schema-validates its generated file against the canonical Topology schema, and (b) constrains
+the `objectType`/`relation` tokens it emits to the **domain pack's vocabulary** — which the pack
+keeps aligned to the Knowledge vocabulary Topology validates against — so a generated file Topology
+accepts is produced by construction.
 
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://acp/simulator/topology-snapshot.schema.json",
-  "title": "TopologySnapshotFile",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schemaVersion", "domain", "nodes", "edges"],
-  "properties": {
-    "schemaVersion": { "type": "integer", "const": 1 },
-    "domain": { "type": "string", "const": "core-ip" },
-    "nodes": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["managedObjectId", "objectType"],
-        "properties": {
-          "managedObjectId": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
-          "objectType": { "enum": ["Site","Node","LineCard","Port","Interface","IPLink","IGPAdjacency","LSP","VPNService","FiberSpan","SRLG"] },
-          "attributes": { "type": "object" }
-        }
-      }
-    },
-    "edges": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["from", "to", "relation"],
-        "properties": {
-          "from": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
-          "to": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$" },
-          "relation": { "enum": ["LOCATED_AT","HOSTED_ON","HOSTS","TERMINATES","RIDES_ON","ADJACENCY_OVER","TRAVERSES","SERVES","MEMBER_OF"] },
-          "attributes": { "type": "object" }
-        }
-      }
-    }
-  }
-}
-```
-
-The `managedObjectId` pattern now matches the **domain-agnostic** scheme `^[A-Za-z][A-Za-z0-9]*:[^:]+$`
+The `managedObjectId` pattern matches the **domain-agnostic** scheme `^[A-Za-z][A-Za-z0-9]*:[^:]+$`
 in the merged event-model `managedObjectId.schema.json` (#81) — the engine reuses
-`acp_event_model.validate` so the two never drift. The `objectType`/`relation` enums (incl. the
-domain-agnostic **`Site`** / **`LOCATED_AT`** and the Core-IP **`Interface`** object type with the
-**`HOSTS`**/**`TERMINATES`** relations) and the well-known `attributes` keys come from the
-**domain pack's vocabulary**, which is the same vocabulary Topology validates the upload against
-(authored canonically in Knowledge). **Well-known `attributes` keys** — devices: `vendor`, `model`,
+`acp_event_model.validate` so the two never drift. The `objectType`/`relation` tokens the Simulator
+emits (incl. the domain-agnostic **`Site`** / **`LOCATED_AT`** and the Core-IP **`Interface`** object
+type with the **`HOSTS`**/**`TERMINATES`** relations) and the well-known `attributes` keys come from
+the **domain pack's vocabulary**, the same vocabulary Topology validates the upload against (authored
+canonically in Knowledge). **Well-known `attributes` keys** — devices: `vendor`, `model`,
 `equipmentType`, `role`, `capacity`; connections: `linkType`, `capacity`, `protectionRole`; `Site`:
 `name`, `latitude`, `longitude`, `region`. The set is open (extensible per domain), so `attributes`
 stays an open object. Referential integrity (every edge endpoint resolves to a node in `nodes[]`;
@@ -293,7 +295,11 @@ each `Interface` `TERMINATES` exactly one `IPLink`; the IGP adjacency is `ADJACE
   - `alarms.history` — `TypedEnvelope[AlarmEvent]`, batch (history mode).
   - `alarms.live` — `TypedEnvelope[AlarmEvent]`, wall-clock paced (live mode).
   - Both carry the frozen `AlarmEvent` payload (envelope `source="simulator"`, `type="AlarmEvent"`,
-    `schemaVersion=1`). Serialized via `acp_event_model.serialize`.
+    `schemaVersion=1`). Serialized via `acp_event_model.serialize`. **Every payload includes the
+    required canonical `alarmType`** token (a `alarmTypeVocabulary` member from the pack's
+    `alarm_shape`) alongside `eventType`/`probableCause` — the Simulator is the **origin** of these
+    alarms and is therefore one of the two `alarmType` populators (with Enrichment), per the
+    `architecture.md` alarmType invariant.
 - **Idempotency:** every emitted event gets a fresh UUID `eventId` (envelope) and a unique `alarmId`
   (payload) so at-least-once redelivery is dedupable downstream on `eventId`/`alarmId`. Producer is
   configured `enable.idempotence=true`, `acks=all`. **Re-runs with the same `SIM_SEED`** reproduce
@@ -313,12 +319,17 @@ change is a contract change). Request/response models are Pydantic.
 | GET | `/health` | — | `{"status":"ok","kafka":"connected","run":"<runId|idle>"}` | `503` if startup incomplete or Kafka connection lost |
 | GET | `/metrics` | — | Prometheus text exposition (`Content-Type: text/plain`); ≥1 metric e.g. `simulator_alarms_emitted_total` | — |
 | GET | `/openapi.json` | — | OpenAPI 3.1 document | — |
-| GET | `/labels` | query `?scenarioId=` optional | `GroundTruthLabel[]` — `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, children[]}` | `404` unknown `scenarioId` |
-| GET | `/labels/{scenarioId}` | path | one `GroundTruthLabel` | `404` |
-| GET | `/scenarios` | — | scenario-def summary (type, root-cause object type, expected child count) | — |
+| GET | `/labels` | query `?scenarioId=` optional | `GroundTruthLabel[]` — **frozen shape** `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children[]}` | `404` unknown `scenarioId` |
+| GET | `/labels/{scenarioId}` | path | one `GroundTruthLabel` (same frozen shape) | `404` |
+| GET | `/scenarios` | — | scenario-def summary (type, root-cause object type, root-cause `alarmType`, expected child count) | — |
 | POST | `/runs` (optional control) | `{mode:"history"|"live", config?}` | `{runId}` accepted `202` | `400` invalid config, `409` run in progress |
 
-`/labels` is the REST mirror of the canonical JSONL file export; the integration oracle MAY use
+**`/labels` response is frozen** at `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId,
+rootCauseAlarmType, children[]}`. `rootCauseAlarmType` is the canonical `alarmType` token of the
+injected root cause (a Knowledge `alarmTypeVocabulary` member), added so the RCA-accuracy oracle can
+compare the injected root cause to `correlation.results.rootCauseAlarmId` / `rootCauseAlarmType` on
+the **same token space** (like-for-like, not `probableCause`). `/labels` is the REST mirror of the
+canonical JSONL file export (which carries the identical fields); the integration oracle MAY use
 either. No write endpoints expose alarm content (read-only oracle).
 
 ## Integration points (mock vs. real)
@@ -328,13 +339,24 @@ collaborator's **published OpenAPI** (used in unit tests); real = the live servi
 
 | Collaborator + operation | Config key(s) | mock | real |
 |---|---|---|---|
-| **Topology Service — ingestion API** (upload snapshot file; lift → AGE → `topology.changed`) | `TOPOLOGY_API_MODE` (`mock`\|`real`), `TOPOLOGY_API_BASE_URL` | local stub generated from Topology's published OpenAPI 3.1 — records the uploaded file, returns a synthetic `{snapshotId}` 202; never contacts a real service | `httpx` client → `TOPOLOGY_API_BASE_URL` ingestion endpoint |
+| **Topology Service — ingestion API** (`POST /topology/snapshots`; upload snapshot file; lift → graph → `topology.changed`) | `TOPOLOGY_API_MODE` (`mock`\|`real`), `TOPOLOGY_API_BASE_URL` | local stub generated from Topology's published OpenAPI 3.1 — records the uploaded file, returns a synthetic **200** `SnapshotIngestResponse` `{snapshotId, domain, status, nodeCount, edgeCount, changeType}`; never contacts a real service | `httpx` client `POST {TOPOLOGY_API_BASE_URL}/topology/snapshots` → reads `snapshotId` from the **200** `SnapshotIngestResponse` body |
 | **Knowledge Service — scenario config** (optional read of scenario/jitter/noise params) | `KNOWLEDGE_MODE` (`local`\|`real`), `KNOWLEDGE_API_BASE_URL` | `local` = read scenario/threshold config from local files (default) | `real` = fetch from Knowledge Service API |
 | **Kafka** (produce `alarms.history`/`alarms.live`) | `KAFKA_BOOTSTRAP_SERVERS` | embedded/in-memory producer double in unit tests | real broker in integration |
 
 The Topology upload client is built **against Topology's published OpenAPI, never its source**
 (invariant: contract-first, no cross-service code coupling). `TOPOLOGY_API_MODE` switching requires
 no code change (criterion 15).
+
+**Frozen ingestion contract (Topology P1-G1).** The Simulator's upload aligns exactly to Topology's
+**frozen** ingestion operation: `POST /topology/snapshots` with the snapshot file as the JSON body,
+returning **HTTP 200** (synchronous — `snapshotId` is minted inline during the lift, **not** 202
+async) with body `SnapshotIngestResponse { snapshotId, domain, status, nodeCount, edgeCount,
+changeType }`. The client reads **`snapshotId` from the 200 body** and records it on the `SimRun` so
+later P2/P3 alarms share the same `snapshotId` identity. The Simulator validates its generated file
+against the **single canonical schema `services/topology/schema/snapshot.schema.json`** (Topology
+owns + publishes it; the Simulator keeps no independent copy) before upload, so Topology's ingest
+JSON-Schema check passes by construction. (The earlier Simulator assumption of a `202 {snapshotId}`
+bare body is corrected here to the frozen `200 SnapshotIngestResponse`.)
 
 ## Key flows (sequence / data-flow diagrams)
 
@@ -355,16 +377,16 @@ sequenceDiagram
   Pack-->>TB: typed nodes plus Site nodes plus Interface nodes plus edges incl LOCATED_AT HOSTS TERMINATES plus attributes (managedObjectIds minted)
   TB-->>CLI: networkx DiGraph
   CLI->>SW: write_snapshot(graph)
-  SW->>Val: validate every managedObjectId + schema + refs
+  SW->>Val: validate every managedObjectId plus canonical Topology snapshot schema plus refs
   Val-->>SW: ok (no dangling refs)
   SW-->>CLI: snapshot-(runId).json
   CLI->>TC: upload(snapshot file)
   alt TOPOLOGY_API_MODE=mock
-    TC-->>CLI: 202 {snapshotId} (stub, no network)
+    TC-->>CLI: 200 SnapshotIngestResponse stub, no network
   else real
-    TC->>Topo: POST ingestion (file)
-    Topo-->>TC: 202 {snapshotId}
-    TC-->>CLI: snapshotId
+    TC->>Topo: POST /topology/snapshots (file body)
+    Topo-->>TC: 200 SnapshotIngestResponse snapshotId domain status nodeCount edgeCount changeType
+    TC-->>CLI: snapshotId from 200 body
   end
   CLI->>CLI: record snapshotId on SimRun (shared with later alarms)
 ```
@@ -444,23 +466,28 @@ hard-coded). Output: an ordered alarm list + a `{rootCause, children}` label.
 ```mermaid
 flowchart TD
   A[Pick scenario from library:<br/>fiber-cut / line-card-fault / port-fault / interface-fault] --> B[Select root-cause object<br/>of the scenario fault-origin type]
-  B --> C[Emit root-cause alarm<br/>X.733 shape from pack.alarm_shape]
+  B --> C["Emit root-cause alarm<br/>pack.alarm_shape sets canonical alarmType plus X.733 fields<br/>(FiberFault or LOS for fiber-cut, InterfaceDown for interface-fault, ...)"]
   C --> D[Seed BFS frontier with root-cause node]
   D --> E{Frontier empty?}
-  E -- yes --> Z[Return ordered alarms +<br/>label rootCause + children]
+  E -- yes --> Z["Return ordered alarms plus<br/>label rootCause, rootCauseAlarmType, children"]
   E -- no --> F[Pop node, find outgoing edges<br/>whose relation has a template]
-  F --> G[Apply template per edge relation:<br/>RIDES_ON Fiber to LinkDown IPLink<br/>HOSTED_ON LineCard to PortDown<br/>HOSTS PortDown to InterfaceDown<br/>TERMINATES InterfaceDown to LinkDown<br/>ADJACENCY_OVER InterfaceDown to AdjDown<br/>TRAVERSES LinkDown to LSPDown<br/>SERVES LSPDown to ReachabilityLoss VPN]
-  G --> H[Emit child alarm w/ X.733 shape;<br/>raisedAt = parent.raisedAt + base_delay + jitter]
+  F --> G["Apply template per edge relation, child carries the canonical effect alarmType:<br/>RIDES_ON Fiber to LinkDown IPLink<br/>HOSTED_ON LineCard to PortDown<br/>HOSTS PortDown to InterfaceDown<br/>TERMINATES InterfaceDown to LinkDown<br/>ADJACENCY_OVER InterfaceDown to AdjDown<br/>TRAVERSES LinkDown to LSPDown<br/>SERVES LSPDown to ReachabilityLoss VPN"]
+  G --> H[Emit child alarm with the effect alarmType plus its X.733 shape;<br/>raisedAt equals parent.raisedAt plus base_delay plus jitter]
   H --> I[Add child node to frontier;<br/>append child alarmId to label.children]
   I --> E
 ```
 
 Notes:
+- The template effect names (`LinkDown`, `PortDown`, `InterfaceDown`, `AdjDown`, `LSPDown`,
+  `ReachabilityLoss`) **are the canonical `alarmType` tokens** — each is set on the emitted
+  `AlarmEvent.alarmType` (the join key), alongside the X.733 `eventType`/`probableCause` the pack's
+  `alarm_shape` returns. `rootCauseAlarmType` on the label is the root alarm's `alarmType` token.
 - Jitter is applied per inter-alarm gap: `delay = base_delay + gauss(0, jitter_stddev_ms)`. With
   `jitter_stddev_ms=0` the cascade is deterministic (criterion 12). `MEMBER_OF` (SRLG) fate-sharing
   expands a single fiber/link fault to all co-grouped links before propagating onward.
-- All template data and alarm X.733 shapes come from the pack; `cascade.py` only walks edges and
-  applies whatever template the pack provides → engine stays domain-agnostic (criterion 19).
+- All template data, the canonical `alarmType` tokens, and the X.733 alarm shapes come from the
+  pack; `cascade.py` only walks edges and applies whatever template/shape the pack provides → engine
+  stays domain-agnostic (criterion 19).
 
 ### Randomization scope (what is random, how it stays grounded)
 
@@ -496,7 +523,8 @@ defaults (a default run is evaluation-grade without tuning):
    signature **guarantees minable support** for every injected pattern, so pattern quality
    (recovered ÷ injected, §10 ≥ 0.80) is measurable rather than vacuously zero. Each instance is an
    independent cascade (fresh ids, possibly different fault-origin instance) but the **same ordered
-   probable-cause signature**, which is exactly what PrefixSpan recovers.
+   canonical `alarmType` signature** (the join token the downstream chain mines on — not
+   `probableCause`), which is exactly what PrefixSpan recovers.
 
 2. **Fair share of non-pattern / background alarms.** `BACKGROUND_FRACTION` (**default 0.3**) of
    emitted alarms belong to **no injected pattern** — valid alarms on real objects that appear in
@@ -710,39 +738,46 @@ sessions run between interfaces. The peer side mirrors it (`Port:P1-LC1-P1` HOST
 A `fiber-cut` on `FiberSpan:F-PE1-P1` propagates `RIDES_ON → TRAVERSES → SERVES` (LinkDown →
 LSPDown → ReachabilityLoss); the interfaces terminating the down link also lose their adjacency
 (`TERMINATES`/`ADJACENCY_OVER` from the affected interfaces drives the `AdjDown`). Each emitted
-envelope (`source="simulator"`, fresh `eventId`); payload is the frozen `AlarmEvent`:
+envelope (`source="simulator"`, fresh `eventId`); payload is the frozen `AlarmEvent`. **Every
+payload carries the required canonical `alarmType`** join token (a `alarmTypeVocabulary` member),
+distinct from `eventType` (X.733 category) and `probableCause` (X.733 probable cause):
 
 ```json
 { "eventId":"a1...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:00Z","source":"simulator","traceId":"sc-fiber-001",
-  "payload":{ "alarmId":"ALM-FC-0001","managedObjectId":"FiberSpan:F-PE1-P1","eventType":"communicationsAlarm","probableCause":"lossOfSignal","perceivedSeverity":"critical","raisedAt":"2026-06-10T10:00:00.000Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-FC-0001","managedObjectId":"FiberSpan:F-PE1-P1","alarmType":"FiberFault","eventType":"communicationsAlarm","probableCause":"lossOfSignal","perceivedSeverity":"critical","raisedAt":"2026-06-10T10:00:00.000Z","state":"raised","trailIds":[] } }
 
 { "eventId":"a2...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:00Z","source":"simulator","traceId":"sc-fiber-001",
-  "payload":{ "alarmId":"ALM-FC-0002","managedObjectId":"IPLink:PE1_P1","eventType":"communicationsAlarm","probableCause":"linkDown","perceivedSeverity":"critical","raisedAt":"2026-06-10T10:00:00.420Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-FC-0002","managedObjectId":"IPLink:PE1_P1","alarmType":"LinkDown","eventType":"communicationsAlarm","probableCause":"linkDown","perceivedSeverity":"critical","raisedAt":"2026-06-10T10:00:00.420Z","state":"raised","trailIds":[] } }
 
 { "eventId":"a3...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:01Z","source":"simulator","traceId":"sc-fiber-001",
-  "payload":{ "alarmId":"ALM-FC-0003","managedObjectId":"IGPAdjacency:PE1_P1","eventType":"communicationsAlarm","probableCause":"adjacencyDown","perceivedSeverity":"major","raisedAt":"2026-06-10T10:00:00.880Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-FC-0003","managedObjectId":"IGPAdjacency:PE1_P1","alarmType":"AdjDown","eventType":"communicationsAlarm","probableCause":"adjacencyDown","perceivedSeverity":"major","raisedAt":"2026-06-10T10:00:00.880Z","state":"raised","trailIds":[] } }
 
 { "eventId":"a4...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:01Z","source":"simulator","traceId":"sc-fiber-001",
-  "payload":{ "alarmId":"ALM-FC-0004","managedObjectId":"LSP:PE1-PE9-1","eventType":"communicationsAlarm","probableCause":"lspDown","perceivedSeverity":"major","raisedAt":"2026-06-10T10:00:01.310Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-FC-0004","managedObjectId":"LSP:PE1-PE9-1","alarmType":"LSPDown","eventType":"communicationsAlarm","probableCause":"lspDown","perceivedSeverity":"major","raisedAt":"2026-06-10T10:00:01.310Z","state":"raised","trailIds":[] } }
 
 { "eventId":"a5...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:01Z","source":"simulator","traceId":"sc-fiber-001",
-  "payload":{ "alarmId":"ALM-FC-0005","managedObjectId":"VPNService:CUST-A","eventType":"qualityOfServiceAlarm","probableCause":"reachabilityLoss","perceivedSeverity":"critical","raisedAt":"2026-06-10T10:00:01.790Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-FC-0005","managedObjectId":"VPNService:CUST-A","alarmType":"ReachabilityLoss","eventType":"qualityOfServiceAlarm","probableCause":"reachabilityLoss","perceivedSeverity":"critical","raisedAt":"2026-06-10T10:00:01.790Z","state":"raised","trailIds":[] } }
 ```
 
-Ground-truth label (one record in `labels-run42.jsonl`):
+Each alarm's `alarmType` (e.g. `FiberFault` on the `FiberSpan`, `LinkDown` on the `IPLink`) is the
+canonical join token; `eventType`/`probableCause` keep their X.733 meanings (`communicationsAlarm`/
+`lossOfSignal`). Ground-truth label (one record in `labels-run42.jsonl`), now carrying the
+root-cause canonical `alarmType` token (`rootCauseAlarmType`):
 
 ```json
 { "scenarioId":"sc-fiber-001","scenarioType":"fiber-cut",
-  "rootCause":"ALM-FC-0001","rootCauseManagedObjectId":"FiberSpan:F-PE1-P1",
+  "rootCause":"ALM-FC-0001","rootCauseManagedObjectId":"FiberSpan:F-PE1-P1","rootCauseAlarmType":"FiberFault",
   "children":["ALM-FC-0002","ALM-FC-0003","ALM-FC-0004","ALM-FC-0005"] }
 ```
 
-A noise alarm emitted in the same run (e.g. flapping on an unrelated port) carries its own `alarmId`
-and appears in **no** label's `children`, so the oracle classifies it as noise:
+A noise alarm emitted in the same run (e.g. flapping on an unrelated port) still carries the
+**required canonical `alarmType`** (a valid `alarmTypeVocabulary` token — noise is identified by its
+**absence from any label's `children`**, never by a distinct alarmType), its own `alarmId`, and
+appears in **no** label's `children`, so the oracle classifies it as noise:
 
 ```json
 { "eventId":"n1...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T10:00:00Z","source":"simulator","traceId":"noise-0001",
-  "payload":{ "alarmId":"NSE-0001","managedObjectId":"Port:P3-LC1-P7","eventType":"qualityOfServiceAlarm","probableCause":"thresholdCrossed","perceivedSeverity":"warning","raisedAt":"2026-06-10T10:00:00.250Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"NSE-0001","managedObjectId":"Port:P3-LC1-P7","alarmType":"PortDown","eventType":"qualityOfServiceAlarm","probableCause":"thresholdCrossed","perceivedSeverity":"warning","raisedAt":"2026-06-10T10:00:00.250Z","state":"raised","trailIds":[] } }
 ```
 
 ### Worked example — interface-fault cascade `AlarmEvent` records + ground-truth label (§5 #91)
@@ -755,26 +790,26 @@ port or link:
 
 ```json
 { "eventId":"i1...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:00Z","source":"simulator","traceId":"sc-iface-001",
-  "payload":{ "alarmId":"ALM-IF-0001","managedObjectId":"Interface:PE1-LC2-P3-if0","eventType":"communicationsAlarm","probableCause":"interfaceDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:00.000Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-IF-0001","managedObjectId":"Interface:PE1-LC2-P3-if0","alarmType":"InterfaceDown","eventType":"communicationsAlarm","probableCause":"interfaceDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:00.000Z","state":"raised","trailIds":[] } }
 
 { "eventId":"i2...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:00Z","source":"simulator","traceId":"sc-iface-001",
-  "payload":{ "alarmId":"ALM-IF-0002","managedObjectId":"IPLink:PE1_P1","eventType":"communicationsAlarm","probableCause":"linkDown","perceivedSeverity":"critical","raisedAt":"2026-06-10T11:00:00.410Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-IF-0002","managedObjectId":"IPLink:PE1_P1","alarmType":"LinkDown","eventType":"communicationsAlarm","probableCause":"linkDown","perceivedSeverity":"critical","raisedAt":"2026-06-10T11:00:00.410Z","state":"raised","trailIds":[] } }
 
 { "eventId":"i3...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:00Z","source":"simulator","traceId":"sc-iface-001",
-  "payload":{ "alarmId":"ALM-IF-0003","managedObjectId":"IGPAdjacency:PE1_P1","eventType":"communicationsAlarm","probableCause":"adjacencyDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:00.880Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-IF-0003","managedObjectId":"IGPAdjacency:PE1_P1","alarmType":"AdjDown","eventType":"communicationsAlarm","probableCause":"adjacencyDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:00.880Z","state":"raised","trailIds":[] } }
 
 { "eventId":"i4...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:01Z","source":"simulator","traceId":"sc-iface-001",
-  "payload":{ "alarmId":"ALM-IF-0004","managedObjectId":"LSP:PE1-PE9-1","eventType":"communicationsAlarm","probableCause":"lspDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:01.300Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-IF-0004","managedObjectId":"LSP:PE1-PE9-1","alarmType":"LSPDown","eventType":"communicationsAlarm","probableCause":"lspDown","perceivedSeverity":"major","raisedAt":"2026-06-10T11:00:01.300Z","state":"raised","trailIds":[] } }
 
 { "eventId":"i5...","type":"AlarmEvent","schemaVersion":1,"occurredAt":"2026-06-10T11:00:01Z","source":"simulator","traceId":"sc-iface-001",
-  "payload":{ "alarmId":"ALM-IF-0005","managedObjectId":"VPNService:CUST-A","eventType":"qualityOfServiceAlarm","probableCause":"reachabilityLoss","perceivedSeverity":"critical","raisedAt":"2026-06-10T11:00:01.760Z","state":"raised","trailIds":[] } }
+  "payload":{ "alarmId":"ALM-IF-0005","managedObjectId":"VPNService:CUST-A","alarmType":"ReachabilityLoss","eventType":"qualityOfServiceAlarm","probableCause":"reachabilityLoss","perceivedSeverity":"critical","raisedAt":"2026-06-10T11:00:01.760Z","state":"raised","trailIds":[] } }
 ```
 
-Ground-truth label (root cause is the `Interface`):
+Ground-truth label (root cause is the `Interface`; `rootCauseAlarmType` is `InterfaceDown`):
 
 ```json
 { "scenarioId":"sc-iface-001","scenarioType":"interface-fault",
-  "rootCause":"ALM-IF-0001","rootCauseManagedObjectId":"Interface:PE1-LC2-P3-if0",
+  "rootCause":"ALM-IF-0001","rootCauseManagedObjectId":"Interface:PE1-LC2-P3-if0","rootCauseAlarmType":"InterfaceDown",
   "children":["ALM-IF-0002","ALM-IF-0003","ALM-IF-0004","ALM-IF-0005"] }
 ```
 
@@ -815,7 +850,7 @@ each metric:
 
 | Metric | How the design makes it computable | MVP target |
 |---|---|---|
-| RCA accuracy | `/labels` (or JSONL) gives `rootCause` per scenario; oracle compares to `rootCauseAlarmId` in `correlation.results` | ≥ 0.80 |
+| RCA accuracy | `/labels` (or JSONL) gives `rootCause` (alarmId) **and `rootCauseAlarmType`** (canonical join token) per scenario; oracle compares to `rootCauseAlarmId` / `rootCauseAlarmType` in `correlation.results` on the same token space | ≥ 0.80 |
 | Alarm-reduction ratio | count emitted alarms (metric `simulator_alarms_emitted_total`) ÷ incidents in `correlation.results` | ≥ 5× |
 | Noise-filter removal | noise alarms are tagged (label-absence) so oracle counts injected-noise removed by Noise Filter | ≥ 0.90 |
 | Noise-filter retention | scenario alarms (in some label) retained after Noise Filter | ≥ 0.95 |
@@ -846,7 +881,7 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 |---|---|---|
 | Ground-truth retrieval (OQ-2) | (a) REST only; (b) flat file only; (c) queryable DB | **File (canonical) + thin REST mirror.** File is broker-free and trivially consumed by the integration oracle and CI artifacts; REST adds convenient query without forcing a DB. DB rejected — no query/scale need for a short-lived job. |
 | Deterministic replay (OQ-3) | (a) always random; (b) optional seed | **Optional `SIM_SEED` (deterministic generation), fresh ids per run.** Determinism makes regression/CI reproducible; fresh `eventId`/`alarmId` keeps idempotency honest and avoids cross-run collisions (satisfies spec's "SHOULD produce new ids"). |
-| Snapshot schema location (OQ-4) | (a) under `libs/event-model/`; (b) producer `schema/` dir | **`services/simulator/schema/`.** Event-model is the Kafka contract; the snapshot is a file/API hand-off, so co-locating with the producer keeps event-model focused. Still versioned + change = contract change. |
+| Snapshot schema location (OQ-4) | (a) under `libs/event-model/`; (b) independent producer `schema/` copy; (c) single canonical Topology-owned schema | **(c) single canonical `services/topology/schema/snapshot.schema.json`.** Event-model is the Kafka contract; the snapshot is a file/API hand-off whose **consuming owner (Topology) already publishes the one schema its ingest validates against**. The Simulator validates against THAT same file (synced at build time) rather than keeping a second copy — eliminating producer/validator drift. (b) rejected: an independent copy can silently diverge from the validating owner. Still versioned + change = contract change. |
 | Domain extensibility | (a) config-data-only pack; (b) Python `Protocol` pack interface | **`Protocol` interface (`domains/coreip` impl).** Allows code-level generators (graph topology, X.733 shapes) the engine can't express in pure data, while keeping the engine domain-agnostic and testable for "no Core-IP literals". |
 | Kafka client | (a) `kafka-python`; (b) `confluent-kafka` | **`confluent-kafka`** for first-class `enable.idempotence`/`acks=all` and delivery callbacks (librdkafka); `kafka-python` retained as a lighter test double option. |
 | Cascade traversal | (a) recursive per-template; (b) generic BFS over template-relevant edges | **Generic BFS** — single domain-agnostic walker driven by pack template data; supports SRLG fate-sharing and avoids per-template engine code. |
@@ -855,6 +890,8 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | Attribute values (#81) | (a) hard-coded constants; (b) fully-random strings; (c) small grounded catalogue | **Grounded catalogue in the pack** — realistic vendor/model/equipmentType/region values (config-influenced) so downstream features (e.g. Noise Filter `equipmentType`) are meaningful, while keeping `attributes` descriptive (never identity). Hard-coded rejected (no variety); random strings rejected (not grounded, breaks feature realism). |
 | Interface layer + adjacency anchoring (#91) | (a) keep `ADJACENCY_OVER` on `IPLink` (pre-#91); (b) interfaces but adjacency still on the link; (c) full §5 Interface layer with adjacency on the interface | **Full §5 Interface layer** — `Port` `HOSTS` `Interface`, `Interface` `TERMINATES` `IPLink`, `ADJACENCY_OVER` runs **between interfaces**; `Interface` is a first-class fault origin. Matches the merged #91 model so the generated topology + cascades exercise the real interface step (PortDown⇒InterfaceDown⇒LinkDown⇒AdjDown) the downstream services learn against. (a)/(b) rejected — they would mis-anchor the adjacency and skip the interface fault origin, drifting from the authored Knowledge vocabulary Topology validates. `Interface`/`HOSTS`/`TERMINATES` live in the pack (domain vocabulary), so the engine stays domain-agnostic. |
 | Interfaces per port (#91) | (a) fixed 1; (b) random; (c) `INTERFACES_PER_PORT` knob (default 1) | **`INTERFACES_PER_PORT` knob, default 1** — one L3 endpoint per port is the realistic Core-IP default and keeps the worked example simple, while the knob lets a run generate multiple sub-interfaces per port for richer cascades without code change. Fixed-1 rejected (no flexibility); fully-random rejected (non-reproducible without a seed and harder to assert). |
+| Canonical join token for ground-truth / minable signature | (a) key off `probableCause` (X.733); (b) key off `eventType` (X.733 category); (c) key off the canonical `alarmType` join token | **(c) `alarmType`.** `architecture.md` pins `alarmType` as the **single canonical join key** the whole mining → codebook → correlation chain joins on (its value space = Knowledge `alarmTypeVocabulary`); `correlation.results.rootCauseAlarmType` is on that token space. Keying the emitted-alarm join token + the label `rootCauseAlarmType` + the minable signature off `alarmType` lets the RCA oracle compare like-for-like. (a)/(b) rejected — `probableCause`/`eventType` are X.733 fields with different meanings and would mis-align the oracle and the mined signature against the canonical chain. |
+| `/labels` carries the root-cause join token (Q1) | (a) keep `{...,children[]}` only; (b) add `rootCauseAlarmType`; (c) embed full per-child `alarmType` arrays | **(b) add `rootCauseAlarmType`** (and each `EmittedAlarm` already carries its `alarmType`). RCA accuracy compares the injected root cause to `correlation.results.rootCauseAlarmType` — the label must expose the root-cause token to compare on the same space. (a) rejected (no token to compare). (c) deferred — children's `alarmType`s are available via the per-alarm records / minable signature; a per-child array on the label is redundant for the RCA oracle, kept out to keep the frozen `/labels` shape minimal. |
 
 ## Test plan
 
@@ -865,18 +902,21 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | 1 | Topology snapshot valid & internally consistent | `test_snapshot_internally_consistent` | N=20 build → every Node id `Node:<id>`; every LineCard→existing Node, Port→existing LineCard, IPLink→two existing Ports, SRLG→existing IPLinks; every device has one `LOCATED_AT`→existing `Site`; no dangling refs |
 | 2 | `managedObjectId` shared between snapshot & alarms | `test_alarm_moids_subset_of_snapshot` | every emitted alarm `managedObjectId` ∈ snapshot node ids |
 | 3 | `managedObjectId` conforms to the (now domain-agnostic) scheme | `test_all_moids_pass_event_model_validator` | every snapshot + alarm moid (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme (objectType `^[A-Za-z][A-Za-z0-9]*$`, non-empty colon-free id) |
-| 4 | Fiber-cut cascade correct | `test_fiber_cut_cascade_matches_templates` | root alarm on `FiberSpan`; children include `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`/`VPNloss`(VPNService); label root=FiberSpan alarm, children=all downstream |
-| 5 | Line-card & port faults producible & distinguishable | `test_linecard_and_port_scenarios_distinct` | line-card-fault root objectType=`LineCard` (HOSTED_ON⇒HOSTS⇒TERMINATES cascade incl. the `InterfaceDown` step), port-fault root objectType=`Port` (HOSTS⇒TERMINATES cascade); labels differ in rootCause object type; both produce an `InterfaceDown` child |
+| 4 | Fiber-cut cascade correct | `test_fiber_cut_cascade_matches_templates` | root alarm on `FiberSpan` with `alarmType=FiberFault`; children carry the canonical effect `alarmType`s `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`(VPNService); label root=FiberSpan alarm, `rootCauseAlarmType=FiberFault`, children=all downstream |
+| 5 | Line-card & port faults producible & distinguishable | `test_linecard_and_port_scenarios_distinct` | line-card-fault root objectType=`LineCard` (HOSTED_ON⇒HOSTS⇒TERMINATES cascade incl. the `InterfaceDown` step), port-fault root objectType=`Port` (HOSTS⇒TERMINATES cascade); labels differ in rootCause object type and `rootCauseAlarmType`; both produce an `InterfaceDown` `alarmType` child |
 | 6 | ≥3 noise classes generated | `test_at_least_three_noise_classes` | with noise enabled, ≥3 distinct noise classes emitted; each noise alarm absent from every label.children |
-| 7 | Emitted alarms validate vs frozen `AlarmEvent` | `test_emitted_alarms_validate_against_event_model` | every payload constructs as `AlarmEvent` w/o ValidationError; required fields present; `state` ∈ {raised,cleared} |
+| 7 | Emitted alarms validate vs frozen `AlarmEvent` (required fields incl. `alarmType`) | `test_emitted_alarms_validate_against_event_model` | every payload constructs as `AlarmEvent` w/o ValidationError; **all required fields present incl. `alarmType`** (`alarmId, managedObjectId, eventType, probableCause, alarmType, perceivedSeverity, raisedAt, state, trailIds`); `state` ∈ {raised,cleared}; a payload missing `alarmType` raises ValidationError |
+| 7a | **Every emitted `AlarmEvent.alarmType` is a valid canonical vocabulary token** (Q4/Q7) | `test_every_alarm_has_valid_alarm_type_token` | across a full run, **every** emitted alarm (scenario root, scenario child, noise, background) has a non-empty `alarmType` ∈ the pack's `alarm_type_vocabulary()` (a subset of Knowledge `alarmTypeVocabulary`); `alarmType` differs from `eventType` and `probableCause` (distinct token spaces) |
 | 8 | History lands on `alarms.history` | `test_history_mode_targets_history_topic` | history mode → all alarms on `alarms.history`, zero on `alarms.live` |
 | 9 | Live lands on `alarms.live` with pacing | `test_live_mode_targets_live_topic_with_pacing` | live mode → all on `alarms.live`, zero on `alarms.history`; inter-event delay > 0 for pacing>0 |
 | 10 | Ground-truth labels retrievable | `test_ground_truth_labels_retrievable` | after run, label retrievable (file + `/labels`); `rootCause`=injected root alarmId; `children`=downstream alarmIds |
+| 10a | **`/labels` carries `rootCauseAlarmType`** (Q1) | `test_labels_carry_root_cause_alarm_type` | every `/labels` and JSONL record includes `rootCauseAlarmType`; its value is a canonical `alarmTypeVocabulary` token and **equals the `alarmType` of the alarm identified by `rootCause`** (like-for-like with `correlation.results.rootCauseAlarmType`); `/labels` response matches the frozen shape `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children[]}` (validated against checked-in `openapi.json`) |
 | 11 | Topology size configurable, no hard-coded count | `test_topology_size_configurable` | runs N=10 and N=50 → ~10 and ~50 nodes; no default count compiled in (config-driven) |
 | 12 | Timing jitter configurable, no hard-coded value | `test_jitter_configurable` | `jitter_stddev_ms=0` → deterministic intervals; `=500` → varied intervals; distributions differ measurably |
 | 13 | Noise mix configurable, no hard-coded rate | `test_noise_mix_configurable` | rate 0 → zero noise; non-zero → noise present; two mixes → statistically different noise:scenario ratios |
-| 14 | Snapshot validates vs topology-file schema | `test_snapshot_validates_against_schema` | any-run snapshot passes `jsonschema` validation against `topology-snapshot.schema.json` (incl. `Site`/`LOCATED_AT`/`attributes`); all required fields + refs well-formed (criterion 27 adds the Site-specific assertions) |
-| 15 | Topology ingestion config-switchable | `test_topology_api_mode_switch` | `TOPOLOGY_API_MODE=mock` → stub used, no real call; `=real` → contacts `TOPOLOGY_API_BASE_URL`; switch needs no code change |
+| 14 | Snapshot validates vs the **canonical Topology** topology-file schema | `test_snapshot_validates_against_schema` | any-run snapshot passes `jsonschema` validation against the **single canonical `services/topology/schema/snapshot.schema.json`** (no independent Simulator copy; incl. `Site`/`LOCATED_AT`/`attributes`); all required fields + refs well-formed (criterion 27 adds the Site-specific assertions) |
+| 15 | Topology ingestion config-switchable | `test_topology_api_mode_switch` | `TOPOLOGY_API_MODE=mock` → stub used, no real call; `=real` → `POST {TOPOLOGY_API_BASE_URL}/topology/snapshots`; switch needs no code change |
+| 15a | **Ingestion reads `snapshotId` from the frozen 200 `SnapshotIngestResponse`** (Q3) | `test_ingestion_reads_snapshot_id_from_200_response` | upload returns **HTTP 200** (not 202) with body `{snapshotId, domain, status, nodeCount, edgeCount, changeType}`; the client reads `snapshotId` from that 200 body and records it on the `SimRun`; the stub is generated from Topology's published `openapi.json` so the contract is enforced; a 202 or a bare body would fail the test |
 | 16 | `/health` 200 when running | `test_health_endpoint` | GET `/health` → 200 when started+Kafka up; non-200 before startup / on lost Kafka |
 | 17 | `/metrics` Prometheus format | `test_metrics_endpoint` | GET `/metrics` → 200, `text/plain`, ≥1 metric incl. `simulator_alarms_emitted_total` |
 | 18 | Config validation fails fast | `test_missing_required_config_aborts` | start w/o required env → structured JSON error log + non-zero exit, zero events emitted |
@@ -888,23 +928,24 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 
 | # | Acceptance criterion (design-added) | Test | Asserts |
 |---|---|---|---|
-| 21 | **Scenario-instance count drives minable support — configurable, default minable.** Each selected scenario is injected `SCENARIO_INSTANCES` times; default (8) yields ≥ minimum-support repetitions of each scenario signature. | `test_scenario_instances_repeats_signature` | `SCENARIO_INSTANCES=N` → exactly N labels per scenario type; each instance shares the same ordered probable-cause signature with fresh ids; default ≥ 5 (PrefixSpan-minable) |
+| 21 | **Scenario-instance count drives minable support — configurable, default minable.** Each selected scenario is injected `SCENARIO_INSTANCES` times; default (8) yields ≥ minimum-support repetitions of each scenario signature. | `test_scenario_instances_repeats_signature` | `SCENARIO_INSTANCES=N` → exactly N labels per scenario type; each instance shares the same ordered canonical `alarmType` signature (the join token, not `probableCause`) with fresh ids; default ≥ 5 (PrefixSpan-minable) |
 | 22 | **Background fraction configurable; background alarms are non-pattern.** A configurable fraction of emitted alarms belong to no injected pattern and appear in no label's `children`. | `test_background_fraction_configurable` | `BACKGROUND_FRACTION=0` → no background alarms; `=0.3` → ~30% of emitted alarms in no label.children; vary fraction → measurably different background:signal ratio |
 | 23 | **Hard noise is placed near cascades for DBSCAN stress.** A configurable fraction of noise is placed near a cascade in time and/or on a topology-adjacent object; the rest is clearly separate. | `test_hard_noise_fraction_near_cascade` | `HARD_NOISE_FRACTION=0.4` → ~40% of noise alarms within a near-cascade time/object window of a scenario; remainder clearly separated; still in no label.children |
 | 24 | **History timestamps fall inside the configured window.** P2 alarms' `raisedAt` lie within `[HISTORY_START, HISTORY_END]`. | `test_history_timestamps_within_window` | with a set window, every emitted P2 alarm `raisedAt` ∈ window; invalid window (`START ≥ END`) fails fast (exit 3) |
 | 25 | **Generated topology includes `Site` nodes + `LOCATED_AT` edges (configurable).** The pack emits `Site` nodes (geo attrs) and a `LOCATED_AT` edge per device into a site; counts driven by `SITE_COUNT`/`DEVICES_PER_SITE`. | `test_topology_has_sites_and_located_at` | snapshot has ≥1 `Site` node carrying `name`/`latitude`/`longitude`/`region`; every device node has exactly one `LOCATED_AT` edge whose `to` is a `Site`; `SITE_COUNT=N` → N sites; no device unplaced |
 | 26 | **Devices carry the well-known `attributes` keys (grounded).** Device nodes carry `vendor`/`model`/`equipmentType`/`role`/`capacity`; connection edges carry `linkType`/`capacity`/`protectionRole` where sensible, with pack-grounded values. | `test_device_and_connection_attributes_present` | every device node has the device well-known keys with non-empty pack-catalogue values; connection edges carry the connection keys where the pack populates them; values drawn from the grounded catalogue (not random strings) |
-| 27 | **Snapshot validates against the topology-file schema incl. Site/LOCATED_AT/attributes.** The generated snapshot (with sites, `LOCATED_AT`, attributes) passes the versioned schema and the domain-agnostic `managedObjectId` validator. | `test_snapshot_with_sites_validates` | full snapshot passes `jsonschema` against `topology-snapshot.schema.json` with `Site` in `objectType` enum + `LOCATED_AT` in `relation` enum; every `managedObjectId` (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme; `domain == "core-ip"` |
-| 28 | **Generated topology includes `Interface` nodes + `HOSTS`/`TERMINATES` edges (§5 #91, configurable).** The pack emits `Interface` nodes on ports (`Port` `HOSTS` `Interface`), each `Interface` `TERMINATES` its `IPLink`, and the IGP adjacency runs `ADJACENCY_OVER` an `Interface` (not a `Port`/`IPLink`); count per port driven by `INTERFACES_PER_PORT` (default 1). | `test_topology_has_interfaces_and_hosts_terminates` | snapshot has ≥1 `Interface` node; every `Interface` has exactly one incoming `HOSTS` from a `Port` and ≥1 `TERMINATES` to an existing `IPLink`; every `ADJACENCY_OVER` edge originates at an `Interface` (never a `Port`/`IPLink`); `INTERFACES_PER_PORT=N` → N interfaces per port; passes schema (`Interface` in `objectType` enum, `HOSTS`/`TERMINATES` in `relation` enum) + `acp_event_model.validate` for every `Interface:*` moid; no dangling refs |
+| 27 | **Snapshot validates against the canonical topology-file schema incl. Site/LOCATED_AT/attributes.** The generated snapshot (with sites, `LOCATED_AT`, attributes) passes the canonical Topology schema and the domain-agnostic `managedObjectId` validator. | `test_snapshot_with_sites_validates` | full snapshot passes `jsonschema` against the **canonical `services/topology/schema/snapshot.schema.json`** (generic id pattern + non-empty `objectType`/`relation`; the `Site`/`LOCATED_AT` tokens are emitted from the pack vocabulary and validated **semantically by Topology**, not by a JSON-Schema enum); every `managedObjectId` (incl. `Site:*`) passes `acp_event_model.validate` under the generic `<objectType>:<id>` scheme; `domain == "core-ip"` |
+| 28 | **Generated topology includes `Interface` nodes + `HOSTS`/`TERMINATES` edges (§5 #91, configurable).** The pack emits `Interface` nodes on ports (`Port` `HOSTS` `Interface`), each `Interface` `TERMINATES` its `IPLink`, and the IGP adjacency runs `ADJACENCY_OVER` an `Interface` (not a `Port`/`IPLink`); count per port driven by `INTERFACES_PER_PORT` (default 1). | `test_topology_has_interfaces_and_hosts_terminates` | snapshot has ≥1 `Interface` node; every `Interface` has exactly one incoming `HOSTS` from a `Port` and ≥1 `TERMINATES` to an existing `IPLink`; every `ADJACENCY_OVER` edge originates at an `Interface` (never a `Port`/`IPLink`); `INTERFACES_PER_PORT=N` → N interfaces per port; passes the canonical schema (generic id pattern; `Interface`/`HOSTS`/`TERMINATES` tokens validated semantically by Topology against its domain vocabulary) + `acp_event_model.validate` for every `Interface:*` moid; no dangling refs |
 | 29 | **Interface-fault scenario produces the InterfaceDown→LinkDown→AdjDown cascade with ground-truth label (§5 #91).** The pack's scenario library includes `interface-fault`; injecting it yields a cascade rooted on an `Interface` whose `children` follow `TERMINATES ⇒ ADJACENCY_OVER ⇒ TRAVERSES ⇒ SERVES`. | `test_interface_fault_cascade_matches_templates` | `interface-fault` selectable in `SCENARIOS`; root alarm objectType=`Interface` (`interfaceDown`); children include `LinkDown`(IPLink), `AdjDown`(IGPAdjacency), `LSPDown`(LSP), `ReachabilityLoss`(VPNService) in causal order; label `rootCause`=Interface alarm, `rootCauseManagedObjectId` an `Interface:*`, `children`=all downstream; distinct from fiber-cut/line-card/port labels by root object type |
 
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
 |---|---|---|---|
-| 1 | **P1 happy path** (mock Topology) | `--phase p1`, `TOPOLOGY_API_MODE=mock`, N=20 | snapshot file written + validated; stub receives it, returns `snapshotId`; `/health` 200 |
-| 2 | **P1 with real Topology** (integration stack) | `--phase p1`, `mode=real` against running Topology | Topology lifts to AGE, mints `snapshotId`, emits `topology.changed`; simulator records the same `snapshotId` |
-| 3 | **P2 history corpus → oracle** | `--phase p2`, fiber-cut+line-card+port + noise | all alarms on `alarms.history`; labels file written; downstream noise-filter/pattern-miner can be scored against labels |
+| 1 | **P1 happy path** (mock Topology) | `--phase p1`, `TOPOLOGY_API_MODE=mock`, N=20 | snapshot file written + validated vs the canonical Topology schema; stub `POST /topology/snapshots` returns **200 `SnapshotIngestResponse`**; client reads `snapshotId` from the 200 body; `/health` 200 |
+| 2 | **P1 with real Topology** (integration stack) | `--phase p1`, `mode=real` against running Topology | Topology validates + lifts to its graph, returns **200 `SnapshotIngestResponse {snapshotId, domain, status, nodeCount, edgeCount, changeType}`**, emits `topology.changed`; simulator reads + records the same `snapshotId` from the 200 body |
+| 3 | **P2 history corpus → oracle** | `--phase p2`, fiber-cut+line-card+port + noise | all alarms on `alarms.history`, **every one carrying a valid canonical `alarmType`** token; labels file written with `rootCauseAlarmType` per scenario; downstream noise-filter/pattern-miner can be scored against labels and key on the `alarmType` join token |
+| 3a | **alarmType present + joinable end-to-end** | `--phase p2` then inspect emitted corpus + labels | **100%** of emitted `AlarmEvent`s have `alarmType` ∈ vocabulary; each label's `rootCauseAlarmType` equals the `alarmType` of its `rootCause` alarm; the ordered `alarmType` signature repeats across the N instances of each scenario (the minable join-token signature) |
 | 4 | **P3 live paced stream** | `--phase p3`, `PACING_MULTIPLIER=1.0` | alarms on `alarms.live` with non-zero inter-event delays; labels retrievable; correlation oracle can compute RCA/reduction |
 | 5 | **Shared-identity invariant** end-to-end | run P1 then P2 with same `SIM_SEED` | every alarm moid present in the uploaded snapshot (criterion 2 across phases) |
 | 6 | **Failure — Topology ingestion down** | `--phase p1`, real mode, endpoint unreachable | bounded retries, structured error, `/health` non-200, non-zero exit, nothing falsely reported uploaded |
@@ -913,7 +954,7 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 9 | **Noise-only / scenario-only edges** | `NOISE_RATE=0` then high noise | rate 0 → zero noise alarms; high → labels still pure (noise never in `children`) |
 | 10 | **Evaluation-grade default corpus** | `--phase p2` with only `KAFKA_BOOTSTRAP_SERVERS` (all defaults) | corpus has ≥5 instances per scenario (minable), ~30% background, ~20% noise (~40% hard) over a 24h window; sufficient to compute all five §10 thresholds against the labels |
 | 11 | **Partial path — zero scenarios but background/noise on** | `SCENARIOS=` empty, background/noise > 0 | no labels written; background+noise still emitted; no alarm in any `children`; pattern-quality oracle correctly recovers nothing (no false patterns) |
-| 12 | **P1 snapshot with sites + attributes → Topology** | `--phase p1`, `SITE_COUNT=3`, real/mock Topology | snapshot has 3 `Site` nodes (geo attrs), every device `LOCATED_AT` a site, device/connection well-known `attributes` populated; passes schema; Topology accepts it (validates types/relations incl. `Site`/`LOCATED_AT` against the domain vocabulary) and mints `snapshotId` |
+| 12 | **P1 snapshot with sites + attributes → Topology** | `--phase p1`, `SITE_COUNT=3`, real/mock Topology | snapshot has 3 `Site` nodes (geo attrs), every device `LOCATED_AT` a site, device/connection well-known `attributes` populated; passes the canonical Topology schema; Topology accepts it (validates types/relations incl. `Site`/`LOCATED_AT` semantically against the domain vocabulary) and returns **200 `SnapshotIngestResponse`** with `snapshotId` |
 | 13 | **Partial path — single site** | `--phase p1`, `SITE_COUNT=1` | all devices `LOCATED_AT` the one `Site`; still schema-valid; no unplaced device, no second site |
 | 14 | **P1 snapshot with Interface layer → Topology** | `--phase p1`, `INTERFACES_PER_PORT=1`, real/mock Topology | snapshot has `Interface` nodes (`Port` HOSTS `Interface`, `Interface` TERMINATES `IPLink`, IGP adjacency `ADJACENCY_OVER` the interface); passes schema; Topology accepts the `Interface`/`HOSTS`/`TERMINATES` vocabulary and mints `snapshotId` |
 | 15 | **P2 interface-fault corpus → oracle** | `--phase p2`, `SCENARIOS=interface-fault` (+ optional others) + noise | interface-fault cascades on `alarms.history` rooted on `Interface` with `InterfaceDown→LinkDown→AdjDown→LSPDown→ReachabilityLoss` children; labels file records the `Interface` root cause; RCA/pattern oracle scores it like any other scenario |
@@ -964,7 +1005,8 @@ has 3 `Site` nodes with every device `LOCATED_AT` one of them, one `Interface` p
 adjacency `ADJACENCY_OVER` the interface, and the well-known device/connection `attributes` keys
 populated from the pack's grounded catalogue.
 - **`/health`** — 200 when started + Kafka connected; non-200 otherwise.
-- **`/metrics`** — Prometheus exposition incl. `simulator_alarms_emitted_total{topic,scenario}`,
+- **`/metrics`** — Prometheus exposition incl. `simulator_alarms_emitted_total{topic,scenario,alarmType}`
+  (every emitted alarm counted under its canonical `alarmType`),
   `simulator_scenarios_injected_total{scenario}` (counts instances per scenario),
   `simulator_background_alarms_total`, `simulator_noise_alarms_total{class}`,
   `simulator_hard_noise_alarms_total`, `simulator_produce_errors_total`,
@@ -978,8 +1020,9 @@ populated from the pack's grounded catalogue.
 ## Build & run
 
 - **Layout:** `services/simulator/src/simulator/{main.py, config/, engine/, domains/coreip/,
-  integrations/, api/, obs/}`, `services/simulator/schema/topology-snapshot.schema.json`,
-  `services/simulator/openapi.json`, `services/simulator/tests/`.
+  integrations/, api/, obs/}`, `services/simulator/openapi.json`, `services/simulator/tests/`. The
+  snapshot file is validated against the **single canonical `services/topology/schema/snapshot.schema.json`**
+  (Topology-owned; synced/vendored at build time — no independent Simulator schema copy).
 - **Build/test:** `ruff check . && black --check . && pytest` (Python 3.13).
 - **Dockerfile:** `python:3.13-slim` base (per CI pins); installs `acp-event-model` from
   `libs/event-model/python`; `CMD` runs `python -m simulator.main`. Compose entry wires
