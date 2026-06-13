@@ -5,6 +5,13 @@ on:
   push:
     branches: [main, integration]
 
+# dorny/test-reporter publishes results as a check run (per-test counts, failure drill-down)
+# visible on each PR's Checks tab; it needs checks:write. Default read for the rest.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
 # Per-cohort jobs gated by changed paths so each PR runs only the relevant cohort.
 # `event-model` changes trigger both Python and Java (it produces both bindings).
 # Toolchains are pinned to the repo's local versions: Java 17, Python 3.13, Node 24.
@@ -55,29 +62,64 @@ jobs:
       # with its dev extras and run the cohort gate (ruff/black/pytest --cov) against it.
       - name: Lint + test (event-model Python binding)
         run: |
+          mkdir -p "$GITHUB_WORKSPACE/reports/junit"
           if [ -f libs/event-model/python/pyproject.toml ]; then
             python -m pip install ./libs/event-model/python[dev]
             python -c "import acp_event_model"   # clean-import check (criterion 18)
             (cd libs/event-model/python && \
               ruff check . && \
               black --check . && \
-              pytest --cov --cov-fail-under=80)
+              pytest --cov --cov-fail-under=80 --junitxml="$GITHUB_WORKSPACE/reports/junit/event-model-python.xml")
           else
             echo "No event-model Python binding yet — skipping."
           fi
       # Python services: lint/test each that has real sources. Until a service lands
       # (pyproject.toml / requirements.txt + tests) this is a no-op.
+      # Each pytest run emits a JUnit XML under reports/junit/ so results are publishable.
       - name: Lint + test (Python services)
         run: |
           ran=0
+          mkdir -p "$GITHUB_WORKSPACE/reports/junit"
+          # The frozen contract binding is a local path dependency (not on PyPI); install it
+          # once so each service's `acp-event-model` requirement resolves.
+          if [ -f libs/event-model/python/pyproject.toml ]; then
+            python -m pip install ./libs/event-model/python
+          fi
+          # Pin linters to a stable minor (matches the event-model dev extras) so a new
+          # ruff/black release can't fail CI on previously-clean service code.
+          python -m pip install 'ruff~=0.15.0' 'black~=26.5.0'
           for d in services/simulator services/trail-builder services/codebook-generator services/noise-filter services/pattern-miner; do
             if [ -f "$d/pyproject.toml" ] || [ -f "$d/requirements.txt" ]; then
               ran=1
-              python -m pip install ruff black pytest pytest-cov
-              (cd "$d" && ruff check . && black --check . && pytest --cov --cov-fail-under=80)
+              svc=$(basename "$d")
+              # Install the service WITH its dev extras (pytest, respx, pytest-asyncio, …) so the
+              # test suite's imports resolve in CI's clean env — linters stay pinned (above).
+              if [ -f "$d/pyproject.toml" ]; then
+                python -m pip install "./$d[dev]"
+              else
+                python -m pip install -r "$d/requirements.txt" pytest pytest-cov
+              fi
+              (cd "$d" && ruff check . && black --check . && \
+                pytest --cov --cov-fail-under=80 --junitxml="$GITHUB_WORKSPACE/reports/junit/$svc.xml")
             fi
           done
           if [ "$ran" = "0" ]; then echo "No Python service sources yet — skipping (scaffold)."; fi
+      # Publish results: a rich PR-visible summary + the raw JUnit XML as an artifact.
+      - name: Test report (Python)
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: python tests
+          path: 'reports/junit/*.xml'
+          reporter: java-junit   # pytest JUnit XML is JUnit-compatible
+          fail-on-error: false
+      - name: Upload Python test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: python-test-results
+          path: reports/junit/*.xml
+          if-no-files-found: ignore
 
   java:
     needs: changes
@@ -99,6 +141,25 @@ jobs:
             if [ -f "$d/gradlew" ]; then built=1; (cd "$d" && ./gradlew --no-daemon clean build); fi
           done
           if [ "$built" = "0" ]; then echo "No Gradle project yet — skipping (scaffold)."; fi
+      # Publish results: a rich PR-visible summary (per-test counts, drill into failures)
+      # + the raw JUnit XML and HTML reports as artifacts. always() so failing tests still report.
+      - name: Test report (Java)
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: java tests
+          path: '**/build/test-results/test/*.xml'
+          reporter: java-junit
+          fail-on-error: false
+      - name: Upload Java test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-test-results
+          path: |
+            **/build/test-results/test/*.xml
+            **/build/reports/tests/test/**
+          if-no-files-found: ignore
 
   angular:
     needs: changes
@@ -118,5 +179,23 @@ jobs:
           fi
           npm ci
           npm run lint
-          npm test -- --run        # Vitest unit/component tests (TestBed); E2E (Playwright) runs in the integration stage
+          # Vitest unit/component tests (TestBed); emit JUnit XML for CI reporting.
+          # E2E (Playwright) runs in the integration stage, not here.
+          npm test -- --run --reporter=default --reporter=junit --outputFile=reports/junit/web-ui.xml
           npm run build
+      # Publish results: a rich PR-visible summary + the raw JUnit XML as an artifact.
+      - name: Test report (Angular)
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: angular tests
+          path: 'services/web-ui/reports/junit/*.xml'
+          reporter: java-junit   # Vitest JUnit reporter output is JUnit-compatible
+          fail-on-error: false
+      - name: Upload Angular test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: angular-test-results
+          path: services/web-ui/reports/junit/*.xml
+          if-no-files-found: ignore
