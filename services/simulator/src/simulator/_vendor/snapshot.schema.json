@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/topology/schema/snapshot.schema.json",
+  "title": "Topology snapshot file",
+  "description": "Canonical, single-source schema for the topology snapshot file uploaded to POST /topology/snapshots. Owned by the Topology Service (the validating owner). The Simulator (producer) validates its generated file against this SAME file; there is no independent Simulator copy. Per-domain objectType/relation vocabulary (incl. Site / LOCATED_AT) is validated semantically against the Knowledge Service, not by this JSON Schema. A change to this file is a contract change (architecture.md/spec update + human approval).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "domain", "nodes", "edges"],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Topology-file schema version, independent of the event-model schemaVersion."
+    },
+    "snapshotId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional producer-supplied snapshot identifier. If absent, Topology mints one inline on ingest and returns it in the 200 SnapshotIngestResponse."
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Domain-pack identifier (e.g. core-ip). Selects the Knowledge vocabulary the objectTypes/relations are validated against."
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" },
+      "description": "Typed graph nodes, including Site nodes (Site is a domain-agnostic object type carrying geo attributes)."
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" },
+      "description": "Typed graph edges, including LOCATED_AT edges (device LOCATED_AT Site)."
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["managedObjectId", "objectType"],
+      "properties": {
+        "managedObjectId": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$",
+          "description": "Generic objectType:id scheme. The prefix must equal objectType (checked semantically)."
+        },
+        "objectType": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must equal the managedObjectId prefix AND be in the domain's Knowledge object-type set (e.g. Node, LineCard, Port, Interface, IPLink, IGPAdjacency, LSP, VPNService, FiberSpan, SRLG, Site)."
+        },
+        "name": { "type": "string" },
+        "attributes": {
+          "type": "object",
+          "description": "Open, structured, well-known-key-extensible attribute map. For Site nodes: latitude, longitude, region, name. Stored verbatim; not value-validated by Topology."
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "relation"],
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$",
+          "description": "A managedObjectId present in nodes[] (dangling refs rejected semantically)."
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*:[^:]+$",
+          "description": "A managedObjectId present in nodes[] (dangling refs rejected semantically)."
+        },
+        "relation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Must be in the domain's Knowledge relation vocabulary (e.g. HOSTED_ON, HOSTS, TERMINATES, RIDES_ON, ADJACENCY_OVER, TRAVERSES, SERVES, MEMBER_OF, LOCATED_AT)."
+        },
+        "attributes": {
+          "type": "object",
+          "description": "Open, structured per-edge attribute map. Stored verbatim."
+        }
+      }
+    }
+  }
+}
