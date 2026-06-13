@@ -30,11 +30,27 @@ differ only in which input topic is consumed and which output topic is emitted.
   its ruleset (e.g. envelope `source` field vs. a match-rule predicate) is a
   design-stage decision — see Open questions.
 - Apply the **field-mapping** portion of the matched per-source ruleset: translate the
-  source's raw alarm fields (severity codes, eventType strings, managedObjectId
-  construction, and other field/value conventions) into the canonical `AlarmEvent`
-  payload (X.733-aligned fields: `alarmId`, `managedObjectId`, `eventType`,
-  `probableCause`, `perceivedSeverity`, `raisedAt`, `clearedAt`, `state`, `vendorRaw`,
-  `trailIds`) using the frozen `libs/event-model` Java binding.
+  source's raw alarm fields (severity codes, eventType strings, **raw alarm-type
+  identifiers**, managedObjectId construction, and other field/value conventions) into the
+  canonical `AlarmEvent` payload (X.733-aligned fields plus the canonical join key:
+  `alarmId`, `managedObjectId`, `eventType`, `probableCause`, **`alarmType`**,
+  `perceivedSeverity`, `raisedAt`, `clearedAt`, `state`, `vendorRaw`, `trailIds`) using the
+  frozen `libs/event-model` Java binding.
+- **Populate the REQUIRED canonical `alarmType` field on every emitted `AlarmEvent`.** Each
+  per-source ruleset carries an **`alarmTypeMap`** mapping that source's raw alarm-type
+  identifier to a canonical token from the domain's Knowledge **`alarmTypeVocabulary`**
+  (`FiberFault`, `LOS`, `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`,
+  `ReachabilityLoss`). Enrichment is the source-adaptation boundary, so it MAPS each
+  source's raw alarm-type to this canonical token. `alarmType` is the **single canonical
+  join key** used downstream (pattern mining, codebook signatures, `rootCauseAlarmType`,
+  correlation matching); it is **distinct from** `eventType` (the X.733 category) and
+  `probableCause` (the X.733 probable cause). An unmapped raw alarm-type is handled per the
+  per-source `alarmTypeMap` policy (a configured fallback vocabulary token, or routed to the
+  DLQ) — but `alarmType` MUST always be a valid vocabulary token on every emitted alarm. The
+  `alarmType` value space (`alarmTypeVocabulary`) is authored in the Knowledge Service; the
+  per-source raw-to-canonical mapping is Enrichment's own configuration. The `alarmType`
+  field already exists on the frozen `AlarmEvent` payload — **no contract change is
+  required**.
 - Apply the **filter parameters** portion of the matched per-source ruleset: the dedup
   window duration, self-clear hold-time, flap N/window, and known-chatter list are all
   per-source values drawn from that source's ruleset configuration. Different sources may
@@ -122,7 +138,12 @@ stages. There are no pluggable or custom stages.
 1. For each incoming alarm from `alarms.history` or `alarms.live`, select the matching
    per-source ruleset (or the default ruleset when no source-specific match is found).
 2. Apply the field-mapping portion of the matched ruleset to translate the source's raw
-   alarm fields into the canonical `AlarmEvent` schema defined in `libs/event-model`.
+   alarm fields into the canonical `AlarmEvent` schema defined in `libs/event-model`. This
+   includes populating the REQUIRED canonical **`alarmType`** field: map the source's raw
+   alarm-type identifier to a canonical `alarmTypeVocabulary` token via the per-source
+   **`alarmTypeMap`**. Every emitted `AlarmEvent` carries a valid `alarmType` token (an
+   unmapped raw value uses the configured fallback token or routes to the DLQ per policy);
+   `alarmType` is the canonical join key, distinct from `eventType` and `probableCause`.
 3. Deduplicate incoming alarms: count-collapse repeated identical alarms sharing the same
    composite key **`(managedObjectId, eventType)`** within the per-source dedup window so
    only one representative is forwarded downstream.
@@ -137,7 +158,9 @@ stages. There are no pluggable or custom stages.
 6. Apply the known-chatter removal filter using the per-source known-chatter list: drop
    alarms whose (`managedObjectId`, `eventType`) pair appears on that list.
 7. Tag each surviving alarm with its `trailIds` by calling the Trail Builder
-   `getTrailsForObject(managedObjectId)` API for the alarm's `managedObjectId`.
+   `getTrailsForObject` API for the alarm's `managedObjectId` and `domain`, using the frozen
+   contract `GET /trails/by-object?managedObjectId={moId}&domain={domain}` →
+   `{ managedObjectId, domain, trailIds: [] }`; set `AlarmEvent.trailIds` from the response.
 8. Emit each surviving, trail-tagged `AlarmEvent` on the correct output topic:
    `alarms.enriched` for the history path and `alarms.enriched.live` for the live path.
 9. Route messages that cannot be deserialized or that violate the `AlarmEvent` schema to
@@ -159,14 +182,17 @@ stages. There are no pluggable or custom stages.
 ## Contract
 
 - **Consumes (Kafka):** `alarms.history`, `alarms.live`
-- **Produces (Kafka):** `alarms.enriched`, `alarms.enriched.live`
+- **Produces (Kafka):** `alarms.enriched`, `alarms.enriched.live` — each a canonical
+  `AlarmEvent` with the REQUIRED `alarmType` populated from the source's `alarmTypeMap`.
 - **APIs exposed:** None (stream-processing service; no HTTP business API). Exposes
   `/health` (liveness/readiness) and `/metrics` (Prometheus) only. No OpenAPI business
   surface.
 - **APIs/data consumed from other services:**
-  - **Trail Builder `getTrailsForObject(managedObjectId)`** — returns the list of
-    `trailId`s for the given managed object; used to populate `trailIds` on each surviving
-    alarm. Client built against Trail Builder's published OpenAPI 3.1 spec.
+  - **Trail Builder `getTrailsForObject(managedObjectId, domain)`** — frozen contract
+    `GET /trails/by-object?managedObjectId={moId}&domain={domain}` returning
+    `{ managedObjectId, domain, trailIds: string[] }`; used to populate `trailIds` on each
+    surviving alarm (set from the response `trailIds[]`). Client built against Trail
+    Builder's published OpenAPI 3.1 spec; Enrichment passes the alarm's `domain`.
 - **Integration points (mock vs. real):**
   - **Trail Builder `getTrailsForObject`** — base URL and mode configured via environment
     variables (`TRAIL_BUILDER_BASE_URL`, `TRAIL_BUILDER_MODE=mock|real`). Unit tests use a
@@ -177,7 +203,10 @@ stages. There are no pluggable or custom stages.
   (flap-detection counters and dedup windows) in-memory or in a Kafka Streams state store
   scoped to the service. This state is ephemeral and not a domain store. Per-source
   rulesets are owned configuration — loaded at startup from Enrichment's own configuration
-  (not from any other service's datastore).
+  (not from any other service's datastore). Each ruleset's field mapping includes an
+  **`alarmTypeMap`** (raw alarm-type to canonical `alarmTypeVocabulary` token) that drives the
+  required `AlarmEvent.alarmType`; the `alarmTypeVocabulary` value space is authored in the
+  Knowledge Service, the per-source mapping is Enrichment's own configuration.
 
 ## Non-functional
 
@@ -251,8 +280,8 @@ Each criterion maps to a single JUnit 5 unit test.
 10. **Output validates against the frozen `AlarmEvent` binding:** Given any alarm emitted
     on `alarms.enriched` or `alarms.enriched.live`, deserializing it with the
     `libs/event-model` Java `AlarmEvent` binding succeeds without validation errors: all
-    required fields are present, `managedObjectId` matches the `<objectType>:<id>` scheme,
-    and `trailIds` is a non-null array.
+    required fields are present (including a non-null `alarmType`), `managedObjectId` matches
+    the `<objectType>:<id>` scheme, and `trailIds` is a non-null array.
 
 11. **Per-source filter parameters govern filtering for that source:** Given two alarms
     representing the same logical transient alarm, one from source A (configured with a
@@ -283,6 +312,22 @@ Each criterion maps to a single JUnit 5 unit test.
     deserialized as a valid `AlarmEvent` (e.g., malformed JSON or unknown major
     `schemaVersion` ≥ 2), the service routes it to `alarms.history.dlq` and continues
     processing subsequent valid messages without crashing.
+
+16. **Every emitted `AlarmEvent` carries a valid canonical `alarmType`:** Given any surviving
+    alarm, the emitted `AlarmEvent.alarmType` is a non-null token drawn from the domain's
+    Knowledge `alarmTypeVocabulary`, and its value is the token the resolved source's
+    `alarmTypeMap` maps the raw alarm-type to (e.g. an alarm from source A whose raw
+    alarm-type is `LINK_DOWN` is emitted with `alarmType=LinkDown`; an alarm from source B
+    whose raw alarm-type is `port-fault` is emitted with `alarmType=PortDown`). A raw
+    alarm-type with no `alarmTypeMap` entry is emitted with the configured fallback
+    vocabulary token (or routed to the DLQ per the configured policy) — never emitted without
+    a valid `alarmType`.
+
+17. **Trail-tagging calls the frozen Trail Builder by-object contract with `domain`:** Given a
+    surviving alarm, the service tags `trailIds` by calling
+    `GET /trails/by-object?managedObjectId={moId}&domain={domain}` (both query params present,
+    `managedObjectId` = the alarm's managed object, `domain` = the configured domain) and sets
+    `AlarmEvent.trailIds` from the frozen `{ managedObjectId, domain, trailIds: [] }` response.
 
 ## Open questions
 
