@@ -15,14 +15,26 @@
 
 > **Contract status — typed `alarms[]` consumed; issue #99 RESOLVED.** The previous design
 > isolated alarm-detail resolution behind an `AlarmDetailResolver` seam because the old
-> `TransactionEvent` carried only `alarmIds[]` (no per-alarm `eventType`/`raisedAt`). That
-> contract gap is **closed**: the frozen `TransactionEvent` now carries an **ordered, typed
-> `alarms[]`** array (each entry `{alarmId, eventType, raisedAt, managedObjectId,
-> perceivedSeverity}`, all required), populated by the Noise Filter from the enriched AlarmEvents
-> it already holds. **The `AlarmDetailResolver` seam is removed.** The Miner builds its session
-> sequences (`eventType` items) and its timing/inter-arrival statistics + windowing decisions
-> (`raisedAt`) **directly from `TransactionEvent.alarms[]`** — no separate alarm-detail lookup or
-> resolver. **Issue #99 is RESOLVED** by the already-merged `alarms[]` contract; this design
+> `TransactionEvent` carried only `alarmIds[]` (no per-alarm detail). That contract gap is
+> **closed**: the frozen `TransactionEvent` now carries an **ordered, typed `alarms[]`** array
+> with **six required fields per entry** — `{alarmId, alarmType, eventType, raisedAt,
+> managedObjectId, perceivedSeverity}`, all required — populated by the Noise Filter from the
+> enriched AlarmEvents it already holds. **The `AlarmDetailResolver` seam is removed.**
+>
+> **The mined `sequence` is built from `alarms[].alarmType` — the canonical join token.** Per
+> `docs/architecture.md` (canonical alarm-type join key) and the frozen `TransactionEvent` schema,
+> **`alarmType` is the single canonical alarm-type token** the whole correlation chain joins on —
+> mined sequences, codebook signatures, `rootCauseAlarmType`, and correlation matching all key off
+> it. Its value space is the Knowledge-authored, domain-scoped **`alarmTypeVocabulary`** (Core IP
+> set: `FiberFault`, `LOS`, `PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`,
+> `ReachabilityLoss`). `alarmType` is **distinct from** `eventType` (the X.733 *category*, e.g.
+> `communicationsAlarm`) **and from** `probableCause` (X.733 probable cause). The Miner therefore
+> builds each PrefixSpan `sequence` item from **`alarms[].alarmType`** — **never** from `eventType`
+> (category) or `probableCause` — so `PatternMinedEvent.sequence` and the downstream
+> codebook/RCA/correlation matching all share **one token space**. The Miner builds its timing /
+> inter-arrival statistics + windowing decisions from **`raisedAt`** — all read **directly from
+> `TransactionEvent.alarms[]`**, no separate alarm-detail lookup or resolver. **Issue #99 is
+> RESOLVED** by the already-merged `alarms[]` contract (which now carries `alarmType`); this design
 > **consumes** it and introduces **no new event-model / contract change**.
 
 ## Stack
@@ -55,9 +67,9 @@ Every spec **Task (high-level)** is realized below; none is dropped or re-scoped
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | 1. Consume `transactions.clean`, dedupe `TransactionEvent` on envelope `eventId` (at-least-once). | `ingest.Consumer` reads `transactions.clean`, deserializes via `acp_event_model.codec.deserialize`; `ingest.Dedup` tracks processed `eventId`s for the current run and silently acks+drops duplicates. |
-| 2. Fetch current mining params (min-support, max-pattern-length, **windowing adaptation params incl. base/fallback gap**, max-sequence-count, `codebookVersion` in scope) from Knowledge before each run; no hard-coded thresholds. | `knowledge.MiningParamsClient` calls the Knowledge mining-params endpoint (config-switchable mock/real); returns a typed `MiningParams` carrying `minSupport`, `maxPatternLength`, a typed **`WindowingParams`** (adaptation params + base/fallback gap), `maxSequenceCount`, and `codebookVersion`. Values flow into windowing + PrefixSpan + provenance. No threshold literal exists in source/default config. |
+| 2. Fetch current mining params (min-support, max-pattern-length, **windowing adaptation params incl. base/fallback gap**, max-sequence-count, `codebookVersion` in scope) from Knowledge before each run; no hard-coded thresholds. | `knowledge.MiningParamsClient` calls the **frozen** Knowledge endpoint **`GET /domains/{domain}/model-params/{recordId}`** (config-switchable mock/real) and maps the returned versioned-record `payload.params[]` (dotted keys: `prefixspan.minSupport`, `prefixspan.maxPatternLength`, `window.adaptive.*`, named tempo profiles, …) into a typed `MiningParams` carrying `minSupport`, `maxPatternLength`, a typed **`WindowingParams`** (adaptation params + base/fallback gap), `maxSequenceCount`, and `codebookVersion`. Values flow into windowing + PrefixSpan + provenance. No threshold literal exists in source/default config. |
 | 3. Apply a **dynamic, activity/idle-driven session window** per trail: pool per-trail alarms, split on idle gaps; the closing gap **adapts to each burst's tempo** (fast cascade vs. slow-developing get different boundaries); all params Knowledge-sourced incl. base/fallback gap. | `windowing.SessionWindower` reads each `TransactionEvent.alarms[]` (ordered typed alarms), pools them per `trailId`, orders by `raisedAt`, and splits into sessions where the inter-arrival gap exceeds an **adaptive closing gap** computed per burst by `windowing.AdaptiveGap` from the `WindowingParams`. Each session gets a composite `sourceWindowId`. (Mechanism resolved below — Algorithm logical flow → Windowing.) |
-| 4. Run PrefixSpan (Spark MLlib) over the session-windowed, trail-scoped sequences yielding all frequent ordered subsequences meeting min-support; **pure sequence mining, no topology**. | `mining.PrefixSpanMiner` builds the Spark `sequences` DataFrame (one row per session = ordered list of single-item `eventType` sets), runs `PrefixSpan(minSupport, maxPatternLength)`, and reads back `freqSequences`, truncated to `maxSequenceCount`. No topology graph is consulted. |
+| 4. Run PrefixSpan (Spark MLlib) over the session-windowed, trail-scoped sequences yielding all frequent ordered subsequences meeting min-support; **pure sequence mining, no topology**. | `mining.PrefixSpanMiner` builds the Spark `sequences` DataFrame (one row per session = ordered list of single-item sets, **each item the alarm's `alarmType`** — the canonical join token, **not** `eventType`/`probableCause`), runs `PrefixSpan(minSupport, maxPatternLength)`, and reads back `freqSequences`, truncated to `maxSequenceCount`. The mined `sequence` is thus a list of `alarmTypeVocabulary` tokens (e.g. `["FiberFault","LinkDown","AdjDown"]`). No topology graph is consulted. |
 | 5. Compute support, confidence, lift for each discovered sequence (MVP metrics; no conviction). | `metrics.MetricsComputer` computes `support` (relative frequency), `confidence` (conditional probability of the sequence given its prefix), and `lift` (over the independence baseline) from PrefixSpan frequency counts + per-item marginals. `conviction` is **not** computed and not in the schema. |
 | 6. Assemble a `PatternMinedEvent` per sequence: `sequence`, `support`, `confidence`, `lift`, `trailId`, `timing`, `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`) — no RCA/lifecycle fields. | `assemble.PatternAssembler` builds a `PatternMinedEvent` (Pydantic) per discovered sequence; `timing` is the canonical **millisecond-keyed** inter-arrival statistics object (`timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `stddevInterArrivalMs`) computed by `metrics.TimingComputer` from the per-alarm `raisedAt` in `alarms[]` within matching sessions — the **contract-of-shape the Pattern Manager's `SessionWindowDeriver` consumes** (see Timing statistics, contract-of-shape on the open `timing` object below). `provenance` carries the composite `sourceWindowId`, the `snapshotId` from the source transaction, `codebookVersion` from the Knowledge response, and `domain` propagated from the transaction. RCA/lifecycle/patternId are structurally impossible (schema forbids extras). |
 | 7. Emit one `PatternMinedEvent` on `patterns.mined` per discovered sequence. | `emit.Producer` wraps each `PatternMinedEvent` in an envelope (`type="PatternMinedEvent"`, `schemaVersion=1`, `source="pattern-miner"`, propagated `traceId`) and produces to `patterns.mined`. |
@@ -118,7 +130,8 @@ flowchart TD
   mock/real.
 - **windowing.SessionWindower** — reads each `TransactionEvent.alarms[]` (ordered typed alarms),
   pools alarms per `trailId`, orders by `raisedAt`, and splits into **dynamic, idle-driven**
-  sessions. **Reads `eventType` and `raisedAt` directly from `alarms[]` — no resolver.**
+  sessions. **Reads `alarmType` (the sequence item) and `raisedAt` (timing/windowing) directly
+  from `alarms[]` — no resolver.**
 - **windowing.AdaptiveGap** — computes the **closing idle gap per burst** from the burst's own
   inter-arrival statistics and the Knowledge `WindowingParams`, so different tempos get different
   boundaries (mechanism below).
@@ -146,8 +159,10 @@ to the Pattern Manager.
 
 - **Consumers:**
   - `transactions.clean` to `ingest.Consumer`. Payload type: `TransactionEvent` (event-model),
-    now carrying the ordered typed **`alarms[]`** (`{alarmId, eventType, raisedAt,
-    managedObjectId, perceivedSeverity}`) consumed directly.
+    now carrying the ordered typed **`alarms[]`** with **six required fields per entry**
+    (`{alarmId, alarmType, eventType, raisedAt, managedObjectId, perceivedSeverity}`) consumed
+    directly. The mined sequence item is **`alarmType`** (canonical join token); `eventType`
+    (X.733 category) is carried but **not** used as the sequence item.
     **Idempotency/dedupe key:** envelope **`eventId`** (criterion 7) — duplicates are acked +
     dropped.
     **DLQ routing:** deserialize failure, `TransactionEvent` schema-validation failure, or
@@ -177,20 +192,26 @@ job. It exposes only operational endpoints:
 These are operational, not a contract surface, so **no OpenAPI 3.1 document is published** (spec:
 "no HTTP API surface beyond `/health` and `/metrics`; no OpenAPI spec is published"). The service's
 **inbound** contracts are the Kafka topic + event-model payloads (`TransactionEvent` with typed
-`alarms[]` in, `PatternMinedEvent` out); its **outbound** synchronous contract (Knowledge
-mining-params) is built against the **Knowledge Service's** published OpenAPI spec (see
-Integration points).
+`alarms[]` — six required fields incl. `alarmType` — in, `PatternMinedEvent` out); its **outbound**
+synchronous contract is the Knowledge Service's frozen
+`GET /domains/{domain}/model-params/{recordId}` versioned-record endpoint, built against the
+Knowledge Service's published `openapi.json` (see Integration points).
 
 ## Integration points (mock vs. real)
 
-| Collaborator + operation | Config key(s) | Mock (unit) | Real (integration) |
-|---|---|---|---|
-| **Knowledge Service — mining-params** (min-support, max-pattern-length, windowing adaptation params incl. base/fallback gap, max-sequence-count, `codebookVersion`) | `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_CLIENT_MODE` (`mock`/`real`) | `respx`-backed stub generated from the **Knowledge Service published OpenAPI 3.1 spec** | Live Knowledge Service at the Docker Compose address, resolved from env |
+| Collaborator + operation | Endpoint (frozen shape) | Config key(s) | Mock (unit) | Real (integration) |
+|---|---|---|---|---|
+| **Knowledge Service — mining-params** (min-support, max-pattern-length, windowing adaptation params incl. base/fallback gap, max-sequence-count, `codebookVersion`) | **`GET /domains/{domain}/model-params/{recordId}`** — the frozen versioned-record surface (Knowledge design §B, P2-GAP-07); `recordId` is the pattern-miner param set (e.g. `core-ip/modelParams/pattern-miner`, URL-encoded). Returns the versioned envelope `{domain, recordType:"modelParams", recordId, version, isCurrent, payload:{paramSet:"pattern-miner", params:[{key,type,value,min,max,unit?}]}}` with **real dotted keys** (`prefixspan.minSupport`, `prefixspan.maxPatternLength`, `window.adaptive.baseGapSeconds`, named tempo profiles, …). `codebookVersion` in scope is returned in the same response. `404` for unknown domain/record. | `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_CLIENT_MODE` (`mock`/`real`), `KNOWLEDGE_DOMAIN`, `KNOWLEDGE_MODEL_PARAMS_RECORD_ID` | `respx`-backed stub generated from the **Knowledge Service published `openapi.json`**, returning the versioned-record envelope above | Live Knowledge Service at the Docker Compose address, resolved from env |
 
-- No hard-coded URLs; base URL + mock/real toggle come from env (spec Non-functional / Config).
-- The exact endpoint path and response shape are taken from the Knowledge Service's **published
-  OpenAPI** at build time (spec OQ #1 / #45 — design-stage, resolved against the published spec,
-  not against assumptions here).
+- No hard-coded URLs; base URL + mock/real toggle + `domain`/`recordId` come from env (spec
+  Non-functional / Config).
+- **Endpoint pinned (resolves spec OQ #1 / #45).** The path and response shape are the
+  **frozen** `GET /domains/{domain}/model-params/{recordId}` versioned-record surface published by
+  the Knowledge Service (Knowledge design §B — Knowledge is the single source of truth for the path
+  and payload; there is **no** flat `/knowledge/model-params` path and **no** flat camelCase keys).
+  The `MiningParamsClient` maps the dotted-key `payload.params[]` to its typed `MiningParams` /
+  `WindowingParams`. The Knowledge **`openapi.json`** is a build-time artifact the client and its
+  unit-test mock are generated against; pinning the frozen shape here is sufficient.
 - **No alarm-detail integration point exists.** The former `AlarmDetailResolver` seam is removed;
   the typed `alarms[]` arrive in-band on the `TransactionEvent`, so there is no lookup/join/API for
   alarm detail (issue #99 RESOLVED by the merged contract).
@@ -209,13 +230,13 @@ sequenceDiagram
   participant MC as MetricsComputer
   participant AS as PatternAssembler
   participant P as patterns.mined
-  K->>I: TransactionEvent (envelope, typed alarms array)
+  K->>I: TransactionEvent (envelope, typed alarms array, six fields incl alarmType)
   I->>I: dedupe on eventId, drop duplicates
-  I->>KS: fetch MiningParams plus WindowingParams plus codebookVersion
+  I->>KS: GET model-params recordId, fetch MiningParams plus WindowingParams plus codebookVersion
   KS-->>I: minSupport, maxLen, WindowingParams, maxCount, codebookVersion
   I->>W: typed alarms read from event, ordered by raisedAt per trail
   W->>W: per burst compute adaptive closing gap, split on idle gap
-  W->>PS: per-trail session sequences of eventType, sourceWindowId per session
+  W->>PS: per-trail session sequences of alarmType tokens, sourceWindowId per session
   PS-->>MC: frequent ordered sequences plus counts
   MC->>AS: support, confidence, lift per sequence
   W->>AS: ms timing timeframeMs, medianInterArrivalMs, maxInterArrivalMs, stddevInterArrivalMs
@@ -246,12 +267,12 @@ Output: zero or more `PatternMinedEvent`s.
 
 ```mermaid
 flowchart TD
-  S["start mining run"] --> P["fetch MiningParams plus WindowingParams from Knowledge"]
-  P --> READ["read typed alarms array from each TransactionEvent (eventType plus raisedAt)"]
+  S["start mining run"] --> P["GET model-params recordId, fetch MiningParams plus WindowingParams from Knowledge"]
+  P --> READ["read typed alarms array from each TransactionEvent (alarmType plus raisedAt)"]
   READ --> ORD["order alarms by raisedAt within each trail"]
   ORD --> GAP["per burst compute adaptive closing gap from inter-arrival stats plus WindowingParams"]
   GAP --> SESS["split into sessions where idle gap exceeds the adaptive closing gap"]
-  SESS --> SEQ["build one ordered eventType sequence per session, tag composite sourceWindowId"]
+  SESS --> SEQ["build one ordered alarmType-token sequence per session, tag composite sourceWindowId"]
   SEQ --> PSPAN["run PrefixSpan with minSupport and maxPatternLength (no topology)"]
   PSPAN --> FREQ{"any frequent sequences"}
   FREQ -- no --> DONE["emit nothing, log empty result"]
@@ -265,9 +286,11 @@ flowchart TD
 ### Windowing (resolves spec OQ #50 — dynamic activity/idle session windowing)
 
 **Inputs come from the event, not a resolver.** The Miner reads the ordered, typed `alarms[]`
-**directly off each `TransactionEvent`** — `eventType` is the PrefixSpan item and `raisedAt` drives
-both timing and windowing. There is no `alarmId` to detail lookup (issue #99 RESOLVED by the merged
-`alarms[]` contract).
+**directly off each `TransactionEvent`** — **`alarmType`** (the canonical join token, drawn from the
+domain's `alarmTypeVocabulary`) is the PrefixSpan item, and `raisedAt` drives both timing and
+windowing. `eventType` (X.733 category) is present but is **not** the sequence item — using it would
+break the shared token space with the codebook/RCA/correlation chain. There is no `alarmId` to
+detail lookup (issue #99 RESOLVED by the merged `alarms[]` contract).
 
 **Chosen finalize semantics.** The Miner treats `TransactionEvent`s as **inputs to re-window**,
 not as already-final sessions (the Miner owns the final boundary, per §6.8). Per trail it pools the
@@ -389,16 +412,18 @@ lifecycle assignment, no topology access, and nothing is persisted — those are
 ## Seed data & examples
 
 **N/A.** pattern-miner generates no seed/fixture corpus of its own. Test inputs are synthetic
-`TransactionEvent` batches with **typed `alarms[]`** populated inline (each `{alarmId, eventType,
-raisedAt, managedObjectId, perceivedSeverity}`) constructed in the test suite — including the
-Simulator-style injected fiber-cut sequence `["lossOfSignal","linkDown","bgpPeerDown"]`, a spurious
-low-lift co-occurrence, a fast-tempo and a slow-tempo burst, and a two-burst idle-split trail —
-described inline in the Test plan rather than as a standalone seed dataset. No resolver fake is
-needed (alarm detail is in-band).
+`TransactionEvent` batches with **typed `alarms[]`** populated inline (each of the **six required
+fields** `{alarmId, alarmType, eventType, raisedAt, managedObjectId, perceivedSeverity}`)
+constructed in the test suite — including the Simulator-style injected fiber-cut sequence whose
+**`alarmType` tokens** are `["FiberFault","LinkDown","AdjDown"]` (all members of the Core IP
+`alarmTypeVocabulary`), a spurious low-lift co-occurrence, a fast-tempo and a slow-tempo burst, and
+a two-burst idle-split trail — described inline in the Test plan rather than as a standalone seed
+dataset. The mined `sequence` is built from these `alarmType` tokens (not `eventType` categories,
+not `probableCause`). No resolver fake is needed (alarm detail is in-band).
 
 **Worked timing example (ms keys).** A session whose alarms `raisedAt` are
-`12:00:00.000`, `12:00:04.000`, `12:00:09.000` (one occurrence of
-`["lossOfSignal","linkDown","bgpPeerDown"]`) has consecutive gaps `4000 ms` and `5000 ms` and a
+`12:00:00.000`, `12:00:04.000`, `12:00:09.000` (one occurrence of the `alarmType`-token sequence
+`["FiberFault","LinkDown","AdjDown"]`) has consecutive gaps `4000 ms` and `5000 ms` and a
 span of `9000 ms`. Over a single such occurrence the Miner emits:
 
 ```json
@@ -441,7 +466,8 @@ results; every other failure is logged and either DLQ-routed or fails the run.
 
 | Consideration | Alternatives considered | Chosen + rationale |
 |---|---|---|
-| **Source of per-alarm `eventType` / `raisedAt`** | (a) consume the typed `alarms[]` now carried in-band on `TransactionEvent`; (b) keep the old `AlarmDetailResolver` seam and resolve `alarmId` to detail out-of-band (lookup API / co-consume `alarms.enriched` / enrich the contract). | **(a) consume `alarms[]` in-band.** The contract gap that motivated the resolver (issue #99) is **closed** — `TransactionEvent` now carries ordered typed `alarms[]`, populated by the Noise Filter. The resolver seam is therefore **removed**; the Miner reads `eventType`/`raisedAt` directly off the event. No new consumer, no extra phase-map dependency, no contract change. (b) is now dead weight and is deleted. |
+| **Source of per-alarm detail (`alarmType` / `raisedAt`)** | (a) consume the typed `alarms[]` now carried in-band on `TransactionEvent`; (b) keep the old `AlarmDetailResolver` seam and resolve `alarmId` to detail out-of-band (lookup API / co-consume `alarms.enriched` / enrich the contract). | **(a) consume `alarms[]` in-band.** The contract gap that motivated the resolver (issue #99) is **closed** — `TransactionEvent` now carries ordered typed `alarms[]` (six fields incl. `alarmType`), populated by the Noise Filter. The resolver seam is therefore **removed**; the Miner reads `alarmType` (the sequence item) and `raisedAt` directly off the event. No new consumer, no extra phase-map dependency, no contract change. (b) is now dead weight and is deleted. |
+| **Mined-sequence token: `alarmType` vs. `eventType`** | (a) build the PrefixSpan `sequence` items from `alarms[].alarmType` (the canonical join token); (b) build them from `alarms[].eventType` (the X.733 category); (c) from `probableCause`. | **(a) `alarmType`.** `docs/architecture.md` and the frozen `TransactionEvent` make `alarmType` the **single canonical join key** — mining, codebook signatures, `rootCauseAlarmType`, and correlation matching all key off the domain's `alarmTypeVocabulary`. Building `sequence` from `eventType` (b) would emit X.733 *categories* (e.g. `communicationsAlarm`) that do **not** match codebook signatures or RCA tokens — breaking the shared token space and making mined patterns unusable downstream. (c) `probableCause` is likewise off the join key. Only (a) keeps `PatternMinedEvent.sequence` in the same token space as every downstream consumer. |
 | **Session-window finalize plus adaptive-gap mechanism (spec OQ#50)** | (a) single fixed global `sessionGap`; (b) Knowledge per-tempo-class gap profiles only; (c) data-driven gap from each burst's own inter-arrival distribution only; (d) **hybrid** — Knowledge tempo-class floor plus data-driven per-burst derivation, clamped, with a Knowledge `baseGap` fallback. | **(d) hybrid.** (a) cannot satisfy criterion 10/11 — one gap over-splits slow bursts and merges fast cascades. (b) alone is rigid (a burst off-profile is mis-cut and needs operator pre-classification). (c) alone is unstable on tiny bursts (a 2-alarm burst has no robust percentile) and ungoverned. The hybrid tracks each burst's own tempo (data-driven core), is floored/ceilinged and biasable by Knowledge tempo classes, and falls back to a Knowledge `baseGap` when data is insufficient — adaptive, fully Knowledge-parameterized, no hard-coded gap. `sourceWindowId` becomes a composite session reference. |
 | **Mining engine** | (a) Spark MLlib `PrefixSpan`; (b) SPMF or pure-Python sequence miner; (c) FP-Growth (unordered itemsets). | **(a) PrefixSpan (Spark MLlib).** The spec mandates PrefixSpan and ordered sequences; Spark gives scale-out for the historical corpus and is the cohort PySpark choice. (c) FP-Growth loses ordering (wrong algorithm class); (b) does not scale and is off-spec. PrefixSpan stays **pure sequence mining over sessions — no topology**. |
 | **Stateless job vs. long-running Streams app** | (a) batch Spark job run per learning window; (b) a long-running streaming windower. | **(a) stateless batch job.** The spec and architecture classify the Miner as a stateless, container-only Spark job active only in P2; batch matches the offline learning phase and keeps it stateless (no owned store). |
@@ -458,8 +484,8 @@ Test inputs are `TransactionEvent`s with **typed `alarms[]`** populated inline �
 
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
-| 1 | Injected fiber-cut sequence is recovered with correct support. | `test_fiber_cut_sequence_recovered_with_support` | Given transactions whose `alarms[]` repeat `["lossOfSignal","linkDown","bgpPeerDown"]`, at least one emitted `PatternMinedEvent.sequence` equals that ordered list and its `support` equals the observed session frequency within float tolerance. |
-| 2 | Spurious high-support, low-lift co-occurrence is surfaced with its computed lift. | `test_spurious_cooccurrence_surfaced_with_low_lift` | For two frequently co-occurring `eventType`s that are statistically independent, a `PatternMinedEvent` is emitted and its `lift` is approximately 1.0 (within tolerance), enabling downstream flagging. |
+| 1 | Injected fiber-cut sequence is recovered with correct support. | `test_fiber_cut_sequence_recovered_with_support` | Given transactions whose `alarms[]` carry the `alarmType`-token sequence `["FiberFault","LinkDown","AdjDown"]`, at least one emitted `PatternMinedEvent.sequence` equals that ordered list of **`alarmType`** tokens and its `support` equals the observed session frequency within float tolerance. |
+| 2 | Spurious high-support, low-lift co-occurrence is surfaced with its computed lift. | `test_spurious_cooccurrence_surfaced_with_low_lift` | For two frequently co-occurring `alarmType` tokens that are statistically independent, a `PatternMinedEvent` is emitted and its `lift` is approximately 1.0 (within tolerance), enabling downstream flagging. |
 | 3 | Raising min-support above a sequence support removes it; lowering it back restores it. | `test_min_support_threshold_filters_and_restores` | With the Knowledge mock returning a high `minSupport`, the borderline sequence is absent from emitted events for the window; with a lowered `minSupport`, the same input re-emits it. |
 | 4 | Every emitted event validates against the frozen `PatternMinedEvent` model; all required fields present, no extras. | `test_emitted_event_validates_against_frozen_model` | Each emitted event round-trips through `acp_event_model` `PatternMinedEvent.model_validate`; required fields (`sequence`,`support`,`confidence`,`lift`,`trailId`,`timing`,`provenance`) present and typed; injecting an extra field raises `ValidationError`. |
 | 5 | No emitted event carries `rootCauseAlarmType`, `patternId`, or `lifecycle`; constructing one with such a field raises `ValidationError`. | `test_no_rca_or_lifecycle_fields_on_output` | Emitted payload dicts contain none of those keys; `PatternMinedEvent(**{...,"rootCauseAlarmType":"x"})` and the `patternId`/`lifecycle` variants each raise `ValidationError` (enforced by `extra="forbid"`). |
@@ -470,13 +496,17 @@ Test inputs are `TransactionEvent`s with **typed `alarms[]`** populated inline �
 | 10 | Two trails with markedly different inter-arrival tempos get **different appropriate** session boundaries — fast burst kept whole (not over-split), slow burst kept whole (not truncated). | `test_different_tempo_trails_get_appropriate_boundaries` | Build trail A as a single fast burst (sub-second inter-arrivals) and trail B as a single slow burst (minutes apart). After windowing, **trail A yields exactly one session** (the adaptive gap calibrated to its tempo is not exceeded) **and trail B yields exactly one session** (its large adaptive gap is not exceeded). A single fixed slow-calibrated gap would split A, and a fast-calibrated fixed gap would split B — asserting per-tempo adaptation, not one global gap. |
 | 11 | A single trail with two bursts separated by a clear idle period (longer than any intra-burst gap) splits into **exactly two** sessions; intra-burst alarms stay together. | `test_idle_period_splits_trail_into_two_sessions` | Build one trail with burst-1, a long idle gap, then burst-2 (each intra-burst inter-arrival small). Windowing produces **exactly two sessions**, burst-1's alarms all in session 1 and burst-2's all in session 2, with no further intra-burst split. |
 | 12 | Changing the Knowledge windowing configuration and reprocessing the **same** inputs yields **different** session boundaries — proving adaptation is Knowledge-governed, nothing hard-coded. | `test_knowledge_windowing_config_changes_boundaries` | Reprocess a fixed alarm-event set twice with two different `WindowingParams` from the Knowledge mock (e.g. different `baseGap`/`multiplier`); the resulting session boundaries (count and/or membership) differ; under identical params they are identical (deterministic), confirming boundaries are a pure function of Knowledge-sourced params plus input. |
-| — (typed `alarms[]`, no resolver) | Session sequences + timing are built directly from `TransactionEvent.alarms[]` — no alarm-detail resolver/lookup. | `test_sequences_and_timing_built_from_typed_alarms` | The PrefixSpan input items equal the `alarms[].eventType` values in `raisedAt` order, and `timing` inter-arrival stats are computed from `alarms[].raisedAt`; no resolver/lookup/HTTP-join is invoked (there is no such collaborator), and removing `alarms[]` makes the event fail schema validation and DLQ-route (not a resolver call). |
+| — (sequence built from `alarmType`) | The mined `sequence` items are the `alarms[].alarmType` tokens — **not** `eventType` (X.733 category) and **not** `probableCause`. | `test_sequence_built_from_alarm_type_not_event_type` | For a session whose alarms carry **distinct** `alarmType` and `eventType` values (e.g. `alarmType=["FiberFault","LinkDown","AdjDown"]` while `eventType=["communicationsAlarm","communicationsAlarm","communicationsAlarm"]`), the PrefixSpan input items and the emitted `PatternMinedEvent.sequence` equal the **`alarmType`** tokens in `raisedAt` order and contain **none** of the `eventType` category values — proving the sequence is built from `alarms[].alarmType`, the canonical join token shared with the codebook/RCA/correlation chain. |
+| — (typed `alarms[]`, no resolver) | Session sequences + timing are built directly from `TransactionEvent.alarms[]` (six fields) — no alarm-detail resolver/lookup. | `test_sequences_and_timing_built_from_typed_alarms` | The PrefixSpan input items equal the `alarms[].alarmType` values in `raisedAt` order, and `timing` inter-arrival stats are computed from `alarms[].raisedAt`; no resolver/lookup/HTTP-join is invoked (there is no such collaborator), and removing `alarms[]` makes the event fail schema validation and DLQ-route (not a resolver call). |
 | — (P2-GAP-10) timing canonical keys + units consumed by Pattern Manager | `PatternMinedEvent.timing` carries exactly `timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`, `stddevInterArrivalMs`, all in **milliseconds**; no `meanInterArrivalSeconds`/`stdDevSeconds`. | `test_timing_emits_ms_keys_for_session_window_deriver` | For the worked example (`raisedAt` gaps `4000`/`5000` ms, span `9000` ms), the emitted `timing` equals `{timeframeMs:9000, medianInterArrivalMs:4500, maxInterArrivalMs:5000, stddevInterArrivalMs:500}`; the four keys are present and integer-ms; the old `meanInterArrivalSeconds`/`stdDevSeconds` keys are **absent**; the object still validates against the open (`additionalProperties:true`) `timing` schema. |
 | — (P2-GAP-10) median, not mean | `medianInterArrivalMs` is the **median** of consecutive inter-arrival gaps (so the consumer's `cv = stddevInterArrivalMs / medianInterArrivalMs` is well-defined), never the mean. | `test_median_inter_arrival_used_not_mean` | For an asymmetric gap set whose median and mean differ (e.g. gaps `1000, 1000, 7000` ms → median `1000`, mean `3000`), `medianInterArrivalMs` equals `1000` (median), proving median is emitted; `maxInterArrivalMs` equals `7000`; `stddevInterArrivalMs` equals the stddev of the gaps. |
 
-Every spec acceptance criterion (1–12) maps to a named pytest test above, plus the typed-`alarms[]`
-no-resolver test and the two P2-GAP-10 timing tests (ms canonical keys; median-not-mean) that pin
-the producer-side contract-of-shape the Pattern Manager `SessionWindowDeriver` consumes.
+Every spec acceptance criterion (1–12) maps to a named pytest test above, plus
+`test_sequence_built_from_alarm_type_not_event_type` (the mined `sequence` is built from
+`alarms[].alarmType`, the canonical join token — not `eventType`/`probableCause`), the
+typed-`alarms[]` no-resolver test, and the two P2-GAP-10 timing tests (ms canonical keys;
+median-not-mean) that pin the producer-side contract-of-shape the Pattern Manager
+`SessionWindowDeriver` consumes.
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -486,7 +516,7 @@ alarm-detail collaborator.
 
 | # | Scenario | Trigger → path | Expected outcome |
 |---|---|---|---|
-| 1 | Fiber-cut storm mined end to end | Publish a `transactions.clean` batch whose `alarms[]` contain the injected fiber-cut sequence; consume → fetch Knowledge params → window → PrefixSpan → emit | A `PatternMinedEvent` on `patterns.mined` with `sequence=["lossOfSignal","linkDown","bgpPeerDown"]`, correct support, and full provenance (incl. `codebookVersion` from Knowledge). |
+| 1 | Fiber-cut storm mined end to end | Publish a `transactions.clean` batch whose `alarms[]` carry the fiber-cut `alarmType` tokens; consume → `GET /domains/{domain}/model-params/{recordId}` for params → window → PrefixSpan → emit | A `PatternMinedEvent` on `patterns.mined` with `sequence=["FiberFault","LinkDown","AdjDown"]` (`alarmType` tokens), correct support, and full provenance (incl. `codebookVersion` from the Knowledge model-params response). |
 | 2 | Spurious co-occurrence flagged downstream | Publish transactions with an independent frequent pair | A `PatternMinedEvent` emitted with `lift` near 1.0, available for the Pattern Manager to flag. |
 | 3 | Threshold change re-shapes output | Run, then change Knowledge `minSupport`, re-run same input | Borderline sequence disappears then reappears across runs, proving Knowledge-driven thresholds. |
 | 4 | Dynamic tempo windowing end to end | Publish one trail as a fast burst and another as a slow burst in the same run | Each trail mines as a single coherent session — the fast cascade is not over-split and the slow build-up is not truncated — proving per-tempo adaptive windowing on the real path. |
