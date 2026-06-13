@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Port:p1", "objectType": "Node" }
+  ],
+  "edges": []
+}

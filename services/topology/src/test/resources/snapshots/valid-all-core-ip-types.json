@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "snapshotId": "SNAP-ALL-TYPES-001",
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Node:PE1", "objectType": "Node", "name": "PE1",
+      "attributes": { "vendor": "acme", "model": "X9", "equipmentType": "router", "role": "PE" } },
+    { "managedObjectId": "LineCard:PE1-LC2", "objectType": "LineCard", "name": "LC2" },
+    { "managedObjectId": "Port:PE1-LC2-P3", "objectType": "Port", "name": "ge-0/0/3" },
+    { "managedObjectId": "Interface:PE1-LC2-P3-100", "objectType": "Interface", "name": "ge-0/0/3.100",
+      "attributes": { "ipAddress": "10.0.0.1", "adminState": "up" } },
+    { "managedObjectId": "IPLink:PE1-PE2-1", "objectType": "IPLink", "name": "link1",
+      "attributes": { "linkType": "backbone", "capacity": "100G" } },
+    { "managedObjectId": "IGPAdjacency:PE1-PE2", "objectType": "IGPAdjacency", "name": "isis-adj" },
+    { "managedObjectId": "LSP:PE1-PE2-primary", "objectType": "LSP", "name": "lsp1" },
+    { "managedObjectId": "VPNService:cust-A", "objectType": "VPNService", "name": "Customer A VPN" },
+    { "managedObjectId": "FiberSpan:LON-PAR-1", "objectType": "FiberSpan", "name": "fiber1" },
+    { "managedObjectId": "SRLG:srlg-7", "objectType": "SRLG", "name": "SRLG 7" },
+    { "managedObjectId": "Site:LON-DC1", "objectType": "Site", "name": "London DC1",
+      "attributes": { "latitude": 51.5, "longitude": -0.12, "region": "EU-West" } }
+  ],
+  "edges": [
+    { "from": "Port:PE1-LC2-P3", "to": "Node:PE1", "relation": "HOSTED_ON" },
+    { "from": "LineCard:PE1-LC2", "to": "Node:PE1", "relation": "HOSTED_ON" },
+    { "from": "Port:PE1-LC2-P3", "to": "Interface:PE1-LC2-P3-100", "relation": "HOSTS" },
+    { "from": "Interface:PE1-LC2-P3-100", "to": "IPLink:PE1-PE2-1", "relation": "TERMINATES" },
+    { "from": "FiberSpan:LON-PAR-1", "to": "IPLink:PE1-PE2-1", "relation": "RIDES_ON" },
+    { "from": "Interface:PE1-LC2-P3-100", "to": "IGPAdjacency:PE1-PE2", "relation": "ADJACENCY_OVER" },
+    { "from": "LSP:PE1-PE2-primary", "to": "IPLink:PE1-PE2-1", "relation": "TRAVERSES" },
+    { "from": "VPNService:cust-A", "to": "IPLink:PE1-PE2-1", "relation": "SERVES" },
+    { "from": "IPLink:PE1-PE2-1", "to": "SRLG:srlg-7", "relation": "MEMBER_OF" },
+    { "from": "Node:PE1", "to": "Site:LON-DC1", "relation": "LOCATED_AT" }
+  ]
+}

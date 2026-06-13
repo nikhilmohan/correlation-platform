@@ -162,20 +162,94 @@ services:
     networks:
       - cp-net
 
+  # --- Knowledge Service — authoritative, versioned store for authored domain knowledge.
+  #     Owns ONLY the `knowledge` PostgreSQL schema; produces `knowledge.updated`; consumes
+  #     nothing. Build context is the repo root (composite build includes libs/event-model). ---
+  knowledge:
+    build:
+      context: .
+      dockerfile: services/knowledge/Dockerfile
+    image: acp/knowledge:0.1.0
+    container_name: cp-knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: "8080"
+      DB_URL: "jdbc:postgresql://postgres:5432/correlation"
+      DB_USER: "correlation"
+      DB_PASSWORD: "correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KAFKA_ENABLED: "true"
+      KNOWLEDGE_UPDATED_TOPIC: "knowledge.updated"
+      SEED_ON_STARTUP: "true"
+    ports:
+      - "8081:8080"      # /health + /metrics + /openapi.json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
+  # --- Topology Service — sole owner of the NebulaGraph topology graph (nGQL 9669) + the
+  #     PostgreSQL topology_meta snapshot metadata. Ingests snapshot files via POST
+  #     /topology/snapshots, lifts into NebulaGraph, mints snapshotId, emits topology.changed.
+  #     Runs the idempotent ADD HOSTS + CREATE SPACE/TAG/EDGE bootstrap on startup (subsumes the
+  #     deferred nebula-init one-shot). All config from env; no hard-coded URLs/credentials. ---
+  topology:
+    build:
+      context: .
+      dockerfile: services/topology/Dockerfile
+    image: acp/topology:0.1.0
+    container_name: cp-topology
+    ports:
+      - "8082:8080"      # HTTP API + /actuator/health + /actuator/prometheus (8081 = knowledge)
+    environment:
+      TOPOLOGY_PORT: "8080"
+      TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      TOPOLOGY_NEBULA_HOSTS: "nebula-graphd:9669"
+      TOPOLOGY_NEBULA_SPACE: "topology"
+      TOPOLOGY_NEBULA_USERNAME: "root"
+      TOPOLOGY_NEBULA_PASSWORD: "nebula"
+      TOPOLOGY_NEBULA_STORAGED_HOST: "nebula-storaged:9779"
+      TOPOLOGY_NEBULA_BOOTSTRAP: "true"
+      TOPOLOGY_POSTGRES_JDBC_URL: "jdbc:postgresql://postgres:5432/correlation"
+      TOPOLOGY_POSTGRES_USERNAME: "correlation"
+      TOPOLOGY_POSTGRES_PASSWORD: "correlation"
+      TOPOLOGY_KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      TOPOLOGY_KNOWLEDGE_MODE: "real"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nebula-graphd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
-#   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
+#   simulator, trail-builder, codebook-generator, enrichment,
 #   noise-filter, pattern-manager, correlation-engine, web-ui
 #
 #   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)
 #   Also deferred:
 #     - spark: PySpark runtime for pattern-miner (container-only)
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
-#     - nebula-init: one-shot container that runs `ADD HOSTS "nebula-storaged":9779;` against
-#       nebula-graphd (port 9669) after first boot — NebulaGraph requires storaged hosts to be
-#       registered with metad before a graph space can be used. (Owned by the Topology Service's
-#       bootstrap once it is built.)
+#     - nebula-init: NO LONGER NEEDED as a separate one-shot — the Topology Service now runs the
+#       idempotent `ADD HOSTS "nebula-storaged":9779;` + CREATE SPACE/TAG/EDGE bootstrap itself on
+#       startup (see the `topology` service above), so storaged registration is owned by it.
 # -----------------------------------------------------------------------------------------
 
 volumes:
