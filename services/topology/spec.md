@@ -404,6 +404,30 @@ Each criterion maps to a single unit test (JUnit 5).
     `services/simulator/schema/...` copy; the Simulator (producer) references this same file, so
     producer and validator cannot diverge (CI lockstep guard).
 
+25. **Interface model lifts and is queryable end-to-end (Core-IP §5 layering).** Interface is a
+    first-class object in the Core IP topology — IP links terminate on interfaces, IGP/BGP
+    adjacencies run between interfaces, and an interface is a first-class fault origin — so the
+    interface layering must be a tested guarantee, not implicit. Given a snapshot file containing
+    `Interface` nodes plus `HOSTS` (Port → Interface), `TERMINATES` (Interface → IPLink), and
+    `ADJACENCY_OVER` (Interface → IGPAdjacency) edges:
+    - **Lift.** The snapshot lifts correctly into the typed graph: each `Interface` node becomes a
+      typed `Interface` vertex (objectType `Interface`), and the `HOSTS`, `TERMINATES`, and
+      `ADJACENCY_OVER` edge types are all created on the correct endpoints — no partial or dropped
+      interface data.
+    - **Layering is queryable.** `GET /topology/nodes?objectType=Interface` lists exactly the
+      interfaces; the neighbors/traversal API resolves the layering `Port —HOSTS→ Interface
+      —TERMINATES→ IPLink` (from a Port, the `HOSTS` neighbor is its Interface; from that Interface,
+      the `TERMINATES` neighbor is its IPLink); and `ADJACENCY_OVER` resolves **between interfaces** —
+      an interface's `ADJACENCY_OVER` neighbor is the IGPAdjacency, reflecting that adjacencies run
+      between interfaces, not directly between nodes.
+    - **Resolution.** `GET /topology/nodes/{managedObjectId}` for an `Interface:*` id returns the
+      object as a typed `NodeDto` with `objectType` equal to `Interface` (its layer == objectType).
+    - **Domain-agnostic.** `Interface` and the `HOSTS` / `TERMINATES` / `ADJACENCY_OVER` relations are
+      validated against the snapshot domain's Knowledge-authored vocabulary like any other
+      type/relation (an interface type/relation absent from the domain's vocabulary is rejected with
+      HTTP 422 per AC-7/AC-7b); there is **no** Interface-specific code path. This criterion guarantees
+      that the Core-IP Interface model is exercised through the generic typed-graph machinery.
+
 ---
 
 ## Open questions
