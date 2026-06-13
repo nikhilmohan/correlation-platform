@@ -19,8 +19,10 @@ dev = [
     "datamodel-code-generator>=0.25,<0.26",
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.5",
-    "black>=24",
+    # Pin linters to a stable minor so a new ruff/black release can't fail CI on
+    # previously-clean code (unpinned ruff floated to 0.15 and flagged a new E501).
+    "ruff~=0.15.0",
+    "black~=26.5.0",
     "jsonschema>=4",
 ]
 
