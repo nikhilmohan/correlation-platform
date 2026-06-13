@@ -42,9 +42,7 @@ def _alarm_id_seq() -> Iterator[str]:
 
 
 def _fault_origin_candidates(graph: nx.DiGraph, object_type: str) -> list[str]:
-    return [
-        moid for moid, data in graph.nodes(data=True) if data.get("objectType") == object_type
-    ]
+    return [moid for moid, data in graph.nodes(data=True) if data.get("objectType") == object_type]
 
 
 def _expected_cascade_size(

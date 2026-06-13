@@ -80,6 +80,10 @@ def build_topology(  # noqa: C901 - layered construction, kept explicit for clar
     # backbone P/RR (area-0); the rest are PE/peering edge nodes.
     node_count = params.node_count
     nodes: list[str] = []
+    # Round-robin edge nodes across the numbered edge areas by an edge-node counter (NOT the raw
+    # node index, which correlates with the P-role modulus and would leave some areas unreached);
+    # this guarantees IGP_AREA_COUNT=N yields N distinct areas (criterion 22).
+    edge_area_index = 0
     for i in range(node_count):
         # Backbone every 3rd node, RR every 7th, else PE/peering.
         if i % 7 == 6:
@@ -90,7 +94,9 @@ def build_topology(  # noqa: C901 - layered construction, kept explicit for clar
             role = "peering"
         else:
             role = "PE"
-        igp_area = _area_for_role(role, params.igp_area_count, i)
+        igp_area = _area_for_role(role, params.igp_area_count, edge_area_index)
+        if role not in ("P", "RR"):
+            edge_area_index += 1
         igp_areas_used.add(igp_area)
         node_id = f"N{i}"
         moid = f"Node:{node_id}"

@@ -21,9 +21,11 @@ from jsonschema import Draft202012Validator
 
 SNAPSHOT_SCHEMA_VERSION = 1
 
-_SVC_DIR = Path(__file__).resolve().parents[2]
-# Canonical, Topology-owned source (preferred when present in the checkout).
-_CANONICAL = _SVC_DIR.parents[1] / "services" / "topology" / "schema" / "snapshot.schema.json"
+# services/simulator/src/simulator/engine/snapshot_writer.py -> services/simulator is parents[3].
+_SVC_DIR = Path(__file__).resolve().parents[3]
+# Canonical, Topology-owned source (preferred when present in the checkout):
+# services/simulator -> services -> services/topology/schema/snapshot.schema.json.
+_CANONICAL = _SVC_DIR.parent / "topology" / "schema" / "snapshot.schema.json"
 # Build-time synced cache (verbatim copy of the canonical schema — no re-authoring).
 _VENDOR = _SVC_DIR / "_vendor" / "snapshot.schema.json"
 

@@ -113,7 +113,10 @@ def run_p1(
 
     response = client.upload(snapshot)
     outcome = RunOutcome(
-        run_id=run_id, phase="p1", mode=settings.sim_mode, snapshot_id=response.snapshotId,
+        run_id=run_id,
+        phase="p1",
+        mode=settings.sim_mode,
+        snapshot_id=response.snapshotId,
         snapshot=snapshot,
     )
     if state is not None:
@@ -172,9 +175,7 @@ def run_replay_phase(
             outcome.background_count = result.background_count
             outcome.noise_count = result.noise_count
             for scenario in settings.selected_scenarios:
-                inst = sum(
-                    1 for label in labels.all() if label.scenario_type == scenario
-                )
+                inst = sum(1 for label in labels.all() if label.scenario_type == scenario)
                 if inst:
                     metrics.SCENARIOS_INJECTED.labels(scenario=scenario).inc(inst)
             metrics.BACKGROUND_ALARMS.inc(result.background_count)

@@ -77,7 +77,11 @@ class BatchReplay:
             event = synth_to_event(alarm)
             envelope = wrap_envelope(event, trace_id=alarm.trace_id)
             self._producer.produce(self.topic, envelope)
-            _count(self.topic, event, alarm.scenario_id or ("noise" if alarm.is_noise else "background"))
+            _count(
+                self.topic,
+                event,
+                alarm.scenario_id or ("noise" if alarm.is_noise else "background"),
+            )
             if self._tap:
                 self._tap(self.topic, envelope)
             n += 1
@@ -134,7 +138,11 @@ class LiveReplay:
             event = synth_to_event(alarm)
             envelope = wrap_envelope(event, trace_id=alarm.trace_id)
             self._producer.produce(self.topic, envelope)
-            _count(self.topic, event, alarm.scenario_id or ("noise" if alarm.is_noise else "background"))
+            _count(
+                self.topic,
+                event,
+                alarm.scenario_id or ("noise" if alarm.is_noise else "background"),
+            )
             if self._tap:
                 self._tap(self.topic, envelope)
             n += 1

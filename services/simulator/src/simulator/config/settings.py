@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from simulator.config.demo_profiles import DEMO_PROFILES, PROFILE_NAMES
@@ -120,9 +120,7 @@ def apply_profile(values: dict[str, object], explicit: set[str]) -> dict[str, ob
     if not profile_name:
         return values
     if profile_name not in DEMO_PROFILES:
-        raise ConfigError(
-            f"DEMO_PROFILE={profile_name!r} not one of {PROFILE_NAMES}"
-        )
+        raise ConfigError(f"DEMO_PROFILE={profile_name!r} not one of {PROFILE_NAMES}")
     for key, val in DEMO_PROFILES[profile_name].items():
         if key not in explicit:
             values[key] = val

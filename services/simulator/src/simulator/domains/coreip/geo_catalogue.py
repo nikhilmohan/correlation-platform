@@ -32,7 +32,5 @@ CATALOGUE_SIZE: int = len(GEO_CATALOGUE)
 def first_n_sites(n: int) -> tuple[GeoSite, ...]:
     """Return the first ``n`` distinct catalogue entries (caller validates ``n`` ≤ size)."""
     if n > CATALOGUE_SIZE:
-        raise ValueError(
-            f"SITE_COUNT={n} exceeds the grounded geo catalogue size {CATALOGUE_SIZE}"
-        )
+        raise ValueError(f"SITE_COUNT={n} exceeds the grounded geo catalogue size {CATALOGUE_SIZE}")
     return GEO_CATALOGUE[:n]

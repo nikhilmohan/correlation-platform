@@ -89,7 +89,9 @@ class HttpTopologyClient:
                 last_exc = exc
             if attempt < self._max_attempts - 1:
                 time.sleep(min(2.0**attempt * 0.1, 2.0))
-        raise TopologyUploadError(f"upload to {url} failed after {self._max_attempts} attempts") from last_exc
+        raise TopologyUploadError(
+            f"upload to {url} failed after {self._max_attempts} attempts"
+        ) from last_exc
 
 
 def make_client(

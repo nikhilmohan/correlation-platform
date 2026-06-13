@@ -21,7 +21,9 @@ import sys
 from pathlib import Path
 
 _SVC_DIR = Path(__file__).resolve().parents[1]
-_DEFAULT_CANONICAL = _SVC_DIR.parents[1] / "services" / "topology" / "schema" / "snapshot.schema.json"
+_DEFAULT_CANONICAL = (
+    _SVC_DIR.parents[1] / "services" / "topology" / "schema" / "snapshot.schema.json"
+)
 _VENDOR = _SVC_DIR / "_vendor" / "snapshot.schema.json"
 
 
