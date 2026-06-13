@@ -43,8 +43,9 @@ class TopologyEventConformanceTest {
     @Test
     void emittedEventValidatesAgainstFrozenSchema() throws Exception {
         EventCodec codec = new EventCodec();
+        TopologyProperties properties = new TopologyProperties();
         TopologyEventPublisher publisher = new TopologyEventPublisher(
-                noopKafka(), codec, new TopologyProperties());
+                noopKafka(), codec, new DlqPublisher(noopKafka(), properties), properties);
 
         List<GraphVertex> vertices = List.of(
                 new GraphVertex("Node:PE1", "Node", "core-ip", "SNAP-CONF", "PE1", Map.of()),

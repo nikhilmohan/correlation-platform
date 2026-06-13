@@ -42,7 +42,8 @@ topology:
   snapshot:
     retention: ${TOPOLOGY_SNAPSHOT_RETENTION:2}
   knowledge:
-    base-url: ${TOPOLOGY_KNOWLEDGE_BASE_URL:http://knowledge:8080}
+    # REQUIRED — no default; startup fails fast if TOPOLOGY_KNOWLEDGE_BASE_URL is unset.
+    base-url: ${TOPOLOGY_KNOWLEDGE_BASE_URL}
     mode: ${TOPOLOGY_KNOWLEDGE_MODE:real}
     vocab-path: ${TOPOLOGY_KNOWLEDGE_VOCAB_PATH:/domains/{domain}/vocabulary}
     vocab-ttl-seconds: ${TOPOLOGY_KNOWLEDGE_VOCAB_TTL_SECONDS:300}

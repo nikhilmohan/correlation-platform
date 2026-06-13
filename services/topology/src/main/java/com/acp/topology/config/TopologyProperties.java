@@ -1,12 +1,18 @@
 package com.acp.topology.config;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotBlank;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
+import org.springframework.validation.annotation.Validated;
 
 /**
  * All Topology config, bound from environment (no hard-coded URLs, credentials or thresholds).
  * NebulaGraph + PostgreSQL connection details are internal-only and never forwarded to callers.
+ * {@code @Validated} so a missing {@code (required)} env var (e.g. the Knowledge base URL) fails
+ * fast at startup rather than starting with a silent default.
  */
+@Validated
 @ConfigurationProperties(prefix = "topology")
 public class TopologyProperties {
 
@@ -22,6 +28,7 @@ public class TopologyProperties {
     @NestedConfigurationProperty
     private final Traversal traversal = new Traversal();
 
+    @Valid
     @NestedConfigurationProperty
     private final Knowledge knowledge = new Knowledge();
 
@@ -181,7 +188,14 @@ public class TopologyProperties {
 
     /** Knowledge Service domain-vocabulary integration (config-switchable mock|real). */
     public static class Knowledge {
-        private String baseUrl = "http://knowledge:8080";
+        /**
+         * Knowledge Service base URL (domain-vocabulary API). REQUIRED — bound from
+         * {@code TOPOLOGY_KNOWLEDGE_BASE_URL} with NO code-level default; startup fails fast if
+         * unset (design config table marks this var "(required)"). No compose-hostname default is
+         * baked in so the wiring is explicit per environment.
+         */
+        @NotBlank(message = "TOPOLOGY_KNOWLEDGE_BASE_URL is required (no default)")
+        private String baseUrl;
         /** {@code mock} (stub from Knowledge OpenAPI) or {@code real}. */
         private String mode = "real";
         /** Frozen path template; {@code {domain}} substituted at call time. */

@@ -120,13 +120,14 @@ jacocoTestReport {
                 fileTree(dir: it, exclude: [
                     'com/acp/topology/TopologyApplication.class',
                     'com/acp/topology/api/dto/**',
-                    // Infrastructure adapters / Spring wiring exercised by the Testcontainers
-                    // `integrationTest` task (NebulaGraph + PostgreSQL + Kafka), NOT the fast unit
-                    // `test` JaCoCo bundle: the nGQL repository + idempotent schema bootstrap +
-                    // session/pool wiring + actuator readiness. Their behaviour IS asserted by the
-                    // @Tag("integration") tests (NebulaGraphRepositoryTest, NebulaSchemaBootstrapIT,
-                    // InterfaceModelTest, IngestionQueryIT, SnapshotRepositoryTest).
-                    'com/acp/topology/graph/NebulaGraphRepository*.class',
+                    // ONLY genuinely un-unit-testable infrastructure is excluded — the raw nebula-java
+                    // driver/pool wiring (session borrow/return, ADD HOSTS / CREATE SPACE bootstrap),
+                    // Spring @Configuration wiring, and the actuator/observability adapters. These are
+                    // exercised for real by the Testcontainers `integrationTest` task.
+                    // The nGQL REPOSITORY (NebulaGraphRepository) is NOT excluded: its query/nGQL
+                    // string construction, domain-scoping predicate, edgeId/rank derivation and
+                    // ResultSet→DTO mapping are unit-tested in isolation (NebulaGraphRepositoryUnitTest)
+                    // with a mocked session, so that logic counts toward the merge-gate coverage.
                     'com/acp/topology/graph/NebulaSchemaBootstrap.class',
                     'com/acp/topology/graph/NebulaSessionProvider.class',
                     'com/acp/topology/graph/GraphAccessException.class',
@@ -155,13 +156,14 @@ jacocoTestCoverageVerification {
                 fileTree(dir: it, exclude: [
                     'com/acp/topology/TopologyApplication.class',
                     'com/acp/topology/api/dto/**',
-                    // Infrastructure adapters / Spring wiring exercised by the Testcontainers
-                    // `integrationTest` task (NebulaGraph + PostgreSQL + Kafka), NOT the fast unit
-                    // `test` JaCoCo bundle: the nGQL repository + idempotent schema bootstrap +
-                    // session/pool wiring + actuator readiness. Their behaviour IS asserted by the
-                    // @Tag("integration") tests (NebulaGraphRepositoryTest, NebulaSchemaBootstrapIT,
-                    // InterfaceModelTest, IngestionQueryIT, SnapshotRepositoryTest).
-                    'com/acp/topology/graph/NebulaGraphRepository*.class',
+                    // ONLY genuinely un-unit-testable infrastructure is excluded — the raw nebula-java
+                    // driver/pool wiring (session borrow/return, ADD HOSTS / CREATE SPACE bootstrap),
+                    // Spring @Configuration wiring, and the actuator/observability adapters. These are
+                    // exercised for real by the Testcontainers `integrationTest` task.
+                    // The nGQL REPOSITORY (NebulaGraphRepository) is NOT excluded: its query/nGQL
+                    // string construction, domain-scoping predicate, edgeId/rank derivation and
+                    // ResultSet→DTO mapping are unit-tested in isolation (NebulaGraphRepositoryUnitTest)
+                    // with a mocked session, so that logic counts toward the merge-gate coverage.
                     'com/acp/topology/graph/NebulaSchemaBootstrap.class',
                     'com/acp/topology/graph/NebulaSessionProvider.class',
                     'com/acp/topology/graph/GraphAccessException.class',

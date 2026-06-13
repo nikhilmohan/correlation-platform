@@ -49,7 +49,9 @@ class TopologyEventPublisherTest {
 
     @BeforeEach
     void setUp() {
-        publisher = new TopologyEventPublisher(kafkaTemplate, codec, new TopologyProperties());
+        TopologyProperties properties = new TopologyProperties();
+        publisher = new TopologyEventPublisher(kafkaTemplate, codec,
+                new DlqPublisher(kafkaTemplate, properties), properties);
     }
 
     private void stubSuccessfulSend() {

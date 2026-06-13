@@ -99,7 +99,8 @@ class IngestionQueryIT extends NebulaIntegrationBase {
                 metadata,
                 new LiftingService(),
                 new GraphWriteService(graphRepo),
-                new TopologyEventPublisher(kafka, new EventCodec(), properties));
+                new TopologyEventPublisher(kafka, new EventCodec(),
+                        new com.acp.topology.events.DlqPublisher(kafka, properties), properties));
         query = new QueryService(new GraphReadService(graphRepo), metadata, properties);
     }
 

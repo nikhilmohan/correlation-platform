@@ -12,6 +12,9 @@ topology:
     bootstrap-on-startup: false
   knowledge:
     mode: mock
+    # base-url is (required) with no code default; supply a throwaway value so the isolated
+    # web/springdoc context still binds (mock mode never calls it).
+    base-url: http://knowledge.test:8080
 springdoc:
   api-docs:
     path: /openapi.json

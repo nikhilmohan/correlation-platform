@@ -41,7 +41,7 @@ JSON Schema is the single canonical [`schema/snapshot.schema.json`](schema/snaps
 | `TOPOLOGY_NEBULA_STORAGED_HOST` | storaged `host:port` for idempotent `ADD HOSTS` | `nebula-storaged:9779` |
 | `TOPOLOGY_NEBULA_BOOTSTRAP` | run the startup space/schema bootstrap | `true` |
 | `TOPOLOGY_POSTGRES_JDBC_URL` / `_USERNAME` / `_PASSWORD` | snapshot-metadata store (internal-only) | local defaults |
-| `TOPOLOGY_KNOWLEDGE_BASE_URL` | Knowledge Service base URL | `http://knowledge:8080` |
+| `TOPOLOGY_KNOWLEDGE_BASE_URL` | Knowledge Service base URL | **(required — no default; startup fails fast if unset)** |
 | `TOPOLOGY_KNOWLEDGE_MODE` | `mock` (stub from Knowledge OpenAPI) or `real` | `real` |
 | `TOPOLOGY_KNOWLEDGE_VOCAB_PATH` | frozen vocab path template | `/domains/{domain}/vocabulary` |
 | `TOPOLOGY_INGEST_MAX_FILE_BYTES` | max snapshot upload size | `10485760` |

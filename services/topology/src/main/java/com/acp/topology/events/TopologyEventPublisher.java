@@ -32,12 +32,14 @@ public class TopologyEventPublisher {
 
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final EventCodec codec;
+    private final DlqPublisher dlqPublisher;
     private final TopologyProperties.Kafka config;
 
     public TopologyEventPublisher(KafkaTemplate<String, String> kafkaTemplate, EventCodec codec,
-            TopologyProperties properties) {
+            DlqPublisher dlqPublisher, TopologyProperties properties) {
         this.kafkaTemplate = kafkaTemplate;
         this.codec = codec;
+        this.dlqPublisher = dlqPublisher;
         this.config = properties.getKafka();
     }
 
@@ -63,7 +65,7 @@ public class TopologyEventPublisher {
         } catch (Exception e) {
             log.error("topology.changed send failed; routing to DLQ snapshotId={} traceId={}",
                     snapshotId, traceId, e);
-            routeToDlq(wire, snapshotId, traceId, e);
+            dlqPublisher.publish(wire, snapshotId, traceId, e);
         }
         return eventId;
     }
@@ -103,21 +105,5 @@ public class TopologyEventPublisher {
             out.add(edge);
         }
         return out;
-    }
-
-    private void routeToDlq(String wire, String snapshotId, String traceId, Exception cause) {
-        try {
-            var record = new org.apache.kafka.clients.producer.ProducerRecord<String, String>(
-                    config.getDlqTopic(), snapshotId, wire);
-            record.headers().add("x-error",
-                    String.valueOf(cause.getMessage()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            record.headers().add("x-original-topic",
-                    config.getTopic().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            record.headers().add("x-trace-id",
-                    String.valueOf(traceId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            kafkaTemplate.send(record);
-        } catch (Exception dlqError) {
-            log.error("failed to route topology.changed to DLQ snapshotId={}", snapshotId, dlqError);
-        }
     }
 }
