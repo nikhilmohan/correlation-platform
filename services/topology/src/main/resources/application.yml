@@ -64,5 +64,7 @@ management:
 springdoc:
   api-docs:
     path: /openapi.json
+    # Emit OpenAPI 3.1 (spec requirement); springdoc defaults to 3.0.1 otherwise.
+    version: openapi_3_1
   swagger-ui:
     path: /swagger-ui.html

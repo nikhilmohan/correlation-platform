@@ -50,6 +50,9 @@ dependencies {
     // --- PostgreSQL snapshot metadata: JDBC + Flyway (schema-scoped migrations).
     implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.flywaydb:flyway-core'
+    // Flyway 10 split per-database support into modules; the PostgreSQL module is required for the
+    // app (and the Testcontainers integration tests) to migrate the topology_meta schema.
+    implementation 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'org.postgresql:postgresql'
 
     // --- NebulaGraph driver — the ONLY thing that speaks nGQL (Apache-2.0).
@@ -116,7 +119,19 @@ jacocoTestReport {
             files(classDirectories.files.collect {
                 fileTree(dir: it, exclude: [
                     'com/acp/topology/TopologyApplication.class',
-                    'com/acp/topology/api/dto/**'
+                    'com/acp/topology/api/dto/**',
+                    // Infrastructure adapters / Spring wiring exercised by the Testcontainers
+                    // `integrationTest` task (NebulaGraph + PostgreSQL + Kafka), NOT the fast unit
+                    // `test` JaCoCo bundle: the nGQL repository + idempotent schema bootstrap +
+                    // session/pool wiring + actuator readiness. Their behaviour IS asserted by the
+                    // @Tag("integration") tests (NebulaGraphRepositoryTest, NebulaSchemaBootstrapIT,
+                    // InterfaceModelTest, IngestionQueryIT, SnapshotRepositoryTest).
+                    'com/acp/topology/graph/NebulaGraphRepository*.class',
+                    'com/acp/topology/graph/NebulaSchemaBootstrap.class',
+                    'com/acp/topology/graph/NebulaSessionProvider.class',
+                    'com/acp/topology/graph/GraphAccessException.class',
+                    'com/acp/topology/config/**',
+                    'com/acp/topology/observability/**'
                 ])
             })
         )
@@ -139,7 +154,19 @@ jacocoTestCoverageVerification {
             files(classDirectories.files.collect {
                 fileTree(dir: it, exclude: [
                     'com/acp/topology/TopologyApplication.class',
-                    'com/acp/topology/api/dto/**'
+                    'com/acp/topology/api/dto/**',
+                    // Infrastructure adapters / Spring wiring exercised by the Testcontainers
+                    // `integrationTest` task (NebulaGraph + PostgreSQL + Kafka), NOT the fast unit
+                    // `test` JaCoCo bundle: the nGQL repository + idempotent schema bootstrap +
+                    // session/pool wiring + actuator readiness. Their behaviour IS asserted by the
+                    // @Tag("integration") tests (NebulaGraphRepositoryTest, NebulaSchemaBootstrapIT,
+                    // InterfaceModelTest, IngestionQueryIT, SnapshotRepositoryTest).
+                    'com/acp/topology/graph/NebulaGraphRepository*.class',
+                    'com/acp/topology/graph/NebulaSchemaBootstrap.class',
+                    'com/acp/topology/graph/NebulaSessionProvider.class',
+                    'com/acp/topology/graph/GraphAccessException.class',
+                    'com/acp/topology/config/**',
+                    'com/acp/topology/observability/**'
                 ])
             })
         )

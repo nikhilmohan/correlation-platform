@@ -1,0 +1,18 @@
+# Profile used by OpenApiContractTest to boot the web/springdoc layer in isolation:
+# no real PostgreSQL (Flyway/DataSource excluded), no real Kafka, no NebulaGraph connection.
+# The OpenAPI surface is generated purely from the annotated controllers/DTOs.
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+topology:
+  nebula:
+    bootstrap-on-startup: false
+  knowledge:
+    mode: mock
+springdoc:
+  api-docs:
+    path: /openapi.json
+    version: openapi_3_1
