@@ -43,6 +43,50 @@
 > - **Alarm Manager** (P3-G3): `GET /alarms` to the canonical paginated envelope
 >   `{ items, total, limit, offset }` with `limit`/`offset` params.
 >
+> **MVP-achievability addendum (this revision — consumer-side, no backend/contract change).** Two
+> fixes are added on top of the design above; everything else (the five views, the four modules, the
+> geo to site to graph drill-down, pattern XAI/edit, config, streaming, incident-detail, the
+> `{items,total,limit,offset}` client alignment, WCAG, signal stores, mock/real harness) is
+> unchanged. This ADDS one view, two dashboard KPIs, and one client.
+> - **FIX F-UI1 — Chatter-management page (new view `/chatter`, the noise to live feedback loop).**
+>   A new `ChatterManagementComponent` + `ChatterStore` close the **learned-noise to live** loop:
+>   the **Noise Filter** learns chatter/noise signatures during P2 and exposes them on a **read-only**
+>   API (`GET /api/v1/observed-chatter`, PR #165 — frozen on the Noise Filter service branch); the
+>   operator **reviews** these candidates and **promotes** selected ones into **Enrichment's**
+>   per-source known-chatter list via Enrichment's **chatter edit API** (`GET`/`ADD`/`REMOVE`), so
+>   the **live** enrichment path then suppresses that chatter deterministically. The page shows NF's
+>   observed-chatter ranked by `occurrenceCount`, the current Enrichment chatter list for a
+>   source/ruleset, which observed signatures are **already promoted** vs **candidates**, and
+>   promote/remove actions. A new **`EnrichmentChatterClient`** is added (built against Enrichment's
+>   **published chatter OpenAPI**); the **`NoiseFilterClient`** gains `listObservedChatter`. This is a
+>   pure **consumer-side** addition — NF produces the observed-chatter read API, Enrichment produces
+>   the chatter edit API; the web-ui only reads/writes them. **See the flagged dependency note below.**
+> - **FIX F-UI2 — RCA accuracy + auto-correlation% on the dashboard (demonstrability).** The
+>   Correlation Engine froze two read-API additions (PR #166): `GET /stats` now carries
+>   **`correlatedAlarmCount`** (so **auto-correlation% = `correlatedAlarmCount / totalAlarmsProcessed`**
+>   is derivable — the ~60% target) and an **eval-mode `rcaAccuracy`** field (populated only when the
+>   engine runs with the Simulator labels oracle wired); each `GET /incidents` item now carries
+>   **`rootCauseAlarmType`**. The dashboard now **shows RCA accuracy** — from `GET /stats.rcaAccuracy`
+>   when present (eval/demo mode), else **computed client-side** by joining incidents'
+>   `rootCauseAlarmId`/`rootCauseAlarmType` to the **Simulator `/labels`** ground truth in the demo —
+>   instead of the old "evaluated offline" placeholder; and a new **auto-correlation%** KPI card. The
+>   existing KPIs (alarm-reduction ratio, live incident count, active patterns, alarms processed) are
+>   kept. This is read-only consumption of already-frozen producer fields — **no backend/contract change.**
+>
+> > **FLAGGED DEPENDENCY (for the human — missing/unpublished producer contract).** This design
+> > consumes the Enrichment chatter edit API against the **expected** shape (described under
+> > "Enrichment chatter edit API" in API contracts), consistent with Enrichment's existing
+> > per-source `chatterList` entry shape `{ managedObjectId, eventType }`. At the time of writing,
+> > the producer branch `design/enrichment-chatter-api` (which is to **add** this REST chatter edit
+> > API to Enrichment — Enrichment currently exposes **no** REST business surface, only
+> > Kafka + actuator endpoints) **was not yet published/merged**. Per the operating rules the web-ui
+> > builds its typed `EnrichmentChatterClient` against the **producer's published chatter
+> > `openapi.json`**; until that is published the client is built against the shape below and the
+> > dependency is **flagged here, not fabricated**. **No web-ui-side contract is invented**; the
+> > path/field names are pinned to Enrichment's published chatter OpenAPI when it lands (a
+> > collaborator contract change = architecture.md update + human approval before the client is
+> > finalized).
+>
 > **Note on the canonical list envelope** (consumer alignment to the producers' SSoT): the
 > Correlation Engine and Alarm Manager froze the **platform-canonical** pagination envelope
 > `{ items, total, limit, offset }` with `limit`/`offset` request params — the **same** envelope
@@ -96,7 +140,7 @@ License posture: Angular (MIT), MapLibre GL (BSD-3), deck.gl (MIT), Cytoscape.js
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| 1. Render the landing dashboard (home/default route) | `DashboardModule` to `DashboardComponent` + `KpiCardComponent` + `RecentIncidentsComponent` + `QuickLinksComponent`; `DashboardStore` (signals) fans out parallel reads to `CorrelationEngineClient.getStats()` + `listIncidents()`, `PatternManagerClient.listPatterns({lifecycle:'approved'})`, and `AlarmManagerClient.listAlarms()` (count). Default route `''` redirects to `/dashboard`. |
+| 1. Render the landing dashboard (home/default route) | `DashboardModule` to `DashboardComponent` + `KpiCardComponent` + `RecentIncidentsComponent` + `QuickLinksComponent`; `DashboardStore` (signals) fans out parallel reads to `CorrelationEngineClient.getStats()` + `listIncidents()`, `PatternManagerClient.listPatterns({lifecycle:'approved'})`, and `AlarmManagerClient.listAlarms()` (count). Default route `''` redirects to `/dashboard`. **FIX F-UI2:** the KPI set now also surfaces **RCA accuracy** (`RcaAccuracyService`: prefer `stats.rcaAccuracy` when non-null in eval/demo mode, else compute client-side by joining `listIncidents().items[].rootCauseAlarmType`/`rootCauseAlarmId` to `SimulatorLabelsClient.listLabels()` ground truth, else N/A) and **auto-correlation%** (`stats.correlatedAlarmCount / stats.totalAlarmsProcessed`). |
 | 2. Real-time streaming view via configurable client polling | `StreamingModule` to `StreamingViewComponent` + `LivePollingService`; `LivePollingService` runs a signal-driven timer at `STREAMING_REFRESH_INTERVAL_MS`, polling `AlarmManagerClient.listAlarms()` + `CorrelationEngineClient.listIncidents()` — **both return the same canonical `{ items, total, limit, offset }` page envelope**; `DeltaDiffService` diffs previous-vs-new over the **`.items`** arrays keyed by `alarmId`/`incidentId`; new/changed rows get transient highlight classes; pause/resume toggle + interval control + live/last-updated indicator. |
 | 3. Render the incident-detail drill-down page | `IncidentDetailModule` to `IncidentDetailComponent`; route `/incidents/:incidentId`; reads `CorrelationEngineClient.getIncident(incidentId)` (`GET /incidents/{id}` → a single `IncidentVM` with `rootCauseAlarmId`, `childAlarmIds[]`, `matchedPatternId?`/`matchedCodebookId?`, `confidence`, `trailId`) then `AlarmManagerClient.getAlarm(alarmId)` per member (root-cause + children) via parallel `forkJoin`/`Promise.all`; renders root cause, children, matched pattern/codebook (`matchedCodebookId` = codebook artifact id) + confidence, trail, per-member links into the streaming/alarm view. |
 | 4. Render the noise-filter run-stats view | `CorrelationStatsModule` to `NoiseStatsComponent` (learning sub-view); reads `NoiseFilterClient.listRunStats({trailId, from, to, limit, offset})` (`GET /api/v1/run-stats`); renders one row per run with derived storm-reduction ratio; filterable by `trailId` and time range. |
@@ -111,9 +155,12 @@ License posture: Angular (MIT), MapLibre GL (BSD-3), deck.gl (MIT), Cytoscape.js
 | 13. Read & edit Knowledge model params | `ConfigModule` to `ModelParamsFormComponent` (typed reactive form) reads `KnowledgeClient.getModelParams(domain, recordId)` (`GET /domains/{domain}/model-params/{recordId}`) and submits `KnowledgeClient.updateModelParams(domain, recordId, payload)` (`PUT /domains/{domain}/model-params/{recordId}`). The form maps the **versioned record payload** `{ domain, recordType, recordId, version, isCurrent, payload:{ paramSet, params:[{key, type, value, min, max, unit?}] } }` — real dotted keys (`dbscan.epsilon`, `dbscan.minSamples`, `window.sizeSeconds`, `prefixspan.minSupport`, ...); validates each param against its `min`/`max` client-side, submits the versioned record payload, and handles the new-version/`isCurrent` write semantics (P2-GAP-07). Confirmation toast. |
 | 14. Display live correlation stats & incidents | `CorrelationStatsModule` to `IncidentListComponent` + `StatsDashboardComponent` read `CorrelationEngineClient.listIncidents()` (returns the canonical **`{ items:[IncidentVM], total, limit, offset }` envelope** — render `items[]`, P3-G3/G4) and `getStats()`; ratio derived client-side. |
 | 15. Display live alarm lifecycle | `AlarmLifecycleComponent` reads `AlarmManagerClient.listAlarms({state, limit, offset})` (returns the canonical **`{ items:[AlarmSummary], total, limit, offset }` envelope** — render `items[]`, P3-G3); each `AlarmSummary` shows `lifecycleState` (`open`/`in-progress`/`correlated`/`cleared`; `reverted-open` is modelled as a transition back to `open`, surfaced from the detail's `transitions`), `role`, `incidentId`; filter by lifecycle state. |
-| 16. Config-switchable backend integration | `ApiConfigService` resolves each base URL + `mock|real` toggle from `environment.ts`; `MockBackendProvider` (MSW) wired only when toggle is `mock`. Nine integration points (now +Noise Filter). |
+| 16. Config-switchable backend integration | `ApiConfigService` resolves each base URL + `mock|real` toggle from `environment.ts`; `MockBackendProvider` (MSW) wired only when toggle is `mock`. **Eleven** integration points (the prior nine + Enrichment chatter edit + Simulator labels). |
+| 17. (FIX F-UI1) Chatter-management page — noise to live promotion | `ChatterModule` (lazy, route `/chatter`) to `ChatterManagementComponent` + `ObservedChatterTableComponent` + `EnrichmentChatterTableComponent`; `ChatterStore` (signals) reads `NoiseFilterClient.listObservedChatter()` (ranked by `occurrenceCount`) and `EnrichmentChatterClient.listChatter(source)`, computes the **promoted-vs-candidate** join, and writes promotions via `EnrichmentChatterClient.addChatter(source, entry)` / removals via `removeChatter(source, entry)`. Closed loop: NF learned noise to operator review/promote to Enrichment applies live. Added to the nav map + cross-nav. |
+| 18. (FIX F-UI2) Dashboard RCA accuracy + auto-correlation% | Realized within task 1's `DashboardModule` (see task 1) — two added `KpiCardComponent`s driven by `RcaAccuracyService` and the auto-correlation `computed`; the `/stats` `StatsDashboardComponent` reuses `RcaAccuracyService` so the same shown RCA number replaces its old "evaluated offline" note. |
 
-Every spec task above maps to a named module/component; none dropped or re-scoped.
+Spec tasks 1-16 map to named modules/components (none dropped or re-scoped). Tasks 17-18 are the
+two MVP-achievability fixes (F-UI1, F-UI2) added by this revision; both are consumer-side only.
 
 ## Phase applicability (design view)
 
@@ -126,8 +173,8 @@ the operator works in.
 | Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
 |---|---|---|---|
 | P1 — Topology onboarding | Active | `DashboardModule` (topology KPIs available at this phase; incident/pattern KPIs show empty/N-A). `TopologyTrailsModule`: `GeoSiteMapComponent`, `SiteGraphComponent`, `AttributeDetailPanelComponent`, `LayerToggleComponent`, `TrailOverlayService`. Streaming/stats modules dormant (lazy, not loaded). | Reads: Topology site query API (`listSites` → `SiteListDto`, `objectsAtSite` → `SiteObjectsDto` with nodes+edges, neighbours, resolve `NodeDto` with `layer == objectType`); Trail Builder (`listTrails`, `getTrail` → `TrailDetail`, `getTrailsForObject` at `GET /trails/by-object`). Writes: none |
-| P2 — Pattern learning | Active | `DashboardModule` (active-pattern count, learning KPIs). `PatternReviewModule`: `PatternListComponent`, `PatternXaiDetailComponent`, `PatternEditDialogComponent`, `PatternDecisionService`. `ConfigModule`: `ModelParamsFormComponent`. `CorrelationStatsModule` → `NoiseStatsComponent` (noise-filter run-stats / learning sub-view). | Reads: Pattern Manager read API (`GET /patterns` → `PatternPage` envelope, `GET /patterns/{id}` → `PatternView`); Knowledge model-params read API (`GET /domains/{domain}/model-params/{recordId}` → versioned record); Noise Filter run-stats read API (`GET /api/v1/run-stats`). Writes: Pattern Manager approval-intent (`POST /patterns/{id}/approve`), pattern-edit (`PATCH /patterns/{id}` → `PatternEdit` with `sequenceFlags`); Knowledge model-params edit API (`PUT /domains/{domain}/model-params/{recordId}`, versioned write). |
-| P3 — Real-time correlation | Active | `DashboardModule` (live KPIs). `StreamingModule`: `StreamingViewComponent`, `LivePollingService`, `DeltaDiffService`. `IncidentDetailModule`: `IncidentDetailComponent`. `CorrelationStatsModule`: `IncidentListComponent`, `StatsDashboardComponent`, `AlarmLifecycleComponent`; `ActivePatternsComponent` (reused). | Reads: Correlation Engine (`GET /incidents` → `{items,total,limit,offset}`, `GET /incidents/{id}` → `IncidentVM`, `GET /stats`); Pattern Manager active-patterns (`GET /patterns?lifecycle=approved` → `PatternPage`); Alarm Manager (`GET /alarms` → `{items,total,limit,offset}`, `GET /alarms/{id}` → `AlarmDetail`). Writes: none |
+| P2 — Pattern learning | Active | `DashboardModule` (active-pattern count, learning KPIs). `PatternReviewModule`: `PatternListComponent`, `PatternXaiDetailComponent`, `PatternEditDialogComponent`, `PatternDecisionService`. `ConfigModule`: `ModelParamsFormComponent`. `CorrelationStatsModule` → `NoiseStatsComponent` (noise-filter run-stats / learning sub-view). **`ChatterModule` (FIX F-UI1):** observed-chatter accumulates during P2, so this is where candidates appear; the operator can review/promote at any time. | Reads: Pattern Manager read API (`GET /patterns` → `PatternPage` envelope, `GET /patterns/{id}` → `PatternView`); Knowledge model-params read API (`GET /domains/{domain}/model-params/{recordId}` → versioned record); Noise Filter run-stats + **observed-chatter** read API (`GET /api/v1/run-stats`, `GET /api/v1/observed-chatter`); Enrichment chatter list (`GET` chatter for source). Writes: Pattern Manager approval-intent (`POST /patterns/{id}/approve`), pattern-edit (`PATCH /patterns/{id}` → `PatternEdit` with `sequenceFlags`); Knowledge model-params edit API (`PUT /domains/{domain}/model-params/{recordId}`, versioned write); **Enrichment chatter ADD/REMOVE** (promote/demote chatter for a source). |
+| P3 — Real-time correlation | Active | `DashboardModule` (live KPIs incl. **RCA accuracy + auto-correlation%**, FIX F-UI2). `StreamingModule`: `StreamingViewComponent`, `LivePollingService`, `DeltaDiffService`. `IncidentDetailModule`: `IncidentDetailComponent`. `CorrelationStatsModule`: `IncidentListComponent`, `StatsDashboardComponent`, `AlarmLifecycleComponent`; `ActivePatternsComponent` (reused). **`ChatterModule` (FIX F-UI1):** the NF observed-chatter read API stays served in P3 (over P2-accumulated history) and the Enrichment chatter ADD/REMOVE writes take effect on the **live** enrichment path — so a promotion made here suppresses chatter on the live stream (the closed loop). | Reads: Correlation Engine (`GET /incidents` → `{items,total,limit,offset}` with `rootCauseAlarmType`, `GET /incidents/{id}` → `IncidentVM`, `GET /stats` with `correlatedAlarmCount` + eval-mode `rcaAccuracy`); Simulator `/labels` (eval/demo RCA join, when wired); Pattern Manager active-patterns (`GET /patterns?lifecycle=approved` → `PatternPage`); Alarm Manager (`GET /alarms` → `{items,total,limit,offset}`, `GET /alarms/{id}` → `AlarmDetail`); Noise Filter observed-chatter + Enrichment chatter list. Writes: **Enrichment chatter ADD/REMOVE** (chatter promotion to the live path). |
 
 ## Module breakdown
 
@@ -135,12 +182,24 @@ Lazy-loaded feature modules behind a shared app shell. Each feature route is loa
 `loadComponent` / `loadChildren` so a phase the operator is not using carries no bundle cost.
 
 - **App shell (eager):** `AppShellComponent` (top nav with links to every page, module
-  router-outlet, global error toast, `LiveAnnouncer` host), `ApiConfigService`, the nine typed
-  API clients, `MockBackendProvider` (active only under the mock toggle), `ErrorBannerService`,
-  `NavigationService` (builds all cross-navigation targets).
+  router-outlet, global error toast, `LiveAnnouncer` host), `ApiConfigService`, the **eleven** typed
+  API clients (the prior nine + `EnrichmentChatterClient` + `SimulatorLabelsClient`),
+  `MockBackendProvider` (active only under the mock toggle), `ErrorBannerService`,
+  `NavigationService` (builds all cross-navigation targets), `RcaAccuracyService` (shared by the
+  dashboard and the stats view — resolves the shown RCA-accuracy value).
 - **`DashboardModule` (lazy, default route `/dashboard`):** `DashboardComponent`,
   `KpiCardComponent`, `RecentIncidentsComponent`, `QuickLinksComponent`, `DashboardStore`
-  (signals: `stats`, `incidents`, `activePatternCount`, `alarmCount`, `loading`, `error`).
+  (signals: `stats`, `incidents`, `activePatternCount`, `alarmCount`, **`rcaAccuracy`**,
+  **`autoCorrelationPct`**, `loading`, `error`). **FIX F-UI2:** `rcaAccuracy` is a `computed` over
+  `RcaAccuracyService` (eval-mode `stats.rcaAccuracy` or client-side label join or N/A);
+  `autoCorrelationPct` is a `computed` `stats.correlatedAlarmCount / stats.totalAlarmsProcessed`.
+- **`ChatterModule` (lazy, route `/chatter`) — FIX F-UI1:** `ChatterManagementComponent`,
+  `ObservedChatterTableComponent` (NF candidates ranked by `occurrenceCount`),
+  `EnrichmentChatterTableComponent` (current Enrichment list for the selected source),
+  `SourceSelectorComponent`, `ChatterStore` (signals: `observed`, `enrichmentChatter`,
+  `selectedSource`, `joinView`, `pendingPromotion`, `loading`, `error`). `joinView` is a `computed`
+  marking each observed signature **already-promoted** vs **candidate** by keying on
+  `(managedObjectId, eventType)` against the Enrichment list.
 - **`StreamingModule` (lazy, route `/streaming`):** `StreamingViewComponent`,
   `StreamingAlarmRowComponent`, `StreamingIncidentRowComponent`, `IntervalControlComponent`,
   `LivePollingService`, `DeltaDiffService`, `StreamingStore` (signals: `alarms`, `incidents`,
@@ -174,9 +233,13 @@ flowchart TD
   Shell --> PR[PatternReviewModule]
   Shell --> CFG[ConfigModule]
   Shell --> CS[CorrelationStatsModule]
+  Shell --> CH[ChatterModule]
   DB --> CEC[CorrelationEngineClient]
   DB --> PMC[PatternManagerClient]
   DB --> AMC[AlarmManagerClient]
+  DB --> SLC[SimulatorLabelsClient]
+  CH --> NFC[NoiseFilterClient]
+  CH --> ECC[EnrichmentChatterClient]
   ST --> LPS[LivePollingService plus DeltaDiffService]
   LPS --> AMC
   LPS --> CEC
@@ -189,7 +252,7 @@ flowchart TD
   CS --> CEC
   CS --> AMC
   CS --> PMC
-  CS --> NFC[NoiseFilterClient]
+  CS --> NFC
   TC --> Resolve[ApiConfigService resolves baseUrl plus mock or real]
   TBC --> Resolve
   PMC --> Resolve
@@ -197,6 +260,8 @@ flowchart TD
   CEC --> Resolve
   AMC --> Resolve
   NFC --> Resolve
+  ECC --> Resolve
+  SLC --> Resolve
 ```
 
 ## Data model / DB schema
@@ -323,6 +388,7 @@ classDiagram
   class IncidentVM {
     string incidentId
     string rootCauseAlarmId
+    string rootCauseAlarmType
     StringArray childAlarmIds
     string matchedPatternId
     string matchedCodebookId
@@ -338,10 +404,49 @@ classDiagram
   }
   class StatsVM {
     number totalAlarmsProcessed
+    number correlatedAlarmCount
     number totalIncidentsCreated
     number patternMatchCount
     number codebookMatchCount
     number alarmReductionRatio
+    number autoCorrelationPct
+    number rcaAccuracy
+  }
+  class ObservedChatterSignatureVM {
+    string managedObjectId
+    string alarmType
+    string eventType
+    string trailId
+    number occurrenceCount
+    string firstSeen
+    string lastSeen
+  }
+  class ObservedChatterPageVM {
+    ObservedChatterArray items
+    number total
+    number limit
+    number offset
+  }
+  class EnrichmentChatterEntryVM {
+    string managedObjectId
+    string eventType
+  }
+  class EnrichmentChatterListVM {
+    string source
+    EnrichmentChatterArray chatterList
+  }
+  class ChatterJoinRowVM {
+    ObservedChatterSignatureVM observed
+    boolean alreadyPromoted
+    string status
+  }
+  class GroundTruthLabelVM {
+    string scenarioId
+    string scenarioType
+    string rootCause
+    string rootCauseManagedObjectId
+    string rootCauseAlarmType
+    StringArray children
   }
   class AlarmSummaryVM {
     string alarmId
@@ -421,7 +526,30 @@ classDiagram
   ModelParamsRecordVM "1" --> "1" ModelParamsPayload : payload
   ModelParamsPayload "1" --> "many" ModelParamVM : params
   RunStatsVM "many" --> "1" TrailDetailVM : per-trail runs
+  ObservedChatterPageVM "1" --> "many" ObservedChatterSignatureVM : items
+  EnrichmentChatterListVM "1" --> "many" EnrichmentChatterEntryVM : chatterList
+  ChatterJoinRowVM "1" --> "1" ObservedChatterSignatureVM : observed
+  ChatterJoinRowVM "many" --> "many" EnrichmentChatterEntryVM : promoted-match
+  IncidentVM "many" --> "1" GroundTruthLabelVM : rca-oracle-join
 ```
+
+**Chatter view-models (FIX F-UI1).** `ObservedChatterSignatureVM` mirrors the **frozen** Noise Filter
+`ObservedChatterSignature` `{ managedObjectId (nullable), alarmType, eventType, trailId (nullable),
+occurrenceCount, firstSeen, lastSeen }`; the page envelope `ObservedChatterPageVM` is the same
+canonical `{ items, total, limit, offset }`. `EnrichmentChatterEntryVM` `{ managedObjectId, eventType }`
+mirrors Enrichment's per-source `chatterList` entry (the same key shape NF emits). `ChatterStore`
+computes `ChatterJoinRowVM` per observed signature: `alreadyPromoted` is true when an Enrichment
+chatter entry exists with the same `(managedObjectId, eventType)` for the selected source; `status`
+is `promoted` or `candidate`. A signature with a **null** `managedObjectId` (source-level chatter) is
+joined on `(null, eventType)` and rendered with a clear "source-level" label.
+
+**RCA-accuracy view-models (FIX F-UI2).** `StatsVM` adds `correlatedAlarmCount` (raw, from CE
+`/stats`), `autoCorrelationPct` (computed `correlatedAlarmCount / totalAlarmsProcessed`), and
+`rcaAccuracy` (the **shown** value: eval-mode `stats.rcaAccuracy` when non-null, else the client-side
+label-join fraction, else null to render N/A). `GroundTruthLabelVM` mirrors the **frozen** Simulator
+`/labels` shape `{ scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType,
+children[] }`; `IncidentVM` adds `rootCauseAlarmType` (frozen CE read-API field) so the client-side
+RCA join compares on the canonical `alarmType` token space (like-for-like with the label).
 
 ### Streaming delta / diff view-model
 
@@ -476,9 +604,22 @@ Notes:
   edges) get friendly labels, all other keys render as generic rows. The UI never validates the
   attribute schema (Knowledge Service owns the catalogue).
 - `alarmReductionRatio` is **computed client-side** as `totalAlarmsProcessed` divided by
-  `totalIncidentsCreated` from the Correlation Engine `GET /stats` raw counts. RCA accuracy is
-  not returned by the stats API (evaluated offline per the Correlation Engine spec); the
-  dashboard/stats view show "evaluated offline" rather than fabricating a value.
+  `totalIncidentsCreated` from the Correlation Engine `GET /stats` raw counts.
+- **`autoCorrelationPct` (FIX F-UI2)** is **computed client-side** as `correlatedAlarmCount` divided
+  by `totalAlarmsProcessed` from the same `GET /stats` response (the CE froze `correlatedAlarmCount`
+  for exactly this; the ~60% target). It is **distinct from** `alarmReductionRatio` and must not be
+  conflated with it (reduction is alarms/incidents; auto-correlation is the correlated fraction).
+  Guarded for `totalAlarmsProcessed` equal to 0 (then N/A).
+- **`rcaAccuracy` (FIX F-UI2)** is now **shown, not "evaluated offline"**. `RcaAccuracyService`
+  resolves it in priority order: (1) **eval-mode** — `stats.rcaAccuracy` from CE `GET /stats` when
+  the engine runs with the Simulator labels oracle wired (`RCA_EVAL` profile) and the field is
+  non-null; (2) **demo client-side join** — fetch `SimulatorLabelsClient.listLabels()` and, for each
+  incident from `GET /incidents`, compare the incident's `rootCauseAlarmType` (and/or resolve
+  `rootCauseAlarmId`) to the scenario label's `rootCauseAlarmType` on the canonical `alarmType` token
+  space, accuracy = matches / total incidents; (3) **N/A** — in production with no ground truth and
+  null `stats.rcaAccuracy`, render "N/A (no ground truth)". The gating is explicit: production with
+  no oracle shows N/A; eval/demo shows the number — the strongest power metric is VISIBLE, never
+  fabricated.
 - `stormReductionRatio` on `RunStatsVM` is computed client-side as `alarmsIn / clustersFormed`
   when the Noise Filter API does not return it directly (guarded for `clustersFormed` equal to 0).
 - `domain` on `RunStatsVM` may be absent/null in some rows; the UI handles it gracefully.
@@ -579,17 +720,25 @@ producer's frozen `openapi.json`** — the producer is the single source of trut
   the **canonical paginated envelope `{ items: IncidentVM[], total, limit, offset }`** (P3-G3/G4;
   `limit` default 50 max 500, `offset` default 0 — the platform-canonical envelope, **not**
   `page`/`size`). web-ui renders `items[]`. `IncidentVM = { incidentId, rootCauseAlarmId,
-  childAlarmIds[], matchedPatternId|null, matchedCodebookId|null, confidence, trailId, createdAt }`.
-  Used by dashboard, streaming view, and stats module.
+  rootCauseAlarmType, childAlarmIds[], matchedPatternId|null, matchedCodebookId|null, confidence,
+  trailId, createdAt }`. **`rootCauseAlarmType` is the frozen CE read-API field (PR #166)** — the
+  canonical `alarmType` token of the root-cause alarm, used by the dashboard's client-side RCA
+  accuracy join (FIX F-UI2). Used by dashboard, streaming view, and stats module.
 - `GET /incidents/{incidentId}` (`getIncident`) returns `200` a **single `IncidentVM`** (same shape
   as an `items[]` element) or `404`. **Used by the incident-detail page**; carries `rootCauseAlarmId`,
   `childAlarmIds[]`, `matchedPatternId`/`matchedCodebookId`, `confidence`, `trailId` — all fields
   the incident-detail page needs (no contract change).
 - **`matchedCodebookId` is the codebook artifact id** on codebook-decode incidents (display/label
   it as the matched codebook id; `matchedPatternId` is the matched pattern id).
-- `GET /stats` returns `200 { totalAlarmsProcessed, totalIncidentsCreated, patternMatchCount,
-  codebookMatchCount, confidenceDistribution }`. UI computes `alarmReductionRatio`. RCA accuracy
-  is not returned (evaluated offline) — UI surfaces a note.
+- `GET /stats` returns `200 { totalAlarmsProcessed, correlatedAlarmCount, totalIncidentsCreated,
+  patternMatchCount, codebookMatchCount, confidenceDistribution, rcaAccuracy|null }` (frozen, PR #166).
+  - **`correlatedAlarmCount` (new, PR #166)** — distinct alarms placed into a correlated incident;
+    the UI computes **auto-correlation% = `correlatedAlarmCount / totalAlarmsProcessed`** (FIX F-UI2,
+    the ~60% KPI), distinct from `alarmReductionRatio`.
+  - **`rcaAccuracy` (new, eval-mode only, PR #166)** — populated server-side only when the engine
+    runs with the Simulator labels oracle wired (`RCA_EVAL` profile); **null in production**. When
+    null, the UI falls back to the client-side `/labels` join (FIX F-UI2). The UI still computes
+    `alarmReductionRatio` client-side from the raw counts.
 
 ### Alarm Manager (P3 + streaming + incident-detail) — FROZEN (P3-G3)
 - `GET /alarms?state=open|in-progress|correlated|cleared&trailId=X&incidentId=Y&from=A&to=B&limit=&offset=`
@@ -605,7 +754,7 @@ producer's frozen `openapi.json`** — the producer is the single source of trut
   changedAt, occurredAt }]` (ascending `occurredAt`, UTC). Used by the incident-detail page per
   member alarm.
 
-### Noise Filter (P2 — run-stats / learning sub-view) **[NEW client]**
+### Noise Filter (P2 — run-stats / learning sub-view + observed-chatter for FIX F-UI1)
 - `GET /api/v1/run-stats?trailId=X&from=Y&to=Z&limit=L&offset=O` returns `200 RunStatsPage`
   `{ items: [RunStatsRow], total, limit, offset }`, newest first. Each `RunStatsRow`:
   `runId`, `runTimestamp`, `trailId`, `snapshotId`, `domain` (optional/null), `windowStart`,
@@ -613,9 +762,50 @@ producer's frozen `openapi.json`** — the producer is the single source of trut
   `alarmsKept`, `alarmsDropped`, `noiseRatio`. The UI computes the storm-reduction ratio
   (`alarmsIn / clustersFormed`) when not directly returned.
 - `GET /api/v1/run-stats/{runId}` returns `200 RunStatsRow` or `404`.
+- **`GET /api/v1/observed-chatter?alarmType=&trailId=&minOccurrence=&limit=&offset=`** (`listObservedChatter`,
+  FIX F-UI1; frozen, PR #165) returns `200 ObservedChatterPage` `{ items: ObservedChatterSignature[],
+  total, limit, offset }`, **ranked by `occurrenceCount` descending** (most-frequent learned noise
+  first). Each `ObservedChatterSignature = { managedObjectId|null, alarmType, eventType, trailId|null,
+  occurrenceCount, firstSeen, lastSeen }`. These are the **candidate** chatter entries the operator
+  reviews and promotes. **Read-only** on the Noise Filter side — NF writes signatures only from its own
+  P2 clustering; a non-GET returns `405`. The chatter-management page reads this, ranked, as the left
+  pane. `minOccurrence` lets the operator hide rarely-seen noise.
 - Validation errors (bad `limit`, malformed `from`/`to`) return `422`; surfaced as an error
-  banner in the noise-stats sub-view. Exact paths/params confirmed against the Noise Filter
-  `openapi.json` (open question #7).
+  banner in the noise-stats / chatter sub-view. Exact paths/params confirmed against the Noise Filter
+  `openapi.json` (run-stats open question #7 resolved; observed-chatter shape is frozen per PR #165).
+
+### Enrichment chatter edit API (FIX F-UI1 — **promotion target**; FLAGGED — see dependency note)
+> Built against Enrichment's **published chatter `openapi.json`** when it lands (producer branch
+> `design/enrichment-chatter-api`, not yet published at time of writing). The shapes below are the
+> **expected** contract, pinned to Enrichment's existing per-source `chatterList` entry shape
+> `{ managedObjectId, eventType }` (the same key NF emits). No web-ui-side contract is invented; on
+> publication the `EnrichmentChatterClient` is regenerated from the producer's `openapi.json` (a
+> collaborator contract change = architecture.md update + human approval).
+
+- `GET /api/v1/sources/{source}/chatter` (`listChatter`) returns `200`
+  `{ source, chatterList: [{ managedObjectId, eventType }] }` — the current known-chatter list for the
+  named source/ruleset (the right pane). `source` is the Enrichment ruleset selector (the envelope
+  `source` value, e.g. `nms-alpha`, `vendor-beta`, `default`).
+- `POST /api/v1/sources/{source}/chatter` (`addChatter`) body `{ managedObjectId|null, eventType }`
+  returns `200`/`201` with the updated list — **promotes** an observed signature into the live
+  per-source chatter list. Idempotent on `(managedObjectId, eventType)` (re-adding an existing entry
+  is a no-op, surfaced as already-promoted). A `409`/`422` (race / bad entry) is surfaced as a
+  structured error.
+- `DELETE /api/v1/sources/{source}/chatter` (`removeChatter`) body/query `{ managedObjectId|null,
+  eventType }` returns `200`/`204` with the updated list — **demotes** (removes) a chatter entry.
+- The promotion maps the NF observed signature's `(managedObjectId, eventType)` onto the Enrichment
+  entry (the `alarmType`/`trailId`/counts on the NF signature are review context only; Enrichment's
+  chatter key is `(managedObjectId, eventType)`). A null-`managedObjectId` source-level signature
+  promotes as `{ managedObjectId: null, eventType }`.
+
+### Simulator labels (FIX F-UI2 — RCA-accuracy ground-truth oracle, demo/eval only)
+- `GET /labels?scenarioId=` (`listLabels`; frozen Simulator shape) returns `200 GroundTruthLabel[]`
+  where `GroundTruthLabel = { scenarioId, scenarioType, rootCause, rootCauseManagedObjectId,
+  rootCauseAlarmType, children[] }`; `GET /labels/{scenarioId}` returns one or `404`. Read in the
+  **demo/eval** path only (when `RCA_LABELS_ENABLED` / the labels base URL is configured) to compute
+  RCA accuracy client-side by comparing each incident's `rootCauseAlarmType` to the scenario label's
+  `rootCauseAlarmType` on the canonical `alarmType` token space. In production this client is unused
+  (RCA accuracy shows N/A unless the CE eval-mode `rcaAccuracy` is non-null). Read-only; no write.
 
 **OpenAPI usage:** the web-ui generates TypeScript models from each producer checked-in
 **FROZEN** `openapi.json` (`openapi-typescript`) and regenerates on a collaborator contract
@@ -642,14 +832,20 @@ handlers generated from the producer OpenAPI; under `real`, calls go to the Comp
 | Knowledge model-params | `KnowledgeClient` | `KNOWLEDGE_API_BASE_URL` | MSW from Knowledge `openapi.json` | Knowledge Service (Compose) |
 | Correlation Engine incident/stats (+single incident) | `CorrelationEngineClient` | `CORRELATION_ENGINE_API_BASE_URL` | MSW from Correlation `openapi.json` | Correlation Engine (Compose) |
 | Alarm Manager lifecycle query (+single alarm) | `AlarmManagerClient` | `ALARM_MANAGER_API_BASE_URL` | MSW from Alarm Manager `openapi.json` | Alarm Manager (Compose) |
-| Noise Filter run-stats read | `NoiseFilterClient` | `NOISE_FILTER_API_BASE_URL` | MSW from Noise Filter `openapi.json` | Noise Filter (Compose) |
+| Noise Filter run-stats + **observed-chatter** read | `NoiseFilterClient` | `NOISE_FILTER_API_BASE_URL` | MSW from Noise Filter `openapi.json` | Noise Filter (Compose) |
+| **Enrichment chatter edit** (GET/ADD/REMOVE) — FIX F-UI1 | `EnrichmentChatterClient` | `ENRICHMENT_CHATTER_API_BASE_URL` | MSW from Enrichment chatter `openapi.json` (when published; flagged) | Enrichment (Compose) |
+| **Simulator labels** (RCA oracle, demo/eval) — FIX F-UI2 | `SimulatorLabelsClient` | `SIMULATOR_LABELS_API_BASE_URL` | MSW from Simulator `openapi.json` | Simulator (Compose, demo/eval profile) |
 
-Pattern Manager read/approval/edit share one base URL but are three logical integration points;
-nine total integration points per spec AC 50/51 (Topology, Trail Builder, Pattern read, Pattern
-approval, Knowledge, Correlation Engine, Alarm Manager, Noise Filter — and the Pattern edit
-shares the Pattern Manager URL). `INTEGRATION_MODE=mock|real`, the per-service base URLs, and
+Pattern Manager read/approval/edit share one base URL but are three logical integration points.
+With FIX F-UI1/F-UI2 there are now **eleven** integration points (the prior nine — Topology, Trail
+Builder, Pattern read, Pattern approval, Knowledge, Correlation Engine, Alarm Manager, Noise Filter,
+Pattern edit sharing the Pattern Manager URL — plus the **Enrichment chatter edit** and **Simulator
+labels** clients). `INTEGRATION_MODE=mock|real`, the per-service base URLs (now incl.
+`ENRICHMENT_CHATTER_API_BASE_URL` and `SIMULATOR_LABELS_API_BASE_URL`), and
 `STREAMING_REFRESH_INTERVAL_MS` are injected into `environment.ts` from Docker Compose
-environment variables at build/serve time.
+environment variables at build/serve time. The Simulator-labels integration is **demo/eval-only**:
+under `INTEGRATION_MODE=real` in production it may be unconfigured, and RCA accuracy then resolves to
+N/A (or the CE eval-mode value) — its absence is not an error.
 
 ## State management
 
@@ -697,7 +893,23 @@ the envelope** — it never assumes a bare top-level array.
 
 - `DashboardStore`: parallel reads on load; each KPI is a `computed` over its source signal,
   degrading to "N/A"/empty when the source is zero/absent. No timer (one-shot load + manual
-  refresh button).
+  refresh button). **FIX F-UI2:** `autoCorrelationPct` is a `computed` over `stats`
+  (`correlatedAlarmCount / totalAlarmsProcessed`, guarded for 0); `rcaAccuracy` is a `computed` over
+  `RcaAccuracyService` (eval-mode `stats.rcaAccuracy` else client-side label-join else N/A).
+- `RcaAccuracyService` (FIX F-UI2, shared by `DashboardStore` and `StatsStore`): exposes a
+  `computed`/`resource` `shownRcaAccuracy` resolving in priority order (eval-mode `stats.rcaAccuracy`
+  to client-side `/labels` join to N/A). When the labels client is unconfigured (production), it
+  short-circuits to the eval-mode value or N/A — no failed request. The label-join is a pure function
+  over `incidents.items[]` (`rootCauseAlarmType`) and `GroundTruthLabel[]` (`rootCauseAlarmType`).
+- `ChatterStore` (FIX F-UI1): on entering `/chatter`, loads `NoiseFilterClient.listObservedChatter()`
+  (ranked) and `EnrichmentChatterClient.listChatter(selectedSource)` in parallel; `joinView` is a
+  `computed` marking each observed signature `promoted`/`candidate` by `(managedObjectId, eventType)`
+  match against the Enrichment list. `promote(sig)` calls `addChatter` then re-reads the Enrichment
+  list; `remove(entry)` calls `removeChatter` then re-reads; `pendingPromotion` disables the row
+  action while a write is in flight (double-submit guard). Changing `selectedSource` re-reads the
+  Enrichment list and recomputes `joinView` (observed signatures are source-independent on the NF
+  side; the join is per selected source). No timer (one-shot reads + manual refresh + post-write
+  re-read).
 - `IncidentDetailStore`: load incident by route param, then fan out member-alarm reads.
 - `StatsStore`, `TopologyTrailsStore`, `PatternStore`, `ConfigStore`: one-shot reads + filter
   signals (carried forward from the prior design).
@@ -906,6 +1118,68 @@ sequenceDiagram
   NS->>NS: compute storm reduction ratio per row
 ```
 
+### Flow 9 — Chatter management (FIX F-UI1): NF learned noise to operator promote to Enrichment live
+
+```mermaid
+sequenceDiagram
+  actor Operator
+  participant Chat as ChatterManagementComponent
+  participant Store as ChatterStore
+  participant NFC as NoiseFilterClient
+  participant ECC as EnrichmentChatterClient
+  Operator->>Chat: open chatter page slash chatter
+  Chat->>Store: load with selected source
+  par parallel reads
+    Store->>NFC: listObservedChatter ranked by occurrenceCount
+    Store->>ECC: listChatter for selected source
+  end
+  NFC-->>Store: observed signatures candidate noise the ML learned
+  ECC-->>Store: current Enrichment chatter list for source
+  Store->>Store: join by managedObjectId and eventType then mark promoted or candidate
+  Store->>Chat: render observed left pane and enrichment right pane with status
+  Operator->>Chat: click promote on a candidate signature
+  Chat->>Store: promote signature
+  Store->>ECC: addChatter source managedObjectId eventType
+  ECC-->>Store: updated chatter list now includes the entry
+  Store->>ECC: listChatter re-read for source
+  ECC-->>Store: refreshed list
+  Store->>Chat: row now shows promoted, live path will suppress this chatter
+  Operator->>Chat: click remove on a promoted entry
+  Chat->>Store: remove entry
+  Store->>ECC: removeChatter source managedObjectId eventType
+  ECC-->>Store: updated list without the entry then re-read
+  Note over Store,ECC: closed loop, NF learned noise then operator review then Enrichment applies live
+```
+
+### Flow 10 — Dashboard RCA accuracy + auto-correlation (FIX F-UI2)
+
+```mermaid
+sequenceDiagram
+  actor Operator
+  participant Dash as DashboardComponent
+  participant Store as DashboardStore
+  participant Rca as RcaAccuracyService
+  participant CEC as CorrelationEngineClient
+  participant SLC as SimulatorLabelsClient
+  Operator->>Dash: open dashboard
+  Dash->>Store: load
+  Store->>CEC: getStats
+  CEC-->>Store: stats incl correlatedAlarmCount and rcaAccuracy maybe null
+  Store->>Store: auto correlation pct equals correlatedAlarmCount over totalAlarmsProcessed
+  Store->>Rca: resolve shown rca accuracy
+  alt eval mode stats rcaAccuracy non null
+    Rca-->>Store: use server eval mode value
+  else demo labels configured
+    Rca->>CEC: listIncidents items carry rootCauseAlarmType
+    Rca->>SLC: listLabels ground truth rootCauseAlarmType
+    Rca->>Rca: join on canonical alarmType token then matches over total
+    Rca-->>Store: client side computed accuracy
+  else production no ground truth
+    Rca-->>Store: N A no ground truth
+  end
+  Store->>Dash: render RCA accuracy KPI and auto correlation KPI
+```
+
 ## Algorithm logical flow
 
 The web-ui implements **no domain algorithm** (no matching, scoring, RCA, mining — all owned by
@@ -934,6 +1208,19 @@ backend services). The only non-trivial client-side logic is presentation/diff l
 6. **Lifecycle filter (AC 48):** `alarmStateFilter` signal; `computed` filters the `alarms.items`
    by **`lifecycleState`** (`open`/`in-progress`/`correlated`/`cleared`; `reverted-open` surfaces
    from the detail `transitions` as a return to `open`).
+7. **Chatter promoted-vs-candidate join (FIX F-UI1, AC 55, 56):** build a `Set` of the Enrichment
+   list keys `(managedObjectId, eventType)` for the selected source; for each NF observed signature
+   (already ranked by `occurrenceCount` by the producer), mark it `promoted` when its
+   `(managedObjectId, eventType)` is in the set, else `candidate`. Null `managedObjectId` is a valid
+   key value (source-level chatter); the join uses `(null, eventType)`. Pure derived view; `alarmType`,
+   `trailId`, and counts on the NF signature are review context only (not part of the Enrichment key).
+8. **Auto-correlation% (FIX F-UI2, AC 58):** `correlatedAlarmCount / totalAlarmsProcessed` from
+   `GET /stats`; guard `totalAlarmsProcessed` equal to 0 (N/A). Distinct from alarm-reduction ratio.
+9. **RCA accuracy resolution (FIX F-UI2, AC 57):** priority — (a) eval-mode `stats.rcaAccuracy` when
+   non-null; (b) client-side join: matches / total where a match is `incident.rootCauseAlarmType`
+   equal to the scenario label's `rootCauseAlarmType` on the canonical `alarmType` token space (the
+   label is found via the incident-to-scenario mapping / the labels set); (c) N/A when neither
+   available. Never fabricated.
 
 ```mermaid
 flowchart TD
@@ -979,12 +1266,28 @@ published OpenAPI, used by Vitest/TestBed. Representative fixtures:
   {key:"dbscan.epsilon",...}, {key:"dbscan.minSamples",...}, {key:"window.sizeSeconds",...},
   {key:"prefixspan.minSupport",...} ] } }` with real dotted keys + `min`/`max` bounds (AC 40); a
   variant with an out-of-bounds value to drive the client-side validation test (AC 42).
-- `fixtures/correlation/stats.json` — known `totalAlarmsProcessed`/`totalIncidentsCreated` so the
-  reduction ratio is a known value (AC 1, 45); a variant with `totalIncidentsCreated=0` for the
-  N/A case (AC 1).
+- `fixtures/correlation/stats.json` — known `totalAlarmsProcessed`/`correlatedAlarmCount`/
+  `totalIncidentsCreated` so the reduction ratio AND **auto-correlation%** are known values (AC 1, 45,
+  58); a variant with `totalIncidentsCreated=0` for the reduction N/A case (AC 1) and a variant with
+  `totalAlarmsProcessed=0` for the auto-correlation N/A case; an **eval-mode variant with non-null
+  `rcaAccuracy`** (e.g. `0.86`) and a **production variant with `rcaAccuracy=null`** (AC 57).
 - `fixtures/correlation/incidents.json` (a canonical **`{items:[IncidentVM], total, limit, offset}`** envelope)
   + `incident-detail.json` (a single `IncidentVM`) — incidents with root-cause plus children,
-  `matchedPatternId`/`matchedCodebookId`, `confidence`, `trailId` (AC 14, 44).
+  **`rootCauseAlarmType`** (canonical `alarmType` token, for the RCA join, FIX F-UI2),
+  `matchedPatternId`/`matchedCodebookId`, `confidence`, `trailId` (AC 14, 44, 57).
+- `fixtures/simulator/labels.json` (FIX F-UI2) — a `GroundTruthLabel[]` `{scenarioId, scenarioType,
+  rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children[]}` whose `rootCauseAlarmType`
+  values are arranged so the client-side join against `incidents.json` yields a known accuracy (some
+  incidents matching, some not), exercising the demo RCA path (AC 57).
+- `fixtures/noise/observed-chatter.json` (FIX F-UI1) — an `ObservedChatterPage`
+  `{items:[ObservedChatterSignature], total, limit, offset}` ranked by `occurrenceCount` desc; at
+  least one signature with a non-null `managedObjectId` and one **source-level** (null
+  `managedObjectId`), each with `alarmType`, `eventType`, `trailId|null`, `occurrenceCount`,
+  `firstSeen`, `lastSeen` (AC 55).
+- `fixtures/enrichment/chatter-{source}.json` (FIX F-UI1) — `{source, chatterList:[{managedObjectId,
+  eventType}]}` for at least two sources (e.g. `nms-alpha` with one entry, `default` empty), arranged
+  so that one observed signature is **already promoted** (matches an existing entry) and the rest are
+  **candidates** — driving the promoted-vs-candidate join test (AC 55, 56).
 - `fixtures/alarms/lifecycle.json` — a canonical **`{items:[AlarmSummary], total, limit,
   offset}`** envelope with alarms across `lifecycleState` open/in-progress/correlated/cleared
   (plus a member whose detail `transitions` show a revert back to `open`, i.e. reverted-open) with
@@ -1017,7 +1320,7 @@ ASCII layouts (non-mermaid fenced blocks so they are not parsed as diagrams).
 
 ```
 +-------------------------------------------------------------------------+
-| [Dashboard] [Streaming] [Topology] [Patterns] [Config] [Stats]  shell   |
+| [Dashboard][Streaming][Topology][Patterns][Chatter][Config][Stats] shell |
 +-------------------------------------------------------------------------+
 | Platform overview                                       [Refresh]       |
 | +------------------+ +------------------+ +------------------+           |
@@ -1025,21 +1328,30 @@ ASCII layouts (non-mermaid fenced blocks so they are not parsed as diagrams).
 | |       12         | |        5         | |      8.3 : 1     |           |
 | | (click to stats) | | (click patterns) | | (N/A if 0 inc.)  |           |
 | +------------------+ +------------------+ +------------------+           |
-| +------------------+ +------------------+                                |
-| | Alarms processed | | RCA accuracy     |                                |
-| |      1280        | | evaluated offline|                                |
-| +------------------+ +------------------+                                |
+| +------------------+ +------------------+ +------------------+           |
+| | Alarms processed | | RCA accuracy     | | Auto-correlation |           |
+| |      1280        | |   0.86  (eval)   | |   60.0 percent   |           |
+| |                  | | (N/A if no GT)   | | (target near 60) |           |
+| +------------------+ +------------------+ +------------------+           |
+|   RCA accuracy source: CE eval-mode stats.rcaAccuracy when set, else     |
+|   computed from incidents rootCauseAlarmType joined to Simulator labels  |
+|   in the demo, else N A in production with no ground truth.              |
+|   Auto-correlation = correlatedAlarmCount / totalAlarmsProcessed.        |
 +-------------------------------------------------------------------------+
 | Recent incidents                          | Quick links                 |
 |  INC-12 root LOS at FiberSpan  -> detail  |  -> Streaming (live)        |
 |  INC-11 root LinkDown          -> detail  |  -> Topology + trails       |
 |  INC-10 root AdjDown           -> detail  |  -> Pattern review          |
+|                                           |  -> Chatter management      |
 |                                           |  -> Config (Knowledge)      |
 |                                           |  -> Correlation stats       |
 +-------------------------------------------------------------------------+
 ```
-Reads: Correlation Engine `getStats` + `listIncidents`; Pattern Manager `listPatterns?lifecycle=approved`;
-Alarm Manager `listAlarms` (count). Each KPI card + recent-incident row is a deep link.
+Reads: Correlation Engine `getStats` (incl. `correlatedAlarmCount` + eval-mode `rcaAccuracy`) +
+`listIncidents` (incl. `rootCauseAlarmType`); Pattern Manager `listPatterns?lifecycle=approved`;
+Alarm Manager `listAlarms` (count); Simulator `/labels` (demo/eval RCA join only, when configured).
+Each KPI card + recent-incident row is a deep link. **FIX F-UI2:** the RCA-accuracy card shows the
+resolved number (not "evaluated offline"); the auto-correlation card shows the ~60% target metric.
 
 ### New page — Real-time streaming view (`/streaming`)
 
@@ -1102,6 +1414,36 @@ cross-link.
 +-------------------------------------------------------------------------+
 ```
 Reads: Noise Filter `GET /api/v1/run-stats?trailId=&from=&to=`.
+
+### New page — Chatter management (`/chatter`) — FIX F-UI1
+
+```
++-------------------------------------------------------------------------+
+| Chatter management        source [ nms-alpha v ]   [Refresh]            |
+|  Purpose: NF learned noise  ->  operator review/promote  ->  Enrichment |
+|  applies it live (the live path then suppresses promoted chatter).      |
++----------------------------------------+--------------------------------+
+| Observed chatter (NF, ranked by count) | Enrichment chatter list        |
+|  the candidate noise the ML observed   |  current live known-chatter    |
+|  moId            type     evt  count   |  moId            evt           |
+|  Interface:e1-12 LinkDown lnkD  142 P  |  Interface:e1-12 linkDown      |
+|  (null src-lvl)  PortFlap pFlp   88 +  |                                |
+|  Port:c1-3-7     CRCErr   crc    51 +  |  [+] promote moves a candidate |
+|  ...                                   |      into this list (addChatter)|
+|  P = already promoted   + = candidate  |  [x] remove demotes (rmChatter) |
+|  [Promote] on a candidate row          |  [Remove] on a list entry      |
++----------------------------------------+--------------------------------+
+|  status: promoting Port:c1-3-7 / crc ...   (row action disabled while    |
+|  in flight; re-reads Enrichment list on success)                        |
++-------------------------------------------------------------------------+
+```
+Reads: Noise Filter `GET /api/v1/observed-chatter` (ranked by `occurrenceCount`); Enrichment
+`GET /api/v1/sources/{source}/chatter`. Writes: Enrichment `POST .../chatter` (promote / `addChatter`),
+`DELETE .../chatter` (remove / `removeChatter`). The `joinView` marks each observed signature
+**promoted** (P) or **candidate** (+) by `(managedObjectId, eventType)` match against the Enrichment
+list for the selected source; a null `managedObjectId` is a source-level signature. Closed loop: NF
+learned noise to operator promote to Enrichment live suppression. The page is keyboard-operable, the
+two tables are ARIA data tables, and `LiveAnnouncer` announces promote/remove outcomes.
 
 ### Existing — Topology & trails (`/topology`, `/topology/:siteId`)
 
@@ -1175,7 +1517,8 @@ Writes: `PUT /domains/{domain}/model-params/{recordId}` (versioned write, new ve
 ```
 +-------------------------------------------------------------+
 | Stats dashboard                                             |
-|  alarm-reduction ratio: 8.3   RCA accuracy: evaluated offl. |
+|  alarm-reduction ratio: 8.3   RCA accuracy: 0.86 (eval)     |
+|  auto-correlation: 60.0 pct   (correlated / processed)      |
 |  pattern matches: 42   codebook matches: 17                 |
 +------------------------------+------------------------------+
 | Incidents (.items)           | Alarm lifecycle (.items)     |
@@ -1188,9 +1531,11 @@ Writes: `PUT /domains/{domain}/model-params/{recordId}` (versioned write, new ve
 +------------------------------+------------------------------+
 ```
 Reads: Correlation Engine `listIncidents` (`{items,...}`), `getStats`; Alarm Manager `listAlarms`
-(`{items,...}`). Filter is over `lifecycleState` (open/in-progress/correlated/cleared); a
-reverted-open alarm shows as `open` (its `transitions` record the revert). Each incident row
-deep-links to `/incidents/:incidentId`.
+(`{items,...}`); the same `RcaAccuracyService` as the dashboard (FIX F-UI2) so the stats view shows
+the resolved RCA-accuracy number and auto-correlation% instead of the old "evaluated offline" note.
+Filter is over `lifecycleState` (open/in-progress/correlated/cleared); a reverted-open alarm shows
+as `open` (its `transitions` record the revert). Each incident row deep-links to
+`/incidents/:incidentId`.
 
 ## Navigation map (required deliverable)
 
@@ -1209,8 +1554,9 @@ shareable and bookmarkable.
 | `/topology/:siteId` | `SiteGraphComponent` | `:siteId` | geo map site select |
 | `/patterns` | `PatternReviewModule` | — | nav bar, dashboard active-pattern KPI, incident-detail matched pattern |
 | `/incidents/:incidentId` | `IncidentDetailComponent` | `:incidentId` | dashboard recent incidents + incident KPI, stats incident row, streaming incident row, direct deep link |
+| `/chatter` | `ChatterManagementComponent` (FIX F-UI1) | `?source=` (optional source selector) | nav bar, dashboard quick link, stats noise run-stats cross-link, deep link |
 | `/config` | `ModelParamsFormComponent` | — | nav bar, dashboard quick link |
-| `/stats` | `CorrelationStatsModule` (Incidents / Alarm-lifecycle / Noise run-stats tabs) | — | nav bar, dashboard incident-count KPI, dashboard quick link |
+| `/stats` | `CorrelationStatsModule` (Incidents / Alarm-lifecycle / Noise run-stats tabs) | — | nav bar, dashboard incident-count KPI + RCA-accuracy/auto-correlation KPIs, dashboard quick link |
 
 ### Page graph + logical flows
 
@@ -1224,11 +1570,14 @@ flowchart TD
   Inc[Incident detail slash incidents incidentId]
   Cfg[Config slash config]
   Stats[Stats slash stats incidents alarms noise]
+  Chat[Chatter slash chatter]
   Dash -->|incident count KPI| Stats
   Dash -->|active pattern KPI| Pat
   Dash -->|recent incident| Inc
+  Dash -->|RCA accuracy and auto correlation KPI| Stats
   Dash -->|quick link| Stream
   Dash -->|quick link| Topo
+  Dash -->|quick link| Chat
   Dash -->|quick link| Cfg
   Stats -->|incident row| Inc
   Stream -->|incident row| Inc
@@ -1240,6 +1589,7 @@ flowchart TD
   Topo -->|select site| Site
   Site -->|live alarms on site| Stream
   Stats -->|noise run-stats tab| Stats
+  Stats -->|promote observed noise| Chat
 ```
 
 ## Error handling
@@ -1276,10 +1626,22 @@ independently.
   is the owning service concern.
 - **Loading state:** every async view shows a skeleton/spinner with an ARIA `aria-busy` region
   while the request is pending; `LiveAnnouncer` announces load completion.
-- **RCA accuracy display:** the Correlation Engine `GET /stats` does **not** return RCA accuracy
-  (evaluated by the offline oracle per its spec); the dashboard/stats show "evaluated offline"
-  rather than fabricating a value. **Flagged design note** — not a contract change; consistent
-  with the Correlation Engine spec.
+- **RCA accuracy display (FIX F-UI2):** the dashboard/stats now **show** RCA accuracy via
+  `RcaAccuracyService`: eval-mode `stats.rcaAccuracy` when non-null, else a client-side join of
+  `GET /incidents` `rootCauseAlarmType` to Simulator `/labels`, else **N/A (no ground truth)** in
+  production. The value is **never fabricated** — the eval gating is explicit. If the Simulator
+  labels client errors or is unconfigured in demo mode, the RCA card falls back to N/A (or the
+  eval-mode value) and other KPIs are unaffected. Auto-correlation% comes from `correlatedAlarmCount /
+  totalAlarmsProcessed` (N/A when `totalAlarmsProcessed=0`). Not a contract change (read-only of
+  frozen CE/Simulator fields).
+- **Chatter page errors (FIX F-UI1):** the observed-chatter read (Noise Filter) and the chatter list
+  read/write (Enrichment) are independent — a failure in one shows a structured service-named error in
+  that pane while the other still renders. A `409`/`422` from `addChatter`/`removeChatter` (race / bad
+  entry) is surfaced and does not mutate local state; the row action is disabled while a write is in
+  flight (`pendingPromotion`, double-submit guard) and the Enrichment list is re-read on success.
+  Empty observed-chatter or empty Enrichment list renders an explicit empty state. **Flagged: until
+  Enrichment's chatter `openapi.json` is published, the `EnrichmentChatterClient` is mock-only in unit
+  tests and its real wiring is gated on the published contract.**
 
 ## Design alternatives
 
@@ -1300,6 +1662,10 @@ independently.
 | Noise run-stats placement | Separate top-level route vs. sub-view/tab in `/stats` | **Tab within `/stats`** — the spec places noise run-stats in the correlation/learning stats area; a sub-view keeps the navigation map simple and matches the noise-filter spec's "presented in the existing correlation-stats module". |
 | Alarm-reduction ratio source | Server-computed vs. client-computed from raw counts | **Client-computed** — `GET /stats` exposes raw counts only; UI divides `totalAlarmsProcessed` by `totalIncidentsCreated`, N/A when zero. No contract change. |
 | BFF vs. direct-to-service | BFF proxy vs. direct SPA-to-service | **Direct-to-service (no BFF)** — fixed by the spec for MVP. |
+| Chatter page placement (FIX F-UI1) | Sub-tab of `/stats` noise view vs. a dedicated top-level `/chatter` route | **Dedicated `/chatter` route** — it is a read+write operator workflow spanning two services (NF read + Enrichment write), distinct from the read-only noise run-stats view; a deep-linkable top-level route is clearer for the closed-loop task and keeps the nav map explicit. A `/stats` cross-link still bridges from the noise view. |
+| Chatter promotion target / key (FIX F-UI1) | Write into Knowledge vs. write into Enrichment per-source `chatterList` keyed on `(managedObjectId, eventType)` | **Write into Enrichment** on `(managedObjectId, eventType)` — Enrichment owns the live per-source known-chatter list (its config-ownership invariant) and the live path consults it, so promotion there is what makes the live stream benefit from P2 learning. The NF observed signature carries `alarmType`/`trailId`/counts as review context; the Enrichment key is `(managedObjectId, eventType)`, matching Enrichment's existing entry shape — no new key invented. |
+| RCA accuracy resolution (FIX F-UI2) | "evaluated offline" placeholder vs. eval-mode server field only vs. client-side label join only vs. priority of both with N/A gating | **Priority of both with explicit N/A gating** — prefer CE eval-mode `stats.rcaAccuracy` when wired, else compute client-side from `GET /incidents` `rootCauseAlarmType` joined to Simulator `/labels`, else N/A in production. Both server and demo paths make the strongest power metric VISIBLE without fabricating it or owning ground truth at runtime; the CE design explicitly offers these two interchangeable ways. |
+| Auto-correlation vs. alarm-reduction (FIX F-UI2) | Reuse reduction ratio vs. add a distinct auto-correlation% KPI | **Distinct auto-correlation% KPI** = `correlatedAlarmCount / totalAlarmsProcessed` — the CE froze `correlatedAlarmCount` precisely because the correlated fraction (the ~60% target) is a different quantity from alarm-reduction (alarms/incidents) and must not be conflated. Two separate cards. |
 
 ## Test plan
 
@@ -1307,7 +1673,8 @@ independently.
 
 Unit/component tests use **Vitest + Angular TestBed** with **mock backends** (MSW from producer
 OpenAPI) and **mock timers** for the streaming cadence. E2E tests use **Playwright** against the
-integration stack (E2E only). All 54 acceptance criteria are mapped 1:1 to a named test.
+integration stack (E2E only). All acceptance criteria are mapped 1:1 to a named test — the prior 54
+plus the four added by FIX F-UI1/F-UI2 (AC 55-58).
 
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
@@ -1360,16 +1727,21 @@ integration stack (E2E only). All 54 acceptance criteria are mapped 1:1 to a nam
 | 47 | Alarm-lifecycle lists lifecycleState + role + incidentId from the page envelope | `alarm-lifecycle.spec.ts` | `listAlarms` returns the canonical `{items,total,limit,offset}` envelope (request params `limit`/`offset`, not `page`/`size`); `items[]` show `lifecycleState` (open/in-progress/correlated/cleared) + role + incidentId; the reverted-open case shows via the detail `transitions` |
 | 48 | Lifecycle filter filters by selected lifecycleState incl. in-progress | `alarm-filter.spec.ts` | filter on `lifecycleState` over `.items` shows only that state, incl. in-progress; reverted-open shown as a return to `open` |
 | 49 | E2E fiber-cut: correlated alarm with incident association | `alarm-lifecycle.e2e.ts` (Playwright) | integration stack: correlated alarm with non-empty incidentId from Alarm Manager |
-| 50 | Mock config: all nine integration points resolve to mocks, no real HTTP; MSW handlers serve the frozen shapes | `env-mock-switch.spec.ts` | each of 9 clients hits MSW handlers (generated from the producers' frozen `openapi.json`); responses match the frozen envelopes/DTOs; no outbound real request |
-| 51 | Integration config: 9 base URLs from env, no URL literal in source | `no-hardcoded-url.spec.ts` (build-time grep) | no localhost/service-hostname URL in non-environment source |
-| 52 | Keyboard nav cycles all controls; canvases ARIA-labelled (10 views) | `a11y.spec.ts` (axe-core per view) | dashboard/streaming/topology/site-graph/patterns/config/stats/alarm-lifecycle/incident-detail/noise-stats: keyboard reachable; canvas ARIA labels; no axe violations |
+| 50 | Mock config: all integration points resolve to mocks, no real HTTP; MSW handlers serve the frozen shapes | `env-mock-switch.spec.ts` | each client (the prior 9 + `EnrichmentChatterClient` + `SimulatorLabelsClient`) hits MSW handlers (from the producers' frozen `openapi.json`; Enrichment chatter mock against the expected/flagged shape until its `openapi.json` lands); responses match the frozen envelopes/DTOs; no outbound real request |
+| 51 | Integration config: all base URLs from env, no URL literal in source | `no-hardcoded-url.spec.ts` (build-time grep) | no localhost/service-hostname URL in non-environment source (incl. `ENRICHMENT_CHATTER_API_BASE_URL`, `SIMULATOR_LABELS_API_BASE_URL`) |
+| 52 | Keyboard nav cycles all controls; canvases ARIA-labelled (11 views) | `a11y.spec.ts` (axe-core per view) | dashboard/streaming/topology/site-graph/patterns/config/stats/alarm-lifecycle/incident-detail/noise-stats/**chatter**: keyboard reachable; canvas + data-table ARIA labels; no axe violations |
 | 53 | Any backend 5xx: module shows service-named error, others unaffected | `error-boundary.spec.ts` (per integration point) | 5xx then error banner naming the service; other modules still render |
 | 54 | Edit draft pattern: mark optional, PATCH sent, edit reflected; draft-only | `pattern-edit.spec.ts` | `PATCH /patterns/{id}` body the frozen `PatternEdit { sequenceFlags:[{index, optional}], reviewer, notes? }`; returned `PatternView` reflects the `optional` per `index`; edit action absent for non-draft |
+| 55 | (F-UI1) Chatter page reads NF observed-chatter ranked + marks promoted vs candidate | `chatter-load.spec.ts` | `listObservedChatter` returns `ObservedChatterPage` ranked by `occurrenceCount`; rows render `(managedObjectId or src-level, alarmType, eventType, occurrenceCount)`; each row marked `promoted`/`candidate` by `(managedObjectId, eventType)` match against `listChatter` for the selected source; null-MO source-level signature handled |
+| 56 | (F-UI1) Promote posts addChatter, remove posts removeChatter, list re-read | `chatter-promote.spec.ts` | clicking Promote calls `EnrichmentChatterClient.addChatter(source, {managedObjectId, eventType})`, then re-reads; row flips to `promoted`. Remove calls `removeChatter` then re-reads; row flips to `candidate`. Action disabled while in flight (double-submit guard); `409`/`422` surfaces a structured error without mutating local state |
+| 57 | (F-UI2) Dashboard shows RCA accuracy: eval-mode value, else client-side label join, else N/A | `dashboard-rca.spec.ts` | with `stats.rcaAccuracy` non-null then that value shown (eval); with `stats.rcaAccuracy=null` + labels fixture then computed = matches/total joining incidents' `rootCauseAlarmType` to `/labels` `rootCauseAlarmType`; with null + no labels then "N/A (no ground truth)"; never the old "evaluated offline" text |
+| 58 | (F-UI2) Dashboard shows auto-correlation% = correlatedAlarmCount/totalAlarmsProcessed | `dashboard-autocorr.spec.ts` | KPI = `correlatedAlarmCount/totalAlarmsProcessed` from `GET /stats` (e.g. 768/1280 = 60.0%); N/A when `totalAlarmsProcessed=0`; distinct from the alarm-reduction ratio card |
 
-All 54 acceptance criteria map 1:1 to a named test (45 Vitest/TestBed + 9 Playwright E2E:
+All 58 acceptance criteria map 1:1 to a named test (49 Vitest/TestBed + 9 Playwright E2E:
 AC 5, 13, 17, 20, 25, 33, 39, 43, 46, 49 are E2E — note AC 51 is a build-time grep check run
-under the unit harness). The five new-view AC groups are covered: dashboard (AC 1-5), streaming
-(AC 6-13), incident-detail (AC 14-17), noise-stats (AC 18-20), cross-nav/deep-link (AC 21-25).
+under the unit harness). The new-view AC groups are covered: dashboard (AC 1-5, **+57-58** for the
+new KPIs), streaming (AC 6-13), incident-detail (AC 14-17), noise-stats (AC 18-20), cross-nav/deep-link
+(AC 21-25), and the **chatter-management page (AC 55-56, FIX F-UI1)**.
 
 ### E2E scenarios (from this design unit's point of view — Playwright)
 
@@ -1388,12 +1760,17 @@ under the unit harness). The five new-view AC groups are covered: dashboard (AC 
 | 11 (failure path) | Backend-down degradation | Point one client (e.g. Knowledge) at an unavailable/5xx endpoint | Affected module shows a structured service-named error; other modules still function (no whole-app crash) |
 | 12 (failure path) | Streaming poll failure | Make the Alarm Manager poll endpoint return 5xx mid-stream | Streaming view shows a stale-data indicator, retains last good data, retries next tick, does not crash |
 | 13 (empty path) | No discovered patterns | Pattern Manager returns empty draft list | Pattern review shows an explicit empty state, not an error |
+| 14 (F-UI1) | Chatter promote round-trip | Open `/chatter` against the real stack (NF observed-chatter populated from a P2 replay), select a source, promote a candidate signature | Enrichment `listChatter` returns the promoted `(managedObjectId, eventType)` on re-read; the row shows `promoted`; closing the loop (Enrichment now suppresses that chatter on the live path) |
+| 15 (F-UI2) | Dashboard RCA accuracy + auto-correlation shown | Replay a labeled scenario in the eval/demo profile, open `/dashboard` | RCA-accuracy card shows a numeric value (eval-mode `stats.rcaAccuracy` or the `/labels` client-side join), not "evaluated offline"; auto-correlation card shows `correlatedAlarmCount/totalAlarmsProcessed` near the ~60% target |
 
 ## Config & observability
 
-- **Config:** `environment.ts` / `environment.integration.ts` carry the nine per-service base
-  URLs, `INTEGRATION_MODE=mock|real`, `STREAMING_REFRESH_INTERVAL_MS` (default `3000`), and the
-  client log level. Values are injected from Docker Compose environment variables at build/serve
+- **Config:** `environment.ts` / `environment.integration.ts` carry the **eleven** per-service base
+  URLs (the prior nine + `ENRICHMENT_CHATTER_API_BASE_URL` + `SIMULATOR_LABELS_API_BASE_URL`),
+  `INTEGRATION_MODE=mock|real`, `STREAMING_REFRESH_INTERVAL_MS` (default `3000`), an optional
+  `RCA_LABELS_ENABLED` flag (gates the demo/eval Simulator-labels RCA join; off in production), and the
+  client log level. The Simulator-labels base URL may be unset in production — RCA accuracy then
+  resolves to the CE eval-mode value or N/A (not an error). Values are injected from Docker Compose environment variables at build/serve
   time. No URL, threshold, interval literal, or credential is hard-coded in application source
   (AC 51). The streaming refresh interval is operator-adjustable at runtime via the UI; the env
   value is its default. The 3 s default is the spec default (open question #10) and may be
@@ -1428,7 +1805,11 @@ under the unit harness). The five new-view AC groups are covered: dashboard (AC 
   base URLs are Compose addresses).
 - **Container:** multi-stage Dockerfile — build stage `node:24` (`npm ci && npm run build`),
   serve stage nginx serving `dist/` with `/` returning HTTP 200 liveness. Docker Compose entry
-  sets the nine base-URL env vars, `INTEGRATION_MODE`, and `STREAMING_REFRESH_INTERVAL_MS`.
+  sets the **eleven** base-URL env vars, `INTEGRATION_MODE`, `RCA_LABELS_ENABLED`, and
+  `STREAMING_REFRESH_INTERVAL_MS`.
 - **Client regeneration:** on a collaborator OpenAPI contract change (architecture.md update +
   human approval first), run `npm run generate:clients` to regenerate TypeScript models from the
-  producers' checked-in `openapi.json` (now including the Noise Filter `openapi.json`).
+  producers' checked-in `openapi.json` (now including the Noise Filter `openapi.json` with the
+  observed-chatter schema, the Simulator `openapi.json` for `/labels`, and the **Enrichment chatter
+  `openapi.json` once published** — until then the `EnrichmentChatterClient` models are hand-pinned to
+  the flagged expected shape and the dependency is tracked for the human).
