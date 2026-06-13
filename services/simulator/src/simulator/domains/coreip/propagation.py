@@ -1,16 +1,18 @@
-"""Core-IP §5 propagation templates (the 28 Knowledge propagationTemplate records).
+"""Core-IP §5 propagation templates (mirroring the Knowledge propagationTemplate records).
 
 Each record maps an edge relation to an effect ``alarmType`` emitted when the cascade hops
 that relation. Multiple records share one relation (so one hop adds several co-symptom types)
-— this is what lets a single cascade span 10-20 distinct ``alarmType`` tokens. The traversal
-itself lives in the domain-agnostic ``engine/cascade.py``; only this data is domain-specific.
+— this is what lets a single cascade span 10-20 distinct ``alarmType`` tokens (and ensures even
+the shallow LSP-origin cascade reaches the ≥10-type floor via the TE-protection + service
+tail). The traversal itself lives in the domain-agnostic ``engine/cascade.py``; only this data
+is domain-specific.
 """
 
 from __future__ import annotations
 
 from simulator.engine.domain_pack import PropagationTemplate as PT
 
-# 28 propagation records over the typed edge relations.
+# Propagation records over the typed edge relations.
 PROPAGATION_TEMPLATES: tuple[PT, ...] = (
     # FiberSpan RIDES_ON IPLink — optical + link symptoms (4)
     PT("RIDES_ON", "LOS"),
@@ -39,7 +41,12 @@ PROPAGATION_TEMPLATES: tuple[PT, ...] = (
     PT("TRAVERSES", "LSPDown"),
     PT("TRAVERSES", "FRRSwitchover"),
     PT("TRAVERSES", "TETunnelDown"),
-    # LSP SERVES VPNService — service/QoS tail (6)
+    # LSP SERVES VPNService — TE-protection + service/QoS tail (9). The LSP failure both trips
+    # the TE/FRR protection tier (FRRSwitchover/TETunnelDown) and degrades the served VPN
+    # (reachability/QoS), so an LSP-origin cascade still spans the routing→service breadth.
+    PT("SERVES", "FRRSwitchover"),
+    PT("SERVES", "TETunnelDown"),
+    PT("SERVES", "RouteFlap"),
     PT("SERVES", "ReachabilityLoss"),
     PT("SERVES", "VPNReachabilityLoss"),
     PT("SERVES", "ServiceDegraded"),

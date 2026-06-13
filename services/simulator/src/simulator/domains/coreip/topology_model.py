@@ -133,6 +133,8 @@ def build_topology(  # noqa: C901 - layered construction, kept explicit for clar
                 "capacity": rng.choice(_CAPACITIES),
             },
         )
+        # Node HOSTED_ON LineCard (cause→effect: a node failure cascades to its hosted cards)
+        add_edge(node_moid, lc_moid, "HOSTED_ON")
         add_edge(lc_moid, port_moid, "HOSTED_ON")
         for k in range(params.interfaces_per_port):
             if_moid = f"Interface:{node_id}-LC1-P1-if{k}"
@@ -176,10 +178,13 @@ def build_topology(  # noqa: C901 - layered construction, kept explicit for clar
             "RIDES_ON",
             {"linkType": "fiber", "capacity": rng.choice(_CAPACITIES), "protectionRole": "working"},
         )
-        # IGP adjacency over the interface
+        # IGP adjacency over the interface AND over the IP link it runs across: an interface
+        # fault or a link/fiber fault both bring the adjacency down, so the adjacency is
+        # reachable (ADJACENCY_OVER) from both the interface and the link.
         adj_moid = f"IGPAdjacency:{a.split(':')[1]}_{b.split(':')[1]}"
         add_node(adj_moid, "IGPAdjacency", {})
         add_edge(if_a, adj_moid, "ADJACENCY_OVER")
+        add_edge(link_moid, adj_moid, "ADJACENCY_OVER")
         # LSP traverses the link, serving a VPN
         lsp_moid = f"LSP:{a.split(':')[1]}-{b.split(':')[1]}-1"
         add_node(lsp_moid, "LSP", {})
@@ -189,11 +194,16 @@ def build_topology(  # noqa: C901 - layered construction, kept explicit for clar
             add_node(vpn_moid, "VPNService", {})
         add_edge(lsp_moid, vpn_moid, "SERVES")
 
-    # SRLG groups: bundle each adjacent pair of IP links into a shared-risk group.
+    # SRLG groups: bundle each adjacent pair of IP links into a shared-risk group. Both the
+    # group→link membership (SRLG MEMBER_OF IPLink) and the reverse link→group membership
+    # (IPLink MEMBER_OF SRLG) are recorded so a cascade reaching one member link fate-shares
+    # through the group to its co-member links (SRLG fate-sharing, criterion 4 / scenario 9).
     for j in range(0, len(iplinks) - 1, 2):
         srlg_moid = f"SRLG:SRLG-{j // 2}"
         add_node(srlg_moid, "SRLG", {})
         add_edge(srlg_moid, iplinks[j], "MEMBER_OF")
         add_edge(srlg_moid, iplinks[j + 1], "MEMBER_OF")
+        add_edge(iplinks[j], srlg_moid, "MEMBER_OF")
+        add_edge(iplinks[j + 1], srlg_moid, "MEMBER_OF")
 
     return BuildResult(graph=g, sites=sites, igp_areas=sorted(igp_areas_used))

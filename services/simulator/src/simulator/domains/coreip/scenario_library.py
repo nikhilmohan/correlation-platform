@@ -11,19 +11,23 @@ from __future__ import annotations
 
 from simulator.engine.domain_pack import NoiseClass, ScenarioDef
 
-# Relation walk orders (subsets of the pack's edge-relation vocabulary).
+# Relation walk orders (subsets of the pack's edge-relation vocabulary). Each cascade follows
+# its relations forward over the cause→effect-directed graph (FiberSpan RIDES_ON IPLink; IPLink
+# ADJACENCY_OVER IGPAdjacency and TRAVERSES LSP; LSP SERVES VPNService; Node/LineCard HOSTED_ON
+# the layer below; Port HOSTS Interface; Interface TERMINATES IPLink; IPLink MEMBER_OF SRLG for
+# fate-sharing). The cascade reaches the routing/LSP/service tail through the IP link.
 _FULL = ("RIDES_ON", "TERMINATES", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
 _LINECARD = ("HOSTED_ON", "HOSTS", "TERMINATES", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
 _PORT = ("HOSTS", "TERMINATES", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
 _IFACE = ("TERMINATES", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
 _NODE = ("HOSTED_ON", "HOSTS", "TERMINATES", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
-_IPLINK = ("TERMINATES", "MEMBER_OF", "TRAVERSES", "SERVES")
-_LSP = ("SERVES",)
-_ROUTING = ("ADJACENCY_OVER", "TRAVERSES", "SERVES")
-_SRLG = ("RIDES_ON", "TERMINATES", "TRAVERSES", "SERVES")
+_IPLINK = ("ADJACENCY_OVER", "MEMBER_OF", "TRAVERSES", "SERVES")
+_LSP = ("TRAVERSES", "SERVES")
+_ROUTING = ("TERMINATES", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
+_SRLG = ("RIDES_ON", "MEMBER_OF", "ADJACENCY_OVER", "TRAVERSES", "SERVES")
 
 SCENARIO_LIBRARY: tuple[ScenarioDef, ...] = (
-    ScenarioDef("fiber-cut", "FiberSpan", "FiberCut", _FULL),
+    ScenarioDef("fiber-cut", "FiberSpan", "FiberFault", _FULL),
     ScenarioDef("line-card-fault", "LineCard", "LineCardFault", _LINECARD),
     ScenarioDef("port-fault", "Port", "PortDown", _PORT),
     ScenarioDef("interface-fault", "Interface", "InterfaceDown", _IFACE),
@@ -34,9 +38,8 @@ SCENARIO_LIBRARY: tuple[ScenarioDef, ...] = (
     ScenarioDef(
         "srlg-shared-risk-failure",
         "FiberSpan",
-        "FiberCut",
+        "FiberFault",
         _SRLG,
-        co_failure_relation="MEMBER_OF",
     ),
 )
 
