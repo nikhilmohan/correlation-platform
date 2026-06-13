@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Node:PE1", "objectType": "Node", "name": "PE1" },
+    { "managedObjectId": "Node:PE2", "objectType": "Node", "name": "PE2" },
+    { "managedObjectId": "Site:LON-DC1", "objectType": "Site", "name": "London DC1",
+      "attributes": { "latitude": 51.5, "longitude": -0.12, "region": "EU-West" } }
+  ],
+  "edges": [
+    { "from": "Node:PE1", "to": "Site:LON-DC1", "relation": "LOCATED_AT" },
+    { "from": "Node:PE2", "to": "Site:LON-DC1", "relation": "LOCATED_AT" },
+    { "from": "Node:PE1", "to": "Node:PE2", "relation": "ADJACENCY_OVER" }
+  ]
+}

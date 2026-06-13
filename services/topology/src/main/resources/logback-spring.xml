@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Structured JSON logging. MDC carries snapshotId / domain / traceId where in scope. Log lines
+     never carry NebulaGraph connection details or raw nGQL result rows (AC-19 / EH-9). -->
+<configuration>
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <includeMdcKeyName>traceId</includeMdcKeyName>
+      <includeMdcKeyName>snapshotId</includeMdcKeyName>
+      <includeMdcKeyName>domain</includeMdcKeyName>
+      <customFields>{"service":"topology"}</customFields>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Node:PE1", "objectType": "Node", "name": "PE1" },
+    { "managedObjectId": "Port:PE1-LC2-P3", "objectType": "Port", "name": "ge-0/0/3" }
+  ],
+  "edges": [
+    { "from": "Port:PE1-LC2-P3", "to": "Node:PE1", "relation": "HOSTED_ON" }
+  ]
+}

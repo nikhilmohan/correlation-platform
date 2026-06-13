@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "nodes": [
+    { "managedObjectId": "Node:PE1", "objectType": "Node" }
+  ],
+  "edges": []
+}

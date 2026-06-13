@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp/knowledge/recordmodel/trailPolicy.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["closureEdgeTypes", "boundary", "srlgRule"],
+  "properties": {
+    "closureEdgeTypes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+    },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["igp-area", "none"] },
+        "attributeKey": { "type": "string" }
+      }
+    },
+    "srlgRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["union-members", "none"] },
+        "srlgEdgeType": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$" }
+      }
+    }
+  }
+}
