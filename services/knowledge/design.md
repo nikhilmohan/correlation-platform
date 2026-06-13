@@ -51,7 +51,7 @@ The seven `recordType`s:
 | 5 | `objectTypeVocabulary` | Topology | The valid `objectType` token set for a domain. |
 | 6 | `edgeRelationVocabulary` | Topology | The valid edge `relation` token set for a domain. |
 | 7 | `attributeCatalogue` | Noise Filter, Trail Builder, Codebook Generator | Well-known device/connection attribute keys. |
-| (cross-cutting) | `alarmTypeVocabulary` | Codebook Generator (OQ-3) | **THE authoritative value space for the canonical `AlarmEvent.alarmType` join key** (and template `effect`/`trigger.alarmType`); distinct from `eventType` (X.733 category) and `probableCause`. |
+| (cross-cutting) | `alarmTypeVocabulary` | Codebook Generator (OQ-3) | **THE authoritative value space for the canonical `AlarmEvent.alarmType` join key** (and template `effect`/`trigger.alarmType`); seeds **29 grounded Core IP tokens** across the layers (fix A1); distinct from `eventType` (X.733 category) and `probableCause`. |
 
 > **Note on `alarmTypeVocabulary`.** The spec calls out seven *primary* record types but also
 > identifies (OQ-3) that propagation-template effects must reference a **canonical alarm-type
@@ -209,7 +209,9 @@ mechanism that keeps the **template effects / codebook signatures / mined sequen
 
 `objectType` must be in the domain's `objectTypeVocabulary`; `originAlarmType` (the alarm the
 origin emits itself, e.g. `InterfaceDown` for an `Interface` origin) must be in the
-`alarmTypeVocabulary`. Core IP set: `Fiber`, `LineCard`, `Port`, `Interface`, `Node`.
+`alarmTypeVocabulary`. Core IP set (expanded for fix A3 — see **Seed data**):
+`FiberSpan`, `LineCard`, `Port`, `Interface`, `Node`, `IPLink`, `LSP` (7 records, each seeding a
+distinct fault-origin cascade scenario).
 
 ### 3. Alarm-type-vocabulary record schema (the Codebook seam)
 
@@ -228,20 +230,34 @@ origin emits itself, e.g. `InterfaceDown` for an `Interface` origin) must be in 
 }
 ```
 
-One record per domain holds the canonical alarm-type identifier set. Core IP set:
-`PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`, `ReachabilityLoss`, `LOS`,
-`FiberFault` (the discriminators referenced by templates and codebook signatures). This is the
-single authoritative list against which all `propagationTemplate` effect/trigger alarm types are
-validated — resolving the Codebook Generator's `AlarmTypeVocabulary` seam (OQ-3).
+One record per domain holds the canonical alarm-type identifier set. The Core IP set is **the
+29 grounded Core IP alarm-type tokens** spanning the layers (optical → port/line-card →
+interface → IP link → routing IGP/BGP → LSP/MPLS → service/VPN → QoS), enumerated in **Seed
+data** (the `core-ip/alarmTypeVocabulary/default` record). These are the discriminators
+referenced by templates and codebook signatures. This is the single authoritative list against
+which all `propagationTemplate` effect/trigger alarm types are validated — resolving the Codebook
+Generator's `AlarmTypeVocabulary` seam (OQ-3).
+
+> **Magnitude (MVP-achievability fix A1).** The earlier seed shipped only **8** tokens, which
+> arithmetically caps any one cascade at ~6 distinct alarm types and made the MVP target
+> "8-10 patterns each spanning 10-20 alarm TYPES" impossible (mvp-achievability gate, P2 Gap). Per
+> the locked product-owner decision (option A: extend the Core IP pack), the vocabulary is
+> expanded to **29 grounded Core IP alarm types** so a single forward-propagation cascade can
+> realistically span **10-20 distinct types** across the layers. This is **seed-data / vocabulary
+> enrichment within the unchanged `alarmTypeVocabulary` recordType + schema** — not a contract or
+> event-model change (the recordType, the JSON Schema, and the `AlarmEvent.alarmType` binding are
+> all unchanged; only the *value set* grows). Downstream: the **Simulator Core IP domain pack
+> (Step B) must align its alarm-shapes/scenarios to this expanded vocabulary** (its scenarios
+> emit these tokens as `AlarmEvent.alarmType`) — flagged as the downstream dependency.
 
 **This is the value space for the canonical `AlarmEvent.alarmType` field (gap P1-G6).** Per
 `architecture.md` the dedicated `AlarmEvent.alarmType` join key (mirrored on
 `TransactionEvent.alarms[].alarmType`, propagated into codebook `predictedSymptoms[].alarmType`
 and `rootCauseAlarmType`, matched at correlation) draws its values **from this record**. Knowledge
-authors the tokens; every producer/consumer in the chain is constrained to them. The Core IP set
-above is the union the propagation cascade actually emits as `effect.alarmType` plus the
-self-originated `faultOriginType.originAlarmType` values (e.g. `LOS` originated by a `FiberSpan`,
-`FiberFault` by a `LineCard`/`Fiber`), so the seed vocabulary covers every token the cascade uses.
+authors the tokens; every producer/consumer in the chain is constrained to them. The seeded set is
+the union the propagation cascade actually emits as `effect.alarmType` plus the self-originated
+`faultOriginType.originAlarmType` values (e.g. `LOS`/`LOF` originated by a `FiberSpan`,
+`LineCardFault` by a `LineCard`), so the seed vocabulary covers every token the cascade uses.
 The vocabulary tokens are the **canonical `alarmType` tokens** — they are **not** probableCause
 tokens (`lossOfSignal`/`linkDown` lowercase) and **not** X.733 `eventType` categories.
 
@@ -374,6 +390,22 @@ PrefixSpan) are in **Seed data**, resolving OQ-2's remaining design detail.
 catalogue record's own shape (key-name token format, value-form enums). It does **not** enforce
 the catalogue against live topology snapshots or live alarms — that enforcement is out of scope
 (matches the spec's "Out of scope" line and architecture's "descriptive, not identity").
+
+> **Catalogue grounding (MVP-achievability fix A2) — `igpArea` is now a well-known device key.**
+> The seeded `trailPolicy/default` bounds trail closure on `boundary={type:'igp-area',
+> attributeKey:'igpArea'}`, but the earlier `attributeCatalogue` did **not** carry `igpArea`, so
+> the policy's primary partitioning dimension referenced an attribute no producer could emit or
+> validate — area-bounding was inert (mvp-achievability gate, P1 At-risk: "Knowledge pack drives
+> trails" + "Trail Builder area-bounding"). Per the locked product-owner decision, `igpArea`
+> (the IGP area a node/interface belongs to, e.g. `area-0`, `area-1`) is added as a well-known
+> **device key** in the catalogue (applicable to `Node` and to `Interface`). This makes the
+> trail-policy boundary a real, populatable, validatable dimension: the **Simulator emits a
+> grounded per-`Node`/per-`Interface` `igpArea` (Step B)**, **Topology** carries it as a node
+> attribute, and **Trail Builder** bounds closure on it. This is **catalogue enrichment within
+> the unchanged `attributeCatalogue` recordType + descriptive-validation rule** (a new
+> well-known key — the catalogue is explicitly open/extensible per `architecture.md` "well-known
+> keys ... extensible per domain") — **not** a schema or contract change. Downstream dependency:
+> the Simulator must emit `igpArea`; Topology must accept it (both already attribute-generic).
 
 ### Onboarding a new domain / new protocol layer — purely records
 
@@ -822,15 +854,15 @@ sequenceDiagram
   participant DB as PostgreSQL knowledge
   CG->>RC: GET domains core-ip fault-origin-types
   RC->>DB: select current fault origin records
-  DB-->>RC: Fiber LineCard Port Interface Node
+  DB-->>RC: 7 origins FiberSpan LineCard Port Interface Node IPLink LSP
   RC-->>CG: fault origin list
   CG->>RC: GET domains core-ip propagation-templates
   RC->>DB: select current template records
-  DB-->>RC: HOSTED_ON HOSTS TERMINATES RIDES_ON ADJACENCY_OVER TRAVERSES SERVES MEMBER_OF
+  DB-->>RC: 28 templates over HOSTED_ON HOSTS TERMINATES RIDES_ON ADJACENCY_OVER TRAVERSES SERVES MEMBER_OF
   RC-->>CG: template records with trigger and effect alarm types
   CG->>RC: GET domains core-ip alarm-type-vocabulary
-  RC-->>CG: canonical alarm type identifiers
-  Note over CG: runs templates forward over the graph closure, no Knowledge coupling
+  RC-->>CG: 29 canonical alarm type identifiers
+  Note over CG: runs all applicable templates forward over the graph closure, 10 to 20 type cascade, no Knowledge coupling
 ```
 
 ### Flow C — Topology snapshot pre-validation (single vocabulary call)
@@ -910,9 +942,36 @@ path (so the seed is dogfood-validated). All seed records are `domain = core-ip`
     "TRAVERSES","SERVES","MEMBER_OF","LOCATED_AT"] } }
 
 { "recordType": "alarmTypeVocabulary", "recordId": "core-ip/alarmTypeVocabulary/default",
-  "payload": { "alarmTypes": ["PortDown","InterfaceDown","LinkDown","AdjDown","LSPDown",
-    "ReachabilityLoss","LOS","FiberFault"] } }
+  "payload": { "alarmTypes": [
+    "LOS","LOF","OpticalPowerLow","FiberCut","FiberFault",
+    "PortDown","LineCardFault","CRCErrors","PortFlapping","LinkBundleDegraded",
+    "InterfaceDown","InterfaceErrors","IPLinkDown","LinkDown",
+    "ISISAdjacencyDown","AdjDown","OSPFAdjacencyDown","BGPPeerDown","RouteFlap","LDPSessionDown",
+    "LSPDown","FRRSwitchover","TETunnelDown",
+    "VPNReachabilityLoss","ReachabilityLoss","ServiceDegraded",
+    "Congestion","QueueDrop","HighLatency"] } }
 ```
+
+**Canonical Core IP alarm-type set (29 tokens — fix A1).** These are **the** canonical
+`alarmType` tokens for the `core-ip` domain (the value space for `AlarmEvent.alarmType` and every
+mirror/derivation down the chain). They are recognizable telco / Core IP fault-type names,
+grouped by layer (the grouping is descriptive — the record is a flat token set):
+
+| Layer | Tokens |
+|---|---|
+| Optical / fiber | `LOS`, `LOF`, `OpticalPowerLow`, `FiberCut`, `FiberFault` |
+| Port / line-card / L2 | `PortDown`, `LineCardFault`, `CRCErrors`, `PortFlapping`, `LinkBundleDegraded` |
+| L3 interface / IP link | `InterfaceDown`, `InterfaceErrors`, `IPLinkDown`, `LinkDown` |
+| Routing (IGP / BGP / LDP) | `ISISAdjacencyDown`, `AdjDown`, `OSPFAdjacencyDown`, `BGPPeerDown`, `RouteFlap`, `LDPSessionDown` |
+| LSP / MPLS | `LSPDown`, `FRRSwitchover`, `TETunnelDown` |
+| Service / VPN | `VPNReachabilityLoss`, `ReachabilityLoss`, `ServiceDegraded` |
+| QoS / congestion | `Congestion`, `QueueDrop`, `HighLatency` |
+
+The **original 8 tokens** (`PortDown`, `InterfaceDown`, `LinkDown`, `AdjDown`, `LSPDown`,
+`ReachabilityLoss`, `LOS`, `FiberFault`) are **retained verbatim** — the set is a superset, so no
+existing template, codebook signature, or test that named an original token breaks. The 21 added
+tokens are what let a single fault-origin cascade span 10-20 distinct types (see the propagation
+templates below). Every token passes the `^[A-Za-z][A-Za-z0-9]*$` token-format check.
 
 **Single source for snapshot-token validation (gap P1-G3).** The seeded `core-ip`
 `objectTypeVocabulary` and `edgeRelationVocabulary` above are the **authoritative token sets**
@@ -926,27 +985,81 @@ is caught at design/contract time rather than failing ingest closed at integrati
 
 **Single source for the canonical `alarmType` join key (gap P1-G6).** The seeded `core-ip`
 `alarmTypeVocabulary` above is likewise the **authoritative value space** for `AlarmEvent.alarmType`
-(and its mirrors/derivations down the chain). The 8 tokens are exactly the set the propagation
-cascade emits — `effect.alarmType` across the seeded templates yields
-`{PortDown, InterfaceDown, LinkDown, AdjDown, LSPDown, ReachabilityLoss}` and the
-`faultOriginType.originAlarmType` self-origin values add `{LOS, FiberFault}` (and `InterfaceDown`) —
-so the vocabulary covers every token the cascade actually uses, with no probableCause-style or
-X.733-category tokens introduced.
+(and its mirrors/derivations down the chain). The 29 tokens are a **superset** of every token the
+propagation cascade emits — the union of `effect.alarmType` across the seeded templates plus the
+`faultOriginType.originAlarmType` self-origin values (see the coverage test G6b, below) is a
+subset of this vocabulary — so the vocabulary covers every token the cascade actually uses, with
+no probableCause-style or X.733-category tokens introduced. The expanded set (fix A1) is what lets
+the seeded forward-propagation produce **10-20-distinct-type symptom signatures** per fault origin
+(the MVP P2 magnitude target); the **Simulator Core IP pack (Step B) aligns to this set** as the
+downstream dependency.
 
 ### Core IP fault-origin types
 
-`Fiber`, `LineCard`, `Port`, `Interface`, `Node` (each a `faultOriginType` record). Example with
-its own origin alarm:
+Each fault-origin object type is a `faultOriginType` record carrying its **self-originated**
+alarm (`originAlarmType`). The seed pack ships **7** fault-origin records (the original `Fiber`,
+`LineCard`, `Port`, `Interface`, `Node`, plus **2 added** for fix A3 so the 8-10-scenario target
+is met without re-using object types): `FiberSpan`, `LineCard`, `Port`, `Interface`, `Node`,
+`IPLink`, `LSP`. Each origin's self-alarm seeds the head of a distinct cascade scenario:
+
+| `objectType` (fault origin) | `originAlarmType` (self-alarm) | Scenario head it seeds |
+|---|---|---|
+| `FiberSpan` | `FiberCut` | optical fiber-cut storm (deepest cascade — optical to VPN) |
+| `LineCard` | `LineCardFault` | line-card failure (fans out to all hosted ports) |
+| `Port` | `PortDown` | single-port failure |
+| `Interface` | `InterfaceDown` | L3 interface failure (cascades independently of port/card) |
+| `Node` | `LOS` | node-level optical loss-of-signal |
+| `IPLink` | `IPLinkDown` | IP-link / bundle failure (routing-layer entry) |
+| `LSP` | `LSPDown` | MPLS LSP / TE-tunnel failure (service-layer entry) |
+
+Example record:
 
 ```json
 { "recordType": "faultOriginType", "recordId": "core-ip/faultOriginType/Interface",
   "payload": { "objectType": "Interface", "originAlarmType": "InterfaceDown",
     "description": "L3 interface; originates InterfaceDown and cascades independently" } }
+
+{ "recordType": "faultOriginType", "recordId": "core-ip/faultOriginType/FiberSpan",
+  "payload": { "objectType": "FiberSpan", "originAlarmType": "FiberCut",
+    "description": "Optical fiber span; originates FiberCut and seeds the deepest cascade" } }
+
+{ "recordType": "faultOriginType", "recordId": "core-ip/faultOriginType/IPLink",
+  "payload": { "objectType": "IPLink", "originAlarmType": "IPLinkDown",
+    "description": "IP link / bundle; routing-layer fault origin" } }
 ```
 
-### Core IP propagation templates (the full chain, formalized)
+> **Fault-origin grounding (fix A3).** `objectType` of each fault-origin record must be in the
+> `objectTypeVocabulary` (all 7 are: `FiberSpan`, `LineCard`, `Port`, `Interface`, `Node`,
+> `IPLink`, `LSP` are unchanged vocabulary tokens) and each `originAlarmType` is in the expanded
+> `alarmTypeVocabulary`. No new recordType or schema — just more `faultOriginType` records, so the
+> Codebook Generator can enumerate **8-10 distinct fault-origin scenarios** (the 7 single-origin
+> scenarios above plus the SRLG co-failure and the multi-port line-card fan-out, which the
+> Codebook Generator instantiates per topology — see the cascade-coverage table below).
 
-One record per notation line:
+### Core IP propagation templates (the full chain, formalized) — expanded for 10-20-type cascades
+
+The propagation-template **schema is unchanged** (`edgeType`, single `trigger`/`effect`,
+`traversal`, `ordering`): a cascade richer than one alarm-per-hop is authored as **multiple
+template records that share an `edgeType`** but produce **different `effect.alarmType` tokens** on
+the same traversal — the Codebook Generator runs *every* applicable template forward over the
+closure, so N templates on one edge contribute N symptom types at that hop. This is **seed-data /
+record enrichment** (more `propagationTemplate` records), **not** a schema change.
+
+> **Why (fix A3).** The earlier 8 templates yield a longest cascade of ~6 distinct types
+> (mvp-achievability gate, P2 Gap: cascades too short for the 10-20-type target). The expanded set
+> below **keeps all 8 original templates verbatim** (same `recordId`s, same `trigger`/`effect`)
+> and **adds 16 templates** that (a) emit co-symptoms at each existing hop (e.g. a `PortDown` also
+> raising `CRCErrors`/`PortFlapping`), (b) add the optical sub-chain (`FiberCut` to `LOS`/`LOF`/
+> `OpticalPowerLow`), (c) add the multi-protocol routing fan-out (`InterfaceDown` to
+> `ISISAdjacencyDown`/`OSPFAdjacencyDown`/`BGPPeerDown`/`LDPSessionDown`/`RouteFlap`), (d) add the
+> MPLS sub-chain (`LinkDown` to `LSPDown`/`TETunnelDown`/`FRRSwitchover`), and (e) add the
+> service-degradation / QoS tail (`LSPDown` to `VPNReachabilityLoss`/`ServiceDegraded`/
+> `Congestion`/`QueueDrop`/`HighLatency`). Result: the deepest fault-origin (`FiberSpan`) cascade
+> traverses the full layer stack and makes **24 distinct alarm types** available (worked count
+> below); a demo profile (closure depth / area bound) selects a 10-20-type slice per scenario.
+
+**Original 8 templates (retained verbatim):** `HOSTED_ON`, `HOSTS`, `TERMINATES`, `RIDES_ON`,
+`ADJACENCY_OVER`, `TRAVERSES`, `SERVES`, `MEMBER_OF` — one record per notation line:
 
 ```json
 [
@@ -1008,6 +1121,181 @@ One record per notation line:
 ]
 ```
 
+**Added 20 templates (fix A3)** — co-symptoms and sub-chains that lengthen the cascade. Each
+shares an existing `edgeType` (so no edge-relation vocabulary change) and names only tokens from
+the expanded `alarmTypeVocabulary`. `recordId`s are suffixed (`#los`, `#isis`, ...) so they are
+distinct records on the same edge:
+
+```json
+[
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/HOSTED_ON#lcfault",
+   "payload":{ "edgeType":"HOSTED_ON",
+     "trigger":{"objectType":"LineCard","alarmType":"LineCardFault"},
+     "effect":{"objectType":"Port","alarmType":"PortDown"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":0,
+     "description":"LineCardFault(LineCard) => PortDown(each hosted Port)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/RIDES_ON#los",
+   "payload":{ "edgeType":"RIDES_ON",
+     "trigger":{"objectType":"FiberSpan","alarmType":"FiberCut"},
+     "effect":{"objectType":"Port","alarmType":"LOS"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":1,
+     "description":"FiberCut(FiberSpan) => LOS(each lit Port)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/RIDES_ON#lof",
+   "payload":{ "edgeType":"RIDES_ON",
+     "trigger":{"objectType":"FiberSpan","alarmType":"FiberCut"},
+     "effect":{"objectType":"Port","alarmType":"LOF"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":1,
+     "description":"FiberCut(FiberSpan) => LOF(each lit Port)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/RIDES_ON#optpwr",
+   "payload":{ "edgeType":"RIDES_ON",
+     "trigger":{"objectType":"FiberSpan","alarmType":"FiberCut"},
+     "effect":{"objectType":"Port","alarmType":"OpticalPowerLow"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":1,
+     "description":"FiberCut(FiberSpan) => OpticalPowerLow(each lit Port)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/HOSTS#crc",
+   "payload":{ "edgeType":"HOSTS",
+     "trigger":{"objectType":"Port","alarmType":"PortDown"},
+     "effect":{"objectType":"Interface","alarmType":"CRCErrors"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":1,
+     "description":"PortDown(Port) => CRCErrors(each Interface, transient pre-down errors)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/HOSTS#flap",
+   "payload":{ "edgeType":"HOSTS",
+     "trigger":{"objectType":"Port","alarmType":"PortDown"},
+     "effect":{"objectType":"Interface","alarmType":"InterfaceErrors"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":1,
+     "description":"PortDown(Port) => InterfaceErrors(each Interface)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/HOSTED_ON#portflap",
+   "payload":{ "edgeType":"HOSTED_ON",
+     "trigger":{"objectType":"LineCard","alarmType":"LineCardFault"},
+     "effect":{"objectType":"Port","alarmType":"PortFlapping"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":0,
+     "description":"LineCardFault(LineCard) => PortFlapping(each Port, pre-down instability)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/TERMINATES#iplink",
+   "payload":{ "edgeType":"TERMINATES",
+     "trigger":{"objectType":"Interface","alarmType":"InterfaceDown"},
+     "effect":{"objectType":"IPLink","alarmType":"IPLinkDown"},
+     "traversal":{"direction":"forward","cardinality":"single-target"},"ordering":2,
+     "description":"InterfaceDown(Interface) => IPLinkDown(its IPLink, routing-visible)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/MEMBER_OF#bundle",
+   "payload":{ "edgeType":"MEMBER_OF",
+     "trigger":{"objectType":"IPLink","alarmType":"LinkDown"},
+     "effect":{"objectType":"IPLink","alarmType":"LinkBundleDegraded"},
+     "traversal":{"direction":"forward","cardinality":"co-failure-group"},"ordering":2,
+     "description":"LinkDown(member) => LinkBundleDegraded(bundle, partial member loss)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/ADJACENCY_OVER#isis",
+   "payload":{ "edgeType":"ADJACENCY_OVER",
+     "trigger":{"objectType":"Interface","alarmType":"InterfaceDown"},
+     "effect":{"objectType":"IGPAdjacency","alarmType":"ISISAdjacencyDown"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":3,
+     "description":"InterfaceDown(Interface) => ISISAdjacencyDown(IS-IS adjacency)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/ADJACENCY_OVER#ospf",
+   "payload":{ "edgeType":"ADJACENCY_OVER",
+     "trigger":{"objectType":"Interface","alarmType":"InterfaceDown"},
+     "effect":{"objectType":"IGPAdjacency","alarmType":"OSPFAdjacencyDown"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":3,
+     "description":"InterfaceDown(Interface) => OSPFAdjacencyDown(OSPF adjacency)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/ADJACENCY_OVER#bgp",
+   "payload":{ "edgeType":"ADJACENCY_OVER",
+     "trigger":{"objectType":"IGPAdjacency","alarmType":"AdjDown"},
+     "effect":{"objectType":"IGPAdjacency","alarmType":"BGPPeerDown"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":4,
+     "description":"AdjDown(IGP) => BGPPeerDown(BGP session loses IGP next-hop)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/ADJACENCY_OVER#route",
+   "payload":{ "edgeType":"ADJACENCY_OVER",
+     "trigger":{"objectType":"IGPAdjacency","alarmType":"AdjDown"},
+     "effect":{"objectType":"IGPAdjacency","alarmType":"RouteFlap"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":4,
+     "description":"AdjDown(IGP) => RouteFlap(reconvergence churn)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/TRAVERSES#frr",
+   "payload":{ "edgeType":"TRAVERSES",
+     "trigger":{"objectType":"IPLink","alarmType":"LinkDown"},
+     "effect":{"objectType":"LSP","alarmType":"FRRSwitchover"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":5,
+     "description":"LinkDown(IPLink) => FRRSwitchover(protected LSP fast-reroute)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/TRAVERSES#te",
+   "payload":{ "edgeType":"TRAVERSES",
+     "trigger":{"objectType":"IPLink","alarmType":"LinkDown"},
+     "effect":{"objectType":"LSP","alarmType":"TETunnelDown"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":5,
+     "description":"LinkDown(IPLink) => TETunnelDown(unprotected TE tunnel)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/SERVES#vpn",
+   "payload":{ "edgeType":"SERVES",
+     "trigger":{"objectType":"LSP","alarmType":"LSPDown"},
+     "effect":{"objectType":"VPNService","alarmType":"VPNReachabilityLoss"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":6,
+     "description":"LSPDown(LSP) => VPNReachabilityLoss(VPN, explicit VPN-scoped loss)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/SERVES#degraded",
+   "payload":{ "edgeType":"SERVES",
+     "trigger":{"objectType":"LSP","alarmType":"LSPDown"},
+     "effect":{"objectType":"VPNService","alarmType":"ServiceDegraded"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":6,
+     "description":"LSPDown(LSP) => ServiceDegraded(VPN, partial-path degradation)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/SERVES#congestion",
+   "payload":{ "edgeType":"SERVES",
+     "trigger":{"objectType":"LSP","alarmType":"FRRSwitchover"},
+     "effect":{"objectType":"VPNService","alarmType":"Congestion"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":7,
+     "description":"FRRSwitchover(LSP) => Congestion(VPN, backup path oversubscribed)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/SERVES#qdrop",
+   "payload":{ "edgeType":"SERVES",
+     "trigger":{"objectType":"LSP","alarmType":"FRRSwitchover"},
+     "effect":{"objectType":"VPNService","alarmType":"QueueDrop"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":7,
+     "description":"FRRSwitchover(LSP) => QueueDrop(VPN, congestion drops)" } },
+
+ { "recordType":"propagationTemplate","recordId":"core-ip/propagationTemplate/SERVES#latency",
+   "payload":{ "edgeType":"SERVES",
+     "trigger":{"objectType":"LSP","alarmType":"FRRSwitchover"},
+     "effect":{"objectType":"VPNService","alarmType":"HighLatency"},
+     "traversal":{"direction":"forward","cardinality":"each-target"},"ordering":7,
+     "description":"FRRSwitchover(LSP) => HighLatency(VPN, longer backup path)" } }
+]
+```
+
+> **Template count.** Original **8** + added **20** = **28 `propagationTemplate` records** seeded
+> for `core-ip` (each on an existing edge type, each naming only expanded-vocabulary tokens). This
+> is the authoritative tally.
+
+**Worked cascade-magnitude (fix A3 — proves the 10-20-type target).** The Codebook Generator runs
+**all** applicable templates forward over each fault origin's bounded closure. The deepest origin,
+`FiberSpan` with `FiberCut`, produces this distinct-type symptom signature:
+
+| Layer hop | Templates fired | Distinct `alarmType` tokens added |
+|---|---|---|
+| Origin (self) | `faultOriginType/FiberSpan` | `FiberCut` (1) |
+| Fiber to Port (`RIDES_ON`) | `RIDES_ON#los`, `#lof`, `#optpwr` (+ `RIDES_ON` to `LinkDown`) | `LOS`, `LOF`, `OpticalPowerLow` (3) |
+| Port to Interface (`HOSTS`) | `HOSTS`, `#crc`, `#flap` | `InterfaceDown`, `CRCErrors`, `InterfaceErrors` (3) |
+| Interface to IPLink (`TERMINATES`) | `TERMINATES`, `#iplink`, `MEMBER_OF#bundle` | `LinkDown`, `IPLinkDown`, `LinkBundleDegraded` (3) |
+| Interface to routing (`ADJACENCY_OVER`) | `#isis`, `#ospf`, `ADJACENCY_OVER`, `#bgp`, `#route` | `ISISAdjacencyDown`, `OSPFAdjacencyDown`, `AdjDown`, `BGPPeerDown`, `RouteFlap` (5) |
+| IPLink to LSP (`TRAVERSES`) | `TRAVERSES`, `#frr`, `#te` | `LSPDown`, `FRRSwitchover`, `TETunnelDown` (3) |
+| LSP to service (`SERVES`) | `SERVES`, `#vpn`, `#degraded`, `#congestion`, `#qdrop`, `#latency` | `ReachabilityLoss`, `VPNReachabilityLoss`, `ServiceDegraded`, `Congestion`, `QueueDrop`, `HighLatency` (6) |
+
+That is **24 distinct alarm types** available along the full fiber-cut cascade — the demo profile
+(closure depth / area bound) selects a 10-20-type slice per scenario; shallower origins (`Port`,
+`Interface`, `IPLink`, `LSP`) seed naturally shorter 6-14-type cascades. So the seed pack supports
+**8-10 distinct fault-origin scenarios each producing a 10-20-type symptom signature** — the MVP
+P2 magnitude target. The Codebook Generator and Simulator consume these records unchanged (no
+code/contract change); the **Simulator pack (Step B) emits the matching `AlarmEvent.alarmType`
+tokens and the `igpArea` attribute** — the downstream dependency.
+
 ### Core IP trail policy
 
 ```json
@@ -1018,6 +1306,12 @@ One record per notation line:
     "boundary":{"type":"igp-area","attributeKey":"igpArea"},
     "srlgRule":{"mode":"union-members","srlgEdgeType":"MEMBER_OF"} } }
 ```
+
+> **`boundary.attributeKey` = `igpArea` now resolves to a catalogued attribute (fix A2).** The
+> policy is **unchanged**, but `igpArea` is now a well-known device key in the
+> `attributeCatalogue` (above), so the boundary is a real, populatable dimension rather than an
+> inert reference. The `closureEdgeTypes` list is also unchanged — the richer cascade comes from
+> more `propagationTemplate` records on these same edge types, not from new closure edges.
 
 ### Core IP model-params (the cross-consumer seed set — resolves OQ-2)
 
@@ -1129,12 +1423,31 @@ and a **seeded record** behind it — no new topic, no new payload, no new OpenA
       {"key":"model","valueForm":"string"},
       {"key":"equipmentType","valueForm":"enum","allowed":["router","switch","olt","dwdm"]},
       {"key":"role","valueForm":"string"},
-      {"key":"capacity","valueForm":"number"}],
+      {"key":"capacity","valueForm":"number"},
+      {"key":"igpArea","valueForm":"string",
+        "description":"IGP area a Node (and the Interfaces it hosts) belongs to, e.g. area-0, area-1. Trail-policy boundary key (trailPolicy/default boundary.attributeKey). Applicable to Node and Interface."}],
     "connectionKeys":[
       {"key":"linkType","valueForm":"string"},
       {"key":"capacity","valueForm":"number"},
       {"key":"protectionRole","valueForm":"enum","allowed":["working","protect"]}] } }
 ```
+
+> **`igpArea` is now a real, validatable, populatable dimension (fix A2).** Added as a well-known
+> **device key** (applicable to `Node` and to `Interface`). This closes the cross-service
+> inconsistency the mvp-achievability gate flagged (P1 At-risk): the seeded `trailPolicy/default`
+> bounds closure on `boundary={type:'igp-area', attributeKey:'igpArea'}`, and `igpArea` is now the
+> catalogued attribute that key resolves to, so:
+> - the **Simulator (Step B)** emits a grounded per-`Node`/per-`Interface` `igpArea` (e.g.
+>   `area-0`, `area-1`) — the downstream dependency this fix unblocks;
+> - **Topology** carries it as a generic node/interface attribute (already attribute-generic);
+> - **Trail Builder** bounds trail closure on it (the load-bearing IGP-area prune is no longer
+>   inert), so trails are area-bounded rather than spanning the whole connected component.
+>
+> The values (`area-0`, `area-1`, ...) are illustrative; `valueForm` is `string` (open), so the
+> catalogue stays **descriptive** (OQ-4) — no enforced enum. This is a new well-known key in the
+> **unchanged** `attributeCatalogue` recordType (the catalogue is explicitly open/extensible per
+> `architecture.md` "well-known keys ... extensible per domain"), **not** a schema or contract
+> change.
 
 ### Second example — onboarding a new domain / new protocol layer (records only)
 
@@ -1278,7 +1591,7 @@ event-model change.
 | # | Binding / frozen contract | Test | Asserts |
 |---|---|---|---|
 | G6a | `alarmTypeVocabulary` is the value space for template `trigger.alarmType`/`effect.alarmType` | `AlarmTypeValueSpaceTest.templateAlarmTypeMustBeInVocabulary` | A template whose `effect.alarmType` is **not** in the domain's `alarmTypeVocabulary` is rejected `422` (rule `alarm-type-in-vocabulary`); a template using a vocabulary token (e.g. `InterfaceDown`) is accepted. Validation D3 binds to `alarmType`, not `eventType`/`probableCause`. |
-| G6b | Seed `alarmTypeVocabulary` covers every token the seeded cascade uses | `AlarmTypeVocabularyCoverageTest.seedCoversCascadeTokens` | The union of seeded template `effect.alarmType` + `faultOriginType.originAlarmType` values is a subset of the seeded `core-ip` `alarmTypeVocabulary` (`PortDown,InterfaceDown,LinkDown,AdjDown,LSPDown,ReachabilityLoss,LOS,FiberFault`); no probableCause/lowercase token present. |
+| G6b | Seed `alarmTypeVocabulary` covers every token the seeded cascade uses | `AlarmTypeVocabularyCoverageTest.seedCoversCascadeTokens` | The union of seeded template `effect.alarmType` + `trigger.alarmType` + `faultOriginType.originAlarmType` values is a **subset** of the seeded `core-ip` `alarmTypeVocabulary` (the 29-token set); the vocabulary has **at least 24** tokens (the expanded set, fix A1); no probableCause/lowercase token present. |
 | G11 | `GET /domains/{domain}/vocabulary` frozen shape | `VocabularyEndpointContractTest.returnsFrozenShapeAndPublishedInOpenApi` | The live `core-ip` response is `{domain, objectTypes[], relations[], version}` (contains `Interface`,`HOSTS`,`TERMINATES`); the operation + response schema are present in the checked-in `openapi.json`; unknown domain to `404`. |
 | GAP07a | Model-params read returns the versioned record payload with real dotted keys | `ModelParamsReadContractTest.returnsVersionedRecordWithDottedKeys` | `GET /domains/core-ip/model-params/{recordId}` returns the `{domain,recordType,recordId,version,isCurrent,payload{paramSet,params[]}}` envelope with keys `dbscan.epsilon`/`prefixspan.minSupport` (not flat camelCase); operation present in `openapi.json`. |
 | GAP07b | Model-params edit is a versioned write through Knowledge (SSoT) | `ModelParamsEditContractTest.putMintsNewVersion_oldRetrievable_boundsEnforced` | `PUT /domains/core-ip/model-params/{recordId}` mints a new version (old version still retrievable via `.../versions/{v}`); an out-of-bounds value (`prefixspan.minSupport=1.5`) to `422` naming the param. |
@@ -1287,13 +1600,30 @@ event-model change.
 | SEED-PM | Pattern Manager seed `modelParams` present + covered by the frozen read API | `PatternManagerParamsSeedTest.seedServedAndBounded` | `GET /domains/core-ip/model-params/core-ip%2FmodelParams%2Fpattern-manager` returns a versioned record with `paramSet=pattern-manager` and the structural-validation params `structural.maxHops`/`structural.strictness`/`structural.flagVsReject` plus `rca.*` and `reconciliation.overlapThreshold`; an out-of-bounds write (`structural.maxHops=0`) to `422`. |
 | SEED-COV | Every named Knowledge consumer has a covering endpoint + a seeded record | `NamedConsumerCoverageTest.allFourParamSetsServedByFrozenReadApi` | All four `paramSet`s (`noise-filter`, `pattern-miner`, `correlation-engine`, `pattern-manager`) resolve through the **one** frozen `GET /domains/core-ip/model-params/{recordId}` operation published in `openapi.json`; no additional model-params operation exists. |
 
+### MVP-grounding seed tests (fixes A1, A2, A3 — Step A foundation for Simulator + Pattern Miner)
+
+These assert the MVP-achievability Step-A grounding fixes. Each maps to a named JUnit 5 test;
+all are **seed-data / catalogue / vocabulary** assertions — none requires a schema, contract, or
+event-model change (the recordTypes + JSON Schemas are unchanged; only the seeded *value sets*
+grow).
+
+| # | Fix / grounded property | Test | Asserts |
+|---|---|---|---|
+| A1a | `alarmTypeVocabulary` expanded to a Core-IP-grounded set sized for 10-20-type patterns | `AlarmTypeVocabularySizeTest.seedHasAtLeast24GroundedTokens` | The seeded `core-ip/alarmTypeVocabulary/default` has **at least 24** tokens (the design ships 29); contains the layer-spanning grounded tokens `LOS`,`FiberCut`,`PortDown`,`LineCardFault`,`InterfaceDown`,`IPLinkDown`,`ISISAdjacencyDown`,`BGPPeerDown`,`LSPDown`,`FRRSwitchover`,`VPNReachabilityLoss`,`Congestion`; the original 8 tokens are all still present (superset). Every token passes `^[A-Za-z][A-Za-z0-9]*$`. |
+| A1b | Expanded vocabulary is the canonical `alarmType` value space (binding preserved) | `AlarmTypeValueSpaceExpandedTest.expandedTokensValidateOnTemplateWrite` | A template whose `effect.alarmType` is an **added** token (e.g. `ISISAdjacencyDown`) is **accepted** (D3 validates against the seeded vocabulary); a token **not** in the vocabulary is rejected `422` (`alarm-type-in-vocabulary`). The binding is to `alarmType`, not `eventType`/`probableCause`. |
+| A2a | `igpArea` is a catalogued well-known device key | `AttributeCatalogueIgpAreaTest.igpAreaIsDeviceKey` | The seeded `core-ip/attributeCatalogue/default` `deviceKeys` contains `igpArea` (valueForm `string`); the key passes the key-name token check; the record persists and is retrievable. |
+| A2b | Trail-policy boundary key resolves to a catalogued attribute | `TrailPolicyBoundaryGroundedTest.boundaryKeyInCatalogue` | The seeded `trailPolicy/default` `boundary.attributeKey` (`igpArea`) is present in the seeded `attributeCatalogue` `deviceKeys` — the area-bounding dimension is populatable/validatable (no inert reference). |
+| A3a | Seed ships an expanded, grounded propagation-template set | `PropagationTemplateCountTest.seedHasExpandedTemplateSet` | The domain-scoped `core-ip` `propagationTemplate` list returns **28** records (8 original verbatim + 20 added); the 8 original `recordId`s (`HOSTED_ON`,`HOSTS`,`TERMINATES`,`RIDES_ON`,`ADJACENCY_OVER`,`TRAVERSES`,`SERVES`,`MEMBER_OF`) are unchanged; every `edgeType` is in the `edgeRelationVocabulary` and every `trigger`/`effect.alarmType` is in the `alarmTypeVocabulary`. |
+| A3b | Expanded fault-origins + templates support a 10-20-distinct-type cascade | `CascadeMagnitudeTest.fiberOriginYields10to20DistinctTypes` | Composing the seeded `faultOriginType/FiberSpan` self-alarm with all applicable forward templates over a layered fixture topology yields a symptom signature of **at least 10 and at most ~24 distinct `alarmType` tokens** spanning optical→port→interface→IPLink→routing→LSP→service; shallower origins (`Port`,`Interface`,`IPLink`,`LSP`) yield shorter 6-14-type signatures, giving 8-10 distinct fault-origin scenarios. |
+| A3c | Added fault-origin records are accepted (grounded object types) | `FaultOriginExpandedTest.fiberSpanAndIpLinkAndLspOriginsAccepted` | `faultOriginType` records for `FiberSpan`/`IPLink`/`LSP` (`originAlarmType` `FiberCut`/`IPLinkDown`/`LSPDown`) create/retrieve/update; `objectType` validated against `objectTypeVocabulary`; not rejected as unknown. |
+
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
 |---|---|---|---|
 | 1 | Author edit publishes a refresh trigger | Operator `PUT` of a propagation template, validate, version `v2`, emit | `200` `v2`; exactly one `knowledge.updated` with `recordType=propagationTemplate`, `recordId`, `version=v2`, `domain=core-ip`; v1 still retrievable. |
 | 2 | Topology pre-validation round-trip | Topology `GET /domains/core-ip/vocabulary` against the seeded store | One response with full object-type set (incl. `Interface`) + relation set (incl. `HOSTS`,`TERMINATES`); unknown domain to `404`. |
-| 3 | Codebook compile read path | Codebook Generator reads fault-origins + templates + alarm-type vocabulary for `core-ip` | Returns 5 fault origins (incl. `Interface`), the 8 templates with canonical trigger/effect alarm types, and the alarm-type vocabulary they reference — enough to compile the interface cascade InterfaceDown to LinkDown to AdjDown to LSPDown to ReachabilityLoss. |
+| 3 | Codebook compile read path | Codebook Generator reads fault-origins + templates + alarm-type vocabulary for `core-ip` | Returns the 7 fault origins (incl. `Interface`, `FiberSpan`), the 28 templates with canonical trigger/effect alarm types, and the 29-token alarm-type vocabulary they reference — enough to compile the fiber-cut cascade FiberCut to LOS to PortDown to InterfaceDown to LinkDown to ISISAdjacencyDown to LSPDown to VPNReachabilityLoss, a 10-to-20-distinct-type signature. |
 | 4 | Validation failure path (no partial write) | `POST` template with `UNKNOWN_EDGE` and a model-params `minSupport=1.5` | Both to `422` with structured violations; store row count unchanged; no `knowledge.updated` emitted. |
 | 5 | New-domain onboarding by records only | `POST` `transport-otn` vocabularies + template, then read them back | All created/retrieved/filtered by domain with no code change; their `knowledge.updated` events carry `domain=transport-otn`. |
 | 6 | Publish-failure resilience | Kafka broker down at emit time after a committed `PUT` | DB shows `v2` (source of truth); producer retries with backoff; `knowledge_updated_publish_failures_total` increments; on broker recovery a single event with the original `eventId` is delivered (no duplicate logical change). |
@@ -1302,11 +1632,16 @@ event-model change.
 | 8 | Topology vocabulary pre-validation against the frozen contract | Topology client calls `GET /domains/core-ip/vocabulary` (frozen shape) before snapshot ingest | One response `{domain,objectTypes[],relations[],version}`; Topology validates the snapshot tokens as a subset; unknown domain to `404` (Topology fails closed). |
 | 9 | web-ui edits model params through Knowledge as SSoT | web-ui reads `GET /domains/core-ip/model-params/{recordId}`, edits `dbscan.epsilon`, `PUT`s the versioned payload | Read/write use the real dotted-key versioned record (not `/knowledge/model-params` flat keys); `PUT` mints a new version, old version pinned-retrievable; out-of-bounds rejected `422`. |
 | 10 | Correlation Engine + Pattern Manager run out of the box off the seed pack | With only the seeded Core IP pack, Correlation Engine fetches `core-ip/modelParams/correlation-engine` and Pattern Manager fetches `core-ip/modelParams/pattern-manager` via the frozen read API | Each named consumer gets its complete bounded param set on first read — CE its match-quality/conflict params (no session-window), PM its structural-validation + RCA/reconciliation params — so the correlation + structural-validation use cases run with no manual param authoring and no hard-coded defaults. |
+| 11 | MVP magnitude foundation: expanded pack compiles a 10-20-type cascade (fixes A1+A3) | Codebook Generator reads the seeded `core-ip` fault-origins + 28 templates + 29-token vocabulary, runs forward propagation over a layered fixture from the `FiberSpan` origin | The compiled symptom signature has **at least 10 distinct `alarmType` tokens** spanning optical to service (e.g. `FiberCut`,`LOS`,`PortDown`,`InterfaceDown`,`LinkDown`,`ISISAdjacencyDown`,`BGPPeerDown`,`LSPDown`,`FRRSwitchover`,`VPNReachabilityLoss`); each token is in the served vocabulary; this is the foundation the Simulator pack (Step B) and Pattern Miner depend on. |
+| 12 | IGP-area bounding is now real (fix A2) | Trail Builder reads `trailPolicy/default` (boundary `igpArea`) + the attribute catalogue; closure runs over a fixture where Nodes carry catalogued `igpArea` values | The boundary key resolves to a catalogued device key, so closure is bounded by IGP area (not the whole connected component); `igpArea` is a served, validatable catalogue key. (Trail Builder + Simulator implement the emit/consume side; Knowledge supplies the grounded catalogue + policy this E2E keys off.) |
 
 These exercise the success path, the Topology/Codebook hand-offs, the validation/partial-failure
 path, the extensibility path, the producer-down partial path, the **alarmType value-space binding
-(P1-G6)**, the **frozen vocabulary contract (P1-G11)**, and the **model-params SSoT edit
-(P2-GAP-07)**.
+(P1-G6)**, the **frozen vocabulary contract (P1-G11)**, the **model-params SSoT edit
+(P2-GAP-07)**, and the **MVP-grounding Step-A fixes** — the **expanded alarmType vocabulary +
+richer propagation templates compiling a 10-20-type cascade (A1+A3)** and the **`igpArea`
+catalogue grounding that makes trail-policy area-bounding real (A2)** — the foundation the
+Simulator pack (Step B) and Pattern Miner build on.
 
 ---
 

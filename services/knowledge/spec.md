@@ -55,7 +55,10 @@ service backs it with the API and enforces validation.
   Service is the designated extension point for protocol-layering additions.
 - Storing, versioning, validating, and serving **trail policy** (the authored rule set: trail =
   transitive closure bounded by IGP area; SRLG fate-sharing) as domain-scoped records,
-  **directly consumable by the Trail Builder** via the versioned API.
+  **directly consumable by the Trail Builder** via the versioned API. The IGP-area boundary keys
+  on the well-known `igpArea` device attribute (see the attribute catalogue below) — a real,
+  populatable, validatable dimension (the Simulator emits it per Node/Interface; Trail Builder
+  bounds closure on it).
 - Storing, versioning, validating, and serving **model parameters** (DBSCAN params,
   session-window gap, PrefixSpan min-support, max pattern length, and related tuning params)
   as an **extensible, open set of domain-scoped records** — not a fixed enum; the exact MVP
@@ -81,7 +84,8 @@ service backs it with the API and enforces validation.
   change.
 - Storing, versioning, validating, and serving the **device/connection attribute catalogue**
   for each domain: the set of well-known attribute keys and their meaning/allowed forms for
-  device nodes (e.g. `vendor`, `model`, `equipmentType`, `role`, `capacity`) and connection
+  device nodes (e.g. `vendor`, `model`, `equipmentType`, `role`, `capacity`, **`igpArea`** — the
+  IGP area a Node/Interface belongs to, the trail-policy boundary key) and connection
   edges (e.g. `linkType`, `capacity`, `protectionRole`). The catalogue is open (a domain may
   add keys); it is authored and catalogued per domain here. Consumers that may use these
   include Noise Filter (e.g. `equipmentType` as a clustering feature) and Trail Builder /
@@ -226,7 +230,15 @@ are editable at any time via the web-ui config page, `knowledge.updated` can fir
   `effect.alarmType` are drawn from this same vocabulary and validated against it on write, so the
   whole mining→codebook→correlation chain shares one token set. This is a binding **to** the
   already-merged `alarmType` field — it adds **no** topic/payload/event-model change. `alarmType`
-  is distinct from `eventType` (X.733 category) and `probableCause`.
+  is distinct from `eventType` (X.733 category) and `probableCause`. **MVP-grounding (Step A):**
+  the seeded Core IP `alarmTypeVocabulary` is grounded at ~29 Core IP alarm types spanning the
+  layers (optical → port/line-card → interface → IP link → routing IGP/BGP → LSP/MPLS →
+  service/VPN → QoS), and the seeded propagation-template set is enriched so forward propagation
+  from a fault origin spans 10-20 distinct alarm types — sizing the pack for the MVP "8-10
+  patterns each of 10-20 alarm TYPES" target. This is **seed-data / vocabulary enrichment within
+  the unchanged recordType + schema** — not a contract or event-model change (the design's
+  Seed-data section is authoritative for the exact tokens/templates). The Simulator Core IP pack
+  aligns its alarm-shapes/scenarios to this vocabulary and emits the `igpArea` attribute.
 - **APIs/data consumed from other services:** — (none; Knowledge is a server and a Kafka
   producer only)
 - **Integration points (mock vs. real):** Knowledge exposes no outbound integration points.
