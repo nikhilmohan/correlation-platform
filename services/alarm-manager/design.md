@@ -173,10 +173,25 @@ flowchart TD
 
 ## Data model / DB schema
 
-The Alarm Manager **owns** the live alarm store (PostgreSQL, dedicated schema). It is the sole
-writer. There is **no corpus and no historical-alarm table**. The store holds each live alarm,
-its lifecycle STATE, its denormalized correlation outcome (ROLE + `incidentId`), and an ordered
-transition audit.
+The Alarm Manager **owns** the PostgreSQL schema **`live_alarm`** in the shared PostgreSQL
+instance, and **all** of its tables (`alarm`, `state_transition`, `processed_event`) live in
+that `live_alarm` schema — it is the sole writer to that schema. (This is the authoritative
+schema name per the `docs/architecture.md` shared-infra "separation by schema" convention; it is
+**not** a contract change — no new topic/payload/field is introduced, only the owned-store schema
+is named and scoped.) There is **no corpus and no historical-alarm table**. The store holds each
+live alarm, its lifecycle STATE, its denormalized correlation outcome (ROLE + `incidentId`), and
+an ordered transition audit.
+
+**Schema scoping (Flyway).** Flyway is configured to own and target the `live_alarm` schema
+explicitly so the tables are **never** created in `public`:
+`flyway.schemas=live_alarm` and `flyway.defaultSchema=live_alarm` (Spring Boot:
+`spring.flyway.schemas=live_alarm`, `spring.flyway.default-schema=live_alarm`). With
+`defaultSchema=live_alarm`, Flyway keeps its own `flyway_schema_history` **inside** `live_alarm`
+(per-schema history, not the shared `public`), and the migration `search_path` resolves
+unqualified DDL to `live_alarm`. The V1 baseline below is additionally **schema-qualified**
+(`CREATE SCHEMA IF NOT EXISTS live_alarm` then `CREATE TABLE live_alarm.<t>`) so placement is
+correct even if a future runner default changes. The Spring Data JDBC repositories address the
+tables via the same `live_alarm` schema.
 
 **Ownership note (denormalization).** `incident_id` and `role` are **denormalized** onto the
 alarm record. The Correlation Engine remains the **system of record for incidents** (it owns the
@@ -251,19 +266,87 @@ erDiagram
 | `raw_envelope` | `jsonb` NOT NULL | the exact consumed envelope, so republish re-emits a faithful `AlarmEvent` |
 | `created_at` / `updated_at` | `timestamptz` NOT NULL | row audit |
 
+**Migration ordering.** Flyway applies, in order, **V1** (the baseline below — creates the
+`live_alarm` schema and the three base tables, schema-qualified) then **V2** (the in-progress
+state + audit-source delta) then **V3** (the `alarm_type` delta). The column/constraint/index
+shapes documented in the tables above are the **post-V3** result of applying V1 then V2 then V3.
+
+**V1 baseline migration (DDL).** Creates the owned schema idempotently, then the three base tables
+**schema-qualified into `live_alarm`** with their base columns, keys, the base `lifecycle_state`
+check constraint, the FK, and the base indexes. (`alarm_type` and the audit `source`/`changed_at`
+columns and the `in-progress` value are **not** here — they are added by V2/V3 as deltas; the base
+`lifecycle_state` set is `open` / `correlated` / `cleared`.)
+
+```sql
+-- migration V1__baseline_live_alarm.sql
+-- Owned schema (idempotent); all Alarm Manager tables live here.
+CREATE SCHEMA IF NOT EXISTS live_alarm;
+
+-- Base live-alarm record (one row per alarm; alarm_id is the idempotency anchor).
+CREATE TABLE live_alarm.alarm (
+  alarm_id           text        PRIMARY KEY,
+  managed_object_id  text        NOT NULL,
+  event_type         text        NOT NULL,
+  probable_cause     text        NOT NULL,
+  perceived_severity text        NOT NULL,
+  wire_state         text        NOT NULL,
+  raised_at          timestamptz NOT NULL,
+  cleared_at         timestamptz,
+  trail_ids          jsonb       NOT NULL,
+  vendor_raw         jsonb,
+  lifecycle_state    text        NOT NULL,
+  role               text        NOT NULL DEFAULT 'none',
+  incident_id        text,
+  published          boolean     NOT NULL DEFAULT false,
+  raw_envelope       jsonb       NOT NULL,
+  created_at         timestamptz NOT NULL,
+  updated_at         timestamptz NOT NULL,
+  CONSTRAINT alarm_lifecycle_state_chk
+    CHECK (lifecycle_state IN ('open', 'correlated', 'cleared'))
+);
+
+-- Append-only audit (one row per lifecycle/role change).
+CREATE TABLE live_alarm.state_transition (
+  id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  alarm_id           text        NOT NULL REFERENCES live_alarm.alarm (alarm_id),
+  to_state           text        NOT NULL,
+  reason             text,
+  caused_by_event_id text,
+  occurred_at        timestamptz NOT NULL
+);
+
+-- Shared idempotency guard for the event-driven channels.
+CREATE TABLE live_alarm.processed_event (
+  event_id   text        PRIMARY KEY,
+  applied_at timestamptz NOT NULL
+);
+
+-- Base indexes / constraints.
+CREATE INDEX idx_alarm_lifecycle_state ON live_alarm.alarm (lifecycle_state);
+CREATE INDEX idx_alarm_incident_id     ON live_alarm.alarm (incident_id);
+CREATE INDEX idx_alarm_raised_at       ON live_alarm.alarm (raised_at);
+CREATE INDEX gin_alarm_trail_ids       ON live_alarm.alarm USING gin (trail_ids);
+CREATE INDEX idx_transition_alarm_id   ON live_alarm.state_transition (alarm_id, occurred_at);
+-- At most one ingest-origin 'open' audit row per alarm (acceptance #1); a later
+-- revert-to-open carries a different reason, so it is excluded from the partial unique guard.
+CREATE UNIQUE INDEX uq_transition_open_ingest
+  ON live_alarm.state_transition (alarm_id)
+  WHERE to_state = 'open' AND reason = 'ingest';
+```
+
 **State-set constraint (DDL delta).** The `lifecycle_state` check constraint now admits the new
 `in-progress` value. `reverted-open` is **not** a stored state — it is a transition **to** `open`
 (distinguished only by the audit `reason`):
 
 ```sql
 -- migration V2__add_in_progress_state_and_audit_source.sql
-ALTER TABLE alarm DROP CONSTRAINT IF EXISTS alarm_lifecycle_state_chk;
-ALTER TABLE alarm ADD CONSTRAINT alarm_lifecycle_state_chk
+ALTER TABLE live_alarm.alarm DROP CONSTRAINT IF EXISTS alarm_lifecycle_state_chk;
+ALTER TABLE live_alarm.alarm ADD CONSTRAINT alarm_lifecycle_state_chk
   CHECK (lifecycle_state IN ('open', 'in-progress', 'correlated', 'cleared'));
 
 -- audit table gains the originating source plus the payload changedAt
-ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS source     text;
-ALTER TABLE state_transition ADD COLUMN IF NOT EXISTS changed_at timestamptz;
+ALTER TABLE live_alarm.state_transition ADD COLUMN IF NOT EXISTS source     text;
+ALTER TABLE live_alarm.state_transition ADD COLUMN IF NOT EXISTS changed_at timestamptz;
 ```
 
 **Canonical join key (DDL delta).** The live alarm store **persists the canonical `alarmType`
@@ -275,9 +358,11 @@ join token** in its own `alarm_type` column, alongside `event_type` and `probabl
 -- migration V3__add_alarm_type.sql
 -- alarm_type carries AlarmEvent.alarmType, the platform canonical alarm-type join token
 -- (distinct from event_type / probable_cause). Required on every AlarmEvent, so NOT NULL.
-ALTER TABLE alarm ADD COLUMN IF NOT EXISTS alarm_type text;
+ALTER TABLE live_alarm.alarm ADD COLUMN IF NOT EXISTS alarm_type text;
 -- backfill is N/A for the MVP live-only store (no historical rows); enforce NOT NULL:
-ALTER TABLE alarm ALTER COLUMN alarm_type SET NOT NULL;
+ALTER TABLE live_alarm.alarm ALTER COLUMN alarm_type SET NOT NULL;
+-- canonical join-token index (forward-looking; see Keys / indexes / constraints):
+CREATE INDEX IF NOT EXISTS idx_alarm_alarm_type ON live_alarm.alarm (alarm_type);
 ```
 
 **Table `state_transition`** (append-only audit; one row per lifecycle/role change):
@@ -695,6 +780,7 @@ and logged with the `traceId`.
 | Lifecycle vs. wire state | Reuse `AlarmEvent.state` (`raised`/`cleared`) as lifecycle vs. a separate `lifecycle_state` column | **Separate `lifecycle_state`.** The wire enum has only `raised`/`cleared`; the lifecycle now needs `in-progress` and `correlated` as well. Keeping both preserves the faithful wire value for republish while modelling the richer lifecycle. |
 | Persisting `alarmType` | (a) drop it (only persist `event_type` / `probable_cause`, the prior design's gap), (b) conflate it into `event_type` or `probable_cause`, (c) persist it as its own NOT NULL `alarm_type` column and return it on both DTOs | **(c) own `alarm_type` column.** `alarmType` is a **required** `AlarmEvent` field and the **platform canonical alarm-type join token** (the single key pattern mining, codebook signatures, `rootCauseAlarmType`, and correlation matching all join on, per `architecture.md`). Dropping it (a) loses the canonical join key from the live alarm view that the web-ui/incident views and the alarm-to-incident join need; conflating it (b) is wrong because `alarmType` is **distinct from** `eventType` (X.733 category) and `probableCause` (X.733 probable cause). It is `NOT NULL` because the codec rejects an `AlarmEvent` missing it before persistence. No contract change: `alarmType` is already on `AlarmEvent` in `libs/event-model`; this only fixes the store/DTOs to stop silently dropping it. |
 | Out-of-order clear/correlation/status before raise | Reject (DLQ) vs. tolerate (no-op plus metric) | **Tolerate.** At-least-once plus independent topics make out-of-order arrival normal; treating it as poison would lose real signal. Tolerate with observability so the condition is visible but processing continues. |
+| Schema isolation in the shared PostgreSQL | (a) let Flyway default to `public`, (b) `flyway.schemas`/`defaultSchema=live_alarm` with a per-schema `flyway_schema_history`, plus schema-qualified baseline DDL | **(b).** `architecture.md` mandates "separation by schema" with the Alarm Manager owning `live_alarm`; defaulting to `public` (a) would collide with other services' tables in the shared instance and break ownership. Setting both `flyway.schemas` and `defaultSchema` to `live_alarm` makes Flyway create/own the schema, keep its history table inside it, and resolve unqualified DDL there; schema-qualifying the V1 baseline DDL on top makes placement robust even if a runner default changes. Permissive: Flyway is Apache-2.0. |
 
 ## Test plan
 
@@ -727,6 +813,8 @@ the consumer/producer paths).
 | 20 | Schema-invalid `AlarmStatusChange` (missing `alarmId` or bad `newStatus`) then `alarms.status.changed.dlq`, store unmodified, processing continues | `AlarmStatusChangeDlqTest.invalidStatusChangeRoutedToDlqStoreUnmodifiedProcessingContinues` | poison message lands on `alarms.status.changed.dlq`; no `alarm` row changed; a subsequent valid `AlarmStatusChange` is still applied |
 | 21 (P3-G3) | `GET /alarms` returns the platform-canonical `{ items, total, limit, offset }` list envelope with `limit`/`offset` request params (same shape as Correlation Engine `GET /incidents` / Pattern Manager `PatternPage`), so the web-ui reads one uniform envelope | `AlarmListApiTest.returnsCanonicalItemsTotalLimitOffsetEnvelopeWithLimitOffsetParams` | for a filter matching N alarms with `?limit=L&offset=O`, the `200` body is a JSON object with exactly `items` (array of `AlarmSummary`), `total` (== N, the full filtered count), `limit` (== L), `offset` (== O); it is NOT a JSON array and does NOT contain `page`/`size`/`totalElements`/`totalPages`; `items.length` respects `limit`/`offset` paging; each item retains the unchanged `AlarmSummary` fields |
 | 22 (canonical join key) | A consumed `AlarmEvent`'s required `alarmType` is **persisted** in the live alarm store **and returned** on both the `GET /alarms` `AlarmSummary` and the `GET /alarms/{alarmId}` `AlarmDetail` (the canonical alarm-type join token, distinct from `eventType`/`probableCause`) | `AlarmTypeRoundTripTest.alarmTypePersistedAndReturnedOnSummaryAndDetail` | after ingesting an `AlarmEvent` with `alarmType=PortDown` (`eventType=communicationsAlarm`, `probableCause=lossOfSignal`): the `alarm` row has `alarm_type=PortDown` (NOT NULL); `GET /alarms` `AlarmSummary` for it has `alarmType=PortDown`; `GET /alarms/{alarmId}` `AlarmDetail` has `alarmType=PortDown`; in both DTOs `alarmType` is a separate field from `eventType` and `probableCause` and matches the ingested value |
+| 23 (DB readiness — schema created) | The V1 baseline migration creates the owned `live_alarm` schema and its three base tables on a clean database; the full V1→V2→V3 chain applies cleanly | `FlywayMigrationTest.test_live_alarm_schema_created` | against a clean Testcontainers PostgreSQL, after Flyway migrates: schema `live_alarm` exists (`information_schema.schemata`); tables `alarm`, `state_transition`, `processed_event` exist in `live_alarm`; `live_alarm.flyway_schema_history` records V1, V2, V3 all `success` |
+| 24 (DB readiness — correct schema placement) | All Alarm Manager tables live in `live_alarm`, never in `public`; the post-migration shapes (incl. V2 `in-progress` constraint + audit `source`/`changed_at`, V3 NOT NULL `alarm_type`) are present in `live_alarm` | `FlywayMigrationTest.test_tables_in_live_alarm_schema` | after migration: `information_schema.tables` shows `alarm`/`state_transition`/`processed_event` with `table_schema='live_alarm'` and **none** of them in `public`; `live_alarm.alarm` has the NOT NULL `alarm_type` column and the `alarm_lifecycle_state_chk` admitting `in-progress`; `live_alarm.state_transition` has `source`/`changed_at`; the indexes (`idx_alarm_alarm_type`, `gin_alarm_trail_ids`, `idx_transition_alarm_id`, `uq_transition_open_ingest`) exist in `live_alarm` |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -744,6 +832,7 @@ harnesses).
 | 6 | At-least-once redelivery (partial/duplicate path) | Re-deliver the same `alarms.enriched.live`, `alarms.status.changed`, and `correlation.results` messages | Exactly one alarm row, one republish, one transition per logical change; `processed_event` dedupes the status and correlation events; no duplicates |
 | 7 | Poison message (failure path) | Produce a malformed `AlarmEvent` (missing `alarmId`), an envelope with `schemaVersion=2`, and an `AlarmStatusChange` with an unrecognised `newStatus` | Each lands on the matching `<topic>.dlq` (`alarms.enriched.live.dlq` / `alarms.status.changed.dlq`); no rows persisted/modified; service keeps processing subsequent valid messages |
 | 8 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent`, an `AlarmStatusChange`, and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `status_for_unknown_alarm` / `clear_for_unknown_alarm` metrics increment; a later raise for the same `alarmId` still persists `open` |
+| 10 | Schema bootstrap on a clean DB (DB readiness) | Start the service against a clean PostgreSQL (Testcontainers) and let Flyway run | The `live_alarm` schema and its `alarm` / `state_transition` / `processed_event` tables are created in `live_alarm` (none in `public`); V1→V2→V3 all record `success` in `live_alarm.flyway_schema_history`; the service then ingests an `AlarmEvent` and the row lands in `live_alarm.alarm` |
 | 9 | web-ui contract (uniform pagination envelope, P3-G3) | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms?limit&offset` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service, alongside its `GET /incidents` poll | `GET /alarms` returns the **same** `{ items, total, limit, offset }` envelope as Correlation Engine `GET /incidents`, so the streaming view reads `.items`/`.total`/`.limit`/`.offset` uniformly across both polled endpoints; `AlarmSummary` and `AlarmDetail` both carry the canonical `alarmType` join token (distinct from `eventType`/`probableCause`) for the live/incident views and the alarm-to-incident join; detail with transitions incl. `source`/`changedAt`; no drift between running surface and checked-in `openapi.json` |
 
 ## Config & observability
@@ -752,7 +841,10 @@ harnesses).
   `ALARM_DB_JDBC_URL` / `ALARM_DB_USER` / `ALARM_DB_PASSWORD`,
   `KAFKA_GROUP_ID_ENRICHED` / `KAFKA_GROUP_ID_STATUS` / `KAFKA_GROUP_ID_CORRELATION`,
   `KAFKA_CONSUMER_MAX_RETRIES` / `KAFKA_RETRY_BACKOFF_MS`, `QUERY_MAX_PAGE_SIZE`. No Knowledge
-  Service params are needed (no domain thresholds).
+  Service params are needed (no domain thresholds). Flyway schema scoping is fixed config (not
+  per-environment): `spring.flyway.schemas=live_alarm` and
+  `spring.flyway.default-schema=live_alarm` so migrations create and own the `live_alarm` schema
+  and keep `flyway_schema_history` inside it.
 - **`/health`** — Actuator liveness plus readiness (readiness gates on Kafka consumer assignment
   for all three consumers and a DB connection check).
 - **`/metrics`** — Prometheus (Micrometer): `alarms_persisted_total`,
@@ -771,11 +863,14 @@ harnesses).
   (PostgreSQL plus Kafka).
 - **Dockerfile:** base `eclipse-temurin:17-jdk`; runs the Spring Boot fat jar; exposes the HTTP
   port (`/health`, `/metrics`, `/openapi.json`, `/alarms`).
-- **Compose:** depends on `kafka` and `postgres` (its own schema); all addresses from env.
+- **Compose:** depends on `kafka` and `postgres` (the Alarm Manager owns the `live_alarm` schema
+  in the shared PostgreSQL); all addresses from env.
 - **Local run:** `./gradlew bootRun` with `KAFKA_BOOTSTRAP_SERVERS` and `ALARM_DB_JDBC_URL` set;
-  Flyway applies the `alarm` / `state_transition` / `processed_event` migrations (incl. the
-  `in-progress` state and audit `source`/`changed_at` delta, and the `alarm_type` NOT NULL
-  column) on startup.
+  on startup Flyway (scoped to `live_alarm` via `spring.flyway.schemas` /
+  `spring.flyway.default-schema`) applies **V1** (creates the `live_alarm` schema + the base
+  `live_alarm.alarm` / `live_alarm.state_transition` / `live_alarm.processed_event` tables), then
+  **V2** (the `in-progress` state and audit `source`/`changed_at` delta), then **V3** (the
+  `alarm_type` NOT NULL column). All tables land in `live_alarm`, never in `public`.
 - **README:** documents env vars, topics consumed (`alarms.enriched.live`,
   `alarms.status.changed`, `correlation.results`) / produced (`alarms.persisted.live`), the
   query API, and the DLQ topics (`alarms.enriched.live.dlq`, `alarms.status.changed.dlq`,
