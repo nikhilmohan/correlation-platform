@@ -204,20 +204,29 @@ public class ValidationService {
 
     /** Resolve the scalar value at a violation's instance location, if it is a simple value. */
     private static String valueAt(JsonNode payload, ValidationMessage m) {
-        if (m.getInstanceLocation() == null) {
+        com.networknt.schema.JsonNodePath location = m.getInstanceLocation();
+        if (location == null) {
             return null;
         }
         JsonNode node = payload;
-        for (Object token : m.getInstanceLocation()) {
-            String name = String.valueOf(token);
-            if (node.isArray()) {
-                try {
-                    node = node.get(Integer.parseInt(name));
-                } catch (NumberFormatException e) {
+        for (int i = 0; i < location.getNameCount(); i++) {
+            Object element = location.getElement(i);
+            if (element instanceof Integer idx) {
+                if (!node.isArray()) {
                     return null;
                 }
+                node = node.get(idx);
             } else {
-                node = node.get(name);
+                String name = String.valueOf(element);
+                if (node.isArray()) {
+                    try {
+                        node = node.get(Integer.parseInt(name));
+                    } catch (NumberFormatException e) {
+                        return null;
+                    }
+                } else {
+                    node = node.get(name);
+                }
             }
             if (node == null) {
                 return null;

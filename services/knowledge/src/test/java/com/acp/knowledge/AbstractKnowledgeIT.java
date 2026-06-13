@@ -10,26 +10,33 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 /**
  * Base for API/persistence integration tests: a real PostgreSQL (Testcontainers) with Flyway run
  * against the {@code knowledge} schema, the full Spring context, and MockMvc. The Kafka producer
  * is disabled here ({@code knowledge.kafka.enabled=false}) and the startup seeder is off so each
  * test controls its own data; producer-specific assertions live in their own embedded-Kafka tests.
+ *
+ * <p>Uses the <b>singleton-container</b> pattern: a single PostgreSQL container is started once for
+ * the whole JVM test run (in a static initializer, never stopped) and shared across every test
+ * class. This avoids the per-class container lifecycle (one container per concrete subclass) that
+ * can race the Hikari pool and surface a "connection refused" on the second context. The Ryuk
+ * resource reaper tears the container down when the JVM exits.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.MOCK)
 @AutoConfigureMockMvc
-@Testcontainers
 public abstract class AbstractKnowledgeIT {
 
-    @Container
-    static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:16")
-                    .withDatabaseName("correlation")
-                    .withUsername("correlation")
-                    .withPassword("correlation");
+    static final PostgreSQLContainer<?> POSTGRES;
+
+    static {
+        POSTGRES = new PostgreSQLContainer<>("postgres:16")
+                .withDatabaseName("correlation")
+                .withUsername("correlation")
+                .withPassword("correlation")
+                .withReuse(false);
+        POSTGRES.start();
+    }
 
     @DynamicPropertySource
     static void dataSourceProperties(DynamicPropertyRegistry registry) {
