@@ -3,22 +3,50 @@
 Buildable design for the Trail Builder Service, derived from the approved, merged
 `services/trail-builder/spec.md` (PRs #33, #88, #93) on the `trail-builder` branch. Honours
 the contract-first, single-owner, idempotency, DLQ, `/health`+`/metrics`, and
-permissive-license invariants. Reads the Topology graph via its query API only (never AGE).
+permissive-license invariants. Reads the Topology graph via its query API only (never the topology
+graph store directly — Topology is the single owner of that store).
 
 The contract surface this design builds against (`topology.changed` carrying `domain`,
 `TrailsBuiltEvent` carrying `domain`, the §5 Interface model with `HOSTS` / `TERMINATES`) is
 already FROZEN in `libs/event-model` and merged into `docs/architecture.md`. No contract change
 is proposed here.
 
-**Data-integration API freeze (this revision).** Applies the producer-side fixes for three
+**Data-integration API freeze (prior revision).** Applies the producer-side fixes for three
 data-integration gaps where Trail Builder's published query-API shape/paths diverged from its
 consumers' (Codebook Generator, Enrichment, Noise Filter, web-ui) expectations. Trail Builder's
-checked-in `openapi.json` is the **single source of truth**; this revision FREEZES the paths and
+checked-in `openapi.json` is the **single source of truth**; that revision FROZE the paths and
 response schemas of `getTrail`, `getTrailsForObject`, and `listTrails` so consumers align to them
 (consumer-side alignment is handled in those services' own fixes). Gaps addressed: **P1-G4**
 (getTrail/getTrailsForObject response schemas), **P1-G10** (getTrailsForObject endpoint path),
 **P2-GAP-09** (`snapshotId` guaranteed on getTrail). This is **service-owned API surface only** —
 no Kafka topic or event-model change; `TrailsBuiltEvent` is unchanged.
+
+**Design-readiness fixes (this revision).** Two cross-service-consistency fixes, both
+**service-owned, no contract change** (`TrailsBuiltEvent` and every topic unchanged):
+
+- **Q1 + Q7 — `domain` required-param reconciliation (query API vs. event path).** The frozen
+  `getTrailsForObject` (`GET /trails/by-object?managedObjectId=&domain=`) makes `domain` a
+  **strictly REQUIRED** query parameter with a **clear 400** when missing. This revision removes
+  the prior ambiguity where a `core-ip` default-domain fallback was described as if it applied
+  broadly: the default-domain fallback is **scoped to the Kafka event-ingestion path only** (a
+  legacy `topology.changed` whose optional `domain` is absent), and **never** to the HTTP query
+  API. The query API has **no domain default** — a missing `domain` is a 400. This is exactly the
+  call shape the live consumers now send: **Enrichment** (`enrichment-readiness-fixes`) and
+  **Codebook Generator** (`codebook-readiness-fixes`) both pass `domain` on every
+  `getTrailsForObject` call (both treat `domain` as required, sourcing it from their own resolved
+  domain — Enrichment from `ENRICHMENT_DOMAIN`, Codebook from the event's resolved `domain`). The
+  endpoint is therefore aligned with the actual consumer call shape and future-proof for
+  multi-domain. The frozen by-object response shape `{ managedObjectId, domain, trailIds }` is
+  unchanged.
+- **Q3 — Topology call shapes pinned to the FROZEN Topology query API + snapshot pinning.** The
+  graph-closure reads this service makes are pinned to Topology's **frozen** query-API paths,
+  required params (incl. `snapshotId=current|previous` scoping), and DTOs (`NodeListDto`,
+  `NeighborsDto`, `TraversalDto`, `NodeDto`). Trail Builder builds its Topology client against
+  these frozen shapes; the producer's checked-in `services/topology/openapi.json` is the
+  build-time artifact, and referencing the frozen shape here is sufficient. The `snapshotId`
+  persisted on every trail and emitted on `trails.built` is the snapshot **carried by the
+  triggering `topology.changed` event** (the in-scope snapshot), consistent with Topology's
+  current/previous `snapshotId` model — never re-resolved by a Topology lookup.
 
 ## Stack
 
@@ -49,7 +77,7 @@ Every spec Task (1–8) is realized below; no task is dropped or re-scoped.
 |---|---|
 | **1. Consume `topology.changed` and trigger a domain-scoped build (+ on-demand API).** | `kafka_consumer.TopologyChangedConsumer` decodes the envelope, reads `domain` directly from the payload, calls `idempotency.IdempotencyStore.seen(eventId)`, and on a new event invokes `build_service.BuildService.build(snapshotId, domain, traceId)`. On-demand path: `api.routes.rebuild` (`POST /trails/rebuild`) calls the same `BuildService.build`. Key flow A. |
 | **2. React to `knowledge.updated` for trail-policy changes.** | `kafka_consumer.KnowledgeUpdatedConsumer` decodes `KnowledgeUpdatedEvent`; when `recordType == "trailPolicy"` it calls `policy_client.invalidate(domain)` so `KnowledgePolicyClient` re-fetches on next access. No build is triggered, no `trails.built` emitted. |
-| **3. Fetch graph closures from the Topology Service.** | `topology_client.TopologyClient` calls the Topology query API (`GET /topology/nodes?objectType=&domain=` to enumerate seeds, `GET /topology/nodes/{moId}/neighbors`, `GET /topology/traversal?start=&relation=&maxDepth=`) over `httpx`, domain-scoped, traversing the dependency-edge relations from the policy (incl. `HOSTS`/`TERMINATES`). Never touches AGE. |
+| **3. Fetch graph closures from the Topology Service (FROZEN shapes, snapshot-scoped).** | `topology_client.TopologyClient` calls Topology's **frozen** query API over `httpx`, domain- and snapshot-scoped, traversing the dependency-edge relations from the policy (incl. `HOSTS`/`TERMINATES`): **list-by-type** `GET /topology/nodes?objectType={t}&domain={d}&snapshotId={current\|previous}` to `NodeListDto { domain, objectType?, snapshotId, count, nodes: NodeDto[] }` (enumerate seeds), **neighbors** `GET /topology/nodes/{moId}/neighbors?relation={r}` to `NeighborsDto { managedObjectId, domain, neighbors: [{ node: NodeDto, via: EdgeDto }] }`, **bounded traverse** `GET /topology/traversal?start={moId}&relation={r}&...&maxDepth={K}&crossDomain=false` to `TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[] }`. `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }`. The `snapshotId` scoping token is `current` for the build's in-scope snapshot (the snapshot carried by the triggering event is Topology's current snapshot for the domain). Never touches the topology graph store directly (Topology is the single owner). |
 | **4. Fetch trail policy from Knowledge (domain-parameterized).** | `policy_client.KnowledgePolicyClient.get_policy(domain)` calls the Knowledge read API for the `trailPolicy` record scoped to `domain`, returning a `TrailPolicy` value object (IGP-area key, SRLG-union rule, dependency-edge set). Cached per-domain; invalidated by Task 2. No hard-coded policy values. |
 | **5. Compute trails per domain, traversing Interface objects.** | `closure.TrailClosure` builds a `networkx.MultiDiGraph` slice and computes overlapping, IGP-area-bounded transitive closures over the policy's dependency-edge set (which includes `HOSTS` Port to Interface and `TERMINATES` Interface to IPLink, so `Interface:*` objects are natural members), then unions SRLG-co-member links into shared trails. Algorithm logical flow below. |
 | **6. Persist trail definitions with domain.** | `repository.TrailRepository` writes `trail` + `trail_member` rows in one transaction tagged with `snapshotId` and `domain`; a rebuild for the same `domain`+`snapshotId` supersedes prior rows for that pair; older snapshots retained per the retention rule (Data model). |
@@ -93,10 +121,21 @@ flowchart TD
   `schemaVersion` and routes poison messages to `topology.changed.dlq`.
 - **`build_service`** — orchestrates a build: idempotency check, policy fetch, graph fetch,
   closure compute, persist, emit. Shared by the Kafka path and the `POST /trails/rebuild` path.
+  **Snapshot pinning:** the `snapshotId` used to scope the Topology graph reads, persisted on every
+  trail, and set on the emitted `trails.built` is the `snapshotId` carried by the triggering
+  `topology.changed` event (or supplied on the `POST /trails/rebuild` request) — that is the
+  in-scope snapshot. No Topology lookup re-resolves it; the Topology reads use the
+  `snapshotId=current|previous` scoping token consistent with Topology's current/previous model.
 - **`idempotency`** — `IdempotencyStore` backed by the `processed_event` table; `seen(eventId)`
   is an atomic insert-if-absent.
-- **`topology_client`** — `TopologyClient` against the Topology Service published OpenAPI;
-  config-switchable mock/real; domain-scoped traversal over the policy dependency edges.
+- **`topology_client`** — `TopologyClient` against the Topology Service's **frozen** published
+  OpenAPI (`services/topology/openapi.json`); config-switchable mock/real; domain- **and
+  snapshot-scoped** traversal over the policy dependency edges. Pins to the frozen paths/DTOs:
+  list-by-type `GET /topology/nodes?objectType=&domain=&snapshotId=current|previous` (`NodeListDto`),
+  neighbors `GET /topology/nodes/{moId}/neighbors?relation=` (`NeighborsDto`), bounded traverse
+  `GET /topology/traversal?start=&relation=&maxDepth=&crossDomain=false` (`TraversalDto` with
+  `reached: NodeDto[]`). Always passes the in-scope `snapshotId` token (`current`) so the graph
+  slice matches the snapshot the build is for.
 - **`policy_client`** — `KnowledgePolicyClient` against the Knowledge Service published OpenAPI;
   per-domain `TrailPolicy` cache; `invalidate(domain)`.
 - **`closure`** — `TrailClosure`: networkx graph build + IGP-area-bounded transitive closure +
@@ -207,6 +246,36 @@ targets, removing the consumer-side mismatch; (b) it cleanly separates a per-obj
 the snapshot-scoped `listTrails` browse, so the two operations cannot collide on one path; (c) it
 reads as a self-describing sub-resource. `listTrails` keeps `GET /trails?snapshotId=&domain=`.
 
+**`domain` is a strictly REQUIRED query param on the query API — clear 400, no default (Q1 + Q7).**
+On `getTrailsForObject` (`GET /trails/by-object?managedObjectId=&domain=`) **and** on `listTrails`
+(`GET /trails?snapshotId=&domain=`), `domain` is required. A request missing `domain` returns
+**400** with a structured error body (FastAPI/Pydantic `RequestValidationError` for the missing
+required query parameter) — it is **never** silently defaulted to `core-ip`. The decision and its
+justification:
+
+- **Chosen: strictly required + clear 400 (no query-API domain default).** Rationale: (1) a trail
+  belongs to exactly one domain, and `getTrailsForObject(moId, domain)` is meaningless without the
+  domain that scopes which trails are wanted — defaulting would silently return Core-IP trails for
+  a non-Core-IP query, a correctness hazard once a second domain exists; (2) it matches the spec's
+  frozen contract ("Both query parameters are required for MVP"); (3) it matches **what the live
+  consumers actually send today** — Enrichment (`enrichment-readiness-fixes`) passes `domain` on
+  every call (sourced from `ENRICHMENT_DOMAIN`, MVP `core-ip`), and Codebook Generator
+  (`codebook-readiness-fixes`) passes the event's resolved `domain` on every per-symptom-object
+  call; neither relies on a server default. The endpoint is thus aligned with the real call shape
+  and future-proof for multi-domain.
+- **Rejected: server-side `core-ip` default-domain fallback on the query API (backward-compat).**
+  This was considered for tolerance toward a consumer that historically called with
+  `managedObjectId` only, but it is rejected: the consumers no longer call that way (both now send
+  `domain`), so the fallback would be dead code that masks a genuine caller bug (a forgotten
+  `domain`) and silently returns wrong-domain trails. A clear 400 surfaces the bug at the caller.
+
+**Default-domain fallback is scoped to the event-ingestion path only — not the query API.** The
+`DEFAULT_DOMAIN` (`core-ip`) fallback exists solely for a **legacy `topology.changed` event whose
+optional `domain` field is absent** (the `TrailsBuiltEvent`/`TopologyChangedEvent` `domain` is
+optional in the event model for backward-compat). On the inbound query API the `domain` is always
+caller-supplied and required. The two paths are kept deliberately distinct so the query contract
+stays strict while the consumer (Kafka) path remains tolerant of an older producer.
+
 | Operation | Method + path (FROZEN) | Request | Response 200 (FROZEN) | Errors |
 |---|---|---|---|---|
 | getTrailsForObject | `GET /trails/by-object?managedObjectId={moId}&domain={domain}` | both query params required | `TrailsForObjectResponse { managedObjectId, domain, trailIds: string[] }` | 400 missing param; 422 bad `managedObjectId` shape |
@@ -261,14 +330,17 @@ startup. Clients are built against the collaborator's **published OpenAPI spec**
 
 | Collaborator + operation | Config keys | Mock (unit) | Real (integration) |
 |---|---|---|---|
-| **Topology Service** — graph closure: list seeds by type, neighbors, bounded traversal over `HOSTS`/`TERMINATES`/`RIDES_ON`/`ADJACENCY_OVER`/`TRAVERSES`/`SERVES`/`MEMBER_OF` (domain-scoped) | `TOPOLOGY_SERVICE_BASE_URL`, `TOPOLOGY_SERVICE_MODE` (`mock`/`real`) | `respx` stubs generated from Topology published `openapi.json` returning fixture graph slices | live Topology Service on the `integration` Compose network |
+| **Topology Service** — graph closure against the **FROZEN** query API, domain- and snapshot-scoped: list-by-type `GET /topology/nodes?objectType=&domain=&snapshotId=current|previous` to `NodeListDto`; neighbors `GET /topology/nodes/{moId}/neighbors?relation=` to `NeighborsDto`; bounded traverse `GET /topology/traversal?start=&relation=&...&maxDepth=&crossDomain=false` to `TraversalDto { ..., reached: NodeDto[] }` over `HOSTS`/`TERMINATES`/`RIDES_ON`/`ADJACENCY_OVER`/`TRAVERSES`/`SERVES`/`MEMBER_OF` | `TOPOLOGY_SERVICE_BASE_URL`, `TOPOLOGY_SERVICE_MODE` (`mock`/`real`) | `respx` stubs generated from Topology's **frozen** checked-in `services/topology/openapi.json`, returning fixture `NodeListDto`/`NeighborsDto`/`TraversalDto` graph slices | live Topology Service on the `integration` Compose network |
 | **Knowledge Service** — read the domain-scoped `trailPolicy` record (IGP-area bound, SRLG-union rule, dependency-edge set) | `KNOWLEDGE_SERVICE_BASE_URL`, `KNOWLEDGE_SERVICE_MODE` (`mock`/`real`) | `respx` stubs from Knowledge published `openapi.json` returning per-domain policy | live Knowledge Service |
-| **Codebook Generator / Enrichment / Noise Filter / web-ui** (inbound consumers of our query API) | n/a (we publish) | each builds its client from **our** checked-in, **frozen** `openapi.json` (`getTrail`, `getTrailsForObject`, `listTrails` paths + response schemas frozen — P1-G4/P1-G10/P2-GAP-09) | call our query API: Enrichment + Codebook read `getTrailsForObject.trailIds[]`; Noise Filter reads `getTrail.snapshotId` (+ `members`); web-ui reads all three |
+| **Codebook Generator / Enrichment / Noise Filter / web-ui** (inbound consumers of our query API) | n/a (we publish) | each builds its client from **our** checked-in, **frozen** `openapi.json` (`getTrail`, `getTrailsForObject`, `listTrails` paths + response schemas frozen — P1-G4/P1-G10/P2-GAP-09; `domain` **required** on `getTrailsForObject` and `listTrails`) | call our query API with `domain` always supplied: Enrichment + Codebook call `GET /trails/by-object?managedObjectId=&domain=` and read `trailIds[]`; Noise Filter reads `getTrail.snapshotId` (+ `members`); web-ui reads all three |
 
-The exact Topology traversal endpoint shapes and the Knowledge trail-policy record shape are
-design-stage items tracked in issues #24 and #25; this design pins the operations and
-domain-scoping semantics, and the dev agent finalizes the client against each producer's
-checked-in `openapi.json`.
+The Topology graph-closure operations are now pinned to Topology's **frozen** query-API paths,
+required params (incl. `snapshotId=current|previous` scoping), and DTOs — `NodeListDto`,
+`NeighborsDto`, `TraversalDto`, `NodeDto` (Q3). The Knowledge trail-policy record shape remains a
+design-stage item tracked in issue #25; the dev agent finalizes the Knowledge client against the
+producer's checked-in `openapi.json`. (Former Topology issue #24 is resolved by the Topology
+API-freeze: the shapes are frozen above.) All clients are built against each producer's checked-in
+`openapi.json`, never against producer source.
 
 ## Key flows (sequence / data-flow diagrams)
 
@@ -291,8 +363,10 @@ sequenceDiagram
   C->>B: build snapshotId domain traceId
   B->>P: get_policy domain
   P-->>B: TrailPolicy igpAreaKey srlgRule dependencyEdges
-  B->>T: fetch graph slice domain-scoped over dependency edges incl HOSTS and TERMINATES
-  T-->>B: nodes and edges
+  B->>T: GET topology nodes objectType domain snapshotId current to list seeds NodeListDto
+  T-->>B: NodeListDto seeds
+  B->>T: GET topology traversal start relation HOSTS and TERMINATES maxDepth K crossDomain false
+  T-->>B: TraversalDto reached NodeDto array domain-scoped and snapshot-scoped
   B->>A: compute graph and policy
   A-->>B: overlapping bounded trails incl Interface members
   B->>R: persist trails snapshotId domain then prune old snapshots
@@ -342,8 +416,10 @@ over the policy's **dependency-edge set** from each seed, bounded by IGP area, t
 SRLG-co-member links into shared trails. All bounds come from the domain's Knowledge trail
 policy — nothing is hard-coded.
 
-**Inputs:** the per-snapshot graph slice (nodes + typed edges from `TopologyClient`, domain-
-scoped); `TrailPolicy { dependencyEdges, igpAreaKey, srlgRule }` from Knowledge.
+**Inputs:** the per-snapshot graph slice — `NodeDto`/`EdgeDto` data assembled from Topology's
+frozen `NodeListDto` (seeds), `NeighborsDto`, and `TraversalDto` (`reached: NodeDto[]`) responses
+via `TopologyClient`, **domain- and snapshot-scoped** (the `snapshotId=current` token for the
+in-scope snapshot); `TrailPolicy { dependencyEdges, igpAreaKey, srlgRule }` from Knowledge.
 
 **Why Interface is in the closure:** the policy `dependencyEdges` includes `HOSTS`
 (Port to Interface) and `TERMINATES` (Interface to IPLink). Closure over those edges therefore
@@ -408,9 +484,11 @@ topology-trails module overlays trail membership on the Topology-supplied multi-
 | Unknown major `schemaVersion` (at least 2) on `topology.changed` | Rejected by the envelope check, routed to `topology.changed.dlq` as poison (AC-14). |
 | Topology Service unavailable / errors during a build | Bounded retry with exponential backoff (`httpx`); on exhaustion the build is **held, not dropped** — the `eventId` is NOT marked processed (so a later redelivery retries), the error is logged with `traceId`/`snapshotId`/`domain`, a `build_failures_total{reason="topology"}` metric increments, and `/health` reports the dependency degraded. `POST /trails/rebuild` returns 502. |
 | Knowledge Service unavailable / errors during policy fetch | Same retry/hold policy as Topology (`build_failures_total{reason="knowledge"}`); a previously cached policy for the domain may be used if present and `KNOWLEDGE_STALE_OK=true`, else the build holds. |
-| `domain` missing on the `topology.changed` event (backward-compat) | Default to the MVP domain `core-ip` (per the event-model optional-`domain` backward-compat note); logged at WARN. The `trails.built` and persisted records carry the resolved `core-ip`. |
-| Snapshot supersession / re-delivery | Idempotency on `eventId` (one emission, no duplicate rows; AC-7). A new `snapshotId` for the domain supersedes that domain+snapshot pair and prunes per retention; older snapshots records remain until pruned (AC-15). |
-| Bad query request (missing `domain`, malformed `managedObjectId`) | 400/422 with a structured JSON error body; no partial result. |
+| `domain` missing on the **`topology.changed` event** (event path only — legacy producer, backward-compat) | Default to the MVP domain `core-ip` via `DEFAULT_DOMAIN` (per the event-model optional-`domain` backward-compat note); logged at WARN. The `trails.built` and persisted records carry the resolved `core-ip`. **This fallback applies ONLY to the Kafka event path; it is NOT applied to the HTTP query API** (Q1 + Q7). |
+| `domain` missing on the **query API** (`GET /trails/by-object`, `GET /trails`) | **400** with a structured JSON error body (required-query-param validation). **No `core-ip` default is applied** — the query contract is strict so a wrong/forgotten `domain` surfaces at the caller rather than silently returning Core-IP trails (Q1 + Q7). This matches the call shape the live consumers send (Enrichment + Codebook always pass `domain`). |
+| Snapshot supersession / re-delivery | Idempotency on `eventId` (one emission, no duplicate rows; AC-7). A new `snapshotId` for the domain supersedes that domain+snapshot pair and prunes per retention; older snapshots records remain until pruned (AC-15). The `snapshotId` is always the one carried by the triggering event — never re-resolved from Topology. |
+| Topology query returns an unexpected/non-frozen shape (e.g. version skew) | Treated as a build dependency error: validated against the frozen `NodeListDto`/`NeighborsDto`/`TraversalDto`/`NodeDto` shapes on decode; a decode failure logs with `traceId`/`snapshotId`/`domain`, increments `build_failures_total{reason="topology"}`, and holds the build (eventId not marked processed) rather than persisting a partial trail set. |
+| Bad query request (malformed `managedObjectId`) | 422 with a structured JSON error body; no partial result. |
 | `getTrail` unknown `trailId` | 404 with structured error. |
 | Empty closure (a seed with no dependency neighbours) | Produces a singleton trail (the seed itself), never an error; logged at DEBUG. |
 | `knowledge.updated` poison | Logged and skipped (refresh-only path); not DLQ'd, since a missed refresh self-heals on the next event/build. |
@@ -432,6 +510,8 @@ metric + health signal.
 | getTrail snapshotId (P2-GAP-09) | (a) guarantee `snapshotId` in `TrailDetail`; (b) make it optional | **(a)** — Noise Filter derives the REQUIRED `TransactionEvent.snapshotId` from `getTrail(trailId).snapshotId` (the source `AlarmEvent` has none), so the field is frozen as always-present and contract-tested. Optional would break a required downstream field. |
 | Idempotency store | (a) dedicated `processed_event` table; (b) rely on deterministic `trailId` upsert only | **(a)** — explicit `eventId` PK guarantees exactly-one `trails.built` emission (AC-7), which a member-set hash alone cannot (two different events could yield the same trails). |
 | Policy cache invalidation | (a) `knowledge.updated`-driven invalidate + lazy re-fetch; (b) TTL cache; (c) fetch every build | **(a)** — event-driven freshness with no per-build latency (Task 2); (c) adds latency to every build; (b) risks stale policy between TTL ticks. |
+| `domain` on the query API (Q1 + Q7) | (a) strictly REQUIRED with a clear 400, no default; (b) server-side `core-ip` default-domain fallback for backward-compat; (c) required on `getTrailsForObject` but defaulted on `listTrails` | **(a)** — chosen. A trail belongs to exactly one domain, so a per-object/listing lookup is meaningless without it; the spec freezes both params as required; and the live consumers (Enrichment, Codebook Generator) **already pass `domain` on every call**, so a default would be dead code that masks a forgotten-`domain` caller bug and could silently return wrong-domain trails once a second domain exists. (b) is rejected for that masking hazard; (c) is inconsistent. The `core-ip` default is kept **only** on the Kafka event path (legacy optional-`domain` producer) — a deliberately different path from the strict query API. |
+| Topology call shapes + snapshot scoping (Q3) | (a) pin to Topology's FROZEN query-API paths/params/DTOs (`NodeListDto`/`NeighborsDto`/`TraversalDto`/`NodeDto`) with `snapshotId=current|previous` scoping, snapshot taken from the triggering event; (b) treat Topology endpoints as TBD/design-stage and finalize later; (c) re-resolve the snapshot via a Topology lookup at build time | **(a)** — chosen. Topology's query API is now frozen (its API-freeze closed issue #24), so pinning the exact paths/DTOs removes the build-time ambiguity and lets the dev agent generate the client + mock directly from `services/topology/openapi.json`. Scoping every read to `snapshotId=current` (the in-scope snapshot the event carries) guarantees the graph slice matches the snapshot the trails are persisted under. (b) leaves a buildable gap; (c) adds a redundant lookup and risks reading a different snapshot than the event named. |
 
 ## Test plan
 
@@ -462,6 +542,10 @@ metric + health signal.
 | 21 | `getTrail` guarantees `snapshotId` for Noise-Filter provenance (P2-GAP-09) | `test_get_trail_response_always_includes_snapshot_id` | every `getTrail` 200 includes a non-null `snapshotId` matching the build snapshot; a consumer can resolve `TransactionEvent.snapshotId` from it; the field is asserted present in the checked-in `openapi.json` `TrailDetail` schema. |
 | 22 | `getTrailsForObject` lives at the frozen path, not on `GET /trails` (P1-G10) | `test_get_trails_for_object_path_is_by_object` | `GET /trails/by-object?managedObjectId=&domain=` returns 200 with the frozen shape; `GET /trails?managedObjectId=&domain=` does NOT serve getTrailsForObject (it is not the frozen per-object operation); the path collision with `listTrails` is gone. |
 | 23 | Frozen consumer-facing shapes match what consumers read | `test_frozen_shapes_match_consumer_contracts` | `getTrailsForObject` exposes `trailIds: string[]` (Enrichment/Codebook consume it); `getTrail.members[i]` exposes both `managedObjectId` and `objectType`; `getTrail` exposes `snapshotId` (Noise Filter) — all asserted against the checked-in `openapi.json`. |
+| 24 | `domain` strictly required on the query API, clear 400, no default (Q1 + Q7) | `test_query_api_missing_domain_is_400_not_defaulted` | `GET /trails/by-object?managedObjectId=X` (no `domain`) and `GET /trails?snapshotId=S` (no `domain`) each return **400** with a structured error; **no** `core-ip` default is applied (no trails returned as if for `core-ip`); the call shape consumers send (`?managedObjectId=&domain=`) returns 200. |
+| 25 | Default-domain fallback applies to the event path only, not the query API (Q1 + Q7) | `test_default_domain_only_on_event_path` | a `topology.changed` with `domain` absent resolves to `core-ip` (records + `trails.built` carry `core-ip`, WARN logged); the same run's query API still returns 400 for a `domain`-less request — the two paths are independent. |
+| 26 | Topology reads pinned to FROZEN shapes + snapshot scoping (Q3) | `test_topology_client_uses_frozen_paths_and_snapshot_scope` | the Topology mock (stubbed from `services/topology/openapi.json`) asserts the client calls `GET /topology/nodes?objectType=&domain=&snapshotId=current` (list-by-type, `NodeListDto`) and `GET /topology/traversal?start=&relation=&maxDepth=&crossDomain=false` (`TraversalDto`); responses decode against the frozen `NodeListDto`/`TraversalDto`/`NodeDto`; the `snapshotId` token passed equals the build's in-scope snapshot. |
+| 27 | Persisted + emitted `snapshotId` comes from the triggering event, not a Topology lookup (Q3) | `test_persisted_snapshot_id_from_event_no_topology_resolution` | a `topology.changed (snapshotId=S, core-ip)` build persists trails tagged `snapshotId=S` and emits `trails.built` with `snapshotId=S`; the Topology mock records zero snapshot-resolution calls (only `snapshotId=current`-scoped graph reads). |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -482,6 +566,8 @@ Service-scoped end-to-end paths the integration stage exercises (Trail Builder +
 | 10 | web-ui viz consumption | web-ui calls `listTrails` then `getTrail` against the live service | typed members (incl. Interface) returned; web-ui overlays trails without a per-member call. |
 | 11 | Enrichment / Codebook trail-tag against frozen path (P1-G4/P1-G10) | Enrichment + Codebook clients (generated from our `openapi.json`) call `GET /trails/by-object?managedObjectId=&domain=` | 200 with `{ managedObjectId, domain, trailIds }`; Enrichment sets `AlarmEvent.trailIds` and Codebook unions `trailIds` — no shape/path adapter needed. |
 | 12 | Noise Filter snapshotId provenance (P2-GAP-09) | Noise Filter client calls `getTrail(trailId)` to populate `TransactionEvent.snapshotId` | `getTrail` 200 carries `snapshotId`; Noise Filter resolves the REQUIRED `TransactionEvent.snapshotId` for every emitted transaction; no hold/retry for a missing field. |
+| 13 | Consumer query with `domain` (Q1 + Q7) vs. without | Enrichment/Codebook clients call `GET /trails/by-object?managedObjectId=&domain=`; a malformed caller omits `domain` | the `domain`-bearing calls (the real consumer shape) return 200 with `{ managedObjectId, domain, trailIds }`; the `domain`-less call returns 400, never silently scoped to `core-ip`. |
+| 14 | Build pinned to frozen Topology shapes + event snapshot (Q3) | `topology.changed (snapshotId=S, core-ip)` against the live Topology Service | the build's graph reads hit the frozen `GET /topology/nodes` (list-by-type, `snapshotId=current`) and `GET /topology/traversal` paths and decode `NodeListDto`/`TraversalDto`; persisted trails and `trails.built` carry `snapshotId=S` taken from the event, with no Topology snapshot-resolution call. |
 
 ## Config & observability
 
@@ -491,7 +577,9 @@ Service-scoped end-to-end paths the integration stage exercises (Trail Builder +
 `DATABASE_URL`, `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_CONSUMER_GROUP`,
 `TOPOLOGY_CHANGED_TOPIC` / `KNOWLEDGE_UPDATED_TOPIC` / `TRAILS_BUILT_TOPIC` / `*_DLQ_TOPIC`,
 `TRAIL_RETENTION_SNAPSHOTS` (default 2), `DEFAULT_DOMAIN` (backward-compat fallback `core-ip`,
-applied only when an event omits `domain`), `REBUILD_API_TOKEN` (optional),
+applied **only on the Kafka event path** when a legacy `topology.changed` omits `domain` — **never
+applied to the HTTP query API**, where `domain` is strictly required with a 400; Q1 + Q7),
+`REBUILD_API_TOKEN` (optional),
 `HTTP_RETRY_MAX` / `HTTP_RETRY_BACKOFF_MS`, `LOG_LEVEL`. All trail-policy bounds (IGP-area,
 SRLG, dependency-edge set) come from Knowledge at build time — never from config.
 

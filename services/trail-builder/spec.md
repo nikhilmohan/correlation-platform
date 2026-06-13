@@ -437,10 +437,11 @@ Each criterion maps to a single `pytest` test.
     records intact.
 
 16. **OpenAPI contract compliance.** Requests and responses for
-    `GET /trails?managedObjectId=&domain=`, `GET /trails?snapshotId=&domain=`,
-    `GET /trails/{trailId}`, and `POST /trails/rebuild` validate against the
-    checked-in `openapi.json` schema (request inputs and response bodies, including
-    the `domain` field on trail responses).
+    `GET /trails/by-object?managedObjectId=&domain=` (the frozen `getTrailsForObject`
+    path; `domain` REQUIRED — 400 if missing), `GET /trails?snapshotId=&domain=`
+    (`domain` REQUIRED), `GET /trails/{trailId}`, and `POST /trails/rebuild` validate
+    against the checked-in `openapi.json` schema (request inputs and response bodies,
+    including the `domain` field on trail responses).
 
 17. **`listTrails(snapshotId, domain)` enumerates all trails for a snapshot+domain.**
     Given a completed trail build for snapshot `S` and domain `D` that produced N
