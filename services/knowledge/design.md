@@ -47,11 +47,11 @@ The seven `recordType`s:
 | 1 | `propagationTemplate` | Codebook Generator | One authored cascade rule `EDGE: trigger => effect`. |
 | 2 | `faultOriginType` | Codebook Generator | One object type that can be a root cause. |
 | 3 | `trailPolicy` | Trail Builder | The trail-closure rule set (bound + SRLG + edge set). |
-| 4 | `modelParams` | Noise Filter, Pattern Miner, (Pattern Manager) | A named, bounded tuning-param set. |
+| 4 | `modelParams` | Noise Filter, Pattern Miner, Pattern Manager, Correlation Engine | A named, bounded tuning-param set (one `paramSet` per consumer). |
 | 5 | `objectTypeVocabulary` | Topology | The valid `objectType` token set for a domain. |
 | 6 | `edgeRelationVocabulary` | Topology | The valid edge `relation` token set for a domain. |
 | 7 | `attributeCatalogue` | Noise Filter, Trail Builder, Codebook Generator | Well-known device/connection attribute keys. |
-| (cross-cutting) | `alarmTypeVocabulary` | Codebook Generator (OQ-3) | Canonical alarm-type identifier set referenced by template effects. |
+| (cross-cutting) | `alarmTypeVocabulary` | Codebook Generator (OQ-3) | **THE authoritative value space for the canonical `AlarmEvent.alarmType` join key** (and template `effect`/`trigger.alarmType`); distinct from `eventType` (X.733 category) and `probableCause`. |
 
 > **Note on `alarmTypeVocabulary`.** The spec calls out seven *primary* record types but also
 > identifies (OQ-3) that propagation-template effects must reference a **canonical alarm-type
@@ -417,8 +417,8 @@ via the web-ui config page, `knowledge.updated` can fire in any phase.
 | Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
 |---|---|---|---|
 | P1 — Topology onboarding | Passive | `VocabularyController` (Topology snapshot validation), `RecordController` read (Trail Builder reads `trailPolicy`; Codebook Generator reads `faultOriginType` + `propagationTemplate` + `alarmTypeVocabulary`; attribute catalogue reads). `RecordController` write + `KnowledgeUpdatedPublisher` if an operator edits a record. | In: — (no Kafka consumption). Out: versioned read responses on request; `knowledge.updated` on any edit. |
-| P2 — Pattern learning | Passive | `RecordController` read of `modelParams` (Noise Filter DBSCAN/feature params; Pattern Miner adaptive-window/PrefixSpan params; Pattern Manager) and attribute catalogue (Noise Filter feature keys). Write path + publisher on any param edit. | In: — . Out: read responses; `knowledge.updated` on any edit. |
-| P3 — Real-time correlation | Passive | `RecordController` read of params + approved policy by real-time consumers (e.g. Correlation Engine config). Write path + publisher on any edit. | In: — . Out: read responses; `knowledge.updated` on any edit. |
+| P2 — Pattern learning | Passive | `RecordController` read of `modelParams` via `GET .../model-params/{recordId}` (Noise Filter `core-ip/modelParams/noise-filter`; Pattern Miner `core-ip/modelParams/pattern-miner`; **Pattern Manager** `core-ip/modelParams/pattern-manager` — RCA/reconciliation + structural-validation params) and attribute catalogue (Noise Filter feature keys). Write path + publisher on any param edit. | In: — . Out: read responses; `knowledge.updated` on any edit. |
+| P3 — Real-time correlation | Passive | `RecordController` read of `modelParams` via `GET .../model-params/{recordId}` by the real-time **Correlation Engine** (`core-ip/modelParams/correlation-engine` — match-quality + conflict params, **not** session-window). Write path + publisher on any edit. | In: — . Out: read responses; `knowledge.updated` on any edit. |
 
 No module is fully dormant across phases — the read API is exercised in every phase; the write +
 publish path is exercised whenever an operator edits a record (possible in any phase).
@@ -630,8 +630,15 @@ declare — all resolve to the generic store):
 - Codebook Generator: `GET /domains/{domain}/fault-origin-types`,
   `GET /domains/{domain}/propagation-templates`, `GET /domains/{domain}/alarm-type-vocabulary`.
 - Trail Builder: `GET /domains/{domain}/trail-policies` (current trail policy).
-- Noise Filter / Pattern Miner / Pattern Manager: `GET /domains/{domain}/model-params?paramSet=...`
-  (current or `.../versions/{version}` to pin).
+- **Model-params consumers (each fetches its own `paramSet` via the same frozen read API):**
+  - Noise Filter — `GET /domains/{domain}/model-params/core-ip%2FmodelParams%2Fnoise-filter`.
+  - Pattern Miner — `GET /domains/{domain}/model-params/core-ip%2FmodelParams%2Fpattern-miner`.
+  - **Correlation Engine** — `GET /domains/{domain}/model-params/core-ip%2FmodelParams%2Fcorrelation-engine`
+    (match-quality + conflict params; **not** session-window).
+  - **Pattern Manager** — `GET /domains/{domain}/model-params/core-ip%2FmodelParams%2Fpattern-manager`
+    (RCA/reconciliation + structural-validation params; session-window derivation calls Knowledge **not at all**).
+  - All also accept `?paramSet=...` to list and `.../versions/{version}` to pin. **No new endpoint
+    is added for any of these — the unified frozen `model-params/{recordId}` read API covers all four.**
 - Topology: `GET /domains/{domain}/vocabulary`.
 
 ### Frozen integration contracts (gaps P1-G11, P2-GAP-07)
@@ -716,7 +723,14 @@ The record payload uses the **real dotted/structured param keys** exactly as the
 
 The Pattern Miner set (`prefixspan.minSupport`, `prefixspan.maxPatternLength`,
 `window.adaptive.baseGapSeconds`, the named tempo profiles, ...) follows the same envelope with
-`paramSet = "pattern-miner"`. **The web-ui builds its Knowledge client from this published
+`paramSet = "pattern-miner"`. The **Correlation Engine** set (`match.partialMatchTolerance`,
+`codebook.missingPenalty`/`codebook.spuriousPenalty`/`codebook.scoreFloor`,
+`conflict.weights.specificity`/`conflict.weights.confidence`) and the **Pattern Manager** set
+(`structural.maxHops`/`structural.strictness`/`structural.flagVsReject`, `rca.*`,
+`reconciliation.overlapThreshold`) follow the **same envelope and same frozen read endpoint** with
+`paramSet = "correlation-engine"` / `paramSet = "pattern-manager"` (full records in **Seed data**)
+— so all four named consumers read through the one frozen surface, no per-consumer endpoint.
+**The web-ui builds its Knowledge client from this published
 `openapi.json`** — it uses `/domains/{domain}/model-params/{recordId}`, sends the versioned record
 payload with the real dotted keys, and handles the new-version/`is_current` write semantics (the
 web-ui alignment is done on the web-ui side; here the SSoT endpoints + payloads are unambiguous).
@@ -1007,7 +1021,18 @@ One record per notation line:
 
 ### Core IP model-params (the cross-consumer seed set — resolves OQ-2)
 
-Two `modelParams` records, named by consumer `paramSet`, every entry bounded:
+**Four** `modelParams` records — **one per named consumer** that reads tuning params from
+Knowledge — named by consumer `paramSet`, every entry bounded. The platform's mining,
+noise-filtering, structural-validation/RCA, and real-time-correlation use cases therefore all
+**run out of the box** off the seed pack; no consumer has to invent a default for a param it
+sources from Knowledge.
+
+| `paramSet` / seeded `recordId` | Consumer (named in `application-design.md`) | Use case it powers |
+|---|---|---|
+| `core-ip/modelParams/noise-filter` | Noise Filter | DBSCAN storm clustering (P2) |
+| `core-ip/modelParams/pattern-miner` | Pattern Miner | PrefixSpan sequence mining + adaptive window (P2) |
+| `core-ip/modelParams/correlation-engine` | **Correlation Engine** | match-quality + conflict resolution (P3) |
+| `core-ip/modelParams/pattern-manager` | **Pattern Manager** | RCA ordering + structural validation (P2) |
 
 ```json
 { "recordType":"modelParams","recordId":"core-ip/modelParams/noise-filter",
@@ -1031,15 +1056,68 @@ Two `modelParams` records, named by consumer `paramSet`, every entry bounded:
     {"key":"window.adaptive.profiles","type":"object",
       "value":{"fast":0.5,"slow":30.0,"default":5.0}},
     {"key":"codebookVersion","type":"string","value":"current"} ] } }
+
+{ "recordType":"modelParams","recordId":"core-ip/modelParams/correlation-engine",
+  "payload":{ "paramSet":"correlation-engine", "params":[
+    {"key":"match.partialMatchTolerance","type":"integer","value":1,"min":0,"max":100},
+    {"key":"codebook.missingPenalty","type":"number","value":1.0,"min":0.0,"max":100.0},
+    {"key":"codebook.spuriousPenalty","type":"number","value":2.0,"min":0.0,"max":100.0},
+    {"key":"codebook.scoreFloor","type":"number","value":0.5,"min":0.0,"max":1.0},
+    {"key":"conflict.weights.specificity","type":"number","value":1.0,"min":0.0,"max":100.0},
+    {"key":"conflict.weights.confidence","type":"number","value":0.5,"min":0.0,"max":100.0} ] } }
+
+{ "recordType":"modelParams","recordId":"core-ip/modelParams/pattern-manager",
+  "payload":{ "paramSet":"pattern-manager", "params":[
+    {"key":"structural.maxHops","type":"integer","value":4,"min":1,"max":64},
+    {"key":"structural.strictness","type":"string","value":"lenient"},
+    {"key":"structural.flagVsReject","type":"string","value":"flag"},
+    {"key":"rca.dependencyOrderingWeight","type":"number","value":1.0,"min":0.0,"max":100.0},
+    {"key":"rca.timestampWeight","type":"number","value":0.5,"min":0.0,"max":100.0},
+    {"key":"reconciliation.overlapThreshold","type":"number","value":0.5,"min":0.0,"max":1.0} ] } }
 ```
 
-These seed values cover exactly what the consumer specs read: Noise Filter (DBSCAN
-`epsilon`/`minSamples`, coarse `window.sizeSeconds`, the Knowledge-sourced feature attribute set,
-the soft hop-distance toggle, object-type-layer toggle); Pattern Miner (PrefixSpan `minSupport`,
-`maxPatternLength`, `maxSequenceCount`, the **adaptive** session-window params — base/fallback gap,
-gap multiplier, tempo percentile, named tempo profiles `fast`/`slow`/`default` per the hybrid
-adaptive mechanism — and `codebookVersion` in scope). Out-of-bounds writes (e.g. `minSupport` 1.5)
-are rejected by D4 (criterion 10).
+These seed values cover exactly what each named consumer's design reads:
+
+- **Noise Filter** (`paramSet = "noise-filter"`): DBSCAN `epsilon`/`minSamples`, coarse
+  `window.sizeSeconds`, the Knowledge-sourced feature attribute set, the soft hop-distance toggle,
+  object-type-layer toggle.
+- **Pattern Miner** (`paramSet = "pattern-miner"`): PrefixSpan `minSupport`, `maxPatternLength`,
+  `maxSequenceCount`, the **adaptive** session-window params (base/fallback gap, gap multiplier,
+  tempo percentile, named tempo profiles `fast`/`slow`/`default`), and `codebookVersion`.
+- **Correlation Engine** (`paramSet = "correlation-engine"`): the exact match-quality + conflict
+  set its design names — `match.partialMatchTolerance` (the N-1-of-N partial-match tolerance,
+  AC10), the codebook closest-match `codebook.missingPenalty` / `codebook.spuriousPenalty` /
+  `codebook.scoreFloor` (the scoring **threshold floor**, AC12), and the conflict-resolution
+  weights `conflict.weights.specificity` / `conflict.weights.confidence` (AC11). These map exactly
+  onto the `{partialMatchTolerance, codebookMissingPenalty, codebookSpuriousPenalty,
+  codebookScoreFloor, conflictWeights{specificity, confidence}}` set the engine's
+  `KnowledgeParamsProvider` pulls; **session-window is deliberately absent** — that is per-pattern,
+  not a Knowledge param.
+- **Pattern Manager** (`paramSet = "pattern-manager"`): its **structural-validation** params
+  — `structural.maxHops` (bounded-BFS depth), `structural.strictness` (`lenient`/`strict`,
+  MVP default `lenient`), `structural.flagVsReject` (MVP default `flag`) — plus the **RCA /
+  reconciliation** params it reads (`rca.dependencyOrderingWeight`, `rca.timestampWeight`,
+  `reconciliation.overlapThreshold`). **Session-window derivation reads NONE of these** — Pattern
+  Manager derives `sessionWindow` purely from the mined `timing`, with no Knowledge call.
+
+Out-of-bounds writes (e.g. `prefixspan.minSupport = 1.5`, `codebook.scoreFloor = 1.5`,
+`structural.maxHops = 0`) are rejected by D4 (criterion 10), naming the offending param.
+
+**Covering read endpoint per named consumer (no new endpoint — the frozen unified read API
+serves all four).** Every named consumer fetches its set through the **same frozen** read surface
+`GET /domains/{domain}/model-params/{recordId}` (current) or
+`GET /domains/{domain}/model-params/{recordId}/versions/{version}` (pinned), and edits via
+`PUT /domains/{domain}/model-params/{recordId}` (web-ui SSoT). The coverage is explicit:
+
+| Named consumer | Frozen read endpoint it calls | Seeded `recordId` returned |
+|---|---|---|
+| Noise Filter | `GET /domains/core-ip/model-params/{recordId}` | `core-ip/modelParams/noise-filter` |
+| Pattern Miner | `GET /domains/core-ip/model-params/{recordId}` | `core-ip/modelParams/pattern-miner` |
+| **Correlation Engine** | `GET /domains/core-ip/model-params/{recordId}` | `core-ip/modelParams/correlation-engine` |
+| **Pattern Manager** | `GET /domains/core-ip/model-params/{recordId}` | `core-ip/modelParams/pattern-manager` |
+
+So each named Knowledge consumer has both a **covering endpoint** (the unified frozen read API)
+and a **seeded record** behind it — no new topic, no new payload, no new OpenAPI operation.
 
 ### Core IP attribute catalogue
 
@@ -1205,6 +1283,9 @@ event-model change.
 | GAP07a | Model-params read returns the versioned record payload with real dotted keys | `ModelParamsReadContractTest.returnsVersionedRecordWithDottedKeys` | `GET /domains/core-ip/model-params/{recordId}` returns the `{domain,recordType,recordId,version,isCurrent,payload{paramSet,params[]}}` envelope with keys `dbscan.epsilon`/`prefixspan.minSupport` (not flat camelCase); operation present in `openapi.json`. |
 | GAP07b | Model-params edit is a versioned write through Knowledge (SSoT) | `ModelParamsEditContractTest.putMintsNewVersion_oldRetrievable_boundsEnforced` | `PUT /domains/core-ip/model-params/{recordId}` mints a new version (old version still retrievable via `.../versions/{v}`); an out-of-bounds value (`prefixspan.minSupport=1.5`) to `422` naming the param. |
 | G3 | Seeded vocabularies are the single source Topology validates against | `VocabularySingleSourceTest.servedVocabIsAuthoritativeSet` | The `GET .../vocabulary` `objectTypes`/`relations` exactly equal the seeded `core-ip` `objectTypeVocabulary`/`edgeRelationVocabulary` records (the authoritative set a Simulator-pack subset check / Topology validator key off — one served source, no independent copy). |
+| SEED-CE | Correlation Engine seed `modelParams` present + covered by the frozen read API | `CorrelationEngineParamsSeedTest.seedServedAndBounded` | `GET /domains/core-ip/model-params/core-ip%2FmodelParams%2Fcorrelation-engine` returns a versioned record with `paramSet=correlation-engine` and the params `match.partialMatchTolerance`, `codebook.missingPenalty`/`spuriousPenalty`/`scoreFloor`, `conflict.weights.specificity`/`confidence`; **no** session-window param present; an out-of-bounds write (`codebook.scoreFloor=1.5`) to `422`. |
+| SEED-PM | Pattern Manager seed `modelParams` present + covered by the frozen read API | `PatternManagerParamsSeedTest.seedServedAndBounded` | `GET /domains/core-ip/model-params/core-ip%2FmodelParams%2Fpattern-manager` returns a versioned record with `paramSet=pattern-manager` and the structural-validation params `structural.maxHops`/`structural.strictness`/`structural.flagVsReject` plus `rca.*` and `reconciliation.overlapThreshold`; an out-of-bounds write (`structural.maxHops=0`) to `422`. |
+| SEED-COV | Every named Knowledge consumer has a covering endpoint + a seeded record | `NamedConsumerCoverageTest.allFourParamSetsServedByFrozenReadApi` | All four `paramSet`s (`noise-filter`, `pattern-miner`, `correlation-engine`, `pattern-manager`) resolve through the **one** frozen `GET /domains/core-ip/model-params/{recordId}` operation published in `openapi.json`; no additional model-params operation exists. |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -1220,6 +1301,7 @@ event-model change.
 | 7 | alarmType value-space binding holds end-to-end | Author a template with `effect.alarmType` outside the vocabulary, then one inside it | First `422` (`alarm-type-in-vocabulary`); second accepted. Codebook reading templates + `alarm-type-vocabulary` sees one token set that a live `AlarmEvent.alarmType` can equal — no eventType/probableCause divergence. |
 | 8 | Topology vocabulary pre-validation against the frozen contract | Topology client calls `GET /domains/core-ip/vocabulary` (frozen shape) before snapshot ingest | One response `{domain,objectTypes[],relations[],version}`; Topology validates the snapshot tokens as a subset; unknown domain to `404` (Topology fails closed). |
 | 9 | web-ui edits model params through Knowledge as SSoT | web-ui reads `GET /domains/core-ip/model-params/{recordId}`, edits `dbscan.epsilon`, `PUT`s the versioned payload | Read/write use the real dotted-key versioned record (not `/knowledge/model-params` flat keys); `PUT` mints a new version, old version pinned-retrievable; out-of-bounds rejected `422`. |
+| 10 | Correlation Engine + Pattern Manager run out of the box off the seed pack | With only the seeded Core IP pack, Correlation Engine fetches `core-ip/modelParams/correlation-engine` and Pattern Manager fetches `core-ip/modelParams/pattern-manager` via the frozen read API | Each named consumer gets its complete bounded param set on first read — CE its match-quality/conflict params (no session-window), PM its structural-validation + RCA/reconciliation params — so the correlation + structural-validation use cases run with no manual param authoring and no hard-coded defaults. |
 
 These exercise the success path, the Topology/Codebook hand-offs, the validation/partial-failure
 path, the extensibility path, the producer-down partial path, the **alarmType value-space binding
