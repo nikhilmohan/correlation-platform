@@ -43,6 +43,9 @@ Every spec Task (1–9) is realized below and traceable to concrete modules/flow
 | **7. Make ground-truth labels retrievable for evaluation** | **Decision (OQ-2): both** — labels are written to a **flat JSONL file** at end-of-run (`labels.export_to_file`) **and** served by a small read-only **FastAPI** surface (`api/labels_api.py`). File export is the canonical, no-broker oracle source; REST is convenience. OpenAPI 3.1 published + `openapi.json` checked in. |
 | **8. Domain-pack interface — object/edge types, templates, alarm shapes, scenario library supplied by the pack; no domain leakage into engine** | `engine/domain_pack.py` defines the `DomainPack` `Protocol`; `domains/coreip/` is the only implementation. The pack **declares the domain vocabulary** the snapshot is built from: its **object-type set** (the Core-IP layers — incl. **`Interface`** — **plus the domain-agnostic `Site`**), its **edge-relation vocabulary** (the Core-IP relations — incl. **`HOSTS`** and **`TERMINATES`** — **plus `LOCATED_AT`**), the **`domain` identifier** (`core-ip`) stamped on the snapshot, and the **well-known `attributes` keys** it populates on devices/connections — the same vocabulary Topology validates against (authored canonically in Knowledge; the pack must align — its object-type/relation set matches the seeded `core-ip` `objectTypeVocabulary`/`edgeRelationVocabulary`, its `alarm_type_vocabulary()` is a subset of the **29-token** `core-ip/alarmTypeVocabulary/default`, its propagation templates mirror the **28** `core-ip/propagationTemplate` records, and its `attribute_keys()` include the catalogued **`igpArea`** device key). `domains/coreip/scenario_library.py` declares the **9 grounded fault scenarios** (one per Knowledge `faultOriginType` + SRLG co-failure) and `domains/coreip/geo_catalogue.py` the **≥10 grounded telco sites**. The engine imports the Protocol only; criterion-19 test asserts no Core-IP literals in `engine/`. |
 | **9. `/health` + `/metrics` + structured JSON logs** | `api/health.py`, `api/metrics.py` (FastAPI routes); `obs/logging.py` JSON formatter; `obs/metrics.py` Prometheus registry. |
+| **10. Ingest mode — skip generation, replay a pre-created dataset verbatim** | `ingest/corpus_loader.py` (loader/validator) loads the pre-created files and the engine's *generation* stage is **skipped**: for P1 it loads the **topology snapshot file** (`INGEST_TOPOLOGY_FILE` / `--topology-file`), validates against the **canonical `services/topology/schema/snapshot.schema.json`** (reusing `engine/snapshot_writer`'s validator) and uploads it via the **existing** `integrations/topology_client` (no `topology_builder` run); for P2/P3 it loads the **alarm corpus file** (`INGEST_ALARMS_FILE` / `--alarms-file`), reconstructs each `TypedEnvelope[AlarmEvent]` via `acp_event_model` (validating the frozen `AlarmEvent` incl. `alarmType`), and replays it **verbatim** through the **existing** `engine/replay.py` (`BatchReplay` to `alarms.history` / `LiveReplay` to `alarms.live`) — `scenario_runner`/`cascade`/`noise` are **not** invoked; and it loads the **labels file** (`INGEST_LABELS_FILE` / `--labels-file`) into the **existing** `engine/labels.py` store so `/labels` plus the oracle work unchanged. Malformed input fails fast (criteria 36-39). Mode selected by `SIM_MODE=ingest` / `--ingest`. |
+| **11. Export mode — generate-and-export round-trip** | `engine/snapshot_writer` already writes the snapshot file (reused as the ingestible topology file); `engine/labels.export_to_file` already writes the labels file (reused); **new** `ingest/corpus_writer.py` writes the **alarm corpus file** (`EXPORT_CORPUS_FILE` / `--export-corpus`) — the ordered emitted `TypedEnvelope[AlarmEvent]` stream plus target topic, JSONL, in emit order, tapped at the **same `kafka_producer` emit point** so the file is exactly what went on the wire. Round-trip: generate then export then ingest reproduces the same stream (criterion 40). |
+| **12. Surface generate / ingest / export in the CLI** | `main.py` CLI gains the mode selector plus per-file flags (`--ingest`, `--topology-file`, `--alarms-file`, `--labels-file`, `--export-corpus`) with env equivalents (`SIM_MODE`, `INGEST_TOPOLOGY_FILE`, `INGEST_ALARMS_FILE`, `INGEST_LABELS_FILE`, `EXPORT_CORPUS_FILE`); `config/settings.py` validates the mode/file combination per phase at startup (fail-fast). Usage documents generate vs. ingest, which files, which phase/topic (criterion 41). |
 
 ## Phase applicability (design view)
 
@@ -58,6 +61,20 @@ The Simulator is **Active in all three runtime phases** and is the evaluation or
 
 The ground-truth labels persisted in P2/P3 and the integration thresholds (see below) are the oracle
 the `integration-test` harness asserts across all phases.
+
+**Ingest mode (design view) — per phase.** Ingest **replaces the generation stage** within each
+phase; the phase role (Active) and outputs (topic/upload) are unchanged. The modules exercised
+differ only in their *source*:
+
+| Phase | Generate-mode modules | Ingest-mode modules (generation skipped) | Output (same) |
+|---|---|---|---|
+| **P1** | `topology_builder` → `snapshot_writer` → `topology_client` | `ingest/corpus_loader` loads **topology file**, validates vs canonical schema, → `topology_client` (`topology_builder` dormant) | Topology ingestion API upload |
+| **P2** | `scenario_runner`/`cascade`/`noise`/`labels` → `BatchReplay` | `ingest/corpus_loader` loads **alarm corpus file** + **labels file** → `BatchReplay` (synthesizer dormant) | `alarms.history` |
+| **P3** | same synthesizer → `LiveReplay` | `ingest/corpus_loader` loads **alarm corpus file** + **labels file** → `LiveReplay` (synthesizer dormant) | `alarms.live` |
+
+Export (generate-mode only) taps the emit point in any of P1/P2/P3: P1 reuses the written snapshot
+file; P2/P3 additionally write the **alarm corpus file** via `ingest/corpus_writer` and reuse the
+labels export.
 
 ## Module breakdown
 
@@ -184,6 +201,22 @@ flowchart TB
   tokens (`lossOfSignal`/`linkDown`) and **not** the X.733 `eventType` categories.
   `Site`/`LOCATED_AT` are domain-agnostic and reused by any future pack; the geo/attribute *values*
   are Core-IP grounded.
+- **`ingest/corpus_loader.py`** (new — the ingest loader/validator) — when `SIM_MODE=ingest`, loads
+  the pre-created files and **bypasses the generation stage**: (P1) reads the topology snapshot file,
+  validates it against the **canonical `services/topology/schema/snapshot.schema.json`** + every
+  `managedObjectId` via `acp_event_model.validate` (reusing `snapshot_writer`'s validator), then
+  hands it to `topology_client` for upload; (P2/P3) streams the alarm corpus JSONL, reconstructs each
+  `TypedEnvelope[AlarmEvent]` via `acp_event_model` (frozen-binding validation incl. required
+  `alarmType`), and yields the ordered stream to `replay.py`; loads the labels JSONL into
+  `engine/labels.py` so `/labels` + the oracle work. It **never** invokes `topology_builder`,
+  `scenario_runner`, `cascade`, or `noise`. Fail-fast on malformed input (criteria 36-39).
+- **`ingest/corpus_writer.py`** (new — the export corpus writer) — when `EXPORT_CORPUS_FILE` is set
+  in a *generate* run, writes the **alarm corpus file**: one JSONL line per emitted
+  `TypedEnvelope[AlarmEvent]` in emit order with the target topic, tapped at the **same point**
+  `kafka_producer` serializes/emits, so the file is exactly the wire stream. Reuses
+  `acp_event_model.serialize` (no new serialization). The snapshot file (from `snapshot_writer`) and
+  labels file (from `labels.export_to_file`) are reused as-is for the round-trip — only the corpus
+  writer is new.
 
 ### Scenario library — 9 grounded fault scenarios, each spanning 10-20 alarm types (fix B1)
 
@@ -386,26 +419,96 @@ fixtures). `igpArea` is a **descriptive attribute value**, not an event-model su
 change. Criterion 31 asserts every `Node` (and its `Interface`s) carries a non-empty `igpArea` and that
 at least one `area-0` backbone area plus at least one numbered edge area are present.
 
+### Alarm corpus file (exported artifact / ingest input — versioned contract, Simulator-owned)
+
+The third owned artifact (added for export/ingest): `corpus-<runId>.jsonl`. It is a **file artifact,
+not a Kafka topic** — the ordered emitted alarm stream serialized to disk so a generated run can be
+**replayed verbatim** later. **No new event-model surface:** each line wraps the **frozen
+`AlarmEvent` payload** inside the existing `TypedEnvelope`, plus a tiny file-level envelope recording
+the target topic and the emit ordinal (so the ingest replays the same alarms on the same topic, in
+order). The corpus file format is versioned (`corpusVersion`) and owned by the Simulator.
+
+**Format.** A JSONL file: an optional first **header line** (`{"corpusVersion":1,
+"sourceRunId":"...", "phase":"p2", "topic":"alarms.history", "count":N}`) followed by **N record
+lines**, each:
+
+```json
+{ "seq": 0, "topic": "alarms.history", "envelope": { "eventId":"a1...", "type":"AlarmEvent", "schemaVersion":1, "occurredAt":"2026-06-10T10:00:00Z", "source":"simulator", "traceId":"sc-fiber-001", "payload": { "alarmId":"ALM-FC-0001", "managedObjectId":"FiberSpan:F-PE1-P1", "alarmType":"FiberFault", "eventType":"communicationsAlarm", "probableCause":"lossOfSignal", "perceivedSeverity":"critical", "raisedAt":"2026-06-10T10:00:00.000Z", "state":"raised", "trailIds":[] } } }
+```
+
+- `seq` is the emit ordinal (0-based) — preserves verbatim **order** on replay.
+- `topic` is the topic the alarm was emitted on (`alarms.history` for P2, `alarms.live` for P3) — so
+  ingest replays each alarm on the same topic without re-deciding.
+- `envelope` is the **exact `TypedEnvelope[AlarmEvent]`** as serialized by `acp_event_model.serialize`
+  — `payload` is the frozen `AlarmEvent` (incl. required `alarmType`). On **ingest**, the loader
+  re-validates each `payload` against the frozen binding and replays it **verbatim** (preserving
+  `alarmId`/`alarmType`/`managedObjectId`/`trailIds`/`raisedAt`/severity/order), **minting a fresh
+  envelope `eventId`** per replay run so a re-ingest never collides with a prior run's events.
+
+The corpus is the input shape for ingest (`--alarms-file`) and the output shape for export
+(`--export-corpus`); the same writer/loader pair guarantees round-trip fidelity (criterion 40). A
+record line whose `envelope.payload` fails frozen-binding validation (e.g. missing `alarmType`)
+aborts ingest before any emission (criterion 38).
+
+The ingest/export data model (the exported/ingested artifacts and how they relate to a run):
+
+```mermaid
+classDiagram
+  class SimDataset {
+    +string sourceRunId
+    +string snapshotFile
+    +string corpusFile
+    +string labelsFile
+  }
+  class CorpusRecord {
+    +int seq
+    +string topic
+    +TypedEnvelope envelope
+  }
+  class TopologySnapshotFile {
+    +int schemaVersion
+    +string domain
+    +Node[] nodes
+    +Edge[] edges
+  }
+  class GroundTruthLabel {
+    +string scenarioId
+    +string rootCause
+    +string rootCauseAlarmType
+    +string[] children
+  }
+  SimDataset "1" --> "1" TopologySnapshotFile : topology file
+  SimDataset "1" --> "*" CorpusRecord : corpus file lines
+  SimDataset "1" --> "*" GroundTruthLabel : labels file lines
+  CorpusRecord "*" --> "0..1" GroundTruthLabel : alarmId in rootCause or children
+```
+
 ## Event handling
 
 - **Consumers:** **none.** The Simulator is a pure Kafka producer (spec Contract: "Consumes (Kafka):
   none"). There is no inbound stream, hence **no DLQ** (spec Non-functional confirms this). `*.dlq`
   routing is N/A for this service.
 - **Producers:**
-  - `alarms.history` — `TypedEnvelope[AlarmEvent]`, batch (history mode).
-  - `alarms.live` — `TypedEnvelope[AlarmEvent]`, wall-clock paced (live mode).
+  - `alarms.history` — `TypedEnvelope[AlarmEvent]`, batch (history mode — generate **or** ingest).
+  - `alarms.live` — `TypedEnvelope[AlarmEvent]`, wall-clock paced (live mode — generate **or**
+    ingest).
   - Both carry the frozen `AlarmEvent` payload (envelope `source="simulator"`, `type="AlarmEvent"`,
     `schemaVersion=1`). Serialized via `acp_event_model.serialize`. **Every payload includes the
     required canonical `alarmType`** token (a `alarmTypeVocabulary` member from the pack's
-    `alarm_shape`) alongside `eventType`/`probableCause` — the Simulator is the **origin** of these
+    `alarm_shape`, or — in ingest mode — the `alarmType` already on the ingested corpus payload)
+    alongside `eventType`/`probableCause` — the Simulator is the **origin** of these
     alarms and is therefore one of the two `alarmType` populators (with Enrichment), per the
-    `architecture.md` alarmType invariant.
+    `architecture.md` alarmType invariant. **Ingest mode produces the same two topics with the same
+    frozen `AlarmEvent` payload — no new topic, no payload change.**
 - **Idempotency:** every emitted event gets a fresh UUID `eventId` (envelope) and a unique `alarmId`
   (payload) so at-least-once redelivery is dedupable downstream on `eventId`/`alarmId`. Producer is
   configured `enable.idempotence=true`, `acks=all`. **Re-runs with the same `SIM_SEED`** reproduce
   the same *cascade structure and timing* (deterministic generation, OQ-3 decision below) but mint
   **new** `eventId`/`alarmId` per run (spec Non-functional: "re-runs SHOULD produce new ids"), so a
-  replayed corpus never collides with a prior run's ids.
+  replayed corpus never collides with a prior run's ids. **Ingest replay** likewise mints a **fresh
+  envelope `eventId`** per replayed event while preserving the ingested `AlarmEvent` payload
+  (incl. `alarmId`/`alarmType`/`managedObjectId`/`raisedAt`) — so re-ingesting the same corpus many
+  times never collides on `eventId`, and downstream dedupe on `eventId`/`alarmId` stays honest.
 
 ## API contracts / API schema
 
@@ -549,6 +652,67 @@ sequenceDiagram
     KP->>K: produce to alarms.live
   end
   Note over R,K: zero events to alarms.history, inter-event delay above 0 for pacing above 0
+```
+
+### (d) Ingest mode — skip generation, replay a pre-created dataset verbatim (P1/P2/P3)
+
+Ingest **reuses the upload path (P1) and the replay path (P2/P3)** but feeds them from pre-created
+files instead of the generator. `topology_builder`/`scenario_runner`/`cascade`/`noise` are never
+called.
+
+```mermaid
+sequenceDiagram
+  participant CLI as main (SIM_MODE=ingest)
+  participant CL as corpus_loader
+  participant Val as jsonschema plus event-model validate
+  participant TC as topology_client (mock/real)
+  participant L as labels (store)
+  participant R as Batch or Live replay
+  participant KP as kafka_producer
+  participant K as Kafka history or live
+
+  alt phase p1 (topology file)
+    CLI->>CL: load(INGEST_TOPOLOGY_FILE)
+    CL->>Val: validate vs canonical snapshot schema plus every managedObjectId
+    Val-->>CL: ok or FAIL FAST (abort, nothing uploaded)
+    CL->>TC: upload(file verbatim)
+    TC-->>CLI: 200 SnapshotIngestResponse snapshotId
+  else phase p2 or p3 (alarm corpus plus labels)
+    CLI->>CL: load(INGEST_ALARMS_FILE, INGEST_LABELS_FILE)
+    CL->>L: load labels JSONL (for the oracle)
+    loop each corpus line in seq order
+      CL->>Val: reconstruct TypedEnvelope plus validate frozen AlarmEvent (incl alarmType)
+      Val-->>CL: ok or FAIL FAST (abort before any emission)
+      CL->>R: yield AlarmEvent verbatim (fresh eventId, preserved payload and order)
+      R->>KP: serialize TypedEnvelope[AlarmEvent]
+      KP->>K: produce to the corpus topic (history batch or live paced)
+    end
+  end
+  Note over CL,K: generation stage skipped, alarms replayed verbatim, no new topic
+```
+
+### (e) Generate-and-export round-trip — generate once, replay many
+
+```mermaid
+sequenceDiagram
+  participant Gen as generate run (P2 or P3)
+  participant KP as kafka_producer
+  participant CW as corpus_writer
+  participant SW as snapshot_writer
+  participant LX as labels.export_to_file
+  participant FS as dataset files
+  participant Ing as later ingest run
+
+  Gen->>SW: write snapshot file (topology)
+  SW->>FS: snapshot-runId.json
+  Gen->>KP: emit each TypedEnvelope[AlarmEvent]
+  KP->>CW: tap same emit point (EXPORT_CORPUS_FILE set)
+  CW->>FS: corpus-runId.jsonl (ordered, with topic)
+  Gen->>LX: export labels
+  LX->>FS: labels-runId.jsonl
+  Note over FS: fixed shareable demo dataset
+  Ing->>FS: read snapshot plus corpus plus labels
+  Ing->>Ing: replay verbatim (flow d) reproduces the same stream
 ```
 
 ## Algorithm logical flow
@@ -736,27 +900,51 @@ The simulator's heart: generation/seed scripts + config knobs + concrete worked 
 
 ### CLI usage (the uniform interface)
 
-There is **one CLI** — `python -m simulator.main` — with a **phase/mode selector**. The phase
-chooses *what the run does*; everything else is env config (see the authoritative defaults table in
-*Config & observability*). `--help` prints exactly this usage and exits `0`.
+There is **one CLI** — `python -m simulator.main` — with a **phase selector** and a **data-source
+mode** (`generate` — the default — vs. `ingest`). The phase chooses *what the run does* (P1 upload /
+P2 history / P3 live); the **mode** chooses *where the topology/alarms come from* — synthesized
+(generate) or loaded from pre-created files (ingest). Generate can additionally **export** its
+dataset to files. Everything else is env config (see the authoritative defaults table in *Config &
+observability*). `--help` prints exactly this usage and exits `0`. (The `python -m simulator.main`
+entrypoint is aliased as `sim` in the container/README; usages below show both.)
 
 ```text
-usage: python -m simulator.main --phase {p1,p2,p3} [--mode {upload,history,live}]
+usage: python -m simulator.main --phase {p1,p2,p3}
+                                [--ingest | SIM_MODE=ingest]        # data source: ingest pre-created files
+                                [--mode {upload,history,live}]      # phase-action alias (upload=p1, history=p2, live=p3)
                                 [--config PATH] [--dry-run] [--help]
+       # generate-mode export (round-trip):
+                                [--export-corpus PATH]              # write the emitted alarm stream to a corpus file
+       # ingest-mode inputs (skip generation):
+                                [--topology-file PATH]              # pre-created snapshot to upload (P1)
+                                [--alarms-file PATH]                # pre-created alarm corpus to replay (P2/P3)
+                                [--labels-file PATH]                # matching ground-truth labels (P2/P3)
 
-One simulator, three phases (the phase selects which generation/replay flow runs):
+One simulator, three phases x two data-source modes:
 
-  --phase p1   Ingest topology  : build the typed Core-IP topology, write the
-                                  versioned snapshot file, and upload it to the
-                                  Topology ingestion API (mock or real per env).
-                                  No Kafka emission.
-  --phase p2   Historical alarms: synthesize the labeled corpus (scenarios x N
-                                  instances + background + noise) and BATCH-replay
-                                  it to alarms.history, spread over the configured
-                                  history time window. Writes the label export.
-  --phase p3   Live alarms      : synthesize the same labeled stream and replay it
-                                  to alarms.live wall-clock paced (PACING_MULTIPLIER).
-                                  Writes the label export.
+GENERATE (default — synthesize, optionally export):
+  --phase p1   build the typed Core-IP topology, write the versioned snapshot file,
+               upload it to the Topology ingestion API (mock/real per env). No Kafka.
+  --phase p2   synthesize the labeled corpus (scenarios x N + background + noise),
+               BATCH-replay it to alarms.history over the history window, write labels.
+  --phase p3   synthesize the same stream, replay to alarms.live wall-clock paced.
+  --export-corpus PATH
+               (generate p2/p3) ALSO write the ordered emitted alarm stream to a
+               corpus file (JSONL, with topic) for later verbatim re-ingest. The
+               snapshot file (p1) and labels file (p2/p3) are always written, so a
+               generate run with --export-corpus produces a full re-ingestible dataset.
+
+INGEST (--ingest or SIM_MODE=ingest — skip generation, replay pre-created files verbatim):
+  --phase p1 --topology-file PATH
+               load a pre-created snapshot file (NOT generated), validate it against
+               the canonical snapshot.schema.json, and upload it via the existing
+               ingestion client. The topology builder is not run.
+  --phase p2 --alarms-file PATH --labels-file PATH
+               load a pre-created alarm corpus and replay it VERBATIM to alarms.history
+               (batch) — scenario/cascade/noise synthesis is skipped; load the labels
+               so the oracle works.
+  --phase p3 --alarms-file PATH --labels-file PATH
+               same, replayed to alarms.live wall-clock paced.
 
 Options:
   --mode {upload,history,live}  Optional explicit alias for the phase action
@@ -764,32 +952,47 @@ Options:
                                 and --mode are given they must agree, else exit 2.
   --config PATH                 Path to a scenario/config file (overrides the
                                 KNOWLEDGE_MODE=local default file location).
-  --dry-run                     Build + validate + log the planned run (counts,
+  --dry-run                     Build/load + validate + log the planned run (counts,
                                 time window, target topic) WITHOUT emitting or
-                                uploading. Verifies config; exits 0 on valid config.
+                                uploading. Verifies config + input files; exits 0 if valid.
   --help                        Print this usage and exit 0.
 
 Exit codes:
   0   success (run completed, or --help, or --dry-run on valid config)
-  2   invalid CLI usage (bad/missing --phase, conflicting --phase/--mode)
-  3   invalid or missing required config (validated at startup; structured-log
-      error, ZERO events emitted) — see criterion 18
+  2   invalid CLI usage (bad/missing --phase, conflicting --phase/--mode, or
+      --ingest without the file(s) the phase requires)
+  3   invalid or missing required config / malformed ingest input (validated at
+      startup; structured-log error, ZERO events emitted) — see criteria 18, 38
   4   dependency failure (Topology ingestion API unreachable after bounded retry,
       or Kafka broker unreachable / persistent produce failure) — run fails loudly
 ```
 
 Every exit path emits a structured JSON log line. Any non-zero exit before emission guarantees
-zero events were produced (criterion 18). Runnable straight from this doc:
+zero events were produced (criteria 18, 38). Runnable straight from this doc — including the
+**round-trip** (generate once, replay many):
 
 ```bash
-# P1 — build + upload topology against a mock Topology (no broker needed)
+# GENERATE P1 — build + upload topology against a mock Topology (no broker needed)
 TOPOLOGY_API_MODE=mock python -m simulator.main --phase p1
 
-# P2 — evaluation-grade history corpus to alarms.history (all defaults; minimal env)
+# GENERATE P2 — evaluation-grade history corpus to alarms.history (all defaults; minimal env)
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --phase p2
 
-# P3 — live paced stream to alarms.live
+# GENERATE P3 — live paced stream to alarms.live
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --phase p3
+
+# ROUND-TRIP — generate once, export the dataset (snapshot + corpus + labels) ...
+TOPOLOGY_API_MODE=mock SIM_OUTPUT_DIR=out python -m simulator.main --phase p1
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 SIM_OUTPUT_DIR=out \
+  python -m simulator.main --phase p2 --export-corpus out/p2-corpus.jsonl
+#   -> out/snapshot-<runId>.json, out/p2-corpus.jsonl, out/labels-<runId>.jsonl
+
+# ... then INGEST the SAME fixed dataset later (verbatim, generation skipped):
+TOPOLOGY_API_MODE=mock python -m simulator.main --ingest --phase p1 \
+  --topology-file out/snapshot-<runId>.json
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --ingest --phase p2 \
+  --alarms-file out/p2-corpus.jsonl --labels-file out/labels-<runId>.jsonl
+# (equivalent env form: SIM_MODE=ingest INGEST_ALARMS_FILE=... INGEST_LABELS_FILE=...)
 ```
 
 ### Generation scripts & knobs
@@ -801,6 +1004,11 @@ env (only `KAFKA_BOOTSTRAP_SERVERS`). Summary of the knob groups:
 
 | Knob group | Env var(s) | Effect |
 |---|---|---|
+| **Data-source mode** | `SIM_MODE` (`generate`\|`ingest`) / `--ingest` | `generate` (default) synthesizes; `ingest` skips generation and replays pre-created files |
+| **Ingest topology file** | `INGEST_TOPOLOGY_FILE` / `--topology-file` | (P1 ingest) pre-created snapshot file to validate + upload verbatim (no builder run) |
+| **Ingest alarms file** | `INGEST_ALARMS_FILE` / `--alarms-file` | (P2/P3 ingest) pre-created alarm corpus (JSONL) to replay verbatim (no synthesizer run) |
+| **Ingest labels file** | `INGEST_LABELS_FILE` / `--labels-file` | (P2/P3 ingest) matching ground-truth labels loaded so the oracle works |
+| **Export corpus file** | `EXPORT_CORPUS_FILE` / `--export-corpus` | (generate P2/P3) write the ordered emitted alarm stream to a re-ingestible corpus file |
 | Topology size | `TOPOLOGY_NODE_COUNT` | number of `Node`s; line cards/ports/links scale per pack ratios |
 | Site count | `SITE_COUNT` | number of `Site` nodes generated (geo attrs); devices distributed across them via `LOCATED_AT` |
 | Devices per site | `DEVICES_PER_SITE` | target devices placed per site (rounds out as node count varies) |
@@ -827,6 +1035,18 @@ signal_fraction`), `DEMO_PROFILE` ∈ {`p1-demo`,`p2-demo`,`p3-demo`}, and (P2)
 `TOTAL_ALARMS` fails fast rather than reusing/fabricating coordinates or producing a sub-minable
 corpus. Missing required config (e.g. `KAFKA_BOOTSTRAP_SERVERS`) → fatal
 structured-log error + non-zero exit (`3`) before any emission (criterion 18).
+
+**Ingest-mode validation (fail-fast).** When `SIM_MODE=ingest`: the phase's required file(s) must be
+present — P1 requires `INGEST_TOPOLOGY_FILE`; P2/P3 require `INGEST_ALARMS_FILE` (and
+`INGEST_LABELS_FILE` for the oracle) — else exit `2` (usage). `settings` rejects combining ingest
+inputs with generation knobs in a way that contradicts (e.g. `--ingest` + `--export-corpus` →
+usage error; you ingest *or* generate-and-export, not both in one run). The ingested **snapshot** is
+JSON-Schema-validated against the canonical `snapshot.schema.json` + every `managedObjectId` via
+`acp_event_model.validate`; the ingested **corpus** is validated line-by-line — each
+`envelope.payload` must construct as a frozen `AlarmEvent` (incl. required `alarmType`); the
+**labels** file must parse to the frozen label shape and its `alarmId`s should resolve in the corpus.
+Any malformed line / schema failure aborts the run with a structured error **before any emission or
+upload** (exit `3`, criteria 36, 38).
 
 ### Worked example — topology snapshot file fragment (small N, fiber-cut-ready)
 
@@ -1035,10 +1255,13 @@ and the noise fraction are **pinned in that file** so the demo numbers are repea
 | **Event serialization / payload-validation failure** | `acp_event_model.serialize`/`AlarmEvent` raises `ValidationError`; the offending alarm is logged with its scenarioId and the run fails (a generation bug must not silently drop an alarm). |
 | **Kafka producer error** (broker down, delivery failure) | producer delivery callback logs structured error, increments `simulator_produce_errors_total`, marks `/health` non-200; bounded retry via librdkafka; persistent failure fails the run non-zero. |
 | **Live-replay pacing failure** (clock skew / oversleep) | pacing computed against a monotonic clock; if a gap is missed it is logged (gauge `simulator_pacing_drift_ms`) and the next event proceeds — pacing degrades gracefully, never crashes. |
-| **No DLQ** | N/A — the Simulator consumes no Kafka stream (pure producer); spec confirms no inbound DLQ. |
-| **schemaVersion** | Producer only ever emits `schemaVersion=1`; rejection of `>=2` is a consumer concern, N/A here. |
+| **No DLQ** | N/A — the Simulator consumes no Kafka stream (pure producer); spec confirms no inbound DLQ. The ingest files are local inputs, not a Kafka stream — a malformed line fails the run fast (below), it is not dead-lettered. |
+| **schemaVersion** | Producer only ever emits `schemaVersion=1`; rejection of `>=2` is a consumer concern, N/A here. An ingested corpus line with an unknown major `schemaVersion`, or whose `payload` fails the frozen `AlarmEvent` binding, is rejected at load and **fails the ingest run** before any emission. |
+| **Malformed ingest input** (bad JSON line, snapshot schema mismatch, corpus payload missing `alarmType`, label `alarmId` not in corpus) | `corpus_loader` validates the snapshot vs the canonical schema and each corpus `payload` vs the frozen binding; the first failure logs a structured error naming the file + line/field, increments `simulator_ingest_validation_errors_total`, and **aborts before any emission or upload** (exit 3, criteria 36, 38). Nothing is replayed from a partially-valid file. |
+| **Missing required ingest file for the phase** | (`--ingest` P1 without `--topology-file`, or P2/P3 without `--alarms-file`/`--labels-file`) → usage error, exit 2, no emission. |
 
-Nothing is ever silently dropped: every generated alarm is either emitted or fails the run loudly.
+Nothing is ever silently dropped: every generated **or ingested** alarm is either emitted (verbatim,
+for ingest) or fails the run loudly.
 
 ## Design alternatives
 
@@ -1061,6 +1284,10 @@ Nothing is ever silently dropped: every generated alarm is either emitted or fai
 | Volume control (fix B3) | (a) leave volume emergent; (b) one rigid 1000-alarm config; (c) a `TOTAL_ALARMS` target knob + overridable named demo profiles | **(c) target knob + profiles.** The gate flagged volume as un-pinned (defaults landed ~350, never asserted ~1000/~500). A `TOTAL_ALARMS` knob solves `SCENARIO_INSTANCES`/background to approximately hit a target, and `p1-demo`/`p2-demo`/`p3-demo` profiles pin the demo numbers as **overridable** defaults (subset-runnable). (a) rejected (not repeatable, un-assertable); (b) rejected (rigid — no subset/override). Profiles + the band are pinned in `integration-thresholds.yaml`. |
 | Geo-site grounding (fix B4) | (a) reuse a 2-3 site placeholder catalogue; (b) generate random coords; (c) a fixed catalogue of ≥10 distinct grounded telco PoP cities | **(c) ≥10 grounded sites (12 shipped).** The gate flagged that `SITE_COUNT=10` over a 2-3 entry placeholder catalogue would reuse/fabricate coords. A 12-entry catalogue of distinct telco PoP cities (lat/long/region) means `SITE_COUNT=10` yields **10 distinct grounded sites**; `p1-demo` pins `SITE_COUNT=10` over 50 nodes for non-trivial drill-down. (a) rejected (reuse), (b) rejected (not grounded). |
 | `igpArea` emission (fix B2) | (a) leave `igpArea` unpopulated (boundary inert); (b) set `trailPolicy boundary:{type:'none'}` (defer area-bounding); (c) emit a grounded per-`Node`/`Interface` `igpArea` | **(c) emit grounded `igpArea`.** The gate flagged the area-bound as inert — the seeded `trailPolicy` bounds on `igpArea` but no P1 producer populated it, so Trail Builder's area-prune could not fire (whole-network trails on real data). `igpArea` is now a catalogued device key (Knowledge fix A2); the pack emits a grounded area per node/interface (`area-0` backbone + numbered edge areas). (a) rejected (keeps the bug), (b) rejected (loses the designed area-bounding the demo needs). Descriptive attribute value — no contract change. |
+| **Ingest data source — skip generation vs. always generate** | (a) keep generate-only; (b) a separate "replayer" service/tool; (c) a `SIM_MODE=ingest` that **reuses** the existing upload + replay paths fed from files | **(c) ingest mode reusing the existing paths.** The product-owner needs a fixed dataset replayed verbatim ("generate once, replay many"). Reusing `topology_client` (upload) and `replay.py` (Batch/Live) means ingest is the **same wire behaviour** as generate, just a different source — no duplicated emit/upload logic, same topics, same frozen payload, **no new contract**. (a) rejected (no fixed-dataset replay). (b) rejected — a second service duplicates the producer/upload paths and the topic ownership, violating single-owner and contract-first; the Simulator already owns these topics + the upload client. |
+| **Alarm corpus file format** | (a) raw `AlarmEvent` payloads only (lose envelope/topic/order); (b) a custom packed/binary format; (c) JSONL of the emitted `TypedEnvelope[AlarmEvent]` + topic + seq | **(c) JSONL of the emitted envelopes + topic + seq.** Wrapping the **already-emitted** `TypedEnvelope` (frozen `AlarmEvent` payload) keeps validation identical to the wire (same `acp_event_model`), preserves verbatim order (`seq`) and target topic, and is trivially diffable/shareable. (a) rejected — losing the topic/order/envelope makes a faithful re-ingest impossible and would need a re-decision at replay; (b) rejected — opaque, no win for these volumes, breaks "diffable demo dataset". No new payload shape ⇒ no event-model change. |
+| **Round-trip export point** | (a) re-serialize from the in-memory label/alarm model after the run; (b) tap the **same `kafka_producer` emit point** during the run | **(b) tap the emit point.** Writing exactly what `kafka_producer` serialized guarantees the exported corpus **is** the wire stream (byte-for-byte envelopes, same order), so ingest reproduces it identically (criterion 40). (a) rejected — a separate re-serialization path can drift from what was actually emitted (jitter/order/severity), breaking round-trip fidelity. |
+| **Fresh vs. preserved ids on ingest replay** | (a) replay with the original `eventId`s; (b) fresh envelope `eventId` per replay, preserved `AlarmEvent` payload (incl. `alarmId`) | **(b) fresh `eventId`, preserved payload.** Re-ingesting the same corpus many times with the original `eventId`s would make every replay look like an at-least-once redelivery and let downstream `eventId` dedupe silently drop the whole replay. Minting a fresh envelope `eventId` per replay (while preserving `alarmId`/`alarmType`/`managedObjectId`/`raisedAt`) keeps each replay a distinct, non-colliding run — matching the spec's "re-runs SHOULD produce new ids" — while the alarm content is verbatim. |
 
 ## Test plan
 
@@ -1118,6 +1345,17 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 34 | **≥10 distinct grounded geo sites; `SITE_COUNT=10` yields 10 distinct (fix B4).** The geo catalogue holds ≥10 distinct grounded telco PoP entries (distinct coords); `SITE_COUNT=10` produces 10 `Site` nodes with 10 distinct `{name,latitude,longitude,region}`. | `test_geo_catalogue_10_distinct_sites` | `pack.geo_sites()` has ≥10 entries, all with distinct `(latitude,longitude)` and distinct `name`; a `SITE_COUNT=10` run yields exactly 10 `Site` nodes, 10 distinct grounded geo tuples (no reused/fabricated coords); `SITE_COUNT` above catalogue size fails fast (criterion 18) |
 | 35 | **Ground-truth supports the oracle metrics on the richer pack (fix B5).** Labels (incl. `rootCauseAlarmType` from the expanded vocab) and per-alarm `alarmType`/noise tags let the oracle compute noise-removal, retention, pattern-quality, alarm-reduction, and RCA accuracy over all 9 scenarios. | `test_ground_truth_supports_oracle_metrics` | for a full `p2-demo` run: every scenario has a label with `rootCauseAlarmType` ∈ the 29-token vocab equal to its root alarm's `alarmType`; noise/background alarms appear in no label `children`; the five §10 metrics are computable from labels + `simulator_alarms_emitted_total{scenario,alarmType}` (oracle dry-run returns finite values for all five) |
 
+**Ingest / export / CLI criteria (spec ACs 26-31 — no contract change; reuse upload + replay).**
+
+| # | Acceptance criterion (ingest/export/CLI) | Test | Asserts |
+|---|---|---|---|
+| 36 | **Ingest a topology snapshot file → uploaded verbatim, generation skipped (P1)** (spec AC 26) | `test_ingest_topology_file_uploaded_verbatim` | `SIM_MODE=ingest`, `--phase p1`, `--topology-file F` → `topology_builder` is **not** invoked (asserted via spy/mock); F is validated vs the canonical `snapshot.schema.json`; the body POSTed to the stub `/topology/snapshots` is byte-equivalent to F (no node/edge mutation); `snapshotId` read from the 200 `SnapshotIngestResponse`; a snapshot failing schema validation aborts before any upload (exit 3, `simulator_ingest_validation_errors_total`>0) |
+| 37 | **Ingest an alarm corpus file → replayed verbatim to history/live (P2/P3)** (spec AC 27) | `test_ingest_corpus_replayed_verbatim_to_topic` | `SIM_MODE=ingest`, `--phase p2 --alarms-file C --labels-file L` → `scenario_runner`/`cascade`/`noise` are **not** invoked (spy); every corpus `AlarmEvent` is produced to `alarms.history` (zero to `alarms.live`) preserving `alarmType`/`managedObjectId`/`trailIds`/`raisedAt`/severity and **seq order**; produced count == corpus line count; `--phase p3` replays the same corpus to `alarms.live` (zero to history) wall-clock paced (inter-event delay>0) |
+| 38 | **Ingested alarms validate against the frozen `AlarmEvent` binding incl. `alarmType`** (spec AC 28) | `test_ingest_alarms_validate_frozen_binding` | every corpus `envelope.payload` constructs as `AlarmEvent` w/o `ValidationError`, all required fields incl. `alarmType` present; a corpus line whose payload omits `alarmType` (or is otherwise malformed) → run aborts before any emission with a structured error naming file+line; `simulator_ingest_validation_errors_total` incremented; zero events produced |
+| 39 | **Ingested labels file loaded so the oracle works** (spec AC 29) | `test_ingest_labels_loaded_and_retrievable` | after a P2 ingest run, `/labels` (and the in-process index) return the loaded labels in the frozen shape `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children[]}`; each `rootCause`/`children` `alarmId` resolves to an `alarmId` present in the ingested corpus; `rootCauseAlarmType` equals the `alarmType` of the `rootCause` alarm in the corpus |
+| 40 | **Export-then-ingest round-trips identically** (spec AC 30) | `test_export_then_ingest_round_trips` | a generate P2 run with `--export-corpus C` (and the snapshot + labels exports) followed by an ingest run from C reproduces the **same ordered `(topic, AlarmEvent payload)` sequence** (equal on `alarmId`/`alarmType`/`managedObjectId`/`raisedAt`/seq), the **same uploaded snapshot**, and the **same labels** — differing only in fresh envelope `eventId`s; the exported corpus content equals what `kafka_producer` emitted in the generate run (emit-point tap) |
+| 41 | **CLI exposes generate / ingest / export options** (spec AC 31) | `test_cli_exposes_generate_ingest_export` | `--help` documents the generate path (incl. `--export-corpus`) and the ingest path (`--ingest`/`--topology-file`/`--alarms-file`/`--labels-file`) and exits 0; each flag has an env equivalent (`SIM_MODE`/`EXPORT_CORPUS_FILE`/`INGEST_TOPOLOGY_FILE`/`INGEST_ALARMS_FILE`/`INGEST_LABELS_FILE`); `--ingest --phase p2` without `--alarms-file` exits 2 (usage); `--ingest --export-corpus` together exits 2 (conflicting) |
+
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
@@ -1143,6 +1381,11 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 18 | **P1 `p1-demo` → 10 distinct grounded sites + igpArea (fix B2/B4)** | `--phase p1`, `DEMO_PROFILE=p1-demo` (SITE_COUNT=10, 50 nodes), real/mock Topology | snapshot has **10 distinct `Site` nodes** with 10 distinct grounded geo tuples and ~5 devices per site; every `Node` (and its `Interface`s) carries a grounded `igpArea` (`area-0` + numbered edge areas); passes the canonical schema; Topology accepts it and Trail Builder's area-prune fires on this data (non-trivial, area-bounded trails) |
 | 19 | **Subset run — single scenario (fix B3 flexibility)** | `--phase p2`, `SCENARIOS=fiber-cut`, no profile | only `fiber-cut` cascades + background/noise emitted; exactly one labeled scenario type; a different, smaller synthesized dataset than the full pack; still computable against labels |
 | 20 | **Failure — SITE_COUNT above catalogue / TOTAL_ALARMS infeasible** | `SITE_COUNT=20` (catalogue=12) or `TOTAL_ALARMS=5` (below minable floor) | startup validation fails fast (exit 3) with a structured error naming the bad knob; zero events emitted (no reused/fabricated coords, no sub-minable corpus silently produced) |
+| 21 | **Round-trip — generate-and-export then ingest-replay (generate once, replay many)** | `--phase p1` + `--phase p2 --export-corpus C` (export snapshot+corpus+labels), then later `--ingest --phase p1 --topology-file S` + `--ingest --phase p2 --alarms-file C --labels-file L` | the ingest run uploads the **same snapshot**, replays the **same ordered alarm stream verbatim** to `alarms.history` (fresh `eventId`s, preserved payloads), and exposes the **same labels** — the downstream oracle scores the ingest run identically to the original generate run |
+| 22 | **Ingest P3 live replay of a fixed corpus** | `--ingest --phase p3 --alarms-file C --labels-file L`, `PACING_MULTIPLIER=1.0` | the fixed corpus is replayed verbatim to `alarms.live` wall-clock paced (inter-event delays>0), zero on history; labels retrievable; Correlation Engine sees the same fixed stream every replay |
+| 23 | **Ingest — generation modules never run** | `--ingest --phase p2` with `topology_builder`/`scenario_runner`/`cascade`/`noise` spied | none of the generation modules are invoked; alarms come solely from the corpus file (proves generation is skipped, not run-and-discarded) |
+| 24 | **Failure — malformed ingest corpus** | `--ingest --phase p2 --alarms-file C` where one line's payload omits `alarmType` / is bad JSON | run aborts before any emission with a structured error naming file+line; `simulator_ingest_validation_errors_total`>0; **zero** alarms produced (no partial replay from a partially-valid file) |
+| 25 | **Failure — ingest missing required file for the phase** | `--ingest --phase p1` without `--topology-file` (or P2 without `--alarms-file`/`--labels-file`) | usage error, exit 2, structured log, zero emission/upload |
 
 ## Config & observability
 
@@ -1155,6 +1398,11 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 
 | Knob | Env var | Default | Effect |
 |---|---|---|---|
+| **Data-source mode** | `SIM_MODE` (or `--ingest`) | `generate` | `generate` synthesizes; `ingest` skips generation, replays pre-created files verbatim |
+| **Ingest topology file** | `INGEST_TOPOLOGY_FILE` (`--topology-file`) | unset (required for P1 ingest) | pre-created snapshot validated + uploaded verbatim (no builder) |
+| **Ingest alarms file** | `INGEST_ALARMS_FILE` (`--alarms-file`) | unset (required for P2/P3 ingest) | pre-created alarm corpus JSONL replayed verbatim (no synthesizer) |
+| **Ingest labels file** | `INGEST_LABELS_FILE` (`--labels-file`) | unset (required for P2/P3 ingest) | matching ground-truth labels loaded so the oracle works |
+| **Export corpus file** | `EXPORT_CORPUS_FILE` (`--export-corpus`) | unset (no corpus export) | (generate P2/P3) write the emitted alarm stream to a re-ingestible corpus file |
 | Kafka brokers | `KAFKA_BOOTSTRAP_SERVERS` | **required** (P2/P3) | broker list; missing in P2/P3 → fail fast |
 | Topology API mode | `TOPOLOGY_API_MODE` | `mock` | `mock` stub vs `real` Topology ingestion |
 | Topology API base URL | `TOPOLOGY_API_BASE_URL` | unset (required only when mode=`real`) | real ingestion endpoint |
@@ -1209,14 +1457,22 @@ stamped with a grounded `igpArea` (`IGP_AREA_COUNT=3`), and the well-known devic
   `simulator_target_alarms` (the resolved `TOTAL_ALARMS` target when set),
   `simulator_distinct_scenarios` (count of distinct labeled scenario types),
   `simulator_snapshot_edges{relation}` (incl. `relation="LOCATED_AT"`, `relation="HOSTS"`,
-  `relation="TERMINATES"`).
+  `relation="TERMINATES"`), and — for ingest/export —
+  `simulator_mode{mode="generate"|"ingest"}` (current data-source mode),
+  `simulator_ingested_alarms_total{topic}` (alarms replayed from a corpus),
+  `simulator_ingest_validation_errors_total` (malformed corpus/snapshot lines rejected — fail-fast),
+  `simulator_exported_corpus_records_total` (alarms written to the export corpus file). In ingest
+  mode `simulator_alarms_emitted_total` still counts the replayed alarms under their preserved
+  `alarmType`, so the same emitted-count assertions hold.
 - **Logging** — structured JSON on stdout (one object per line): `ts, level, event, runId,
-  scenarioId?, msg`.
+  scenarioId?, msg`; ingest/export runs additionally log `mode`, the input/output file paths, and
+  the validated/replayed/exported counts.
 
 ## Build & run
 
 - **Layout:** `services/simulator/src/simulator/{main.py, config/ (incl. demo_profiles.py),
-  engine/, domains/coreip/ (incl. scenario_library.py, geo_catalogue.py), integrations/, api/,
+  engine/, domains/coreip/ (incl. scenario_library.py, geo_catalogue.py), ingest/ (corpus_loader.py,
+  corpus_writer.py), integrations/, api/,
   obs/}`, `services/simulator/openapi.json`, `services/simulator/integration-thresholds.yaml`,
   `services/simulator/tests/`. The
   snapshot file is validated against the **single canonical `services/topology/schema/snapshot.schema.json`**
