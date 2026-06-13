@@ -137,9 +137,9 @@ these conventions so services compose without collision:
   writes **only** that schema (the single-owner rule): `topology_meta` (Topology — snapshot
   metadata; the graph itself is in NebulaGraph), `knowledge` (Knowledge), `trailbuilder` (Trail
   Builder — `trail`/`trail_member` tables), `codebook` (Codebook Generator — Codebook Store), `pattern`
-  (Pattern Manager), `incident` (Correlation Engine), `live_alarm` (Alarm Manager), `nf_run_stats`
-  (Noise Filter — run-stats + observed-chatter). (Eight schema-owning services; the Simulator,
-  Enrichment, and Pattern Miner own no relational store.) **These eight schema names are the
+  (Pattern Manager), `incident` (Correlation Engine), `live_alarm` (Alarm Manager), `noise_filter`
+  (Noise Filter — `nf_run_stats` + `nf_observed_chatter` tables). (Eight schema-owning services; the
+  Simulator, Enrichment, and Pattern Miner own no relational store.) **These eight schema names are the
   authoritative assignment** — each service build uses exactly its assigned name (some service
   designs say only "the Store"; the name here is binding so two services never default to `public`
   and collide). A **shared application role**
@@ -147,9 +147,10 @@ these conventions so services compose without collision:
   per-service roles are a post-MVP hardening. Connection is by env (`<service>` sets
   `*_DB_URL`/JDBC URL + `currentSchema`/`search_path` to its own schema).
 - **Migrations — per-service, schema-scoped, never global.** Each service runs its **own**
-  migrations (Flyway for Java, Alembic for Python) that touch **only its own schema**, with a
+  migrations (Flyway for Java; Alembic or yoyo for Python) that touch **only its own schema**, with a
   **per-schema migration-history table** (e.g. Flyway `schemas=topology_meta`,
-  `table=flyway_schema_history` *inside that schema*; Alembic `version_table_schema=nf_run_stats`).
+  `table=flyway_schema_history` *inside that schema*; yoyo/Alembic version table scoped to
+  `noise_filter`).
   No service runs a global/`public`-schema migration, no shared baseline, no cross-schema DDL.
   `CREATE SCHEMA IF NOT EXISTS <svc-schema>` is each service's own first migration step (idempotent).
 - **NebulaGraph — Topology only.** Only the Topology Service connects (nGQL, port 9669); it owns the
