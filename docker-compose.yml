@@ -35,9 +35,9 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
-      # Auto-create is convenient for the walking skeleton; topic creation becomes an explicit
-      # init job once the topic catalog is enforced.
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Auto-create is OFF: topics are provisioned explicitly by the `kafka-init` one-shot job
+      # below (architecture.md "Shared infrastructure conventions"). Services never create topics.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
@@ -45,6 +45,32 @@ services:
       interval: 10s
       timeout: 10s
       retries: 12
+    networks:
+      - cp-net
+
+  # One-shot: create the architecture.md topic catalog (auto-create is OFF). Services depend on
+  # this completing before they start; they never create topics. Idempotent (--if-not-exists).
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: cp-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        B=kafka:29092
+        create() { /opt/kafka/bin/kafka-topics.sh --bootstrap-server $$B --create --if-not-exists --topic "$$1" --partitions "$$2" --replication-factor 1; }
+        for t in topology.changed trails.built codebook.generated knowledge.updated \
+                 alarms.history alarms.live alarms.enriched alarms.enriched.live alarms.persisted.live \
+                 alarms.status.changed transactions.clean patterns.mined patterns.discovered \
+                 patterns.approved correlation.results; do create "$$t" 3; done
+        # DLQs (one per consumed topic): single-partition is fine for poison messages
+        for t in topology.changed.dlq trails.built.dlq transactions.clean.dlq \
+                 alarms.history.dlq alarms.live.dlq alarms.enriched.live.dlq \
+                 alarms.persisted.live.dlq alarms.status.changed.dlq correlation.results.dlq; do create "$$t" 1; done
+        echo "kafka-init: topic catalog created."
     networks:
       - cp-net
 
@@ -142,12 +168,8 @@ services:
 #   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
 #   noise-filter, pattern-manager, correlation-engine, web-ui
 #
+#   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)
 #   Also deferred:
-#     - kafka-init: one-shot container creating the architecture.md topic catalog
-#       (topology.changed, trails.built, codebook.generated, knowledge.updated,
-#        alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
-#        transactions.clean,
-#        patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq)
 #     - spark: PySpark runtime for pattern-miner (container-only)
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
 #     - nebula-init: one-shot container that runs `ADD HOSTS "nebula-storaged":9779;` against
