@@ -134,9 +134,12 @@ these conventions so services compose without collision:
 
 - **PostgreSQL — one instance + one database, schema-per-service.** All relational stores live in
   the single shared `postgres` instance / database. Each owning service gets a **named schema** and
-  writes **only** that schema (the single-owner rule): `topology_meta` (Topology), `knowledge`
-  (Knowledge), `pattern` (Pattern Manager), `incident` (Correlation Engine), `live_alarm`
-  (Alarm Manager), `nf_run_stats` (Noise Filter). A **shared application role**
+  writes **only** that schema (the single-owner rule): `topology_meta` (Topology — snapshot
+  metadata; the graph itself is in NebulaGraph), `knowledge` (Knowledge), `trail` (Trail Builder —
+  trail/trail_member rows), `codebook` (Codebook Generator — Codebook Store), `pattern`
+  (Pattern Manager), `incident` (Correlation Engine), `live_alarm` (Alarm Manager), `nf_run_stats`
+  (Noise Filter — run-stats + observed-chatter). (Eight schema-owning services; the Simulator,
+  Enrichment, and Pattern Miner own no relational store.) A **shared application role**
   (`correlation`/`correlation`) is used by all services (MVP simplicity); least-privilege
   per-service roles are a post-MVP hardening. Connection is by env (`<service>` sets
   `*_DB_URL`/JDBC URL + `currentSchema`/`search_path` to its own schema).
