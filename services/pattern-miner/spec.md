@@ -30,8 +30,13 @@ responsibilities belong exclusively to the Pattern Manager (§6.9).
   (per §6.8); all windowing parameters governing the adaptation are sourced from the Knowledge
   Service (no hard-coded threshold).
 - Run PrefixSpan (Spark MLlib) over session-windowed, trail-scoped transactions to discover
-  frequent ordered alarm-type sequences. PrefixSpan operates purely as sequence mining over the
-  resulting sessions — no topology graph access is involved.
+  frequent ordered alarm-type sequences. Each PrefixSpan sequence item is the alarm's
+  **`alarmType`** — the canonical alarm-type join token drawn from the domain's Knowledge
+  `alarmTypeVocabulary` (e.g. `FiberFault`, `LinkDown`, `AdjDown`), **not** `eventType` (the X.733
+  category) and **not** `probableCause`. This keeps `PatternMinedEvent.sequence` in the same token
+  space as codebook signatures, `rootCauseAlarmType`, and correlation matching (per
+  `docs/architecture.md`). PrefixSpan operates purely as sequence mining over the resulting
+  sessions — no topology graph access is involved.
 - Compute support, confidence, and lift for each discovered sequence (MVP metrics; conviction
   is not in scope for MVP and is not carried by the frozen `PatternMinedEvent` schema).
 - Source all mining configuration — minimum support threshold, maximum pattern length,
@@ -115,17 +120,23 @@ Consistent with the canonical phase map in `docs/architecture.md`.
 
 ## Contract
 
-- **Consumes (Kafka):** `transactions.clean`
+- **Consumes (Kafka):** `transactions.clean` (`TransactionEvent`). Its `alarms[]` array carries
+  **six required fields per entry** — `alarmId`, `alarmType`, `eventType`, `raisedAt`,
+  `managedObjectId`, `perceivedSeverity`. The Miner builds each mined `sequence` item from
+  **`alarmType`** (the canonical join token) and its timing/windowing from `raisedAt`.
 - **Produces (Kafka):** `patterns.mined`
 - **APIs exposed:** — (pattern-miner is a stateless Spark job; no HTTP API surface beyond
   `/health` and `/metrics`; no OpenAPI spec is published)
 - **APIs/data consumed from other services:**
   - **Knowledge Service — mining params:** retrieves minimum support, maximum pattern length,
     windowing adaptation parameters (including the base/fallback gap), maximum sequence count,
-    and `codebookVersion` in scope. Built against the Knowledge Service's published OpenAPI 3.1
-    spec.
+    and `codebookVersion` in scope via the **frozen** endpoint
+    `GET /domains/{domain}/model-params/{recordId}` (versioned-record envelope with
+    dotted-key `payload.params[]`; `paramSet = "pattern-miner"`). Built against the Knowledge
+    Service's published OpenAPI 3.1 spec.
 - **Integration points (mock vs. real):**
-  - **Knowledge Service mining-params endpoint** — config-switchable per environment:
+  - **Knowledge Service mining-params endpoint** (`GET /domains/{domain}/model-params/{recordId}`)
+    — config-switchable per environment:
     - Unit tests: mock/stub generated from the Knowledge Service's published OpenAPI spec
       (e.g. via `respx` or an equivalent OpenAPI-backed stub).
     - Integration: real Knowledge Service at the Docker Compose address, resolved from env
@@ -160,14 +171,16 @@ Consistent with the canonical phase map in `docs/architecture.md`.
 
 ## Acceptance criteria
 
-1. Given a set of `TransactionEvent` messages on `transactions.clean` that contains the
-   Simulator's injected fiber-cut alarm sequence (e.g. `["lossOfSignal", "linkDown",
-   "bgpPeerDown"]`), the service emits at least one `PatternMinedEvent` on `patterns.mined`
-   whose `sequence` field matches that ordered sequence and whose `support` value equals the
+1. Given a set of `TransactionEvent` messages on `transactions.clean` whose `alarms[]` carry the
+   Simulator's injected fiber-cut alarm sequence as **`alarmType` tokens** (e.g.
+   `["FiberFault", "LinkDown", "AdjDown"]`, all members of the domain's `alarmTypeVocabulary`),
+   the service emits at least one `PatternMinedEvent` on `patterns.mined` whose `sequence` field
+   is built from `alarms[].alarmType` (the canonical join token — **not** `eventType`/category,
+   **not** `probableCause`), matches that ordered sequence, and whose `support` value equals the
    observed frequency of the sequence in the input window (within floating-point tolerance).
 
 2. Given a transaction set that also contains a spurious high-support but low-lift
-   co-occurrence (two alarm types that appear together often but with lift close to 1.0), the
+   co-occurrence (two `alarmType` tokens that appear together often but with lift close to 1.0), the
    service emits a `PatternMinedEvent` for that co-occurrence and the emitted event's `lift`
    field reflects the computed value — allowing the Pattern Manager to identify and flag it
    downstream.
@@ -230,11 +243,15 @@ Consistent with the canonical phase map in `docs/architecture.md`.
 _The following items were open questions blocking the spec. They are resolved or deferred as
 noted below; only design-stage items remain._
 
-1. **[DESIGN-STAGE] Knowledge Service mining-params endpoint path and response shape (#45).**
-   The exact endpoint path and response schema (field names, types, versioning) are resolved
-   when the Knowledge Service publishes its OpenAPI 3.1 spec. The pattern-miner designer builds
-   the client and its unit-test mock against that published OpenAPI — not against assumptions
-   made here. This is not a spec blocker.
+1. **[RESOLVED — endpoint pinned] Knowledge Service mining-params endpoint path and response
+   shape (#45).** Pinned to the **frozen** Knowledge surface
+   `GET /domains/{domain}/model-params/{recordId}` — a versioned-record envelope
+   (`{domain, recordType, recordId, version, isCurrent, payload:{paramSet, params[]}}`) with
+   real dotted-key params (`prefixspan.minSupport`, `prefixspan.maxPatternLength`,
+   `window.adaptive.*`, named tempo profiles, …) and `codebookVersion` in scope, `paramSet =
+   "pattern-miner"` (per the Knowledge Service design, P2-GAP-07). The pattern-miner client and
+   its unit-test mock are built against the Knowledge Service's published `openapi.json` (a
+   build-time artifact); the frozen shape above is the binding contract. Not a spec blocker.
 
 2. **[DESIGN-STAGE] Session-window finalize semantics and adaptive-gap mechanism (#50).**
    The Miner pools per-trail alarm events and re-windows them into sessions by splitting on idle

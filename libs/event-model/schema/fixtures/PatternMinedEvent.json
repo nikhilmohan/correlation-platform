@@ -6,14 +6,20 @@
   "source": "pattern-miner",
   "traceId": "trace-mined-0001",
   "payload": {
-    "sequence": ["lossOfSignal", "linkDown", "bgpPeerDown"],
+    "sequence": [
+      "lossOfSignal",
+      "linkDown",
+      "bgpPeerDown"
+    ],
     "support": 0.42,
     "confidence": 0.87,
     "lift": 3.1,
     "trailId": "TRAIL-0001",
     "timing": {
-      "meanInterArrivalSeconds": 4.5,
-      "stdDevSeconds": 1.2
+      "timeframeMs": 9000,
+      "medianInterArrivalMs": 4500,
+      "maxInterArrivalMs": 6000,
+      "stddevInterArrivalMs": 1200
     },
     "provenance": {
       "sourceWindowId": "TXN-0001",
