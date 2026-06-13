@@ -74,6 +74,21 @@ differ only in which input topic is consumed and which output topic is emitted.
 - Emit normalized, deduped, filtered, trail-tagged `AlarmEvent`s on:
   - `alarms.enriched` — history path (consumed by Noise Filter in P2).
   - `alarms.enriched.live` — live path (consumed by Correlation Engine in P3).
+- **Expose a small chatter-management HTTP API (read + write)** over a source's
+  known-chatter list — Enrichment's first published HTTP business surface. This is the
+  **promote/manage** surface of the noise→live chatter feedback loop: the Noise Filter
+  surfaces observed-noise/chatter signatures via its own read API; the web-ui
+  chatter-management page shows them; the **operator promotes** a selected signature into a
+  source's known-chatter list by calling **this** Enrichment API (and may list or remove
+  entries). The chatter list stays **Enrichment-owned** per-source ruleset configuration (a
+  technical pipeline concern, not authored Knowledge); the API persists each edit to that
+  configuration and the existing ruleset **hot-reload** path makes the change take effect on
+  the live filter path **without restart**, so a promoted signature starts being filtered
+  live. Promotion is **operator-mediated** — the Noise Filter does not call this API; the
+  web-ui reads NF's observed-chatter and writes promotions here. The added entry shape
+  mirrors the `(managedObjectId?, alarmType/eventType)` chatter key the ChatterStep already
+  matches on. The surface is published as **OpenAPI 3.1** at `/openapi.json` and checked into
+  `services/enrichment/openapi.json`.
 - Route poison/undeserializable messages to the appropriate dead-letter topic.
 - Expose `/health` and `/metrics` endpoints; emit structured JSON logs; configure all
   integration URLs, per-source rulesets, and any remaining thresholds via environment
@@ -130,8 +145,11 @@ stages. There are no pluggable or custom stages.
 - Redundancy/protection-aware propagation (FRR, ECMP) — deferred per MVP non-goals.
 - Multi-domain support beyond Core IP — the platform is extensible by design, but the MVP
   builds only the Core IP domain pack.
-- Authoring, versioning, or serving per-source rulesets to other services — rulesets are
-  Enrichment's own internal configuration; no other service reads them.
+- Authoring, versioning, or serving full per-source rulesets to other services — rulesets are
+  Enrichment's own internal configuration; no other service reads the full ruleset. (The narrow
+  exception added by this revision is the chatter-management API, which lets the web-ui list/add/
+  remove only the per-source **known-chatter list** for operator-mediated promotion — it does not
+  expose or serve field mappings or filter parameters.)
 
 ## Tasks (high-level)
 
@@ -166,6 +184,34 @@ stages. There are no pluggable or custom stages.
 9. Route messages that cannot be deserialized or that violate the `AlarmEvent` schema to
    the dead-letter topic (`alarms.history.dlq` for messages from `alarms.history`;
    `alarms.live.dlq` for messages from `alarms.live`).
+10. **Serve a chatter-management HTTP API** (read + write) over a source's known-chatter
+    list — the operator-mediated **promote/manage** surface for the noise→live chatter
+    feedback loop. List the current chatter entries for a source; add a chatter entry
+    (the operator promoting an NF-observed signature); remove a chatter entry. The added
+    entry mirrors the `(managedObjectId?, alarmType/eventType)` chatter key the
+    known-chatter filter (task 6) already matches on. **Persist** each edit to Enrichment's
+    own per-source ruleset configuration (the chatter list's existing home) and let the
+    existing ruleset hot-reload path **apply it live without restart**, so a promoted
+    signature begins being filtered on the live path immediately. Publish the surface as
+    **OpenAPI 3.1** at `/openapi.json`, checked into `services/enrichment/openapi.json`.
+    The Noise Filter does not call this API; promotion is operator-mediated via the web-ui.
+
+## Profile extension note (multi-stream / enrichment profiles)
+
+The per-source ruleset already **IS** a full, independent per-stream pipeline — its own
+field mapping (+ `alarmTypeMap`), filter/dedup/self-clear/flap parameters, **and**
+known-chatter list, with windowed state keyed by source — selected per alarm by the source
+selector and applied concurrently and independently across sources. This per-source ruleset
+is therefore the platform's multi-stream **"enrichment profile"** model: different alarm
+streams (different NMS/vendor sources today, different domains in future) are
+normalized/deduped/filtered concurrently and independently, each routed to its own profile.
+
+**MVP ships exactly ONE profile (the `core-ip` default)**, but the registry, selector, and
+per-source state-keying already support N profiles. An **explicit "enrichment profile"
+renaming**, **selection on (source AND domain)**, and **per-profile domain-awareness** are a
+**documented post-MVP enhancement** — designed-for via this extension point, **not built
+now**. This note adds no scope to the MVP; it records the extension point so the multi-stream
+direction is explicit and the per-source ruleset is understood as the seam for it.
 
 ## Phase applicability
 
@@ -184,9 +230,16 @@ stages. There are no pluggable or custom stages.
 - **Consumes (Kafka):** `alarms.history`, `alarms.live`
 - **Produces (Kafka):** `alarms.enriched`, `alarms.enriched.live` — each a canonical
   `AlarmEvent` with the REQUIRED `alarmType` populated from the source's `alarmTypeMap`.
-- **APIs exposed:** None (stream-processing service; no HTTP business API). Exposes
-  `/health` (liveness/readiness) and `/metrics` (Prometheus) only. No OpenAPI business
-  surface.
+- **APIs exposed:** A small **chatter-management HTTP API** (read + write) over a source's
+  known-chatter list — **Enrichment's first published HTTP business surface** (previously
+  none). Published as **OpenAPI 3.1** at `/openapi.json` and checked into
+  `services/enrichment/openapi.json`. Endpoints (see design for concrete schema): list the
+  chatter entries for a source/ruleset; add a chatter entry to a source (the operator
+  promoting an NF-observed signature); remove a chatter entry. Edits persist to Enrichment's
+  own per-source ruleset configuration and hot-apply to the live filter path without
+  restart. Also exposes `/health` (liveness/readiness) and `/metrics` (Prometheus). No Kafka
+  topic or `event-model` change — the chatter list is existing Enrichment-owned config and
+  the API is a service-owned HTTP surface.
 - **APIs/data consumed from other services:**
   - **Trail Builder `getTrailsForObject(managedObjectId, domain)`** — frozen contract
     `GET /trails/by-object?managedObjectId={moId}&domain={domain}` returning
@@ -206,7 +259,10 @@ stages. There are no pluggable or custom stages.
   (not from any other service's datastore). Each ruleset's field mapping includes an
   **`alarmTypeMap`** (raw alarm-type to canonical `alarmTypeVocabulary` token) that drives the
   required `AlarmEvent.alarmType`; the `alarmTypeVocabulary` value space is authored in the
-  Knowledge Service, the per-source mapping is Enrichment's own configuration.
+  Knowledge Service, the per-source mapping is Enrichment's own configuration. Operator chatter
+  promotions/removals made via the chatter-management API are persisted to a small
+  **Enrichment-owned chatter overlay** (still configuration, not a domain datastore) so they are
+  durable across restart and applied live; no other service reads or writes it.
 
 ## Non-functional
 
@@ -221,10 +277,15 @@ stages. There are no pluggable or custom stages.
   come from the Knowledge Service.
 - **Observability:** `/health` (liveness + readiness), `/metrics` (Prometheus), structured
   JSON logs with `traceId` propagated from the consumed event envelope.
-- **API contract:** The Enrichment Service exposes no OpenAPI business surface (it is a
-  pure stream processor). Collaborating services consume its Kafka output according to the
-  frozen `AlarmEvent` schema in `libs/event-model`; any change to the `AlarmEvent` payload
-  is a contract change requiring `docs/architecture.md` update and human approval.
+- **API contract:** The Enrichment Service publishes one HTTP business surface — the
+  **chatter-management API** — as **OpenAPI 3.1** at `/openapi.json`, checked into
+  `services/enrichment/openapi.json` (the single source of truth for the surface; it drives
+  Enrichment's own provider contract tests and the web-ui's generated client). Collaborating
+  services still consume its Kafka output according to the frozen `AlarmEvent` schema in
+  `libs/event-model`; any change to the `AlarmEvent` payload is a contract change requiring
+  `docs/architecture.md` update and human approval. The chatter API operates only over
+  Enrichment's existing per-source ruleset config and introduces **no** Kafka topic and
+  **no** `event-model` change.
 - **Error handling:** Messages that cannot be deserialized, that carry an unknown major
   `schemaVersion` (≥ 2), or that fail `AlarmEvent` schema validation are routed to
   `alarms.history.dlq` or `alarms.live.dlq` respectively. Transient errors calling the
@@ -328,6 +389,26 @@ Each criterion maps to a single JUnit 5 unit test.
     `GET /trails/by-object?managedObjectId={moId}&domain={domain}` (both query params present,
     `managedObjectId` = the alarm's managed object, `domain` = the configured domain) and sets
     `AlarmEvent.trailIds` from the frozen `{ managedObjectId, domain, trailIds: [] }` response.
+
+18. **Chatter API lists a source's chatter entries:** Given a source whose ruleset has a
+    non-empty known-chatter list, a `GET` of the chatter API for that source returns exactly
+    those entries as `(managedObjectId?, alarmType, eventType)` chatter keys; for a source
+    with no entries it returns an empty list; for an unknown source it returns `404`.
+
+19. **Promoting a chatter entry hot-applies to the live filter path:** Given an
+    NF-observed signature, when the operator `POST`s it as a chatter entry to a source via
+    the chatter API, the API persists it to that source's ruleset configuration and the
+    entry begins being filtered on the live path **without a restart** — i.e. an alarm whose
+    `(managedObjectId, eventType)` matches the just-added entry, processed after the add, is
+    dropped by the known-chatter filter, whereas the same alarm processed before the add was
+    emitted. The added entry's key shape matches what the known-chatter filter matches on.
+
+20. **Removing a chatter entry stops filtering it, and edits survive restart:** Given a
+    source with a chatter entry, a `DELETE` of that entry via the chatter API persists the
+    removal so a matching alarm processed afterwards is again emitted; and the persisted
+    chatter edits are durable — a subsequent reload/restart loads the edited chatter list
+    (a promoted entry is not lost). A malformed chatter-entry write (missing required key
+    field, unknown source) returns a structured `4xx` and changes no configuration.
 
 ## Open questions
 
