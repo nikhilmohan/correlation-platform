@@ -123,7 +123,7 @@ def test_session_window_shared_model_both_events() -> None:
 def test_timing_unchanged_alongside_session_window() -> None:
     """`timing` is untouched: still present, a free-form object, distinct from sessionWindow."""
     env = m.deserialize(_ev("PatternApprovedEvent"))
-    assert env.payload.timing == {"meanInterArrivalSeconds": 4.5, "stdDevSeconds": 1.2}
+    assert env.payload.timing == {"timeframeMs": 9000, "medianInterArrivalMs": 4500, "maxInterArrivalMs": 6000, "stddevInterArrivalMs": 1200}
     # sessionWindow is a separate, additional field — not derived from / merged into timing.
     out = json.loads(m.serialize(env))
     assert "timing" in out["payload"]
