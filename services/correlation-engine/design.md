@@ -29,6 +29,34 @@ Knowledge Service supplies match-quality and conflict-resolution parameters only
 `PatternView.trailId`, since the frozen `PatternApprovedEvent` carries no `trailId`. None of this
 adds or changes any topic, payload, or field.
 
+This revision also closes the three **MVP-achievability** findings on the engine (the P3 rows of
+`docs/mvp-achievability.md`), all as **read-API fields + design notes** — no topic, payload, or
+field is added or changed (`CorrelationResultEvent` and `AlarmStatusChange` are frozen and emitted
+as-is):
+- **D1 — auto-correlation fraction is measurable + shown.** `GET /stats` adds a
+  **`correlatedAlarmCount`** (distinct alarms placed into a correlated incident) alongside the
+  existing `totalAlarmsProcessed`, so the headline **auto-correlation rate** =
+  `correlatedAlarmCount / totalAlarmsProcessed` is **derivable from the response** and rendered by
+  the web-ui — the explicit metric that demonstrates the ~60% target (previously emergent only).
+- **D2 — RCA accuracy is a shown number, not only evaluated-offline.** Every incident's RCA tag
+  (`rootCauseAlarmId` plus the matched pattern/codebook, `confidence`, and the resolved
+  `rootCauseAlarmType`) is served on the incident read API and emitted on `CorrelationResultEvent`,
+  so when ground truth is available (integration/eval/demo mode) **RCA accuracy** = `incidents
+  whose tagged rootCauseAlarmId matches the ground-truth root cause divided by total incidents` is
+  **computable and displayable** by the web-ui from `GET /incidents` plus the Simulator `/labels`
+  oracle. `GET /stats` also exposes an **eval-mode `rcaAccuracy`** field, populated only when the
+  engine is run with the labels oracle wired (null in pure production). The engine still does
+  **not** own ground truth or compute accuracy at production runtime — it exposes exactly what the
+  oracle and UI need.
+- **E1 — P2/P3 train-serve representation asymmetry is documented + resolved.** Patterns are mined
+  in P2 from DBSCAN-cleaned, session-split `transactions.clean`, but matched in P3 against the
+  **raw, noisy** `alarms.persisted.live` stream (the Noise Filter is idle in P3). The engine's
+  matching is **designed to be noise-tolerant** for exactly this reason (partial-match tolerance
+  plus a spurious-alarm penalty plus per-`(trailId, patternId)` instance windowing that ignores
+  unrelated interleaved noise), and the measurable expectation is asserted **on the noisy live
+  stream against ground truth** — not on cleaned data — so the ~60% target holds under realistic
+  conditions. See **Algorithm logical flow → P2/P3 representation + noise tolerance**.
+
 > **Supersedes the window-centric design.** This design replaces the prior global per-trail
 > session-window topology with the `(trailId, patternId)` correlation-instance model. The Kafka
 > Streams stack, Incident Store schema, DLQ, idempotency strategy, stats/read API, and integration
@@ -78,7 +106,7 @@ Every spec Task (1–10) is realized below and traceable to modules/flows.
 | 7. Create + persist incident (resolve `rootCauseAlarmType` to `alarmId`, children, stable `incidentId`, write Incident Store) | `IncidentFactory` resolves the root-cause `alarmId` by matching the winning match's `rootCauseAlarmType` token against the matched alarms' **`alarmType`** field (the canonical join key on `AlarmEvent`; **not** `eventType`/`probableCause`) — the matched alarm whose `alarmType == rootCauseAlarmType` supplies `rootCauseAlarmId`, the rest become children — and derives a deterministic `incidentId`; `IncidentRepository` persists incident + membership idempotently. |
 | 8. Emit `correlation.results` (one event per incident, all applicable fields) | `CorrelationResultProducer` builds + emits `CorrelationResultEvent` via the event-model binding. |
 | 9. Fire `AlarmStatusChange` on `alarms.status.changed` (in-progress / correlated / reverted-open) | `AlarmStatusProducer` fires one `AlarmStatusChange` per alarm per transition, `source = correlation-engine`, `changedAt` = transition time. |
-| 10. Serve Incident/Stats read API (OpenAPI 3.1; raw counts; no accuracy) | `IncidentQueryController` (`GET /incidents`, `GET /incidents/{id}`) + `StatsController` (`GET /stats`), backed by `IncidentRepository` + `StatsAggregator`; springdoc publishes `/openapi.json`. |
+| 10. Serve Incident/Stats read API (OpenAPI 3.1; raw counts + auto-correlation + shown RCA) | `IncidentQueryController` (`GET /incidents`, `GET /incidents/{id}` — each item now carries `rootCauseAlarmType` for token-space RCA comparison) + `StatsController` (`GET /stats` — keeps the raw counts and **adds** `correlatedAlarmCount` for the **auto-correlation rate** (D1) and an eval-mode `rcaAccuracy` field (D2)), backed by `IncidentRepository` + `StatsAggregator`; springdoc publishes `/openapi.json`. RCA accuracy stays externally/UI-computable from the per-incident tag + Simulator `/labels`; the engine owns no ground truth at runtime. |
 
 ---
 
@@ -311,6 +339,7 @@ erDiagram
     text incident_id PK
     text trail_id
     text root_cause_alarm_id
+    text root_cause_alarm_type
     text matched_pattern_id
     text matched_codebook_id
     numeric confidence
@@ -338,6 +367,7 @@ erDiagram
 | `incident_id` | `text` PK | Stable, deterministic (see idempotency). |
 | `trail_id` | `text NOT NULL` | Trail scope of the incident. |
 | `root_cause_alarm_id` | `text NOT NULL` | Tagged root-cause alarm. |
+| `root_cause_alarm_type` | `text NOT NULL` | **(D2)** Canonical `alarmType` token of the root-cause alarm — the winning match's `rootCauseAlarmType`, captured at fire time (same token used to resolve `root_cause_alarm_id`). Stored as a read-model field so `GET /incidents` can serve it and RCA accuracy is computed on the canonical token space without re-fetching the alarm. Not on `CorrelationResultEvent` (read-API only). |
 | `matched_pattern_id` | `text NULL` | Set when winner is a pattern-instance match. |
 | `matched_codebook_id` | `text NULL` | The **codebook artifact id** (`codebookId` from `CodebookGeneratedEvent`) of the active codebook used when the incident was formed by a codebook decode. **Not** a scenario id. Emitted verbatim as `CorrelationResultEvent.matchedCodebookId`. See matchedCodebookId semantics. |
 | `confidence` | `numeric(5,4) NOT NULL` | In [0,1]. |
@@ -364,6 +394,15 @@ a codebook artifact id.
 | `role` | `text NOT NULL` | `root_cause` or `child`. |
 
 Constraint: `UNIQUE(incident_id, alarm_id)`. Index: `(alarm_id)`.
+
+> **`correlatedAlarmCount` derivation (D1).** `StatsAggregator` computes `correlatedAlarmCount` as
+> `COUNT(DISTINCT alarm_id)` over `correlation.incident_alarm` — every distinct alarm that holds a
+> root-cause or child role in some committed incident, counted once (the `UNIQUE(incident_id,
+> alarm_id)` constraint plus the `DISTINCT` make an alarm appearing in multiple incidents or roles
+> count once toward the correlated set). `totalAlarmsProcessed` is the distinct-`alarmId` ingest
+> count (the `alarms_processed_total` source). The auto-correlation rate is the ratio of the two —
+> both numerator and denominator come from the engine's own owned state, so the shown number is
+> self-contained and reproducible.
 
 **`correlation.processed_event`** — idempotency ledger for consumed events deduped on `eventId`
 (`patterns.approved` / `codebook.generated`). `scope` distinguishes topics; `dedupe_key` is the
@@ -424,7 +463,11 @@ contract/unit tests (`OpenApiContractTest`). The checked-in `openapi.json` freez
 (the canonical **`IncidentPage` envelope** `{ items, total, limit, offset }` — P3-G3),
 `GET /incidents/{incidentId}`, and `GET /stats`. A surface change is a contract change (architecture
 update + human approval). Response field names reuse `libs/event-model` `CorrelationResultEvent`
-fields where applicable.
+fields where applicable. This revision adds three **read-API fields** to the checked-in schema —
+`rootCauseAlarmType` on the incident item (D2), and `correlatedAlarmCount` (D1) + eval-mode
+`rcaAccuracy` (D2) on `Stats` — which are HTTP read-API additions only; **no Kafka topic, payload,
+or `libs/event-model` schema changes** (`CorrelationResultEvent` and `AlarmStatusChange` stay
+frozen and are emitted unchanged).
 
 ### `GET /incidents`
 List incidents. Query params: `trailId?` (string), `from?` / `to?` (ISO-8601), `matchType?`
@@ -441,6 +484,7 @@ Returns the **canonical platform list-pagination envelope** `IncidentPage`
     {
       "incidentId": "INC-...",
       "rootCauseAlarmId": "ALM-...",
+      "rootCauseAlarmType": "LOS",
       "childAlarmIds": ["ALM-...", "ALM-..."],
       "matchedPatternId": "PAT-... or null",
       "matchedCodebookId": "CODEBOOK-... or null",
@@ -455,23 +499,73 @@ Returns the **canonical platform list-pagination envelope** `IncidentPage`
 Consumers (web-ui) read `.items` (plus `.total`/`.limit`/`.offset`) — never a top-level array.
 `400` invalid query (bad `matchType` or date) returns a structured error.
 
+> **`rootCauseAlarmType` on the read API (D2 enabler — read-API field, not a contract change).**
+> Each incident item carries `rootCauseAlarmType` — the canonical `alarmType` token of the
+> root-cause alarm, the same value the engine already resolved when it picked `rootCauseAlarmId`
+> (see **Root-cause `alarmId` resolution**). It is **persisted on the incident row** (a stored
+> read-model column, derived at fire time) and surfaced here so the web-ui / evaluation oracle can
+> compute **RCA accuracy on the canonical token space** — comparing this `rootCauseAlarmType`
+> directly to the Simulator label's `rootCauseAlarmType` — without re-fetching the alarm to look up
+> its type. This is purely an **incident read-API + read-model field**; it is **not** added to the
+> frozen `CorrelationResultEvent` schema (which keeps `rootCauseAlarmId` as the on-the-wire root
+> cause; the oracle can equally resolve that id to its `alarmType` via the alarm stream/labels). No
+> event-model or topic change.
+
 ### `GET /incidents/{incidentId}`
 `200 OK`: a single incident object (same shape as an `items[]` element). `404` if not found.
 
 ### `GET /stats`
-Aggregate raw counts for the web-ui Correlation Stats module. No accuracy is computed here.
+Aggregate counts for the web-ui Correlation Stats module. The previously-frozen **raw counts are
+kept unchanged**; this revision **adds** two fields so the two headline P3 numbers — the
+**auto-correlation rate** (D1) and **RCA accuracy** (D2) — become derivable/shown rather than only
+emergent or offline.
 
 `200 OK`:
 ```json
 {
   "totalAlarmsProcessed": 1280,
+  "correlatedAlarmCount": 768,
   "totalIncidentsCreated": 64,
   "patternMatchCount": 50,
   "codebookMatchCount": 14,
-  "confidenceDistribution": { "0.0-0.2": 0, "0.2-0.4": 1, "0.4-0.6": 5, "0.6-0.8": 22, "0.8-1.0": 36 }
+  "confidenceDistribution": { "0.0-0.2": 0, "0.2-0.4": 1, "0.4-0.6": 5, "0.6-0.8": 22, "0.8-1.0": 36 },
+  "rcaAccuracy": null
 }
 ```
-Alarm-reduction ratio = `totalAlarmsProcessed / totalIncidentsCreated` is derivable client-side.
+
+Field semantics:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `totalAlarmsProcessed` | int | Distinct live `alarmId`s consumed from `alarms.persisted.live` (post-dedupe). Unchanged. |
+| `correlatedAlarmCount` | int | **(D1, new)** Distinct `alarmId`s that became part of a correlated incident — i.e. an alarm counted at most once across the root-cause + child roles it holds in committed incidents. This is the numerator of the auto-correlation rate. |
+| `totalIncidentsCreated` | int | Distinct committed incidents. Unchanged. |
+| `patternMatchCount` / `codebookMatchCount` | int | Incidents by winning-match type. Unchanged. |
+| `confidenceDistribution` | object | Bucketed incident confidence. Unchanged. |
+| `rcaAccuracy` | number or null | **(D2, new, eval-mode only)** When the engine is run with the Simulator labels oracle wired (the `RCA_EVAL` integration/demo profile), the server-side fraction of incidents whose tagged `rootCauseAlarmId` resolves to the ground-truth root cause; **`null` in pure production** (no ground truth at runtime). The UI may instead compute the same number client-side from `GET /incidents` + the Simulator `/labels` oracle. |
+
+**Auto-correlation rate (D1) — the metric that demonstrates the ~60% target.** It is
+**`correlatedAlarmCount / totalAlarmsProcessed`** (alarms that became part of a correlated incident
+divided by total live alarms processed), derivable directly from this response and shown by the
+web-ui. This is distinct from the **alarm-reduction ratio** =
+`totalAlarmsProcessed / totalIncidentsCreated` (also still derivable) — the two must not be
+conflated (an explicit `docs/mvp-achievability.md` warning: reduction is a different quantity and
+cannot stand in for the correlated fraction). The integration oracle asserts the auto-correlation
+rate against the `~0.60` target on the noisy live stream (see Test plan / E2E and
+`integration-thresholds.yaml`'s `correlatedFraction`/`autoCorrelationRate`).
+
+**RCA accuracy (D2) — made a shown number.** RCA accuracy = `incidents whose tagged
+rootCauseAlarmId matches the ground-truth root cause / total incidents`, compared on the canonical
+`alarmType` join-token space (the engine's emitted `rootCauseAlarmId` resolves to an `alarmType`,
+compared to the Simulator label's `rootCauseAlarmType`). Because ground truth lives in the
+Simulator oracle (not the engine at runtime), the engine exposes everything needed to **show** it
+in two interchangeable ways: (a) the **per-incident RCA tag** on `GET /incidents` / the emitted
+`CorrelationResultEvent` lets the web-ui (or the oracle) compute accuracy whenever `/labels` is
+available — the demo path; and (b) the **eval-mode `rcaAccuracy` field** above lets the engine
+serve the already-computed fraction when run with the labels oracle wired. Either way the strongest
+power number is **displayable on the dashboard**, not buried in an offline report. The engine still
+neither owns ground truth nor computes accuracy in production (`rcaAccuracy` is `null` there) — no
+ground-truth label feed and no server-side accuracy store is introduced in production mode.
 
 ### Canonical list-pagination envelope (platform standard — P3-G3)
 
@@ -635,14 +729,19 @@ sequenceDiagram
   participant IQ as IncidentQueryController
   participant ST as StatsController
   participant DB as Incident Store
+  participant LB as Simulator labels oracle
   UI->>IQ: GET incidents filter by trailId or time or matchType
   IQ->>DB: query incidents plus membership
-  DB-->>IQ: rows
-  IQ-->>UI: incident list root cause plus children
+  DB-->>IQ: rows incl rootCauseAlarmId and rootCauseAlarmType
+  IQ-->>UI: incident list root cause plus children plus rootCauseAlarmType
   UI->>ST: GET stats
-  ST->>DB: aggregate raw counts
-  DB-->>ST: counts
-  ST-->>UI: totals plus confidenceDistribution
+  ST->>DB: aggregate counts incl distinct correlated alarmIds
+  DB-->>ST: counts incl correlatedAlarmCount
+  ST-->>UI: totals plus correlatedAlarmCount plus confidenceDistribution plus rcaAccuracy eval mode
+  Note over UI: auto correlation rate equals correlatedAlarmCount over totalAlarmsProcessed shown
+  UI->>LB: GET labels demo or eval mode only
+  LB-->>UI: ground truth rootCauseAlarmType per scenario
+  Note over UI: RCA accuracy equals matching incidents over total incidents compared on alarmType token
 ```
 
 ---
@@ -799,7 +898,10 @@ it to the concrete root-cause alarm instance as follows:
      `eventType` (X.733 category) or `probableCause` (X.733 probable cause), which are not the join
      key and may collide across distinct alarm types.
 3. That alarm's **`alarmId`** becomes `rootCauseAlarmId`; every other matched `alarmId` becomes a
-   child (`childAlarmIds[]`).
+   child (`childAlarmIds[]`). The winning token `R` is also **persisted on the incident row as
+   `root_cause_alarm_type`** (the D2 read-model field) so `GET /incidents` can serve it and RCA
+   accuracy is computed on the canonical token space without an alarm re-fetch; it is **not** added
+   to `CorrelationResultEvent`.
 4. If more than one matched alarm carries `alarmType == R`, the earliest-`raisedAt` instance is
    chosen deterministically (stable across replays); if none does, no incident is formed from that
    candidate (logged + counted) — the match cannot name a root cause and is discarded rather than
@@ -808,6 +910,57 @@ it to the concrete root-cause alarm instance as follows:
 This makes the derivation explicit and correct (AC10, AC26): the token-to-instance resolution is
 purely on `alarmType`, so it is robust to alarms that share `eventType`/`probableCause` but differ
 in `alarmType`.
+
+### P2/P3 representation + noise tolerance (train-serve asymmetry — E1 resolved)
+
+There is a deliberate **representation asymmetry** between how patterns are *learned* (P2) and how
+they are *applied* (P3), and it is called out here so it is not a silent risk:
+
+- **Train (P2):** patterns are mined by the Pattern Miner from `transactions.clean` — alarms that
+  the **Noise Filter has already DBSCAN-cleaned** (statistical noise removed) and **session-split**
+  into clean, ordered, storm-collapsed transactions. The mined `sequence[]` is therefore a clean
+  ordered signature drawn from a denoised, grouped representation.
+- **Serve (P3):** the Correlation Engine matches those same patterns against
+  `alarms.persisted.live` — the **raw, noisy** live stream. **In P3 the Noise Filter and Pattern
+  Miner are idle** (they are P2/history-path only), so the live alarms reaching CE are **not**
+  DBSCAN-grouped: real cascade alarms are interleaved with background and noise-class alarms, and a
+  cascade symptom may be dropped or arrive late. Matching a clean-trained sequence against this
+  noisy stream is the representation mismatch that can depress real match accuracy.
+
+**Why the engine does not need a P3 re-clean — the matching is designed to be noise-tolerant.**
+The mismatch is absorbed by three mechanisms already in this design, which together make a clean
+mined sequence recoverable from the noisy live stream without re-running DBSCAN at serve time:
+
+1. **Partial-match tolerance (missing alarms).** A `(trailId, patternId)` instance fires when its
+   matched count covers the pattern `sequence` length minus at most the Knowledge
+   `match.partialMatchTolerance` (e.g. N-1 of N), so a dropped or late cascade symptom does not
+   block the full match.
+2. **Spurious-alarm penalty / non-contiguous advance (extra alarms).** Interleaved background and
+   noise alarms that are **not** part of the pattern's sequence are simply not admitted to the
+   instance (they fail the per-pattern relevance/opening test); the codebook decode path applies an
+   explicit `codebook.spuriousPenalty` for tokens present in the observation but absent from the
+   signature. Unrelated alarms therefore neither join the instance nor derail the sequence advance.
+3. **Per-`(trailId, patternId)` instance windowing (natural noise rejection).** Because state is
+   keyed per `(trailId, patternId)` and scoped to that pattern's `sessionWindow`, an instance only
+   ever sees alarms relevant to its own pattern on its own trail. Unrelated interleaved noise on the
+   same trail lives outside the instance entirely — the instance window is a structural filter that
+   ignores it, which is the serve-time analogue of P2's session-split + DBSCAN grouping.
+
+**Measurable expectation (not a silent assumption).** The resolution is to **measure the asymmetry
+away**, not to assert it away. The auto-correlation rate (D1) and RCA accuracy (D2) are evaluated
+**on the raw noisy `alarms.persisted.live` stream against the Simulator ground-truth labels** —
+**not** on cleaned data — so the `~0.60` auto-correlation target and the `≥0.80` RCA-accuracy
+target are asserted under realistic P3 conditions where noise and background are interleaved (see
+Test plan E2E scenario "noisy-stream auto-correlation + RCA" and `integration-thresholds.yaml`). If
+either rate falls short under noise, the lever is **`match.partialMatchTolerance` (from Knowledge)
+tuned to cascade depth** — a data/config change, no code change.
+
+**Documented enhancement (out of scope for MVP).** A stronger mitigation — an optional **live
+pre-filter** in front of CE (a lightweight flap/dedup or a streaming DBSCAN approximation that
+re-creates the P2 grouping on the live path) — would narrow the asymmetry further. It is recorded
+here as a future enhancement only; for the MVP the noise-tolerant matching above **plus** the
+measurable-on-the-noisy-stream expectation is the resolution. Adding such a pre-filter would be a
+new pipeline stage (and likely a new topic) — a contract change — so it is **not** introduced here.
 
 ### Stable incident idempotency
 
@@ -963,7 +1116,9 @@ All errors are emitted as structured JSON logs with `traceId`; nothing is silent
 | `incidentId` generation | (a) random UUID; (b) **deterministic hash of `(trailId, patternId/codebookId, sorted alarmIds)`** | **(b)** — the spec requires a stable `incidentId` across reprocessing of the same matched set for the same instance; the hash + `UNIQUE(instance_fingerprint)` enforces one-incident idempotently (AC16). |
 | `AlarmStatusChange` vs `CorrelationResultEvent` | (a) put correlation context on `alarms.status.changed`; (b) **minimal `AlarmStatusChange` for status, rich context on `CorrelationResultEvent`** | **(b)** — matches the merged contract: `AlarmStatusChange` is a generic `{alarmId, newStatus, source, changedAt}` signal; incident linkage/role stays on `CorrelationResultEvent` (AC22). |
 | Persist vs. emit ordering | (a) emit then persist; (b) **persist then emit** | **(b)** — the Incident Store is the system of record; emitting only after a committed incident prevents downstream consumers from seeing an incident the store lacks. |
-| RCA accuracy | (a) compute server-side; (b) **expose raw counts only** | **(b)** — spec/architecture put accuracy at the integration-test/evaluation oracle (vs. Simulator ground truth); the engine exposes counts via `/stats`, no accuracy API. |
+| Auto-correlation metric (D1) | (a) leave it emergent (only `totalAlarmsProcessed`/`totalIncidentsCreated` raw counts, infer the fraction); (b) add a server-computed **`correlatedAlarmCount`** (distinct alarms in incidents) so the rate `correlatedAlarmCount / totalAlarmsProcessed` is derivable + shown | **(b)** — the ~60% auto-correlation target needs an explicit, gated number, and reduction (alarms/incidents) is a *different* quantity that cannot stand in for it. `correlatedAlarmCount` (distinct alarm_ids in `incident_alarm`) is the missing numerator; it is computed from the engine's own owned state, added to `/stats` only, no event/contract change. (a) leaves the headline inferred, not measured. |
+| RCA accuracy exposure (D2) | (a) keep it "evaluated offline" — engine returns raw counts only, accuracy lives in the integration report; (b) compute + store accuracy server-side in production (needs a ground-truth feed = new API surface, out of scope); (c) **expose the per-incident RCA tag (`rootCauseAlarmId` + `rootCauseAlarmType` + matched pattern/codebook + confidence) on the read API so the UI/oracle compute accuracy when `/labels` is available, plus an eval-mode `rcaAccuracy` field populated only with the labels oracle wired** | **(c)** — RCA accuracy is the strongest power number and must be *shown*, not buried offline; but the engine must not own ground truth at runtime. (c) makes the number displayable on the dashboard (demo path = UI computes from `GET /incidents` + Simulator `/labels`; eval path = server `rcaAccuracy` when the oracle is wired) while keeping production free of any ground-truth feed (`rcaAccuracy` null). (a) hides the number; (b) introduces an out-of-scope ground-truth API surface. No event/contract change — `rootCauseAlarmType` is a read-model/read-API field only. |
+| P2/P3 train-serve asymmetry (E1) | (a) ignore it (silent risk — train on DBSCAN-cleaned `transactions.clean`, serve on raw noisy `alarms.persisted.live`); (b) add a live pre-filter / streaming DBSCAN before CE to re-create the P2 grouping; (c) **rely on the engine's built-in noise tolerance (partial-match tolerance + spurious penalty + per-`(trailId,patternId)` instance windowing) and assert the rates on the noisy live stream against ground truth** | **(c)** — for MVP the matching is already designed noise-tolerant for exactly this mismatch, and the resolution is to *measure* it away by asserting auto-correlation + RCA accuracy on the raw noisy stream (not cleaned data), with `match.partialMatchTolerance` as the data/config lever. (b) is a stronger mitigation but is a new pipeline stage + likely a new topic (a contract change) — recorded as a documented future enhancement, not built here. (a) leaves a silent risk. No contract change. |
 | Codebook signature fetch shape (CE Open Q4 / P1-G5 / P3-G2) | (a) consume native `GET /codebooks/{id}/scenarios` (`{scenarioId, faultOriginObjectId, faultOriginType, predictedSymptoms[], trailIds[]}`) and adapt client-side (rename, derive root cause, fan out `trailIds`); (b) **consume the producer's CE-oriented `GET /codebooks/{id}/trail-signatures` projection** (`{trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[]}`, already fanned out per trail) | **(b)** — the Codebook Generator's merged fix publishes exactly the per-`trailId` `{trailId, rootCauseAlarmType, expectedSymptoms[]}` shape CE wanted, with `rootCauseAlarmType`/`expectedSymptoms[].alarmType` in the `AlarmEvent.alarmType` vocabulary. CE builds its client + mock against that published `openapi.json` — one stored truth on the producer, no client-side adaptation, and a shared join key. (a) re-creates the value-space/field-name divergence the projection was added to remove. |
 | List-pagination envelope (P3-G3) | (a) keep CE's `{ items, page, size, total }`; (b) Alarm Manager's `{ items, page, size, totalElements, totalPages }`; (c) **the platform-canonical `{ items, total, limit, offset }`** (Pattern Manager `PatternPage`, web-ui `RunStatsPage`) | **(c)** — the streaming view polls CE `/incidents` and AM `/alarms` together and already consumes `{ items, total, limit, offset }` for patterns + run-stats. Standardizing on that one envelope lets web-ui read `.items`/`.total`/`.limit`/`.offset` uniformly with no per-producer special-casing. (a)/(b) keep two divergent shapes. (Alarm Manager + web-ui adopt the same envelope in the next step.) |
 | `matchedCodebookId` value (P3-G4) | (a) write the matched pattern's `codebookMatchId` (a scenario id); (b) **write the active codebook's `codebookId` (artifact id) on codebook-decode incidents, null otherwise** | **(b)** — the frozen `CorrelationResultEvent.matchedCodebookId` description says it references `codebookId`. Writing a scenario id (the pattern's `codebookMatchId` granularity) would invite a wrong join. CE sets it to the codebook artifact id of the active codebook used by the decode; never from a pattern's scenario reference. Description-level clarification only — no schema change. |
@@ -977,13 +1132,19 @@ All errors are emitted as structured JSON logs with `traceId`; nothing is silent
 
 ### Acceptance criterion → test (unit/contract, JUnit 5)
 
-All 27 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use the
+All 30 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use the
 `TopologyTestDriver`, advancing wall-clock time to drive punctuation deterministically.
 (Criteria 23–25 are the earlier data-integration-fix criteria: codebook trail-signatures client +
 decode, the canonical `IncidentPage` envelope, and `matchedCodebookId` semantics. Criteria 26–27
 are the design-readiness fixes: `rootCauseAlarmId` resolved via `alarmType` (Q4), and pattern-refresh
 trail placement sourced from the read API (Q7). Q3 — the frozen Knowledge `model-params/{recordId}`
-endpoint + dotted keys — is exercised by AC21.)
+endpoint + dotted keys — is exercised by AC21. **Criteria 28–30 are the MVP-achievability fixes:**
+the auto-correlation fraction derivable from `GET /stats` (D1), RCA accuracy computable/shown from
+the per-incident RCA tag + the eval-mode `rcaAccuracy` field (D2), and the rates holding on the
+**noisy live stream** against ground truth — the P2/P3 train-serve resolution (E1). AC30's
+noisy-stream rate threshold is asserted at the integration stage; its engine-scoped unit test
+proves the noise-tolerant match fires within the `sessionWindow` on a seeded-cascade-plus-noise
+fixture.)
 
 | # | Acceptance criterion | Test (JUnit 5) | Asserts |
 |---|---|---|---|
@@ -1014,6 +1175,9 @@ endpoint + dotted keys — is exercised by AC21.)
 | 25 | `matchedCodebookId` carries the `codebookId` on a codebook-decode incident (P3-G4) | `MatchedCodebookIdSemanticsTest#codebookDecodeWritesActiveCodebookId` | A codebook-decode incident's `matchedCodebookId` equals the active codebook's `codebookId` (the `CodebookGeneratedEvent` artifact id), is **not** a scenarioId and **not** the matched pattern's `codebookMatchId`; a pattern-match incident has `matchedCodebookId == null`. |
 | 26 | `rootCauseAlarmId` derived by resolving `rootCauseAlarmType` against matched alarms' `alarmType` (Q4) | `RootCauseResolutionTest#rootCauseResolvesOnAlarmTypeNotEventTypeOrProbableCause` | Given a winning match with `rootCauseAlarmType=R` and a matched set in which exactly one alarm has `alarmType=R` (other alarms share identical `eventType`/`probableCause` but carry different `alarmType`), the emitted `rootCauseAlarmId` equals that alarm's `alarmId`; the remaining matched `alarmId`s are in `childAlarmIds[]`; flipping `eventType`/`probableCause` does not change the selection (join is on `alarmType` only). |
 | 27 | Pattern-refresh trail placement comes from the read API, not the event (Q7/P3-G1) | `PatternRefreshTrailFromReadApiTest#approvedEventTriggersReadApiRefetchAndTrailFromPatternView` | A `patterns.approved` event payload with **no** `trailId` triggers `PatternApprovedConsumer` to re-fetch `GET /patterns?lifecycle=approved` (Pattern Manager mock returning `PatternView` items with `trailId=T`); after refresh, pattern P is active on trail `T` in `PatternStore.trailIndex` and the next opening alarm on `T` lazily creates instance `(T, P)`; the `trailId` originated from `PatternView.trailId`, never from the event. |
+| 28 | Auto-correlation fraction derivable from `GET /stats` (D1) | `AutoCorrelationStatsTest#statsExposeCorrelatedAlarmCountForAutoCorrelationRate` | After replaying A live alarms where C distinct alarms land in committed incidents, `GET /stats` returns `totalAlarmsProcessed==A` and `correlatedAlarmCount==C` (an alarm in two incidents/roles counted once); `correlatedAlarmCount / totalAlarmsProcessed` yields the auto-correlation rate, derivable from one response and distinct from the reduction ratio; the field is present in the checked-in `openapi.json` `Stats` schema. |
+| 29 | RCA accuracy computable + shown from incident API + labels oracle (D2) | `RcaAccuracyExposureTest#incidentCarriesRootCauseAlarmTypeAndEvalModeStatsAccuracy` | Each `GET /incidents` item and `GET /incidents/{id}` carries `rootCauseAlarmId` **and** `rootCauseAlarmType` (the tagged root cause's `alarmType` token); given a labels fixture, RCA accuracy = matching incidents over total is computable on the token space; with `RCA_EVAL_MODE=on` + the labels-oracle mock wired, `GET /stats.rcaAccuracy` returns that same fraction, and with `RCA_EVAL_MODE=off` `rcaAccuracy` is `null` and no labels feed is consulted; `CorrelationResultEvent` is unchanged (no `rootCauseAlarmType`/`rcaAccuracy` on the wire). |
+| 30 | Rates hold on the noisy live stream against ground truth — train-serve resolution (E1) | `NoisyStreamMatchToleranceTest#seededCascadePlusNoiseFiresIncidentWithinSessionWindow` (unit) + `NoisyStreamRatesIT` (integration) | **Unit:** a seeded cascade interleaved with the default background/noise mix on `alarms.persisted.live` (no DBSCAN pre-clean) still fires exactly one incident within the pattern's `sessionWindow` — unrelated noise is not admitted to the `(trailId, patternId)` instance, a dropped symptom is tolerated by `match.partialMatchTolerance`, the correct `rootCauseAlarmId` is tagged. **Integration:** on a full noisy P3 replay vs the Simulator labels, the auto-correlation rate (AC28) and RCA accuracy (AC29) meet `integration-thresholds.yaml` (`~0.60` auto-correlation, `≥0.80` RCA) — measured on raw noisy data, not cleaned data. |
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -1039,6 +1203,9 @@ Testcontainers/Compose, real collaborators in `real` mode).
 | 15 | Pattern-refresh trail placement from the read API (Q7/P3-G1) | In `real` mode, approve a pattern in Pattern Manager (fires `patterns.approved` with no `trailId`), then replay an opening alarm on that trail | CE consumes the event as a trigger, re-fetches `GET /patterns?lifecycle=approved` from the live Pattern Manager, picks up `PatternView.trailId`, and lazily creates the `(trailId, patternId)` instance on that trail — proving trail placement comes from the read API, not the event. |
 | 16 | Root-cause resolution on `alarmType` (Q4) | Replay a matched set where the root-cause alarm shares `eventType`/`probableCause` with a child but has the distinguishing `alarmType` token | The emitted `CorrelationResultEvent.rootCauseAlarmId` is the alarm whose `alarmType` equals the match's `rootCauseAlarmType`; children are the rest — the result is unchanged when `eventType`/`probableCause` are permuted. |
 | 17 | Knowledge params from the frozen endpoint + seed (Q3) | In `real` mode against the live Knowledge Service with only the seeded `core-ip` pack, start CE and replay a partial-match scenario | CE reads `GET /domains/core-ip/model-params/core-ip%2FmodelParams%2Fcorrelation-engine` (the seeded `correlation-engine` record), applies `match.partialMatchTolerance`/`codebook.*`/`conflict.weights.*`, and correlates out of the box — no manual param authoring, no hard-coded thresholds. |
+| 18 | Noisy-stream auto-correlation + RCA on raw live data (D1 + D2 + E1) | In `real` mode, run the Simulator `p3-demo` profile (seeded cascades interleaved with the default background/noise mix) onto `alarms.persisted.live`, then read `GET /stats` + `GET /incidents` and join the Simulator `/labels` oracle | Incidents fire on the noisy stream within `sessionWindow`; `correlatedAlarmCount / totalAlarmsProcessed` (D1 auto-correlation rate) meets `~0.60`; RCA accuracy (from per-incident `rootCauseAlarmType` vs `/labels`, and from `GET /stats.rcaAccuracy` when `RCA_EVAL_MODE=on`) meets `≥0.80` — rates measured on raw noisy data, not cleaned, demonstrating the train-serve asymmetry is resolved by noise-tolerant matching. |
+| 19 | RCA accuracy shown on the dashboard, not offline (D2) | After incidents exist (eval/demo), the web-ui reads `GET /incidents` (per-incident `rootCauseAlarmId` + `rootCauseAlarmType`) and the Simulator `/labels`; separately `GET /stats` with `RCA_EVAL_MODE=on` | RCA accuracy is rendered as a dashboard number computed from `GET /incidents` + `/labels`, and matches the engine-served `GET /stats.rcaAccuracy`; in production (`RCA_EVAL_MODE=off`) `rcaAccuracy` is `null` and the UI falls back to the labels-join computation only when ground truth is available. |
+| 20 | Auto-correlation rate not conflated with reduction ratio (D1) | Replay a scenario, read `GET /stats` | The UI computes both `correlatedAlarmCount / totalAlarmsProcessed` (auto-correlation) and `totalAlarmsProcessed / totalIncidentsCreated` (reduction) and shows them as distinct numbers; the auto-correlation rate is the one gated against `~0.60`. |
 
 ---
 
@@ -1054,6 +1221,12 @@ Testcontainers/Compose, real collaborators in `real` mode).
   `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_DOMAIN` (default `core-ip`).
 - `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, schema `correlation`.
 - `KNOWLEDGE_PARAMS_REFRESH_SECONDS` (cache TTL).
+- `RCA_EVAL_MODE=off|on` (default `off`) and `SIMULATOR_LABELS_URL` — **eval/demo only** (D2). When
+  `on`, `StatsController` resolves each incident's `root_cause_alarm_type` against the Simulator
+  `/labels` oracle and serves the computed `rcaAccuracy`; when `off` (production) `rcaAccuracy` is
+  `null` and no labels feed is consulted. This toggle never affects correlation behaviour — it only
+  governs whether the engine computes the already-shown accuracy number server-side vs. leaving the
+  web-ui to compute it from `GET /incidents` + `/labels`.
 - **No threshold values in config** — partial-match tolerance, scoring floors, conflict weights are
   pulled from the Knowledge Service via the frozen `GET /domains/{KNOWLEDGE_DOMAIN}/model-params/core-ip%2FmodelParams%2Fcorrelation-engine` endpoint; **session-window comes from the pattern's `sessionWindow`** (via the Pattern Manager read API).
 
@@ -1063,10 +1236,13 @@ Testcontainers/Compose, real collaborators in `real` mode).
 - `/health` — Actuator liveness + readiness (Streams RUNNING, DB up, Knowledge params loaded,
   pattern bootstrap complete).
 - `/metrics` — Prometheus, exposing at minimum: `incidents_created_total`,
-  `alarms_processed_total`, `pattern_match_total`, `codebook_match_total`,
-  `instance_session_expirations_total`, `alarms_status_changed_total` (labelled by `newStatus`),
-  `dlq_routed_total`, and an `active_instances` gauge (live `instanceStore` size); plus
-  `codebook_fetch_failures_total`.
+  `alarms_processed_total`, **`correlated_alarms_total`** (distinct alarms placed into incidents —
+  the D1 numerator; auto-correlation rate = `correlated_alarms_total / alarms_processed_total`),
+  `pattern_match_total`, `codebook_match_total`, `instance_session_expirations_total`,
+  `alarms_status_changed_total` (labelled by `newStatus`), `dlq_routed_total`, and an
+  `active_instances` gauge (live `instanceStore` size); plus `codebook_fetch_failures_total`. RCA
+  accuracy is **not** a production metric (no ground truth at runtime); it is a shown read-API/UI
+  number (D2) and an `integration-thresholds.yaml` oracle metric.
 - Structured JSON logs (Logback JSON), each line carrying `traceId` + `alarmId`/`eventId`/
   `(trailId, patternId)` where applicable.
 
