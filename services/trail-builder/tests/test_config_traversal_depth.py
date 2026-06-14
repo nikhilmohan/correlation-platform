@@ -70,7 +70,9 @@ def test_configured_depth_within_topology_published_cap() -> None:
             "(parallel topology cap-raise PR not merged into this branch); "
             "guard tightens once it lands."
         )
-    configured = get_settings(TRAVERSAL_MAX_DEPTH=12).traversal_max_depth
+    # Read the REAL configured default (no override) so the guard validates the
+    # actual default trail-builder ships with, not a literal repeated in the test.
+    configured = get_settings().traversal_max_depth
     assert configured <= maximum, (
         f"trail-builder traversal_max_depth ({configured}) exceeds Topology's "
         f"published maxDepth maximum ({maximum}) — would be rejected with HTTP 400"
