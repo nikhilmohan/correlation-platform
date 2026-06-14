@@ -45,7 +45,7 @@ class QueryServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new QueryService(graph, metadata, new TopologyProperties()); // maxDepth = 8
+        service = new QueryService(graph, metadata, new TopologyProperties()); // maxDepth = 32
     }
 
     private void currentSnapshotIs(String domain, String snapshotId) {
@@ -88,6 +88,29 @@ class QueryServiceTest {
                 null, false)).isInstanceOf(ResponseStatusException.class);
         assertThatThrownBy(() -> service.traverse("Node:PE1", List.of("RIDES_ON"), 99, "core-ip",
                 null, false)).isInstanceOf(ResponseStatusException.class);
+    }
+
+    @Test
+    void traversalHonoursHigherDepthUpToCap() {
+        // #214: trail-builder requests depth 12 — must be accepted now that the cap is 32 (was 8).
+        currentSnapshotIs("core-ip", "SNAP-1");
+        when(graph.getNode("Node:PE1", "core-ip", "SNAP-1")).thenReturn(Optional.of(
+                new NodeDto("Node:PE1", "Node", "core-ip", "SNAP-1", "PE1", Map.of())));
+        when(graph.traverse(eq("Node:PE1"), any(), anyInt(), eq("core-ip"), eq("SNAP-1"),
+                anyBoolean())).thenReturn(List.of());
+
+        TraversalDto t = service.traverse("Node:PE1", List.of("RIDES_ON"), 12, "core-ip", null,
+                false);
+        assertThat(t.maxDepth()).isEqualTo(12);
+    }
+
+    @Test
+    void traversalRejectsDepthAboveCapWithBoundedMessage() {
+        // #214: above the (raised, configurable) cap of 32 → 400 with the "[1..32]" message.
+        assertThatThrownBy(() -> service.traverse("Node:PE1", List.of("RIDES_ON"), 33, "core-ip",
+                null, false))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("[1..32]");
     }
 
     @Test

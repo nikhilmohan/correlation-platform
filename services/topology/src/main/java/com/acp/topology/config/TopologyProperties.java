@@ -234,7 +234,13 @@ public class TopologyProperties {
 
     /** Traversal bounds. */
     public static class Traversal {
-        private int maxDepth = 8;
+        /**
+         * Generous runaway backstop for bounded traversal (#214). Topology HONOURS the
+         * caller-requested depth up to this cap; it does not impose a build-policy opinion —
+         * traversal depth is the trail-builder's concern (trail-builder requests 12). Raised
+         * 8 → 32; env-configurable via {@code TOPOLOGY_TRAVERSAL_MAX_DEPTH}.
+         */
+        private int maxDepth = 32;
 
         public int getMaxDepth() {
             return maxDepth;
