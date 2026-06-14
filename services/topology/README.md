@@ -45,7 +45,7 @@ JSON Schema is the single canonical [`schema/snapshot.schema.json`](schema/snaps
 | `TOPOLOGY_KNOWLEDGE_MODE` | `mock` (stub from Knowledge OpenAPI) or `real` | `real` |
 | `TOPOLOGY_KNOWLEDGE_VOCAB_PATH` | frozen vocab path template | `/domains/{domain}/vocabulary` |
 | `TOPOLOGY_INGEST_MAX_FILE_BYTES` | max snapshot upload size | `10485760` |
-| `TOPOLOGY_TRAVERSAL_MAX_DEPTH` | traversal depth bound | `8` |
+| `TOPOLOGY_TRAVERSAL_MAX_DEPTH` | traversal depth bound | `32` |
 
 The NebulaGraph + PostgreSQL connection configs are **internal-only** and never forwarded to callers
 or logs.
