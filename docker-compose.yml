@@ -200,6 +200,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+      # JVM Spring Boot context init can take ~100-140s on a busy host; don't flip unhealthy
+      # during the legitimate startup window (boots ~10-15s on an idle host).
+      start_period: 180s
     networks:
       - cp-net
 
@@ -242,6 +245,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 12
+      # JVM + NebulaGraph bootstrap can take ~90-140s on a busy host; allow the startup window.
+      start_period: 180s
     networks:
       - cp-net
 
@@ -275,6 +280,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 12
+      # Migrate-then-serve startup can be slow on a busy host; allow the startup window.
+      start_period: 120s
     networks:
       - cp-net
 
@@ -332,6 +339,8 @@ services:
       interval: 15s
       timeout: 5s
       retries: 12
+      # Migrate-then-serve startup can be slow on a busy host; allow the startup window.
+      start_period: 120s
     networks:
       - cp-net
 
