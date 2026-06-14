@@ -6,7 +6,10 @@ Kept thin and import-light so unit tests never need a live broker. The
 
 from __future__ import annotations
 
+import os
 import threading
+from importlib.resources import files
+from pathlib import Path
 
 from .config import Settings, get_settings
 from .container import Container, build_container
@@ -15,17 +18,43 @@ from .observability import configure_logging, get_logger
 
 _log = get_logger("trailbuilder.runtime")
 
+#: Env var to override the Alembic migrations (``script_location``) directory. When unset, the
+#: migrations packaged INSIDE the installed ``trailbuilder`` package are used.
+MIGRATIONS_DIR_ENV = "TRAILBUILDER_MIGRATIONS_DIR"
+
+
+def migrations_dir() -> Path:
+    """Absolute path to the Alembic ``script_location``, resolved install-robustly.
+
+    Order of resolution:
+
+    1. ``$TRAILBUILDER_MIGRATIONS_DIR`` if set (operator override).
+    2. The ``migrations/`` package-data directory shipped *inside* the installed
+       ``trailbuilder`` package (via :func:`importlib.resources.files`). This resolves
+       identically for a source checkout, a non-editable wheel install (site-packages), and the
+       Docker image — because the migrations travel with the package rather than living at a
+       fixed source-tree offset (``__file__.parent.parent.parent``), which is what broke in the
+       wheel-installed container.
+    """
+    override = os.environ.get(MIGRATIONS_DIR_ENV)
+    if override:
+        return Path(override).resolve()
+    return Path(str(files("trailbuilder") / "migrations")).resolve()
+
 
 def run_migrations(settings: Settings) -> None:
-    """Run ``alembic upgrade head`` before serving (creates the schema + tables)."""
-    import pathlib
+    """Run ``alembic upgrade head`` before serving (creates the schema + tables).
 
+    The ``script_location`` is resolved via :func:`migrations_dir` (importlib.resources over the
+    installed package) so it is found whether the service runs from a source checkout, a
+    non-editable wheel install, or the Docker image. The first migration is
+    ``CREATE SCHEMA IF NOT EXISTS trailbuilder`` (idempotent, owned-schema only).
+    """
     from alembic import command
     from alembic.config import Config
 
-    root = pathlib.Path(__file__).resolve().parent.parent.parent
-    cfg = Config(str(root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg = Config()
+    cfg.set_main_option("script_location", str(migrations_dir()))
     cfg.set_main_option("sqlalchemy.url", settings.database_url)
     command.upgrade(cfg, "head")
 

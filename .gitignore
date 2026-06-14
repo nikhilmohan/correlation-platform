@@ -25,6 +25,8 @@ node_modules/
 .angular/
 coverage/
 *.tsbuildinfo
+# Generated test reports (e.g. Vitest junit output)
+**/reports/junit/
 
 # --- Docker / data volumes ---
 **/pgdata/

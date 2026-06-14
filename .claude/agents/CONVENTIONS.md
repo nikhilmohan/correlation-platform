@@ -39,9 +39,23 @@ A contract change is **never** made silently inside a service. The procedure is:
 
 ## Self-verification before opening a PR
 Before you open or update a PR, confirm and state in the PR body:
-- The cohort gate is **green locally** (Java: `./gradlew build`; Python: `ruff` + `black` +
-  `pytest --cov`; Angular: `npm run lint` + `npm test` + `npm run build`).
-- Every targeted acceptance criterion has a passing test.
+- The cohort gate is **green the way CI runs it**, from a **clean checkout** — not just a
+  warmed-up dev env (this is where "passed locally, failed in CI" comes from):
+  - Java: the repo's `./gradlew build` (confirm `./gradlew` bootstraps — the `gradle-wrapper.jar`
+    is committed, not swallowed by `.gitignore`).
+  - Python: a **fresh venv + NON-EDITABLE install** (`pip install ./libs/event-model/python`
+    then `pip install "./<svc>[dev]"`), then `ruff` + `black` + `pytest --cov`. An editable
+    install hides packaging bugs.
+  - Angular: `npm ci` (lockfile committed) + `npm run lint` + `npm test` + `npm run build`.
+- Every targeted acceptance criterion has a passing test — including **HTTP status codes / error
+  bodies** the spec names (e.g. 400 vs 422), not just the happy path.
+- **Runtime assets are packaged**: migrations SQL, vendored schemas, etc. are declared as
+  package data and resolved via `importlib.resources` (Python) / shipped in the image — verified
+  present after a non-editable/clean install, not just in the source tree.
+- **Deployable:** a **real Dockerfile that `docker build`s** (non-root, EXPOSEs health/metrics,
+  real entrypoint — not a scaffold stub), a **README** (not a TBD stub), and a
+  **docker-compose service entry** with a non-colliding host port + correct `depends_on`.
+- The checked-in `openapi.json` (if any) is **drift-guarded by a failing-on-drift test**.
 - No silent contract change; no cross-service source coupling.
 
 ## PR & commit conventions

@@ -28,7 +28,7 @@ See `spec.md` (contract) and `design.md` (how).
 
 | Var | Purpose |
 |---|---|
-| `DATABASE_URL` | Codebook Store (pg8000), e.g. `postgresql+pg8000://…` |
+| `DATABASE_URL` | Codebook Store (pg8000), e.g. `postgresql+pg8000://…` — used by both the SQLAlchemy store and the yoyo schema migrations (migrations connect via pg8000 too; see `migrate.py`) |
 | `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_CONSUMER_GROUP` | Kafka (group `codebook-generator-trails.built`) |
 | `TOPOLOGY_QUERY_URL` / `_MODE` | Topology graph query (`topology-query`) |
 | `KNOWLEDGE_FAULT_ORIGINS_URL` / `_MODE` | Knowledge fault-origin list |

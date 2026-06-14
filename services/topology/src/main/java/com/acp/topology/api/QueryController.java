@@ -10,6 +10,8 @@ import com.acp.topology.api.dto.SnapshotListDto;
 import com.acp.topology.api.dto.SnapshotSummaryDto;
 import com.acp.topology.api.dto.TraversalDto;
 import io.swagger.v3.oas.annotations.Operation;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import java.util.List;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -61,7 +63,11 @@ public class QueryController {
     @Operation(summary = "Bounded traversal over one or more edge types up to maxDepth.")
     public TraversalDto traverse(@RequestParam String start,
             @RequestParam(name = "relation") List<String> relations,
-            @RequestParam(name = "maxDepth") int maxDepth,
+            // #214: publish the honoured depth bound [1..32] in the OpenAPI schema so consumers
+            // (trail-builder builds its respx mock from this frozen openapi) reject out-of-range
+            // depths exactly as the live API does. 32 is the configurable runaway backstop; the
+            // authoritative runtime check stays in QueryService (returns 400 "[1..32]").
+            @Min(1) @Max(32) @RequestParam(name = "maxDepth") int maxDepth,
             @RequestParam(required = false) String domain,
             @RequestParam(required = false) String snapshotId,
             @RequestParam(name = "crossDomain", defaultValue = "false") boolean crossDomain) {

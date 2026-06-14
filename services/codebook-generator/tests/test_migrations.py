@@ -29,7 +29,14 @@ from pathlib import Path
 import pytest
 from yoyo import get_backend, read_migrations
 
-from codebook_generator.migrate import MIGRATIONS_DIR_ENV, apply_migrations, migrations_dir
+from codebook_generator import migrate
+from codebook_generator.migrate import (
+    MIGRATIONS_DIR_ENV,
+    apply_migrations,
+    build_backend,
+    migrations_dir,
+    yoyo_url,
+)
 
 # Resolve the migrations the same install-robust way the runtime does (importlib.resources over
 # the installed package), so these tests pass against a non-editable wheel install where the SQL
@@ -170,3 +177,97 @@ def test_apply_migrations_is_idempotent_via_ledger(sqlite_migrations: Path, tmp_
     migrations = read_migrations(str(sqlite_migrations))
     # Nothing left to apply on the second pass.
     assert list(backend.to_apply(migrations)) == []
+
+
+# --------------------------------------------------------------------------- #
+# 3. yoyo URL normalization (the single DATABASE_URL serves two libraries).    #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("database_url", "expected"),
+    [
+        # The documented prod form: SQLAlchemy's +pg8000 driver suffix must be stripped so
+        # yoyo's get_backend accepts the scheme (the container-startup bug).
+        (
+            "postgresql+pg8000://correlation:correlation@postgres:5432/correlation",
+            "postgresql://correlation:correlation@postgres:5432/correlation",
+        ),
+        ("postgresql+psycopg2://u:p@h:5432/db", "postgresql://u:p@h:5432/db"),
+        # Plain DB-API schemes pass through unchanged.
+        ("postgresql://u:p@h:5432/db", "postgresql://u:p@h:5432/db"),
+        ("sqlite:///cb.db", "sqlite:///cb.db"),
+        ("sqlite://", "sqlite://"),
+    ],
+)
+def test_yoyo_url_strips_sqlalchemy_driver_suffix(database_url: str, expected: str) -> None:
+    """yoyo_url removes the SQLAlchemy ``+<driver>`` scheme suffix yoyo cannot parse.
+
+    Regression for the container-only failure: the same ``DATABASE_URL`` feeds SQLAlchemy
+    (which needs ``postgresql+pg8000://``) and yoyo (which only understands ``postgresql://``).
+    """
+    assert yoyo_url(database_url) == expected
+
+
+def test_yoyo_url_only_rewrites_the_scheme() -> None:
+    """A ``+`` elsewhere in the URL (e.g. a password) is left untouched."""
+    url = "postgresql+pg8000://user:p+ss@host:5432/db"
+    assert yoyo_url(url) == "postgresql://user:p+ss@host:5432/db"
+
+
+# --------------------------------------------------------------------------- #
+# 4. Backend selection: pg8000 URLs use the pg8000-backed Postgres backend.    #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+pg8000://correlation:correlation@postgres:5432/correlation",
+        "postgres+pg8000://u:p@h:5432/db",
+        "pg8000://u:p@h:5432/db",
+    ],
+)
+def test_build_backend_uses_pg8000_for_pg8000_schemes(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``+pg8000`` (or ``pg8000``) scheme builds the pg8000 backend, never yoyo's psycopg one.
+
+    The pg8000 backend connects in its constructor, so the driver connect + init_database are
+    stubbed: the assertion is purely on *which* backend class is selected for the scheme.
+    """
+    seen: dict[str, object] = {}
+
+    class _FakeBackend:
+        def __init__(self, dburi: object, table: str) -> None:
+            seen["dburi"] = dburi
+            seen["table"] = table
+
+        def init_database(self) -> None:
+            seen["init_database"] = True
+
+    def _fail_get_backend(_url: str) -> object:  # pragma: no cover - must not be reached
+        raise AssertionError("pg8000 scheme must not fall through to yoyo.get_backend")
+
+    monkeypatch.setattr(migrate, "_Pg8000Backend", _FakeBackend)
+    monkeypatch.setattr(migrate, "get_backend", _fail_get_backend)
+
+    backend = build_backend(database_url)
+
+    assert isinstance(backend, _FakeBackend)
+    assert seen["init_database"] is True
+    assert seen["table"] == "_yoyo_migration"
+
+
+def test_build_backend_delegates_other_schemes_to_yoyo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-pg8000 schemes (e.g. the SQLite test backend) go through yoyo's get_backend."""
+    captured: dict[str, str] = {}
+    sentinel = object()
+
+    def _fake_get_backend(url: str) -> object:
+        captured["url"] = url
+        return sentinel
+
+    monkeypatch.setattr(migrate, "get_backend", _fake_get_backend)
+
+    # A SQLAlchemy +driver suffix on a non-pg8000 scheme is normalized before get_backend.
+    result = build_backend("postgresql+psycopg2://u:p@h:5432/db")
+
+    assert result is sentinel
+    assert captured["url"] == "postgresql://u:p@h:5432/db"

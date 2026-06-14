@@ -94,7 +94,7 @@ fetched per-domain from the Knowledge Service.
 | `TRAIL_RETENTION_SNAPSHOTS` | `2` | Retained snapshots per domain |
 | `DEFAULT_DOMAIN` | `core-ip` | Fallback domain — **event path only**, never the query API |
 | `TOPOLOGY_SNAPSHOT_SCOPE` | `current` | Snapshot scoping token for Topology reads |
-| `TRAVERSAL_MAX_DEPTH` | `32` | Bounded-traversal depth handed to Topology |
+| `TRAVERSAL_MAX_DEPTH` | `12` | Bounded-traversal depth handed to Topology (env-configurable) |
 | `HTTP_RETRY_MAX` | `3` | Max attempts per collaborator HTTP call |
 | `HTTP_RETRY_BACKOFF_MS` | `200` | Backoff between retries (honoured by both clients) |
 | `HTTP_TIMEOUT_SECONDS` | `10.0` | Per-request timeout |
