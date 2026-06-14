@@ -227,7 +227,11 @@ services:
       - "8082:8080"      # HTTP API + /actuator/health + /actuator/prometheus (8081 = knowledge)
     environment:
       TOPOLOGY_PORT: "8080"
-      TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      # Use the INTERNAL listener kafka:29092 (all other services do). kafka:9092 is the PLAINTEXT
+      # listener advertised as localhost:9092 (for host-side tooling), so a producer bootstrapped on
+      # it connects, is told the broker lives at localhost:9092, and then cannot reach it from inside
+      # the container — topology.changed was silently lost (issue #205, P1 chain dead at hop 1).
+      TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
       TOPOLOGY_NEBULA_HOSTS: "nebula-graphd:9669"
       TOPOLOGY_NEBULA_SPACE: "topology"
       TOPOLOGY_NEBULA_USERNAME: "root"
