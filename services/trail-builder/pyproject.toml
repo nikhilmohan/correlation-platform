@@ -43,6 +43,21 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# The Alembic migrations live under src/trailbuilder/migrations but are NOT importable
+# packages (no __init__.py) — Alembic loads them by file path. Ship them as package data
+# (below); exclude the dirs from package discovery so setuptools never treats them as packages.
+exclude = ["trailbuilder.migrations*"]
+
+[tool.setuptools.package-data]
+# Ship the Alembic migration scripts (env.py, script template, versioned revisions) as package
+# data so they travel inside the wheel/sdist and are resolvable from the installed package
+# (importlib.resources) — works for an editable checkout, a non-editable wheel install, and the
+# Docker image alike. This is the same install-robust pattern as codebook-generator.
+trailbuilder = [
+    "migrations/*.py",
+    "migrations/*.mako",
+    "migrations/versions/*.py",
+]
 
 [tool.black]
 line-length = 100
