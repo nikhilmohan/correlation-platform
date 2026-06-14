@@ -188,6 +188,18 @@ TRANSPORT_TEMPLATES = [
 TRANSPORT_VOCABULARY = ["AmpFault", "ChannelLoss"]
 
 
+def _record_envelope(record_type: str, record_id: str, domain: str, payload: dict) -> dict:
+    """Wrap a domain payload in the frozen Knowledge ``RecordResponse`` envelope (#224)."""
+    return {
+        "domain": domain,
+        "recordType": record_type,
+        "recordId": record_id,
+        "version": "v1",
+        "isCurrent": True,
+        "payload": payload,
+    }
+
+
 # Per-domain topology graphs: object instances per fault-origin type, and per-instance closures.
 def _node(mo_id: str, object_type: str, domain: str) -> dict:
     return {
@@ -311,19 +323,29 @@ class MockCollaborators:
         return [r for r in self.requests if path_substring in r.url.path]
 
     def _wire(self) -> None:
-        # Knowledge — fault-origin types
+        # Knowledge — fault-origin types. Served as frozen ``RecordResponse`` envelopes
+        # ({recordType, recordId, payload:{...}}) to match the real Knowledge contract;
+        # the domain fields live under ``payload`` (see #224).
         @self.router.route(method="GET", host="knowledge-fo.test")
         def _fault_origins(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(200, json=_DOMAIN_DATA[domain]["fault_origins"])
+            records = [
+                _record_envelope("faultOriginType", f"fo-{i}", domain, payload)
+                for i, payload in enumerate(_DOMAIN_DATA[domain]["fault_origins"])
+            ]
+            return httpx.Response(200, json={"records": records})
 
-        # Knowledge — propagation templates
+        # Knowledge — propagation templates (same ``RecordResponse`` envelope shape, #224).
         @self.router.route(method="GET", host="knowledge-pt.test")
         def _templates(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(200, json=_DOMAIN_DATA[domain]["templates"])
+            records = [
+                _record_envelope("propagationTemplate", f"pt-{i}", domain, payload)
+                for i, payload in enumerate(_DOMAIN_DATA[domain]["templates"])
+            ]
+            return httpx.Response(200, json={"records": records})
 
         # Knowledge — alarm-type vocabulary
         @self.router.route(method="GET", host="knowledge-av.test")
