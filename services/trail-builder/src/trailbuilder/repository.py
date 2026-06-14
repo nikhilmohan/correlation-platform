@@ -15,6 +15,17 @@ from sqlalchemy import Engine, delete, func, insert, select
 from .db import tables
 from .models import Trail, object_type_of
 
+# Snapshot-scope sentinels — the same ``current|previous`` model the Topology
+# Service exposes on its query API. The web-ui (compose sets ``SNAPSHOT_ID=current``)
+# queries trails with the literal ``current``; the trail store persists each build
+# under the CONCRETE snapshotId carried by the triggering ``topology.changed`` event
+# (e.g. ``SNAP-0439f418-...``), never "current". These sentinels are therefore
+# resolved to that concrete id at query time (#226). Any other token is treated as
+# a concrete snapshotId and passed through unchanged.
+SNAPSHOT_CURRENT = "current"
+SNAPSHOT_PREVIOUS = "previous"
+_SNAPSHOT_SENTINELS = frozenset({SNAPSHOT_CURRENT, SNAPSHOT_PREVIOUS})
+
 
 class TrailRepository:
     """Reads/writes the ``trailbuilder`` trail store."""
@@ -87,6 +98,40 @@ class TrailRepository:
             )
 
     # --- Reads (query API) ---
+
+    def resolve_snapshot_id(self, snapshot_id: str, domain: str) -> str | None:
+        """Resolve a ``current``/``previous`` sentinel to a concrete persisted snapshotId.
+
+        Consistent with the Topology Service's ``current|previous`` snapshot model
+        (#226). ``current`` → the most-recently-built snapshot for ``domain``;
+        ``previous`` → the one built immediately before it. A non-sentinel token is
+        a concrete snapshotId and is returned unchanged (callers query it directly).
+
+        Returns ``None`` when a sentinel cannot be resolved (no snapshot persisted
+        for the domain, or no second snapshot for ``previous``) so the caller can
+        return an empty, non-error result rather than crashing.
+
+        Snapshots are ranked by ``built_at`` desc — the same ordering the retention
+        prune uses, so "current" here is the snapshot the latest build persisted.
+        """
+        if snapshot_id not in _SNAPSHOT_SENTINELS:
+            return snapshot_id
+        ordered = self._snapshots_newest_first(domain)
+        index = 0 if snapshot_id == SNAPSHOT_CURRENT else 1
+        if index < len(ordered):
+            return ordered[index]
+        return None
+
+    def _snapshots_newest_first(self, domain: str) -> list[str]:
+        """Distinct snapshotIds for ``domain``, most-recently-built first."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(tables.trail.c.snapshot_id, func.max(tables.trail.c.built_at).label("ts"))
+                .where(tables.trail.c.domain == domain)
+                .group_by(tables.trail.c.snapshot_id)
+                .order_by(func.max(tables.trail.c.built_at).desc())
+            ).all()
+        return [r.snapshot_id for r in rows]
 
     def trail_ids_for_object(self, managed_object_id: str, domain: str) -> list[str]:
         """All trail ids the object belongs to within ``domain`` (possibly empty)."""
