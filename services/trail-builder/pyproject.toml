@@ -83,8 +83,14 @@ select = ["E", "F", "I", "UP", "B", "W"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
-addopts = "--cov=trailbuilder --cov-report=term-missing"
+# The default (CI) gate is the mock-only unit suite (AC-12). Integration-tagged tests
+# (e.g. INT-IGPAREA) require the live Compose stack and are excluded here; they run in
+# the integration-test stage, or locally via `pytest -m integration`.
+addopts = "--cov=trailbuilder --cov-report=term-missing -m 'not integration'"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "integration: live-stack integration test (real Topology/Knowledge/Kafka/Postgres); excluded from the default unit gate",
+]
 
 [tool.coverage.run]
 omit = ["src/trailbuilder/__main__.py", "src/trailbuilder/migrations/*"]
