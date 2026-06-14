@@ -127,19 +127,40 @@ def test_vocabulary_violation_routes_trigger_to_dlq(
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path.endswith("/fault-origin-types"):
+            # Frozen Knowledge RecordResponse envelope — domain fields live under .payload (#224).
             return httpx.Response(
-                200, json=[{"objectType": "FiberSpan", "originAlarmType": "FiberFault"}]
+                200,
+                json={
+                    "records": [
+                        {
+                            "domain": "core-ip",
+                            "recordType": "faultOriginType",
+                            "recordId": "fo-0",
+                            "payload": {
+                                "objectType": "FiberSpan",
+                                "originAlarmType": "FiberFault",
+                            },
+                        }
+                    ]
+                },
             )
         if path.endswith("/propagation-templates"):
             return httpx.Response(
                 200,
-                json=[
-                    {
-                        "edgeType": "RIDES_ON",
-                        "trigger": {"objectType": "FiberSpan", "alarmType": "FiberFault"},
-                        "effect": {"objectType": "IPLink", "alarmType": "BogusAlarm"},
-                    }
-                ],
+                json={
+                    "records": [
+                        {
+                            "domain": "core-ip",
+                            "recordType": "propagationTemplate",
+                            "recordId": "pt-0",
+                            "payload": {
+                                "edgeType": "RIDES_ON",
+                                "trigger": {"objectType": "FiberSpan", "alarmType": "FiberFault"},
+                                "effect": {"objectType": "IPLink", "alarmType": "BogusAlarm"},
+                            },
+                        }
+                    ]
+                },
             )
         if path.endswith("/alarm-type-vocabulary"):
             return httpx.Response(200, json={"alarmTypes": ["FiberFault"]})  # no BogusAlarm
