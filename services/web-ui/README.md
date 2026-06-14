@@ -46,6 +46,63 @@ npm run e2e                        # Playwright E2E — against the integration 
 Vitest + Angular TestBed is the unit/component runner. **Playwright is E2E only** — never the
 unit-test runner.
 
+## E2E (Playwright) — P1 demonstrable journey + deferred E2E acceptance criteria
+
+The Playwright suite lives in [`e2e/`](e2e/) (outside `src/`, files named `*.e2e.ts`). It is
+**E2E-only and NOT part of the unit gate**: `npm test` (Vitest) globs `src/**/*.spec.ts` only,
+and the CI `angular` job runs lint + Vitest + build — never Playwright. This suite runs in the
+**integration stage**.
+
+It covers the P1 demonstrable journey — *topology ingested → trails built → codebook compiled →
+visualized in the UI* — plus the spec's deferred E2E acceptance criteria
+(ACs **5, 13, 17, 20, 25, 33, 39, 43, 46, 49**), with each test named by its AC id. It also
+asserts the [`docs/solution-goals.md`](../../docs/solution-goals.md) **P1 quantifiable outcomes**
+(sites visualized, device topology per site, trails present).
+
+### Two run modes (`E2E_MODE`, base URL via `E2E_BASE_URL` — no hard-coded hosts)
+
+| Mode | How it runs | Backends |
+|---|---|---|
+| **`mock`** (default) | Playwright auto-starts `ng serve` (mock mode). Fully deterministic, **no live stack needed**. Used for local authoring + the spec-well-formedness gate. | Every API served by the app's in-process mock interceptor from OpenAPI-shaped fixtures (`src/app/core/mock-fixtures.ts`). |
+| **`real`** | Targets the docker-compose SPA (`http://localhost:8086`). This is how `@integration-tester` runs it. | **REAL P1 stack**: Topology (8082), Trail Builder (8083), Codebook (8084), Knowledge (8081). **Contract-mocked** (Playwright route interception, shapes from the producers' OpenAPI / `libs/event-model`): Pattern Manager, Correlation Engine, Alarm Manager, Noise Filter (P2/P3) + Enrichment chatter — these services are not in the P1 compose yet. |
+
+```bash
+# (a) Local authoring / well-formedness gate — no backend needed:
+npx playwright install --with-deps chromium   # one-time: browser binaries
+npm run e2e:list                              # enumerate every spec (no run)
+npm run e2e:mock                              # run all specs against ng serve + in-app mocks
+
+# (b) Integration stack (how integration-tester runs it):
+docker compose up -d topology trail-builder codebook-api knowledge web-ui
+npm run e2e:real                              # P1 real; P2/P3 + chatter contract-mocked
+# override the SPA endpoint if needed:
+E2E_BASE_URL=http://host:port npm run e2e:real
+```
+
+### Real vs contract-mocked boundary
+
+- **Real (P1):** the topology & trails journey and AC 33 hit the live Topology / Trail Builder /
+  Codebook stack; AC 43 (config) hits the live **Knowledge Service** (a P1 service).
+- **Contract-mocked (not yet built):** every assertion that depends on Pattern Manager,
+  Correlation Engine, Alarm Manager, or Noise Filter is served from contract-shaped responses in
+  [`e2e/support/contract-mocks.ts`](e2e/support/contract-mocks.ts), pinned 1:1 to the consumer
+  view-models in `src/app/api/models.ts` (which track the producers' frozen OpenAPI). When a
+  P2/P3 service is built and wired into compose, drop its mock + env override; the same spec then
+  runs end-to-end against the real service with no assertion change.
+
+### Spec ↔ test map
+
+| File | ACs / journey |
+|---|---|
+| `e2e/p1-demonstrable-journey.e2e.ts` | **AC 33** + P1 journey + solution-goals P1-1/P1-2/P1-4/P1-6 |
+| `e2e/dashboard-and-cross-nav.e2e.ts` | **AC 5**, **AC 25** |
+| `e2e/streaming.e2e.ts` | **AC 13** |
+| `e2e/incident-detail.e2e.ts` | **AC 17** |
+| `e2e/noise-stats.e2e.ts` | **AC 20** |
+| `e2e/patterns.e2e.ts` | **AC 39** |
+| `e2e/config.e2e.ts` | **AC 43** (+ AC 42 browser cross-check) |
+| `e2e/correlation-stats.e2e.ts` | **AC 46**, **AC 49** |
+
 ## Configuration (runtime, no rebuild)
 
 The app reads `window.__ACP_ENV__` at boot from `env.js`. In the container `env.js` is
