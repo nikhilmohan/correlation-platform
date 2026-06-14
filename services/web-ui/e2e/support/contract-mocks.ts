@@ -4,11 +4,17 @@ import type { Page, Route, Request } from '@playwright/test';
  * CONTRACT BOUNDARY MOCKS for the not-yet-built P2/P3 collaborators + Enrichment chatter.
  *
  * ── Real-vs-mocked boundary (per the incremental-E2E gate decision) ──────────────────────────
- *  REAL in `E2E_MODE=real`:  Topology (8082), Trail Builder (8083), Codebook (8084),
- *                            Knowledge (8081) — the P1 read-API stack in docker-compose.
+ *  REAL in `E2E_MODE=real`:  Topology, Trail Builder, Codebook, Knowledge — the P1 read-API
+ *                            stack in docker-compose. The browser reaches them SAME-ORIGIN via
+ *                            the web-ui nginx reverse proxy: the SPA base URLs are the path
+ *                            prefixes /api/topology, /api/trail-builder, /api/codebook,
+ *                            /api/knowledge (set in compose), which nginx forwards to the real
+ *                            backends by docker service name. No cross-origin call, no CORS.
  *  CONTRACT-MOCKED:          Pattern Manager, Correlation Engine, Alarm Manager, Noise Filter
  *                            (P2/P3) and Enrichment chatter — these services are not in the P1
- *                            compose yet, so they are stubbed here at the HTTP boundary.
+ *                            compose yet, so they are stubbed here at the HTTP boundary, pointed
+ *                            at the sentinel origins below (distinct from the /api/* same-origin
+ *                            proxy prefixes, so the real P1 paths are never intercepted).
  *
  * The response BODIES below are shaped 1:1 to the consumer view-models in
  * `src/app/api/models.ts`, which the app's typed clients build against each producer's PUBLISHED
@@ -30,6 +36,23 @@ import type { Page, Route, Request } from '@playwright/test';
  * corresponding mock (and the env override for it); the same spec then runs end-to-end against
  * the real service with no assertion change.
  */
+
+/**
+ * Same-origin proxy prefixes for the REAL P1 read-API stack (must match docker-compose web-ui
+ * env + nginx.conf). The env.js override below re-asserts these explicitly: Playwright FULFILLS
+ * the /env.js route with our own script, so the container-generated `window.__ACP_ENV__` has NOT
+ * executed at merge time (it is undefined inside `Object.assign({}, window.__ACP_ENV__, ...)`);
+ * without re-asserting them the P1 base URLs would fall back to the app's compiled `/mock/...`
+ * defaults,
+ * which the SPA nginx serves as index.html (HTTP 200 HTML → "No sites returned"). Keeping them
+ * here ties the real-mode wiring to the proxy prefixes in exactly one place.
+ */
+export const P1_SAME_ORIGIN_BASE_URLS = {
+  TOPOLOGY_API_BASE_URL: '/api/topology',
+  TRAIL_BUILDER_API_BASE_URL: '/api/trail-builder',
+  CODEBOOK_API_BASE_URL: '/api/codebook',
+  KNOWLEDGE_API_BASE_URL: '/api/knowledge',
+} as const;
 
 /** Sentinel origins the env-overlay points the mocked services at; intercepted below. */
 export const MOCK_ORIGINS = {
@@ -145,19 +168,25 @@ let approved = false;
 export async function installContractMocks(p: Page): Promise<void> {
   approved = false;
 
-  // (1) Re-point only the not-yet-built collaborators at the mock origins, preserving any P1 URLs
-  // the compose env.js already set. We MERGE so the real P1 wiring is untouched.
+  // (1) Re-assert the REAL P1 same-origin proxy base URLs and re-point ONLY the not-yet-built
+  // collaborators at the sentinel mock origins. This route FULFILLS /env.js with our own script,
+  // so the container-generated window.__ACP_ENV__ has not run yet — we therefore set the P1 URLs
+  // explicitly (they flow through the web-ui nginx proxy → real backends) rather than relying on a
+  // merge with an as-yet-undefined overlay.
   await p.route('**/env.js', async (route) => {
     const overlay = {
+      ...P1_SAME_ORIGIN_BASE_URLS,
       PATTERN_MANAGER_API_BASE_URL: MOCK_ORIGINS.patternManager,
       CORRELATION_ENGINE_API_BASE_URL: MOCK_ORIGINS.correlationEngine,
       ALARM_MANAGER_API_BASE_URL: MOCK_ORIGINS.alarmManager,
       NOISE_FILTER_API_BASE_URL: MOCK_ORIGINS.noiseFilter,
       ENRICHMENT_CHATTER_API_BASE_URL: MOCK_ORIGINS.enrichment,
       INTEGRATION_MODE: 'real',
+      DOMAIN: 'core-ip',
+      SNAPSHOT_ID: 'current',
     };
     const body =
-      '// E2E real-mode overlay: P1 stays real; P2/P3 + chatter point at contract mocks.\n' +
+      '// E2E real-mode overlay: P1 same-origin proxy (real backends); P2/P3 + chatter mocked.\n' +
       `window.__ACP_ENV__ = Object.assign({}, window.__ACP_ENV__, ${JSON.stringify(overlay)});`;
     await route.fulfill({ status: 200, contentType: 'application/javascript', body });
   });

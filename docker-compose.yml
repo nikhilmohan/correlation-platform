@@ -407,17 +407,25 @@ services:
         condition: service_started
     environment:
       INTEGRATION_MODE: "real"
-      # IMPORTANT: these base URLs are consumed by the SPA running in the OPERATOR'S BROWSER, not
-      # from inside the container/cp-net. They must therefore be HOST-published addresses
-      # (localhost:<published-port>), NOT docker-internal service hostnames — the browser cannot
-      # resolve `topology`/`trail-builder` on cp-net. P1 read APIs (published ports per this file):
-      TOPOLOGY_API_BASE_URL: "http://localhost:8082"        # topology      ports 8082:8080
-      TRAIL_BUILDER_API_BASE_URL: "http://localhost:8083"   # trail-builder ports 8083:8000
-      CODEBOOK_API_BASE_URL: "http://localhost:8084"        # codebook-api  ports 8084:8000
-      KNOWLEDGE_API_BASE_URL: "http://localhost:8081"       # knowledge     ports 8081:8080
-      # P2/P3 services not yet in this compose — left UNSET on purpose (graceful degrade):
-      #   PATTERN_MANAGER_API_BASE_URL, CORRELATION_ENGINE_API_BASE_URL,
-      #   ALARM_MANAGER_API_BASE_URL, NOISE_FILTER_API_BASE_URL, ENRICHMENT_CHATTER_API_BASE_URL
+      # SAME-ORIGIN BASE URLS (CORS fix). These are consumed by the SPA running in the OPERATOR'S
+      # BROWSER. They are now SAME-ORIGIN relative path prefixes, NOT cross-origin backend hosts:
+      # the browser fetches /api/<svc>/... on the SPA's own origin (:8086), and nginx in this same
+      # container reverse-proxies each prefix to the backend BY DOCKER SERVICE NAME on cp-net
+      # (see services/web-ui/nginx.conf for the exact prefix→upstream mapping). Because every call
+      # is same-origin, the browser never performs a CORS check — eliminating the cross-origin
+      # block that previously stopped the SPA from loading data. No backend service is changed.
+      TOPOLOGY_API_BASE_URL: "/api/topology"            # → nginx → topology:8080
+      TRAIL_BUILDER_API_BASE_URL: "/api/trail-builder"  # → nginx → trail-builder:8000
+      CODEBOOK_API_BASE_URL: "/api/codebook"            # → nginx → codebook-api:8000
+      KNOWLEDGE_API_BASE_URL: "/api/knowledge"          # → nginx → knowledge:8080
+      # P2/P3 services not yet in this compose — left UNSET on purpose (graceful degrade). The
+      # nginx /api/<svc> proxy routes for them already exist (resolved at request time), so the
+      # moment those services land we just set the same-origin base URL below — no proxy change:
+      #   PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"
+      #   CORRELATION_ENGINE_API_BASE_URL: "/api/correlation-engine"
+      #   ALARM_MANAGER_API_BASE_URL: "/api/alarm-manager"
+      #   NOISE_FILTER_API_BASE_URL: "/api/noise-filter"
+      #   ENRICHMENT_CHATTER_API_BASE_URL: "/api/enrichment"
       STREAMING_REFRESH_INTERVAL_MS: "3000"
       DOMAIN: "core-ip"
       SNAPSHOT_ID: "current"

@@ -24,8 +24,10 @@ import { defineConfig, devices } from '@playwright/test';
  *
  *   2. `E2E_MODE=real` (INTEGRATION stage — how @integration-tester runs it)
  *      Playwright targets the docker-compose-served SPA (default http://localhost:8086), which is
- *      wired to the REAL P1 read-API stack (Topology 8082 / Trail Builder 8083 / Codebook 8084 /
- *      Knowledge 8081). P1-backed flows hit the real services. Collaborators that are NOT YET
+ *      wired to the REAL P1 read-API stack (Topology / Trail Builder / Codebook / Knowledge)
+ *      SAME-ORIGIN via the web-ui nginx reverse proxy: the browser fetches /api/<svc>/... on
+ *      :8086 and nginx forwards to the real backends by docker service name (no CORS — the prior
+ *      cross-origin block is gone). P1-backed flows hit the real services. Collaborators NOT YET
  *      BUILT (Pattern Manager / Correlation Engine / Alarm Manager / Noise Filter — P2/P3 — and
  *      Enrichment chatter) are stubbed AT THE CONTRACT BOUNDARY via Playwright route interception
  *      using responses shaped from the producers' published OpenAPI / libs/event-model
