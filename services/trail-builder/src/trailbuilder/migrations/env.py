@@ -8,7 +8,7 @@ autogenerate/compare to it. Touches only ``trailbuilder`` (single-owner rule).
 from __future__ import annotations
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from trailbuilder.db import tables  # noqa: F401  (registers tables on metadata)
 from trailbuilder.db.metadata import SCHEMA, metadata
@@ -48,6 +48,14 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
+        # The version table lives INSIDE the owned schema (version_table_schema=SCHEMA).
+        # On a fresh database Alembic creates that table BEFORE running revision 0001
+        # (which is the CREATE SCHEMA migration), so the schema must already exist or
+        # the version-table CREATE fails with InvalidSchemaName. Ensure it idempotently
+        # up front — touches only the owned schema (single-owner rule); 0001 keeps its
+        # own idempotent CREATE SCHEMA for source/CLI runs.
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{SCHEMA}"'))
+        connection.commit()
         _configure(connection)
         with context.begin_transaction():
             context.run_migrations()
