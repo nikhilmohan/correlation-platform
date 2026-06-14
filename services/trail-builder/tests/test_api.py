@@ -280,6 +280,78 @@ def test_list_trails_invalid_limit_422(client) -> None:
     assert resp.status_code == 422
 
 
+# --- #226: snapshotId=current resolution ------------------------------------
+
+
+@pytest.fixture
+def current_snapshot_client(container):
+    """Container seeded under CONCRETE snapshotIds (as a real build does), two snapshots.
+
+    Mirrors the gate bug: trails are persisted under e.g. ``SNAP-0439f418`` (the
+    concrete id the triggering topology.changed event carried), never "current".
+    """
+    repo = container.repository
+    repo.persist_build(
+        "core-ip",
+        "SNAP-prev01",
+        [_trail("p1", "core-ip", "SNAP-prev01", ("Node:P1",))],
+    )
+    repo.persist_build(
+        "core-ip",
+        "SNAP-0439f418",
+        [_trail(f"t{i}", "core-ip", "SNAP-0439f418", (f"Node:N{i}",)) for i in range(10)],
+    )
+    return TestClient(create_app(container))
+
+
+def test_list_trails_resolves_current_to_latest_snapshot(current_snapshot_client) -> None:
+    """#226: /trails?snapshotId=current (compose sets SNAPSHOT_ID=current for the UI)
+    resolves to the latest persisted snapshot for the domain and returns its trails —
+    not count 0 looking for a snapshot literally named "current"."""
+    resp = current_snapshot_client.get(
+        "/trails", params={"snapshotId": "current", "domain": "core-ip"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 10
+    # The response echoes the resolved CONCRETE snapshotId (not the sentinel), so the
+    # UI shows which snapshot it is viewing.
+    assert body["snapshotId"] == "SNAP-0439f418"
+    assert body["domain"] == "core-ip"
+
+
+def test_list_trails_resolves_previous_to_prior_snapshot(current_snapshot_client) -> None:
+    """#226: ``previous`` resolves to the immediately-prior snapshot (topology current|previous)."""
+    resp = current_snapshot_client.get(
+        "/trails", params={"snapshotId": "previous", "domain": "core-ip"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["snapshotId"] == "SNAP-prev01"
+    assert body["count"] == 1
+
+
+def test_list_trails_concrete_snapshot_still_works(current_snapshot_client) -> None:
+    """#226: a concrete snapshotId continues to resolve as-is (regression guard)."""
+    resp = current_snapshot_client.get(
+        "/trails", params={"snapshotId": "SNAP-0439f418", "domain": "core-ip"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["snapshotId"] == "SNAP-0439f418"
+    assert body["count"] == 10
+
+
+def test_list_trails_current_with_no_trails_is_empty_not_error(client) -> None:
+    """#226: ``current`` for a domain with no persisted snapshot returns count 0 cleanly
+    (echoes the sentinel, no 500)."""
+    resp = client.get("/trails", params={"snapshotId": "current", "domain": "unknown-domain"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["count"] == 0
+    assert body["snapshotId"] == "current"
+
+
 # --- POST /trails/rebuild ---------------------------------------------------
 
 
