@@ -26,7 +26,10 @@ services:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:29092"
+      # Bind with empty host (all interfaces) — NOT an explicit 0.0.0.0: the apache/kafka:3.9.0
+      # entrypoint derives advertised.listeners during the KRaft StorageTool format step and
+      # rejects a literal 0.0.0.0 ("advertised.listeners cannot use the nonroutable meta-address").
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:29092"
       KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:29092"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
@@ -40,11 +43,16 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     volumes:
       - kafka-data:/var/lib/kafka/data
+    # Fast TCP readiness check on both listeners. The JVM `kafka-broker-api-versions.sh` tool
+    # takes ~6-8s to start and routinely exceeded the 10s healthcheck timeout, leaving the broker
+    # stuck "starting" and blocking kafka-init + every `depends_on: kafka healthy` service. `nc`
+    # is in the image and is instant; both ports open ⇒ the broker is accepting connections.
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "nc -z localhost 9092 && nc -z localhost 29092 || exit 1"]
       interval: 10s
-      timeout: 10s
-      retries: 12
+      timeout: 5s
+      retries: 15
+      start_period: 30s
     networks:
       - cp-net
 
