@@ -133,6 +133,24 @@ class OpenApiContractTest {
                 "siteId", "domain", "snapshotId", "nodeCount", "edgeCount", "nodes", "edges");
     }
 
+    @Test
+    void checkedInContractPublishesTraversalMaxDepthBound() throws Exception {
+        // #214: the GET /topology/traversal maxDepth query-param schema must declare minimum 1 /
+        // maximum 32 (the honoured runaway cap), so trail-builder's mock (built from this frozen
+        // openapi) rejects out-of-range depths exactly as the live API does.
+        JsonNode doc = mapper.readTree(Files.readString(projectRoot().resolve("openapi.json")));
+        JsonNode params = doc.get("paths").get("/topology/traversal").get("get").get("parameters");
+        JsonNode maxDepthSchema = null;
+        for (JsonNode p : params) {
+            if ("maxDepth".equals(p.get("name").asText())) {
+                maxDepthSchema = p.get("schema");
+            }
+        }
+        assertThat(maxDepthSchema).as("maxDepth query param must be declared").isNotNull();
+        assertThat(maxDepthSchema.get("minimum").asInt()).isEqualTo(1);
+        assertThat(maxDepthSchema.get("maximum").asInt()).isEqualTo(32);
+    }
+
     /**
      * AC-18/AC-27 — a representative live response validates against the schema declared in the
      * CHECKED-IN openapi.json. A validation 422 ({@code ApiError}) is returned by the same controller

@@ -120,15 +120,42 @@ class NebulaGraphRepositoryUnitTest {
     }
 
     @Test
-    void getNodeScopesByDomainSnapshotAndIdUsingObjectTypeTag() throws Exception {
+    void getNodeResolvesByIdViaFetchPropOnTheObjectTypeTag() throws Exception {
+        // #213: by-id resolution must use FETCH PROP ON <tag> "<vid>" (the broken
+        // `LOOKUP ... WHERE id(vertex) == ...` is a SemanticError / returns empty on this
+        // NebulaGraph). The TAG is derived from the managedObjectId prefix (objectType); the
+        // full managedObjectId is the VID.
         recordAllAsEmpty();
         repo.getNode("IPLink:L1", "core-ip", "SNAP-1");
-        String lookup = lastLookup();
-        // TAG is derived from the managedObjectId prefix (objectType).
-        assertThat(lookup).contains("LOOKUP ON `IPLink`");
-        assertThat(lookup).contains("`IPLink`.domain == \"core-ip\"");
-        assertThat(lookup).contains("`IPLink`.snapshotId == \"SNAP-1\"");
-        assertThat(lookup).contains("id(vertex) == \"IPLink:L1\"");
+        String fetch = executed.stream().filter(q -> q.startsWith("FETCH PROP"))
+                .findFirst().orElseThrow();
+        assertThat(fetch).contains("FETCH PROP ON `IPLink` \"IPLink:L1\"");
+        assertThat(fetch).contains("id(vertex) AS moid");
+        assertThat(fetch).contains("properties(vertex).objectType AS ot");
+        assertThat(fetch).contains("properties(vertex).snapshotId AS sid");
+        // No LOOKUP-by-id is issued for single-vertex resolution.
+        assertThat(executed).noneMatch(q -> q.contains("id(vertex) =="));
+    }
+
+    @Test
+    void getNodeFiltersOutSnapshotMismatch() throws Exception {
+        // FETCH PROP returns the vertex; the post-filter rejects a snapshot that does not match the
+        // requested scope (mirrors getEdge snapshot scoping). Build the RS fully BEFORE stubbing
+        // session.execute (each str()/rowsOf() involves its own stubbing).
+        List<ValueWrapper> row = List.of(str("IPLink:L1"), str("IPLink"), str("core-ip"),
+                str("SNAP-OTHER"), str("L1"), str("{}"));
+        ResultSet rs = rowsOf(row);
+        when(session.execute(anyString())).thenReturn(rs);
+        assertThat(repo.getNode("IPLink:L1", "core-ip", "SNAP-1")).isEmpty();
+    }
+
+    @Test
+    void getNodeFiltersOutDomainMismatch() throws Exception {
+        List<ValueWrapper> wrongDomain = List.of(str("IPLink:L1"), str("IPLink"), str("metro"),
+                str("SNAP-1"), str("L1"), str("{}"));
+        ResultSet rs = rowsOf(wrongDomain);
+        when(session.execute(anyString())).thenReturn(rs);
+        assertThat(repo.getNode("IPLink:L1", "core-ip", "SNAP-1")).isEmpty();
     }
 
     @Test
@@ -243,11 +270,11 @@ class NebulaGraphRepositoryUnitTest {
 
     @Test
     void objectsAtSiteTraversesLocatedAtReverselyThenResolvesEachDevice() throws Exception {
-        // GO ... LOCATED_AT REVERSELY yields one device; then getNode (LOOKUP) resolves it.
+        // GO ... LOCATED_AT REVERSELY yields one device; then getNode (FETCH PROP) resolves it.
         ResultSet deviceRs = rowsOf(List.of(str("Node:PE1")));
         ResultSet nodeRs = rowsOf(List.of(str("Node:PE1"), str("Node"), str("core-ip"),
                 str("SNAP-1"), str("PE1"), str("{}")));
-        routeByPrefix(Map.of("GO FROM", deviceRs, "LOOKUP ON", nodeRs));
+        routeByPrefix(Map.of("GO FROM", deviceRs, "FETCH PROP", nodeRs));
 
         List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
         assertThat(objects).extracting(GraphVertex::managedObjectId).containsExactly("Node:PE1");
@@ -256,11 +283,11 @@ class NebulaGraphRepositoryUnitTest {
 
     @Test
     void traverseResolvesEachReachedVidIntoTypedVertex() throws Exception {
-        // GO 1 TO n yields reached vid IPLink:L1; the subsequent getNode (LOOKUP) resolves it.
+        // GO 1 TO n yields reached vid IPLink:L1; the subsequent getNode (FETCH PROP) resolves it.
         ResultSet reachedRs = rowsOf(List.of(str("IPLink:L1")));
         ResultSet nodeRs = rowsOf(List.of(str("IPLink:L1"), str("IPLink"), str("core-ip"),
                 str("SNAP-1"), str("L1"), str("{}")));
-        routeByPrefix(Map.of("GO 1 TO", reachedRs, "LOOKUP ON", nodeRs));
+        routeByPrefix(Map.of("GO 1 TO", reachedRs, "FETCH PROP", nodeRs));
 
         List<GraphVertex> reached = repo.traverse("Node:PE1", List.of("RIDES_ON"), 2,
                 "core-ip", "SNAP-1", false);
