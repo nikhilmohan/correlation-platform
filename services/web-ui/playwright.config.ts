@@ -33,6 +33,15 @@ import { defineConfig, devices } from '@playwright/test';
  *
  * NO HARD-CODED HOSTS: the base URL is resolved from `E2E_BASE_URL` (falling back to a per-mode
  * default), mirroring the app's config-switchable-backends rule (spec AC 51).
+ *
+ * ARTIFACTS FOR CI UPLOAD:
+ *   - HTML report → `e2e/.report/` (the `html` reporter, in both modes).
+ *   - JUnit XML   → `reports/e2e/web-ui-e2e.xml` (CI only).
+ *   - Per-test AC 33.x screenshots → `e2e/__screenshots__/<name>.<mode>.png` (full-page, stable
+ *     filenames; written explicitly by `e2e/support/screenshots.ts`). The integration-tester
+ *     uploads `e2e/__screenshots__/**` + `e2e/.report/**` as a GitHub Actions artifact. The
+ *     `use.screenshot: 'only-on-failure'` below is the failure-diagnostics capture; the AC 33.x
+ *     captures are deterministic per-test and independent of it.
  */
 
 const MODE = (process.env['E2E_MODE'] ?? 'mock') as 'mock' | 'real';
