@@ -18,9 +18,21 @@ import pytest
 
 from fixtures import DEFAULT_POLICY, install_knowledge_stub
 from trailbuilder.clients.errors import IntegrationError
-from trailbuilder.clients.policy_client import KnowledgePolicyClient
+from trailbuilder.clients.policy_client import (
+    POLICY_PATH_SEGMENT,
+    POLICY_RECORD_ID,
+    KnowledgePolicyClient,
+)
 
 BASE = "http://knowledge.test"
+
+# The exact request the client must issue, verified against Knowledge's published
+# RecordController contract (origin/build/knowledge): the route is
+# GET /domains/{domain}/{recordTypePathSegment}/{recordId}, where the segment is the
+# kebab-case form of the RecordType enum (TRAIL_POLICY -> "trail-policies") and the
+# recordId is the seeded slash-bearing id "core-ip/trailPolicy/default", URL-encoded so
+# the slashes survive as one path segment (the controller URLDecoder.decodes it once).
+EXPECTED_PATH = "/domains/core-ip/trail-policies/core-ip%2FtrailPolicy%2Fdefault"
 
 # A distinct non-Core-IP policy (different boundary + SRLG rule) for AC-11.
 METRO_POLICY = {
@@ -32,6 +44,66 @@ METRO_POLICY = {
 
 def _client(settings) -> KnowledgePolicyClient:
     return KnowledgePolicyClient(settings, client=httpx.Client(base_url=BASE, timeout=5.0))
+
+
+def test_fetch_issues_exact_contract_path(settings) -> None:
+    """Contract pin: the client must hit Knowledge's exact RecordController route.
+
+    Regression guard for #206 — the client previously called the off-contract
+    ``/domains/{domain}/trailPolicy/default`` (wrong kebab segment + wrong recordId),
+    which Knowledge answered with HTTP 400, killing the P1 chain. The single request
+    must be ``GET /domains/core-ip/trail-policies/core-ip%2FtrailPolicy%2Fdefault``.
+    """
+    seen: list[str] = []
+    router = __import__("respx").mock(base_url=BASE, assert_all_called=True)
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(
+            200,
+            json={
+                "domain": "core-ip",
+                "recordType": "trailPolicy",
+                "recordId": POLICY_RECORD_ID,
+                "version": "1",
+                "isCurrent": True,
+                "payload": DEFAULT_POLICY,
+            },
+        )
+
+    # Match ONLY the exact contract path — any drift (e.g. back to trailPolicy/default)
+    # leaves the route unmatched and respx fails the request.
+    router.get(EXPECTED_PATH).mock(side_effect=_capture)
+    with router:
+        _client(settings).get_policy("core-ip")
+
+    assert seen == [EXPECTED_PATH]
+
+
+def test_ping_uses_exact_contract_path(settings) -> None:
+    """``ping`` health-checks the same contract route (not the off-contract one)."""
+    seen: list[str] = []
+    router = __import__("respx").mock(base_url=BASE, assert_all_called=True)
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path.decode())
+        return httpx.Response(200, json={"payload": DEFAULT_POLICY})
+
+    router.get(EXPECTED_PATH).mock(side_effect=_capture)
+    with router:
+        assert _client(settings).ping() is True
+    assert seen == [EXPECTED_PATH]
+
+
+def test_path_segment_and_record_id_match_knowledge_seed() -> None:
+    """Drift guard vs Knowledge's published recordType path segment + seeded id.
+
+    The kebab path segment is the canonical RecordType.pathSegment() for TRAIL_POLICY,
+    and the recordId is the literal stored in core-ip.json. Pinned here so a future
+    drift in either constant is caught by a unit test, not at integration time.
+    """
+    assert POLICY_PATH_SEGMENT == "trail-policies"
+    assert POLICY_RECORD_ID == "core-ip/trailPolicy/default"
 
 
 def test_get_policy_decodes_record_response(settings) -> None:
@@ -112,7 +184,7 @@ def test_stale_not_ok_raises_when_uncached(settings) -> None:
     settings = settings.model_copy(update={"knowledge_stale_ok": False})
     client = _client(settings)
     router = __import__("respx").mock(base_url=BASE, assert_all_called=False)
-    router.get(url__regex=r".*/domains/[^/]+/trailPolicy/default(\?.*)?$").mock(
+    router.get(url__regex=r".*/domains/[^/]+/trail-policies/[^/?]+(\?.*)?$").mock(
         return_value=httpx.Response(503, json={"error": "down"})
     )
     with router:
