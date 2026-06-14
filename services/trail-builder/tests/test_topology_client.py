@@ -77,6 +77,32 @@ def test_every_call_is_domain_and_snapshot_scoped(settings) -> None:
         assert params.get("snapshotId") == "current"
 
 
+def test_traversal_maxdepth_flows_from_settings(settings) -> None:
+    """The traversal `maxDepth` param is the configured `traversal_max_depth` (#214).
+
+    No literal in the client — the value flows from config so the env-tunable
+    default (12) is what hits Topology's `GET /topology/traversal`.
+    """
+    graph = FakeGraph(domain="core-ip")
+    graph.add_node("Node:A", "Node", igp_area="area-0")
+    tuned = settings.model_copy(update={"traversal_max_depth": 7})
+    call_log: list[dict] = []
+
+    with install_topology_stub(BASE, graph, call_log=call_log):
+        TopologyClient(tuned, client=httpx.Client(base_url=BASE, timeout=5.0)).fetch_slice(
+            domain="core-ip",
+            snapshot_scope="current",
+            seed_object_types=["Node"],
+            closure_relations=["HOSTS"],
+            srlg_edge_type=None,
+        )
+
+    traversals = [e for e in call_log if e["path"] == "/topology/traversal"]
+    assert traversals, "expected at least one traversal call"
+    for entry in traversals:
+        assert entry["params"].get("maxDepth") == "7"
+
+
 def test_base_url_comes_from_settings(settings) -> None:
     """AC-13: changing the base URL routes calls to the new address (no hard-coding)."""
     client = TopologyClient(settings)

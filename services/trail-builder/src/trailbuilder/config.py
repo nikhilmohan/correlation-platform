@@ -67,8 +67,17 @@ class Settings(BaseSettings):
     default_domain: str = Field("core-ip", alias="DEFAULT_DOMAIN")
     # The Topology snapshot scoping token for the in-scope (event-carried) snapshot.
     topology_snapshot_scope: str = Field("current", alias="TOPOLOGY_SNAPSHOT_SCOPE")
-    # Bound on the in-memory bounded-traversal depth handed to Topology.
-    traversal_max_depth: int = Field(32, alias="TRAVERSAL_MAX_DEPTH")
+    # Bound on the bounded-traversal depth handed to Topology (`maxDepth`).
+    # Default 12: a trail closure is bounded per IGP area (the policy `boundary`
+    # igp-area prune). On the synthesized P1 topology the per-area
+    # dependency-closure diameter is ~8-10 hops — the vertical dependency stack
+    # Node->LineCard->Port->Interface->IPLink->LSP->VPNService is 6 hops, plus
+    # ~3-4 lateral hops within a 6-8-node area. 12 covers that with headroom so
+    # trails are COMPLETE (a too-shallow depth truncates trails and fragments
+    # downstream pattern discovery / auto-correlation), and stays well within
+    # Topology's traversal maxDepth cap (raised to 32, published in its openapi).
+    # Env-configurable via TRAVERSAL_MAX_DEPTH.
+    traversal_max_depth: int = Field(12, alias="TRAVERSAL_MAX_DEPTH")
 
     # --- HTTP client retry ---
     http_retry_max: int = Field(3, alias="HTTP_RETRY_MAX")
