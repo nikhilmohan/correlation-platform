@@ -146,7 +146,10 @@ def install_knowledge_stub(
 ) -> respx.MockRouter:
     """Install respx routes for the Knowledge trailPolicy read API.
 
-    ``policies`` maps domain -> trailPolicy payload dict.
+    ``policies`` maps domain -> trailPolicy payload dict. The route mirrors Knowledge's
+    published RecordController contract: ``GET /domains/{domain}/trail-policies/{recordId}``
+    where ``recordId`` is the seeded slash-bearing id ``core-ip/trailPolicy/default``,
+    URL-encoded so the slashes survive as one path segment (the controller decodes once).
     """
     router = respx.mock(base_url=base_url, assert_all_called=False)
 
@@ -161,14 +164,16 @@ def install_knowledge_stub(
             json={
                 "domain": domain,
                 "recordType": "trailPolicy",
-                "recordId": "default",
+                "recordId": "core-ip/trailPolicy/default",
                 "version": "1",
                 "isCurrent": True,
                 "payload": payload,
             },
         )
 
-    router.get(url__regex=r".*/domains/(?P<domain>[^/?]+)/trailPolicy/default(\?.*)?$").mock(
+    # The recordId path segment is URL-encoded (slashes -> %2F), so it is a single,
+    # slashless path segment captured here as ``[^/?]+``.
+    router.get(url__regex=r".*/domains/(?P<domain>[^/?]+)/trail-policies/[^/?]+(\?.*)?$").mock(
         side_effect=_policy
     )
     return router
