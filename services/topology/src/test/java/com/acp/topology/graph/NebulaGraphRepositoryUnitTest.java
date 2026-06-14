@@ -120,32 +120,42 @@ class NebulaGraphRepositoryUnitTest {
     }
 
     @Test
-    void getNodeFetchesByVidNotAnIdLookupPredicate() throws Exception {
-        // Regression for the P1 sites/{siteId}/objects 404: NebulaGraph rejects an `id(vertex) == …`
-        // predicate inside a LOOKUP WHERE (SemanticError), which used to be swallowed as "empty" →
-        // 404 for a VID that listSites had just emitted. getNode must resolve a single vertex by VID
-        // via FETCH PROP and apply the domain/snapshot scope in-app — never via a LOOKUP id filter.
+    void getNodeResolvesByIdViaFetchPropOnTheObjectTypeTag() throws Exception {
+        // #213: by-id resolution must use FETCH PROP ON <tag> "<vid>" (the broken
+        // `LOOKUP ... WHERE id(vertex) == ...` is a SemanticError / returns empty on this
+        // NebulaGraph). The TAG is derived from the managedObjectId prefix (objectType); the
+        // full managedObjectId is the VID.
         recordAllAsEmpty();
         repo.getNode("IPLink:L1", "core-ip", "SNAP-1");
-        String fetch = executed.stream().filter(q -> q.startsWith("FETCH PROP")).findFirst()
-                .orElseThrow();
-        // TAG is derived from the managedObjectId prefix (objectType); the VID is the moid verbatim.
+        String fetch = executed.stream().filter(q -> q.startsWith("FETCH PROP"))
+                .findFirst().orElseThrow();
         assertThat(fetch).contains("FETCH PROP ON `IPLink` \"IPLink:L1\"");
         assertThat(fetch).contains("id(vertex) AS moid");
-        assertThat(fetch).contains("properties(vertex).domain AS dom");
+        assertThat(fetch).contains("properties(vertex).objectType AS ot");
         assertThat(fetch).contains("properties(vertex).snapshotId AS sid");
-        // The buggy LOOKUP id(vertex) predicate must never be issued for a single-vertex read.
-        assertThat(executed).noneMatch(q -> q.startsWith("LOOKUP ON") && q.contains("id(vertex) =="));
+        // No LOOKUP-by-id is issued for single-vertex resolution.
+        assertThat(executed).noneMatch(q -> q.contains("id(vertex) =="));
     }
 
     @Test
-    void getNodeAppliesDomainAndSnapshotScopeInAppOnTheFetchedRow() throws Exception {
-        // FETCH PROP returns the vertex regardless of scope; the repository must reject a row whose
-        // domain or snapshotId does not match the requested scope (parity with the old LOOKUP WHERE).
-        ResultSet rs = rowsOf(List.of(str("IPLink:L1"), str("IPLink"), str("metro"),
-                str("SNAP-OTHER"), str("L1"), str("{}")));
+    void getNodeFiltersOutSnapshotMismatch() throws Exception {
+        // FETCH PROP returns the vertex; the post-filter rejects a snapshot that does not match the
+        // requested scope (mirrors getEdge snapshot scoping). Build the RS fully BEFORE stubbing
+        // session.execute (each str()/rowsOf() involves its own stubbing).
+        List<ValueWrapper> row = List.of(str("IPLink:L1"), str("IPLink"), str("core-ip"),
+                str("SNAP-OTHER"), str("L1"), str("{}"));
+        ResultSet rs = rowsOf(row);
         when(session.execute(anyString())).thenReturn(rs);
-        assertThat(repo.getNode("IPLink:L1", "core-ip", "SNAP-1")).isEmpty(); // wrong domain + snapshot
+        assertThat(repo.getNode("IPLink:L1", "core-ip", "SNAP-1")).isEmpty();
+    }
+
+    @Test
+    void getNodeFiltersOutDomainMismatch() throws Exception {
+        List<ValueWrapper> wrongDomain = List.of(str("IPLink:L1"), str("IPLink"), str("metro"),
+                str("SNAP-1"), str("L1"), str("{}"));
+        ResultSet rs = rowsOf(wrongDomain);
+        when(session.execute(anyString())).thenReturn(rs);
+        assertThat(repo.getNode("IPLink:L1", "core-ip", "SNAP-1")).isEmpty();
     }
 
     @Test

@@ -135,6 +135,8 @@
           "in" : "query",
           "required" : true,
           "schema" : {
+            "maximum" : 32,
+            "minimum" : 1,
             "type" : "integer",
             "format" : "int32"
           }

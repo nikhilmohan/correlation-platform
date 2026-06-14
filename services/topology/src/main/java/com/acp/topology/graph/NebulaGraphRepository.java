@@ -111,14 +111,14 @@ public class NebulaGraphRepository implements GraphRepository {
 
     @Override
     public Optional<GraphVertex> getNode(String managedObjectId, String domain, String snapshotId) {
+        // #213: resolve a single vertex by its VID via FETCH PROP (NOT `LOOKUP ... WHERE
+        // id(vertex) == ...`, which is a SemanticError / returns empty on this NebulaGraph). The
+        // tag MUST be the correct one — FETCH PROP on the wrong tag returns EMPTY (not an error) —
+        // so derive it from the managedObjectId prefix (`Node:N12` -> tag `Node`, the objectType
+        // per the `<objectType>:<id>` scheme). Mirrors how getEdge() fetches by key.
         String objectType = objectTypeOf(managedObjectId);
         return sessions.execute(session -> {
             use(session);
-            // Resolve a vertex by its VID (== managedObjectId) via FETCH PROP. NebulaGraph does NOT
-            // support an `id(vertex) == ...` predicate inside a LOOKOP WHERE (it raises a
-            // SemanticError), so a single-vertex read MUST use FETCH PROP and validate the
-            // domain/snapshot scope in-app — exactly as getEdge does for a single edge. This keeps
-            // the read round-trip-consistent with what listSites/listNodes emit as the siteId/moid.
             String ngql = "FETCH PROP ON " + quoteTag(objectType) + " " + str(managedObjectId)
                     + " YIELD id(vertex) AS moid, properties(vertex).objectType AS ot, "
                     + "properties(vertex).domain AS dom, properties(vertex).snapshotId AS sid, "
@@ -127,12 +127,12 @@ public class NebulaGraphRepository implements GraphRepository {
             if (rs == null || rs.rowsSize() == 0) {
                 return Optional.empty();
             }
-            GraphVertex v = toVertex(rs.rowValues(0).values());
-            // Enforce the same domain + snapshot scope the LOOKUP-based reads apply.
-            if (!domain.equals(v.domain()) || !snapshotId.equals(v.snapshotId())) {
+            GraphVertex vertex = toVertex(rs.rowValues(0).values());
+            // Scope to the requested domain + snapshotId (post-filter, as getEdge does for snapshot).
+            if (!snapshotId.equals(vertex.snapshotId()) || !domain.equals(vertex.domain())) {
                 return Optional.empty();
             }
-            return Optional.of(v);
+            return Optional.of(vertex);
         });
     }
 
@@ -284,20 +284,21 @@ public class NebulaGraphRepository implements GraphRepository {
     // --- helpers (all inside the graph/ boundary) -----------------------------------------
 
     private String domainOf(Session session, String moid, String snapshotId) {
+        // #213: by-VID lookup via FETCH PROP (the wrong-tag fetch returns empty, so the tag is
+        // derived from the moid prefix). `LOOKUP ... WHERE id(vertex) == ...` is a SemanticError /
+        // returns empty on this NebulaGraph and must not be used for by-id resolution.
         String objectType = objectTypeOf(moid);
-        // FETCH PROP by VID (not a LOOKUP id(vertex) predicate, which NebulaGraph rejects); the
-        // snapshot scope is enforced in-app on the returned row.
         String ngql = "FETCH PROP ON " + quoteTag(objectType) + " " + str(moid)
-                + " YIELD properties(vertex).snapshotId AS sid, properties(vertex).domain AS dom;";
+                + " YIELD properties(vertex).domain AS dom, properties(vertex).snapshotId AS sid;";
         ResultSet rs = execQuietly(session, ngql);
         if (rs == null || rs.rowsSize() == 0) {
             return null;
         }
         List<ValueWrapper> row = rs.rowValues(0).values();
-        if (!snapshotId.equals(asString(row.get(0)))) {
+        if (!snapshotId.equals(asString(row.get(1)))) {
             return null;
         }
-        return asString(row.get(1));
+        return asString(row.get(0));
     }
 
     private GraphVertex toVertex(List<ValueWrapper> row) {
