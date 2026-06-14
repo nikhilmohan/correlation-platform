@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { Router } from '@angular/router';
 import { describe, expect, it } from 'vitest';
 import { IncidentDetailStore } from './incident-detail.store';
 import { IncidentDetailComponent } from './incident-detail.component';
