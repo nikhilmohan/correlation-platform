@@ -298,15 +298,17 @@ services:
     environment: &codebook-env
       DATABASE_URL: "postgresql+pg8000://correlation:correlation@postgres:5432/correlation"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
-      KNOWLEDGE_PROPAGATION_TEMPLATES_MODE: "real"
+      # codebook's IntegrationMode enum is UPPERCASE (MOCK|REAL) — distinct from trail-builder's
+      # lowercase ServiceMode and the simulator's lowercase Literal; values are per-service.
+      KNOWLEDGE_PROPAGATION_TEMPLATES_MODE: "REAL"
       KNOWLEDGE_PROPAGATION_TEMPLATES_URL: "http://knowledge:8080"
-      KNOWLEDGE_FAULT_ORIGINS_MODE: "real"
+      KNOWLEDGE_FAULT_ORIGINS_MODE: "REAL"
       KNOWLEDGE_FAULT_ORIGINS_URL: "http://knowledge:8080"
-      KNOWLEDGE_ALARM_TYPE_VOCABULARY_MODE: "real"
+      KNOWLEDGE_ALARM_TYPE_VOCABULARY_MODE: "REAL"
       KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL: "http://knowledge:8080"
-      TOPOLOGY_QUERY_MODE: "real"
+      TOPOLOGY_QUERY_MODE: "REAL"
       TOPOLOGY_QUERY_URL: "http://topology:8080"
-      TRAIL_BUILDER_MODE: "real"
+      TRAIL_BUILDER_MODE: "REAL"
       TRAIL_BUILDER_URL: "http://trail-builder:8000"
       LOG_LEVEL: "INFO"
     # default CMD = `python -m codebook_generator` (migrate + consumer loop), per the Dockerfile.
