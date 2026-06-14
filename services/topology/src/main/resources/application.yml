@@ -47,7 +47,7 @@ topology:
   ingest:
     max-file-bytes: ${TOPOLOGY_INGEST_MAX_FILE_BYTES:10485760}
   traversal:
-    max-depth: ${TOPOLOGY_TRAVERSAL_MAX_DEPTH:8}
+    max-depth: ${TOPOLOGY_TRAVERSAL_MAX_DEPTH:32}
   snapshot:
     retention: ${TOPOLOGY_SNAPSHOT_RETENTION:2}
   knowledge:
