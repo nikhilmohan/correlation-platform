@@ -6,6 +6,11 @@
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <!-- Runtime backend wiring. In the container this file is regenerated from environment
+         variables at startup (docker-entrypoint.sh); the same static bundle serves any backend
+         wiring with no rebuild. Loaded before the app bundle so window.__ACP_ENV__ is set at
+         boot. In dev/unit tests it is absent and the compiled mock-mode defaults apply. -->
+    <script src="env.js"></script>
   </head>
   <body>
     <app-root></app-root>
