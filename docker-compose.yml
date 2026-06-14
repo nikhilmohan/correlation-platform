@@ -160,8 +160,14 @@ services:
     depends_on:
       nebula-metad:
         condition: service_healthy
+      # storaged: service_STARTED, not service_healthy. storaged cannot become healthy until it
+      # is registered with metad via `ADD HOSTS`, and that registration is issued by the Topology
+      # Service THROUGH graphd. Gating graphd on storaged-healthy is therefore circular
+      # (graphd↜storaged-healthy↜ADD HOSTS↜topology↜graphd) and deadlocks on clean volumes —
+      # graphd only needs metad to serve nGQL; storaged just needs to be up on the network so the
+      # bootstrap can register it. Latent because reused volumes carried prior registration.
       nebula-storaged:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://nebula-graphd:19669/status >/dev/null || exit 1"]
       interval: 10s
