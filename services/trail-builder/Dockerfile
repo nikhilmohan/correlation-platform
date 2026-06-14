@@ -27,12 +27,13 @@ RUN python -m venv "$VIRTUAL_ENV"
 COPY libs/event-model/python /build/event-model
 RUN pip install /build/event-model
 
-# 2) Install the trail-builder package + its third-party deps from pyproject.
+# 2) Install the trail-builder package + its third-party deps from pyproject. The Alembic
+#    migrations ship INSIDE the package (src/trailbuilder/migrations, declared as package-data),
+#    so they are installed into the venv with the package and resolved at runtime via
+#    importlib.resources — no separate copy needed.
 COPY services/trail-builder/pyproject.toml /build/trail-builder/pyproject.toml
 COPY services/trail-builder/README.md /build/trail-builder/README.md
 COPY services/trail-builder/src /build/trail-builder/src
-COPY services/trail-builder/migrations /build/trail-builder/migrations
-COPY services/trail-builder/alembic.ini /build/trail-builder/alembic.ini
 RUN pip install /build/trail-builder
 
 # ---- runtime ---------------------------------------------------------------------------
@@ -48,9 +49,8 @@ RUN useradd --create-home --uid 10001 trail
 WORKDIR /app
 
 COPY --from=builder /opt/venv /opt/venv
-# Alembic migrations are run by the service runtime on startup; ship them with the image.
-COPY --from=builder --chown=trail:trail /build/trail-builder/migrations /app/migrations
-COPY --from=builder --chown=trail:trail /build/trail-builder/alembic.ini /app/alembic.ini
+# Alembic migrations ship INSIDE the installed package (site-packages/trailbuilder/migrations)
+# and are resolved at startup via importlib.resources — no separate /app copy needed.
 
 USER trail
 
