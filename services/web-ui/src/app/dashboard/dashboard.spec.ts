@@ -22,7 +22,7 @@ const ROUTES = [
 
 function configure() {
   TestBed.configureTestingModule({
-    providers: [provideRouter(ROUTES), provideHttpClient(withInterceptors([mockBackendInterceptor]))],
+    providers: [DashboardStore, provideRouter(ROUTES), provideHttpClient(withInterceptors([mockBackendInterceptor]))],
   });
 }
 

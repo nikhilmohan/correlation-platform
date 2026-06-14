@@ -110,7 +110,6 @@ export class AttributeDetailPanelComponent {
       key,
       label: labels[key] ?? key,
       value: this.stringify(value),
-      // eslint-disable-next-line no-prototype-builtins
       wellKnown: Object.prototype.hasOwnProperty.call(labels, key),
     }));
   }
