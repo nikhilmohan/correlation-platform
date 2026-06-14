@@ -120,15 +120,32 @@ class NebulaGraphRepositoryUnitTest {
     }
 
     @Test
-    void getNodeScopesByDomainSnapshotAndIdUsingObjectTypeTag() throws Exception {
+    void getNodeFetchesByVidNotAnIdLookupPredicate() throws Exception {
+        // Regression for the P1 sites/{siteId}/objects 404: NebulaGraph rejects an `id(vertex) == …`
+        // predicate inside a LOOKUP WHERE (SemanticError), which used to be swallowed as "empty" →
+        // 404 for a VID that listSites had just emitted. getNode must resolve a single vertex by VID
+        // via FETCH PROP and apply the domain/snapshot scope in-app — never via a LOOKUP id filter.
         recordAllAsEmpty();
         repo.getNode("IPLink:L1", "core-ip", "SNAP-1");
-        String lookup = lastLookup();
-        // TAG is derived from the managedObjectId prefix (objectType).
-        assertThat(lookup).contains("LOOKUP ON `IPLink`");
-        assertThat(lookup).contains("`IPLink`.domain == \"core-ip\"");
-        assertThat(lookup).contains("`IPLink`.snapshotId == \"SNAP-1\"");
-        assertThat(lookup).contains("id(vertex) == \"IPLink:L1\"");
+        String fetch = executed.stream().filter(q -> q.startsWith("FETCH PROP")).findFirst()
+                .orElseThrow();
+        // TAG is derived from the managedObjectId prefix (objectType); the VID is the moid verbatim.
+        assertThat(fetch).contains("FETCH PROP ON `IPLink` \"IPLink:L1\"");
+        assertThat(fetch).contains("id(vertex) AS moid");
+        assertThat(fetch).contains("properties(vertex).domain AS dom");
+        assertThat(fetch).contains("properties(vertex).snapshotId AS sid");
+        // The buggy LOOKUP id(vertex) predicate must never be issued for a single-vertex read.
+        assertThat(executed).noneMatch(q -> q.startsWith("LOOKUP ON") && q.contains("id(vertex) =="));
+    }
+
+    @Test
+    void getNodeAppliesDomainAndSnapshotScopeInAppOnTheFetchedRow() throws Exception {
+        // FETCH PROP returns the vertex regardless of scope; the repository must reject a row whose
+        // domain or snapshotId does not match the requested scope (parity with the old LOOKUP WHERE).
+        ResultSet rs = rowsOf(List.of(str("IPLink:L1"), str("IPLink"), str("metro"),
+                str("SNAP-OTHER"), str("L1"), str("{}")));
+        when(session.execute(anyString())).thenReturn(rs);
+        assertThat(repo.getNode("IPLink:L1", "core-ip", "SNAP-1")).isEmpty(); // wrong domain + snapshot
     }
 
     @Test
@@ -243,11 +260,11 @@ class NebulaGraphRepositoryUnitTest {
 
     @Test
     void objectsAtSiteTraversesLocatedAtReverselyThenResolvesEachDevice() throws Exception {
-        // GO ... LOCATED_AT REVERSELY yields one device; then getNode (LOOKUP) resolves it.
+        // GO ... LOCATED_AT REVERSELY yields one device; then getNode (FETCH PROP) resolves it.
         ResultSet deviceRs = rowsOf(List.of(str("Node:PE1")));
         ResultSet nodeRs = rowsOf(List.of(str("Node:PE1"), str("Node"), str("core-ip"),
                 str("SNAP-1"), str("PE1"), str("{}")));
-        routeByPrefix(Map.of("GO FROM", deviceRs, "LOOKUP ON", nodeRs));
+        routeByPrefix(Map.of("GO FROM", deviceRs, "FETCH PROP", nodeRs));
 
         List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
         assertThat(objects).extracting(GraphVertex::managedObjectId).containsExactly("Node:PE1");
@@ -256,11 +273,11 @@ class NebulaGraphRepositoryUnitTest {
 
     @Test
     void traverseResolvesEachReachedVidIntoTypedVertex() throws Exception {
-        // GO 1 TO n yields reached vid IPLink:L1; the subsequent getNode (LOOKUP) resolves it.
+        // GO 1 TO n yields reached vid IPLink:L1; the subsequent getNode (FETCH PROP) resolves it.
         ResultSet reachedRs = rowsOf(List.of(str("IPLink:L1")));
         ResultSet nodeRs = rowsOf(List.of(str("IPLink:L1"), str("IPLink"), str("core-ip"),
                 str("SNAP-1"), str("L1"), str("{}")));
-        routeByPrefix(Map.of("GO 1 TO", reachedRs, "LOOKUP ON", nodeRs));
+        routeByPrefix(Map.of("GO 1 TO", reachedRs, "FETCH PROP", nodeRs));
 
         List<GraphVertex> reached = repo.traverse("Node:PE1", List.of("RIDES_ON"), 2,
                 "core-ip", "SNAP-1", false);
