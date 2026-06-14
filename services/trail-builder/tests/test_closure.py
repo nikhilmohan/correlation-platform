@@ -8,6 +8,9 @@ assertion INT-IGPAREA, not these unit tests).
 
 from __future__ import annotations
 
+import pytest
+
+from fixtures import realistic_coreip_slice
 from trailbuilder.closure import TrailClosure
 from trailbuilder.models import Boundary, GraphEdge, GraphNode, GraphSlice, SrlgRule, TrailPolicy
 
@@ -16,6 +19,38 @@ POLICY = TrailPolicy(
     boundary=Boundary(type="igp-area", attribute_key="igpArea"),
     srlg_rule=SrlgRule(mode="union-members", srlg_edge_type="MEMBER_OF"),
 )
+
+# Policy matching the realistic Simulator-shaped fixture (adds CONTAINS for the
+# Node -> LineCard edge; everything else is the same dependency-edge set).
+REALISTIC_POLICY = TrailPolicy(
+    closure_edge_types=(
+        "CONTAINS",
+        "HOSTS",
+        "TERMINATES",
+        "RIDES_ON",
+        "ADJACENCY_OVER",
+        "TRAVERSES",
+    ),
+    boundary=Boundary(type="igp-area", attribute_key="igpArea"),
+    srlg_rule=SrlgRule(mode="union-members", srlg_edge_type="MEMBER_OF"),
+)
+
+
+def _connected_component_size(slice_: GraphSlice, policy: TrailPolicy) -> int:
+    """Size of the largest connected component over the closure edge view.
+
+    This is the whole-network membership the buggy closure collapses to; a correct
+    area-bounded build must produce every trail strictly smaller than this.
+    """
+    import networkx as nx
+
+    g = nx.Graph()
+    g.add_nodes_from(slice_.nodes)
+    closure = set(policy.closure_edge_types)
+    for e in slice_.edges:
+        if e.relation in closure and e.src in slice_.nodes and e.dst in slice_.nodes:
+            g.add_edge(e.src, e.dst)
+    return max((len(c) for c in nx.connected_components(g)), default=0)
 
 
 def _slice(domain: str = "core-ip", snapshot_id: str = "snap-1") -> GraphSlice:
@@ -129,6 +164,83 @@ def test_trail_includes_interface_between_port_and_iplink() -> None:
     ]
     assert with_iface, "expected a trail containing Port, Interface and IPLink together"
     assert any("Interface:" in m for t in with_iface for m in t.members)
+
+
+def test_area_less_mesh_does_not_fuse_areas() -> None:
+    """AC-2 (#225 reproduction): a realistic full topology whose areas are joined
+
+    ONLY through the area-less IPLink/SRLG/FiberSpan/LSP connector mesh must yield
+    multiple area-bounded trails and NO whole-network trail.
+
+    This is the unit-level reproduction of the round-8 gate failure. It FAILS on
+    the old single-``seed_area`` closure (which fuses the whole graph into one
+    181-member trail) and PASSES only after the area-component fix.
+    """
+    s = realistic_coreip_slice(node_count=9, area_count=3)
+    component_size = _connected_component_size(s, REALISTIC_POLICY)
+
+    trails = TrailClosure().compute(s, REALISTIC_POLICY)
+    assert trails, "expected at least one trail"
+
+    # (a) No trail spans two IGP areas.
+    for t in trails:
+        areas = {s.nodes[m].igp_area("igpArea") for m in t.members if m in s.nodes}
+        areas.discard(None)
+        assert len(areas) <= 1, f"trail {t.trail_id} spans areas {areas}"
+
+    # (b) No whole-network trail: the largest trail is strictly smaller than the
+    #     whole connected dependency component (the exact round-8 catch).
+    largest = max(len(t.members) for t in trails)
+    assert largest < component_size, (
+        f"whole-network trail detected: largest trail {largest} "
+        f">= connected component {component_size}"
+    )
+
+    # (c) The bound actually produced per-area trails (more than one area present).
+    distinct_areas = {t.igp_area for t in trails if t.igp_area is not None}
+    assert len(distinct_areas) >= 2, f"expected multiple area-bounded trails, got {distinct_areas}"
+
+
+@pytest.mark.parametrize("seed_type", ["FiberSpan", "IPLink"])
+def test_area_less_seed_yields_per_area_trails_not_whole_network(seed_type: str) -> None:
+    """An area-less seed (FiberSpan / IPLink) yields one bounded set per area it
+
+    touches — never one whole-network set. Directly covers root-cause defect
+    (c)(1): the old closure skipped pruning entirely for an area-less seed, so a
+    FiberSpan/IPLink seed walked the whole connected component (the 181-member fuse).
+
+    Asserted on the closure produced *from that specific area-less seed* (the
+    deterministic ``trail_id`` is content-derived, so after dedup an identical
+    member set may be attributed to a different representative seed — what matters
+    is that each area-less seed's own bounded set is single-area and sub-component).
+    """
+    s = realistic_coreip_slice(node_count=9, area_count=3)
+    component_size = _connected_component_size(s, REALISTIC_POLICY)
+    closure = TrailClosure()
+    graph = closure._build_graph(s, REALISTIC_POLICY)
+
+    seeds = [n for n in graph.nodes if n.startswith(f"{seed_type}:")]
+    assert seeds, f"expected at least one {seed_type} seed object in the fixture"
+
+    for seed in seeds:
+        bounded = closure._bounded_closures(graph, seed, igp_key="igpArea")
+        # Each area-less seed produces >= 1 bounded set, every one single-area and
+        # strictly smaller than the whole connected component (never whole-network).
+        assert bounded, f"{seed} produced no bounded set"
+        for members, area in bounded:
+            assert area is not None, f"{seed} bounded set has no resolved area"
+            member_areas = {s.nodes[m].igp_area("igpArea") for m in members if m in s.nodes}
+            member_areas.discard(None)
+            assert member_areas <= {area}, f"{seed} set spans areas {member_areas}, tagged {area}"
+            assert len(members) < component_size, (
+                f"{seed_type} seed {seed} produced a whole-network set: "
+                f"{len(members)} >= {component_size}"
+            )
+
+    # And end-to-end: the built trail set is multiple, area-bounded, none whole-network.
+    trails = closure.compute(s, REALISTIC_POLICY)
+    assert len(trails) >= 2
+    assert all(len(t.members) < component_size for t in trails)
 
 
 def test_no_boundary_policy_does_not_prune() -> None:
