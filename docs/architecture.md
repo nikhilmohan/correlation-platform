@@ -155,8 +155,22 @@ these conventions so services compose without collision:
   `CREATE SCHEMA IF NOT EXISTS <svc-schema>` is each service's own first migration step (idempotent).
 - **NebulaGraph — Topology only.** Only the Topology Service connects (nGQL, port 9669); it owns the
   graph SPACE + tag/edge schema and bootstraps them idempotently on startup (`CREATE SPACE/TAG/EDGE
-  IF NOT EXISTS` + the `ADD HOSTS` storaged-registration step). No other service receives NebulaGraph
-  credentials/endpoints.
+  IF NOT EXISTS` + the `ADD HOSTS` storaged-registration step, which **polls until the storaged host
+  is `Status ONLINE`** — not merely listed — before `CREATE SPACE`, per the Startup-Robustness
+  Standard). No other service receives NebulaGraph credentials/endpoints.
+- **Startup robustness — every service (the platform comes up reliably in a bounded window).** The
+  platform MUST bring infra + every service up **consistently** and within a **predictable, bounded
+  time window** from **clean volumes** (`docker compose down -v`). Every service's startup MUST: wait
+  for each dependency to be **actually READY** by a true-readiness predicate (migration applied /
+  Kafka reachable + topics present / NebulaGraph storaged `ONLINE` + space usable / an HTTP dep's
+  `/health` 200 — never "container up" or "a row exists"); use **bounded retry with backoff and an
+  explicit configurable deadline** (predictable window, not unbounded); be **self-healing** (a failed
+  bootstrap is re-attempted in the background until ready or deadline — readiness **never latches DOWN
+  forever** and reflects true current state); be **idempotent** (re-run = no-op); and take all
+  timeouts/retries/deadline as **config from env** (no hard-coded thresholds). Each service ships a
+  **clean-volume cold-start test** (real dependencies, empty volumes) that asserts readiness within
+  the deadline — a mock/stub unit test cannot catch this class. Full normative detail:
+  **`docs/startup-robustness-standard.md`**.
 - **Kafka — explicit topic provisioning, no auto-create.** `KAFKA_AUTO_CREATE_TOPICS_ENABLE` is
   **off**. A one-shot **`kafka-init`** Compose job creates the full topic catalog (the topics listed
   under "Kafka topics" + `*.dlq`, with their partition/retention settings) **before** services

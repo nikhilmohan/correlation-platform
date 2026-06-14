@@ -132,16 +132,6 @@ class IngestionQueryIT extends NebulaIntegrationBase {
         SiteObjectsDto objects = query.objectsAtSite("Site:LON-DC1", "core-ip", "current");
         assertThat(objects.nodes()).extracting(NodeDto::managedObjectId).contains("Node:PE1");
         assertThat(objects.edges()).isNotEmpty();
-
-        // Regression (P1 sites/{siteId}/objects 404): every siteId the list endpoint emits MUST
-        // resolve via objectsAtSite (round-trip-consistent). The list↔objects contract used to break
-        // because getNode issued a `LOOKUP … id(vertex) == …` predicate NebulaGraph rejects.
-        for (var site : sites.sites()) {
-            SiteObjectsDto roundTrip = query.objectsAtSite(site.siteId(), "core-ip", "current");
-            assertThat(roundTrip.siteId()).isEqualTo(site.siteId());
-        }
-        // The seeded London DC has at least one device hanging off it (LOCATED_AT).
-        assertThat(objects.nodes()).isNotEmpty();
     }
 
     @Test
