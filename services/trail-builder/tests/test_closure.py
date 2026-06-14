@@ -243,6 +243,147 @@ def test_area_less_seed_yields_per_area_trails_not_whole_network(seed_type: str)
     assert all(len(t.members) < component_size for t in trails)
 
 
+def test_no_degenerate_srlg_only_single_member_trail() -> None:
+    """M1: a pure risk-group (SRLG) node is never a standalone 1-member trail.
+
+    An ``SRLG`` is an area-less fate-sharing GROUP node with no closure-edge
+    neighbours (its only edges are ``MEMBER_OF``, not in the dependency-edge set).
+    Seeding the closure from it yields a useless ``('SRLG:*',)`` 1-member trail
+    that survives dedup — the 7-9 degenerate ``SRLG:*``-only trails the round-8
+    gate produced. This asserts there are NONE, while SRLG groups still co-appear
+    as MEMBERS of real multi-member area-bounded trails via the SRLG union.
+
+    FAILS on the PR-#230 closure (which seeds every node, incl. SRLG); PASSES once
+    risk-group object types are excluded from the seed loop.
+    """
+    s = realistic_coreip_slice(node_count=9, area_count=3)
+    trails = TrailClosure().compute(s, REALISTIC_POLICY)
+
+    # (a) No standalone 1-member SRLG-only trail.
+    degenerate = [
+        t for t in trails if t.member_count == 1 and all(m.startswith("SRLG:") for m in t.members)
+    ]
+    assert (
+        not degenerate
+    ), f"degenerate SRLG-only 1-member trails: {[t.members for t in degenerate]}"
+
+    # (b) SRLG groups still co-trail: each SRLG group node appears as a member of
+    #     at least one real (multi-member, area-bounded) trail via the union.
+    srlg_nodes = {mo for mo in s.nodes if mo.startswith("SRLG:")}
+    assert srlg_nodes, "fixture must contain SRLG group nodes"
+    srlg_members = {m for t in trails if t.member_count > 1 for m in t.members if m in srlg_nodes}
+    assert srlg_members == srlg_nodes, (
+        f"every SRLG group must co-appear inside a multi-member trail; "
+        f"missing {sorted(srlg_nodes - srlg_members)}"
+    )
+
+
+def test_srlg_node_never_seeds_a_trivial_trail_focused() -> None:
+    """M1 (focused): the SRLG group node co-trails its links but never seeds alone.
+
+    A minimal two-link/one-group slice: both links are reachable from their own
+    devices, and only the SRLG union co-trails them. The SRLG group node must end
+    up as a MEMBER of the co-trailed trail(s) and must NOT appear as its own
+    1-member trail.
+    """
+    s = _slice()
+    _add(s, "IPLink:L1", "IPLink")
+    _add(s, "IPLink:L2", "IPLink")
+    _add(s, "SRLG:G1", "SRLG")
+    _add(s, "Node:N1", "Node", igp_area="area-0")
+    _add(s, "Node:N2", "Node", igp_area="area-0")
+    s.add_edge(GraphEdge("Node:N1", "IPLink:L1", "TRAVERSES"))
+    s.add_edge(GraphEdge("Node:N2", "IPLink:L2", "TRAVERSES"))
+    s.add_edge(GraphEdge("IPLink:L1", "SRLG:G1", "MEMBER_OF"))
+    s.add_edge(GraphEdge("IPLink:L2", "SRLG:G1", "MEMBER_OF"))
+
+    trails = TrailClosure().compute(s, POLICY)
+    assert not [
+        t for t in trails if t.members == ("SRLG:G1",)
+    ], "SRLG must not seed a 1-member trail"
+    assert any(
+        "SRLG:G1" in t.members and t.member_count > 1 for t in trails
+    ), "SRLG group must still co-appear as a member of a real trail"
+
+
+def test_unrecognized_boundary_type_falls_back_unbounded() -> None:
+    """m3: an UNRECOGNIZED ``policy.boundary.type`` falls back to a safe unbounded
+
+    whole-component closure — no crash. This is the Phase-B extension-point seam:
+    only ``"igp-area"`` is implemented; any other boundary type (e.g. ``"srlg"`` or
+    ``"service"``) must not raise and must close the whole connected component
+    rather than dropping the build.
+    """
+    for boundary_type in ("srlg", "service", "unknown-future-strategy"):
+        policy = TrailPolicy(
+            closure_edge_types=("ADJACENCY_OVER",),
+            boundary=Boundary(type=boundary_type, attribute_key="igpArea"),
+            srlg_rule=SrlgRule(mode="none"),
+        )
+        s = _slice()
+        _add(s, "Node:A", "Node", igp_area="area-0")
+        _add(s, "Node:B", "Node", igp_area="area-1")
+        s.add_edge(GraphEdge("Node:A", "Node:B", "ADJACENCY_OVER"))
+
+        trails = TrailClosure().compute(s, policy)  # must not raise
+
+        # Unbounded fallback: the whole connected component is one trail (areas
+        # are NOT pruned because the boundary strategy is unrecognized), and the
+        # trail carries no igpArea (the area bound did not fire).
+        assert any(
+            {"Node:A", "Node:B"} <= set(t.members) for t in trails
+        ), f"boundary.type={boundary_type!r} must fall back to an unbounded whole-component trail"
+        assert all(
+            t.igp_area is None for t in trails
+        ), f"boundary.type={boundary_type!r} is unrecognized; no area should be tagged"
+
+
+def test_srlg_union_does_not_fuse_two_areas() -> None:
+    """m1: an SRLG union across the area-less mesh does NOT fuse two areas'
+
+    area-bearing nodes into one trail. Two devices in DIFFERENT IGP areas each
+    TRAVERSE one of two links that share an SRLG group. The union must co-trail
+    the (area-less) co-member links + the group node, but must NEVER drag a
+    different area's area-bearing Node into the trail. The result is TWO
+    area-bounded trails (one per area), each carrying both links + the group, and
+    NO single trail containing both area-bearing devices.
+    """
+    s = _slice()
+    _add(s, "IPLink:L1", "IPLink")  # area-less
+    _add(s, "IPLink:L2", "IPLink")  # area-less
+    _add(s, "SRLG:G1", "SRLG")  # area-less group
+    _add(s, "Node:N1", "Node", igp_area="area-0")  # area-bearing
+    _add(s, "Node:N2", "Node", igp_area="area-1")  # area-bearing, DIFFERENT area
+    s.add_edge(GraphEdge("Node:N1", "IPLink:L1", "TRAVERSES"))
+    s.add_edge(GraphEdge("Node:N2", "IPLink:L2", "TRAVERSES"))
+    s.add_edge(GraphEdge("IPLink:L1", "SRLG:G1", "MEMBER_OF"))
+    s.add_edge(GraphEdge("IPLink:L2", "SRLG:G1", "MEMBER_OF"))
+
+    trails = TrailClosure().compute(s, POLICY)
+
+    # No trail fuses the two areas' area-bearing nodes.
+    assert not [
+        t for t in trails if "Node:N1" in t.members and "Node:N2" in t.members
+    ], "SRLG union must not fuse two areas' area-bearing nodes into one trail"
+
+    # No trail spans two IGP areas (the global AC-2 invariant holds through the union).
+    for t in trails:
+        areas = {s.nodes[m].igp_area("igpArea") for m in t.members if m in s.nodes}
+        areas.discard(None)
+        assert len(areas) <= 1, f"trail {t.trail_id} spans areas {areas}"
+
+    # The fate-shared links still co-trail (AC-3) — both links land together in
+    # each area-bounded trail, alongside the group node.
+    co_trailed = [t for t in trails if {"IPLink:L1", "IPLink:L2", "SRLG:G1"} <= set(t.members)]
+    assert (
+        len(co_trailed) >= 2
+    ), "both SRLG-co-member links must co-trail in each area-bounded trail"
+    assert {t.igp_area for t in co_trailed} == {
+        "area-0",
+        "area-1",
+    }, "the shared SRLG links must appear in BOTH areas' trails (overlap), not one fused trail"
+
+
 def test_no_boundary_policy_does_not_prune() -> None:
     """A policy with no IGP-area boundary closes the whole connected component."""
     policy = TrailPolicy(

@@ -18,6 +18,14 @@ import networkx as nx
 
 from .models import GraphSlice, Trail, TrailPolicy
 
+# Object types that are pure risk GROUPS, not fault-capable seed objects. An
+# ``SRLG`` is an area-less fate-sharing group node: it carries no ``igpArea`` and
+# has no closure-edge neighbours (its only edges are the ``MEMBER_OF`` links that
+# are NOT in the dependency-edge set), so seeding from it yields a useless
+# 1-member ``SRLG:*``-only trail. It must still appear as a MEMBER of real trails
+# via the SRLG co-trailing union — it is just never a standalone SEED.
+RISK_GROUP_OBJECT_TYPES: frozenset[str] = frozenset({"SRLG"})
+
 
 class TrailClosure:
     """Pure, in-memory trail computation over a fetched graph slice."""
@@ -42,6 +50,13 @@ class TrailClosure:
         areas: list[str | None] = []
         seeds: list[str] = []
         for seed in sorted(graph.nodes):
+            # Seed only from fault-capable objects. Pure risk-GROUP nodes (SRLG)
+            # are never standalone seeds — seeding from them yields a degenerate
+            # 1-member ``SRLG:*``-only trail (they have no closure-edge
+            # neighbours). They still become MEMBERS of real trails via the SRLG
+            # co-trailing union in step 2.
+            if graph.nodes[seed].get("object_type") in RISK_GROUP_OBJECT_TYPES:
+                continue
             for members, area in self._bounded_closures(graph, seed, igp_key):
                 member_sets.append(frozenset(members))
                 areas.append(area)
