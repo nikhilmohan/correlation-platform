@@ -1,0 +1,7 @@
+# Playwright E2E artefacts (the suite source lives in e2e/; these are generated outputs).
+e2e/.artifacts/
+e2e/.report/
+test-results/
+playwright-report/
+reports/e2e/
+.last-run.json
