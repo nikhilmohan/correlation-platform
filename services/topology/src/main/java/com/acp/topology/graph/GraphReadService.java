@@ -57,6 +57,23 @@ public class GraphReadService {
                 .stream().map(GraphReadService::toNode).toList();
     }
 
+    /**
+     * #252: the typed directed edges of the traversal closure — every edge whose both endpoints are
+     * in the closure node set ({@code start} + the reached node ids) AND whose relation is one of
+     * {@code relations}. Lets consumers (codebook forward-propagation) walk the cascade. An edge-less
+     * closure returns an empty (never null) list.
+     */
+    public List<EdgeDto> traverseEdges(String start, List<NodeDto> reached, List<String> relations,
+            String domain, String snapshotId) {
+        List<String> closure = new ArrayList<>();
+        closure.add(start);
+        for (NodeDto n : reached) {
+            closure.add(n.managedObjectId());
+        }
+        return repository.edgesAmong(closure, relations, domain, snapshotId).stream()
+                .map(GraphReadService::toEdge).toList();
+    }
+
     /** Sites for a domain, returned as the frozen flat {@link SiteDto} (geo lifted out of attrs). */
     public List<SiteDto> listSites(String domain, String snapshotId) {
         return repository.listNodes("Site", domain, snapshotId).stream()
