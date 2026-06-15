@@ -48,29 +48,92 @@ no Kafka topic or event-model change; `TrailsBuiltEvent` is unchanged.
   triggering `topology.changed` event** (the in-scope snapshot), consistent with Topology's
   current/previous `snapshotId` model — never re-resolved by a Topology lookup.
 
-**MVP-achievability fix (this revision) — exercise the IGP-area-bounded closure on real data.**
-A **data-only, no-contract-change** fix that closes the cross-service gap the MVP-achievability
-gate flagged (`docs/mvp-achievability.md`, P1 row "Trail Builder builds trails…"): the
-load-bearing IGP-area prune in trail closure (step 4 below — prune members whose `igpArea`
-differs from the seed area) was **inert** because no P1 producer populated `igpArea`, so closure
-spanned the **entire connected dependency component** (coarse, whole-network trails that violate
-the no-whole-network-trail property **AC-2** on real data), and the unit tests passed only
-because their fixtures **injected** `igpArea` — masking the gap. The fix is upstream and now
-landed: **Knowledge** added `igpArea` to the `core-ip/attributeCatalogue/default` deviceKeys and
-its `trailPolicy/default` bounds closure on `boundary` of type `igp-area` with `attributeKey`
-`igpArea` (`design/knowledge-mvp-grounding`); the **Simulator** emits a grounded
-per-`Node`/per-`Interface` `igpArea` (one `area-0` backbone plus numbered edge areas,
-`IGP_AREA_COUNT` default 3, `design/simulator-mvp-grounding`) carried in each node's `attributes`.
-The **Trail Builder side** of this revision: (a) confirms and states that `TrailClosure` reads
-`igpArea` from the Topology node attributes (`NodeDto.attributes.igpArea`) per the trail-policy
-`igpArea` boundary key and step 4 prunes cross-area members — and that this **now actually fires**
-because the data carries `igpArea` (previously inert); and (b) adds an **integration assertion
-that runs on Simulator-generated topology** (grounded `igpArea` on real nodes — **not**
-`igpArea`-injected unit fixtures) so the area-bound and AC-2 hold on a real multi-area topology
-and the gap cannot silently regress (Test plan, integration assertion **INT-IGPAREA**; E2E
-scenario 15). **No Kafka topic or event-model change**: `igpArea` is a descriptive node attribute
-carried within the already-frozen `NodeDto.attributes` map; `TrailsBuiltEvent` and every topic
-are unchanged.
+**IGP-area-bounded-closure fix (this revision — gate-blocker #225). Supersedes the prior
+"MVP-achievability fix" diagnosis, which was wrong.** The round-8 P1 live gate
+(`reports/integration/20260614T172551Z.md`) proved the prior diagnosis incorrect: with `igpArea`
+**fully populated on real data** (`{area-0:8, area-1:6, area-2:6}` on 20 Nodes), Trail Builder
+still produced **one 181-member whole-network trail** (seed `FiberSpan:F-N0_N1`, spanning all 3
+IGP areas, `igp_area`=NULL) plus 9 trivial 1-member SRLG trails. So the AC-2 no-whole-network-trail
+guarantee still FAILS — the prune did not fire — even though the data dimension is real. The prior
+revision's claim that the fix was purely upstream (Knowledge `attributeCatalogue` + Simulator emit)
+and that "Trail Builder's closure already reads `igpArea` … the only missing piece was a test" is
+**false**: the bug is in the **closure algorithm itself**, and its INT-IGPAREA "integration
+assertion" was **never implemented as a runnable test** (it lives only in design prose + a
+`test_closure.py` docstring) — so it never ran on real `igpArea`-bearing data and could not have
+caught this.
+
+**Pinned root cause (file:line evidence across the topology↔trail-builder seam).** Data flows
+correctly end-to-end; the break is entirely in the closure's area-bounding semantics:
+
+- **(a) Topology returns attributes on list/neighbors — NOT the cause.**
+  `services/topology/src/main/java/com/acp/topology/graph/NebulaGraphRepository.java` `listNodes`
+  (the `LOOKUP … YIELD … attributes AS attrs`) and `getNode` (`#213` `FETCH PROP … attributes AS
+  attrs`) both select the `attributes` JSON property and parse it (`parseAttrs` → `toVertex`);
+  `GraphReadService.toNode` maps `v.attributes()` onto `NodeDto`. `neighbors` resolves each
+  neighbour via `getNode`, so neighbour DTOs also carry `attributes`. `igpArea` is stored **inside**
+  the node `attributes` map by the Simulator
+  (`services/simulator/.../coreip/topology_model.py` `_device_attrs` sets `"igpArea": igp_area`
+  on each `Node`, and the `Interface` records set `"igpArea": node_area`) and is carried verbatim
+  through `LiftingService.lift` → `INSERT VERTEX … attributes` → `parseAttrs`. So `igpArea` IS in
+  `NodeDto.attributes` on list/neighbors responses. Not the break.
+- **(b) Trail Builder's client/DTO preserves attributes — NOT the cause.**
+  `services/trail-builder/src/trailbuilder/clients/topology_client.py` `_node_from_dto` copies
+  `attributes=dict(dto.get("attributes") or {})` onto `GraphNode`; `closure._build_graph` sets the
+  nx node's `igp_area` via `node.igp_area(policy.boundary.attribute_key)` which reads
+  `attributes["igpArea"]` (`models.py` `GraphNode.igp_area`). So the grounded `igpArea` reaches the
+  closure graph for every area-bearing node. Not the break.
+- **(c) THE BUG — the closure's area-bound leaks across areas, and disables itself for area-less
+  seeds** (`services/trail-builder/src/trailbuilder/closure.py` `_bounded_closure`, lines ~77-93).
+  Two distinct defects, both rooted in the same wrong assumption that *only area-bearing nodes
+  matter*:
+  1. **Area-less seed → no prune at all.** `seed_area = graph.nodes[seed].get("igp_area")` is
+     `None` for any area-less seed type (FiberSpan, LSP, IPLink, IGPAdjacency, VPNService, SRLG —
+     the Simulator only puts `igpArea` on `Node` and `Interface`). The guard
+     `if igp_key is not None and seed_area is not None:` then **skips pruning entirely**, so a
+     `FiberSpan`-seeded closure walks the whole connected component → the 181-member whole-network
+     trail observed in the gate. `FiberSpan` is an explicit seed type (`build_service.py`
+     `SEED_OBJECT_TYPES`) and the spec lists "Fiber" as a seed — so this path is reached every
+     build.
+  2. **Area-less neighbours are never pruned, and they form a network-wide bridge.** Even from an
+     **area-bearing** seed (e.g. `Node:N0` in area-0) the prune only drops a neighbour when
+     `n_area is not None and n_area != seed_area`; an area-less neighbour (LineCard/Port/IPLink/
+     FiberSpan/LSP/IGPAdjacency/SRLG) is **always kept**. In the real Core-IP graph these area-less
+     objects form a **fully-connected mesh spanning all areas**: `IPLink:N0_N1 –MEMBER_OF→
+     SRLG:SRLG-0 –MEMBER_OF→ IPLink:N1_N2 –MEMBER_OF→ SRLG:SRLG-1 → IPLink:N2_N3 …` plus the
+     FiberSpan/IGPAdjacency/LSP/VPN layer riding each link. Once an area-0 seed's closure descends
+     into this area-less mesh it reaches every area-less object network-wide; the SRLG-union step
+     then merges these per-seed sets, and dedup collapses them — which is exactly why even the
+     Node-seeded builds produced no area-bounded trails and everything fused into the one giant
+     trail in the gate. The cross-area **interfaces/nodes** are pruned correctly, but pruning the
+     area-bearing endpoints while keeping the area-less connectors that join them does not bound
+     the trail.
+
+**The fix (owning service: trail-builder only; no other service changes).** Replace the
+"prune cross-area neighbour" semantics with **area-component bounding** that also bounds the
+area-less mesh and resolves the area-less-seed semantics — see the revised Algorithm logical flow
+(step 4) and Design alternatives. Briefly: (i) **derive each trail's area from the area-bearing
+objects it reaches**, not from the seed's own (possibly absent) area; (ii) **do not allow a closure
+to cross from one area's objects to another's through area-less connectors** — an area-less object
+is admitted to a trail only as a connector *within* a single area's reachable set (a shared area-less
+object that legitimately rides two areas appears in BOTH areas' trails as overlap, never fusing them
+into one); (iii) an **area-less seed (FiberSpan/LSP/IPLink) yields one trail per area it touches**,
+bounded to that area's objects — never a whole-network trail. This makes AC-2 hold by construction
+on the real graph. **No contract change**: `igpArea` rides inside the already-frozen
+`NodeDto.attributes` map; the Topology query API, `TrailsBuiltEvent`, and every topic are unchanged.
+
+**Why the unit tests masked it (the present-but-mock-masking lesson).** `tests/test_closure.py`
+runs the closure on **tiny hand-built fixtures** where every cross-area path is a **direct edge
+between two area-bearing Nodes** (`test_no_trail_spans_two_igp_areas`: `Node:A area-0 –ADJACENCY_OVER→
+Node:B area-0 –ADJACENCY_OVER→ Node:C area-1`). The prune fires there because the cross-area
+neighbour (`Node:C`) carries `igpArea`. The fixtures **never reproduce the real-data shape** where
+areas are joined only through an **area-less connector mesh** (IPLink/SRLG/FiberSpan), so they
+cannot exercise defect (c)(2); and no fixture uses an **area-less seed**, so they cannot exercise
+(c)(1). The "INT-IGPAREA integration assertion" that was supposed to cover real data was **never
+coded** — it exists only as design text and a docstring. Net: the bug was *present but untested* on
+realistic topology, and a green unit suite gave false confidence. This revision (1) **adds a real
+unit test on a realistic full-topology fixture** that mirrors the Simulator's area-less-mesh shape
+and **fails on the current closure**, and (2) **implements** INT-IGPAREA as an actual integration
+test on Simulator-generated, `igpArea`-bearing topology — both detailed in the Test plan.
 
 ## Stack
 
@@ -103,7 +166,7 @@ Every spec Task (1–8) is realized below; no task is dropped or re-scoped.
 | **2. React to `knowledge.updated` for trail-policy changes.** | `kafka_consumer.KnowledgeUpdatedConsumer` decodes `KnowledgeUpdatedEvent`; when `recordType == "trailPolicy"` it calls `policy_client.invalidate(domain)` so `KnowledgePolicyClient` re-fetches on next access. No build is triggered, no `trails.built` emitted. |
 | **3. Fetch graph closures from the Topology Service (FROZEN shapes, snapshot-scoped).** | `topology_client.TopologyClient` calls Topology's **frozen** query API over `httpx`, domain- and snapshot-scoped, traversing the dependency-edge relations from the policy (incl. `HOSTS`/`TERMINATES`): **list-by-type** `GET /topology/nodes?objectType={t}&domain={d}&snapshotId={current\|previous}` to `NodeListDto { domain, objectType?, snapshotId, count, nodes: NodeDto[] }` (enumerate seeds), **neighbors** `GET /topology/nodes/{moId}/neighbors?relation={r}` to `NeighborsDto { managedObjectId, domain, neighbors: [{ node: NodeDto, via: EdgeDto }] }`, **bounded traverse** `GET /topology/traversal?start={moId}&relation={r}&...&maxDepth={K}&crossDomain=false` to `TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[] }`. `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }`. The `snapshotId` scoping token is `current` for the build's in-scope snapshot (the snapshot carried by the triggering event is Topology's current snapshot for the domain). Never touches the topology graph store directly (Topology is the single owner). |
 | **4. Fetch trail policy from Knowledge (domain-parameterized).** | `policy_client.KnowledgePolicyClient.get_policy(domain)` calls the Knowledge read API for the `trailPolicy` record scoped to `domain`, returning a `TrailPolicy` value object (IGP-area key, SRLG-union rule, dependency-edge set). Cached per-domain; invalidated by Task 2. No hard-coded policy values. |
-| **5. Compute trails per domain, traversing Interface objects.** | `closure.TrailClosure` builds a `networkx.MultiDiGraph` slice and computes overlapping, IGP-area-bounded transitive closures over the policy's dependency-edge set (which includes `HOSTS` Port to Interface and `TERMINATES` Interface to IPLink, so `Interface:*` objects are natural members), then unions SRLG-co-member links into shared trails. The IGP-area bound reads `igpArea` from each node's `NodeDto.attributes` map under the key named by the policy `boundary.attributeKey` (`igpArea`); step 4 prunes cross-area members. This now **actually fires** on real data because the Simulator emits a grounded `igpArea` per Node/Interface (previously inert — no producer populated it). Algorithm logical flow below. |
+| **5. Compute trails per domain, traversing Interface objects.** | `closure.TrailClosure` builds a `networkx.MultiDiGraph` slice and computes overlapping, IGP-area-bounded transitive closures over the policy's dependency-edge set (which includes `HOSTS` Port to Interface and `TERMINATES` Interface to IPLink, so `Interface:*` objects are natural members), then unions SRLG-co-member links into shared trails. The IGP-area bound reads `igpArea` from each node's `NodeDto.attributes` map under the key named by the policy `boundary.attributeKey` (`igpArea`); step 4 bounds by **area component** (the #225 fix): an area-less connector (IPLink/SRLG/FiberSpan/LSP) is admitted only *within* one area's reachable set and never bridges into another area's objects, and an area-less seed yields one trail per area it touches — so no trail spans two areas and there is no whole-network trail on the real area-less-mesh graph. (The previous "prune neighbour whose area differs from the seed's" leaked across areas through the area-less mesh and did nothing for area-less seeds — the gate-blocker #225 whole-network trail.) Algorithm logical flow below. |
 | **6. Persist trail definitions with domain.** | `repository.TrailRepository` writes `trail` + `trail_member` rows in one transaction tagged with `snapshotId` and `domain`; a rebuild for the same `domain`+`snapshotId` supersedes prior rows for that pair; older snapshots retained per the retention rule (Data model). |
 | **7. Serve domain-scoped queries + browse via API.** | `api.routes`: **`GET /trails/by-object?managedObjectId=&domain=`** (getTrailsForObject → frozen `{ managedObjectId, domain, trailIds }`), `GET /trails/{trailId}` (getTrail → frozen `TrailDetail` with `members[{managedObjectId,objectType}]` + `snapshotId`), `GET /trails?snapshotId=&domain=` (listTrails summaries). FastAPI publishes OpenAPI 3.1 at `/openapi.json`; the generated `openapi.json` is checked into `services/trail-builder/` as the **frozen single source of truth** consumers build against (paths + response schemas frozen; P1-G4/P1-G10/P2-GAP-09). |
 | **8. Emit `trails.built` with `domain`.** | `event_publisher.TrailsBuiltPublisher` builds a `TrailsBuiltEvent` (`snapshotId`, `trailIds`, `trailCount == len(trailIds)`, `domain` taken from the triggering event — no Topology lookup) wrapped in an `Envelope`, serialized via `acp_event_model.serialize`, produced to `trails.built`. |
@@ -162,12 +225,16 @@ flowchart TD
   slice matches the snapshot the build is for.
 - **`policy_client`** — `KnowledgePolicyClient` against the Knowledge Service published OpenAPI;
   per-domain `TrailPolicy` cache; `invalidate(domain)`.
-- **`closure`** — `TrailClosure`: networkx graph build + IGP-area-bounded transitive closure +
-  SRLG union (the algorithm). The IGP-area bound reads the `igpArea` value from each node's
-  `NodeDto.attributes` (the key is the policy `boundary.attributeKey`, `igpArea`) and step 4
-  drops members whose area differs from the seed's. On Simulator-generated topology every Node
-  (and the Interfaces it hosts) carries a grounded `igpArea`, so the prune fires on real data —
-  it was previously inert (no producer populated `igpArea`; fixtures injected it).
+- **`closure`** — `TrailClosure`: networkx graph build + **area-component** IGP-area-bounded
+  closure + SRLG union (the algorithm). The IGP-area bound reads the `igpArea` value from each
+  node's `NodeDto.attributes` (key = policy `boundary.attributeKey`, `igpArea`); step 4 (the #225
+  fix) runs a **per-area closure** that admits an area-less connector only within one area's reach
+  and never lets it bridge into another area's area-bearing objects, and yields **one trail per
+  area** for an area-less seed. **This is the module the dev fix lands in** — `_bounded_closure`'s
+  single-`seed_area` short-circuit is replaced by target-area derivation + per-area traversal; the
+  rest (`_build_graph` stamping `igp_area`, `_srlg_union`, `_materialize`) is unchanged. The grounded
+  `igpArea` already reaches this module on real data (the seam is intact); the previous logic simply
+  bounded incorrectly.
 - **`repository`** — `TrailRepository`: transactional persist + supersession + the three read
   queries.
 - **`event_publisher`** — `TrailsBuiltPublisher`: builds + serializes + produces `TrailsBuiltEvent`.
@@ -564,15 +631,22 @@ in-scope snapshot); `TrailPolicy { dependencyEdges, igpAreaKey, srlgRule }` from
 `policy.igpAreaKey`** (`igpArea`) — the same grounded attribute the Simulator emits per
 Node/Interface and Topology carries through unchanged.
 
-**IGP-area bound is now exercised on real data (MVP-achievability fix).** The step-4 area prune
-reads `igpArea` from `NodeDto.attributes` per the policy boundary key. On Simulator-generated
-topology every Node (and the Interfaces it hosts) carries a grounded `igpArea` (`area-0` backbone
-plus numbered edge areas), so the prune **fires** and trails are bounded to a single IGP area —
-yielding multiple area-bounded trails on a multi-area topology, not one giant whole-network trail.
-This was **previously inert**: no producer populated `igpArea`, closure spanned the whole
-connected dependency component, and only `igpArea`-injecting fixtures kept the unit tests green.
-The guarantee now rests on the **integration assertion over real (igpArea-bearing) Simulator
-data** (Test plan **INT-IGPAREA** / E2E scenario 15), not on fixtures that inject `igpArea`.
+**IGP-area bound — corrected semantics (#225 fix).** `igpArea` is present on real data
+(`NodeDto.attributes[policy.igpAreaKey]`, grounded by the Simulator on `Node` + `Interface`), so
+the input is correct. The defect was the **bounding logic**: the old "prune a neighbour whose area
+differs from the seed's area" (a) **did nothing for area-less seeds** (FiberSpan/LSP/IPLink, whose
+`igpArea` is `None`), and (b) **never pruned area-less neighbours**, which in the real graph form a
+network-wide connector mesh (IPLink↔SRLG↔IPLink, FiberSpan/IGPAdjacency/LSP) that bridges every
+area — so closure spanned the whole component anyway. The corrected algorithm bounds by **area
+component** (step 4 below): an object is admitted to a trail only if it stays within a **single
+area's reachable set**, where an area-less connector is allowed *inside* one area's set but is
+**not** a bridge that lets the closure cross into another area's objects. An area-less seed yields
+**one trail per area it touches** (never a whole-network trail). A shared area-less object that
+legitimately rides two areas lands in **both** areas' trails (real overlap), never fusing them.
+The guarantee rests on (1) a **realistic full-topology unit test** that reproduces the area-less-mesh
+shape and would fail on the old closure, and (2) the now-**implemented** integration assertion
+**INT-IGPAREA** over real Simulator-generated `igpArea`-bearing data (Test plan / E2E scenario 15)
+— not on fixtures that merely inject `igpArea` on directly-adjacent area-bearing nodes.
 
 **Why Interface is in the closure:** the policy `dependencyEdges` includes `HOSTS`
 (Port to Interface) and `TERMINATES` (Interface to IPLink). Closure over those edges therefore
@@ -584,9 +658,9 @@ flowchart TD
   S["Build networkx MultiDiGraph from the domain graph slice"] --> F["Keep only edges whose relation is in policy dependencyEdges as an undirected closure view"]
   F --> SEEDS["Enumerate seed objects of the fault-capable types per policy"]
   SEEDS --> LOOP{"more seeds"}
-  LOOP -->|yes| CLOSE["Transitive closure from seed over dependency edges"]
-  CLOSE --> BOUND["Drop any object whose IGP area differs from the seed area per policy igpAreaKey"]
-  BOUND --> CAND["Candidate trail equals bounded reachable member set incl Interface members"]
+  LOOP -->|yes| CLOSE["Area-component closure from seed: walk dependency edges, never crossing from one IGP area's objects into another's even through an area-less connector"]
+  CLOSE --> BOUND["For an area-less seed, produce one bounded set per area it touches, never a whole-network set"]
+  BOUND --> CAND["Candidate trail equals one area-component member set incl area-less connectors and Interface members"]
   CAND --> LOOP
   LOOP -->|no| SRLG["Union trails that contain links sharing an SRLG group per policy srlgRule over MEMBER_OF"]
   SRLG --> DEDUP["Deduplicate identical member sets into one trail"]
@@ -601,15 +675,40 @@ flowchart TD
 2. Restrict to edges whose `relation` is in `policy.dependencyEdges` and treat that edge view as
    undirected for reachability (a Port and its IPLink correlate regardless of edge direction).
 3. Enumerate **seeds** = the fault-capable object types named by policy (Core IP: Node,
-   LineCard, Port, Interface, Fiber). For each seed, compute the connected reachable set over the
-   dependency-edge view.
-4. **Bound by IGP area:** prune members whose `igpArea` (from `NodeDto.attributes[policy.igpAreaKey]`)
-   differs from the seed area, so no trail spans two areas (AC-2). There is no unbounded
-   whole-network trail. This prune **now fires on real data** because the Simulator populates a
-   grounded `igpArea` per Node/Interface — it was previously inert (no producer set `igpArea`,
-   so closure spanned the whole connected component). The no-whole-network-trail guarantee is
-   verified on Simulator-generated data by the integration assertion **INT-IGPAREA**, not by
-   `igpArea`-injecting unit fixtures.
+   LineCard, Port, Interface, Fiber/FiberSpan). For each seed, compute its **area-bounded
+   reachable set(s)** per step 4 (not a raw connected component).
+4. **Bound by IGP area (corrected — the #225 fix).** Bound by **area component**, not by a
+   "differs-from-seed" prune. Concretely, for a seed:
+   - **Determine the seed's target area(s).** If the seed itself carries `igpArea` (Node /
+     Interface), its target-area set is that single area. If the seed is **area-less**
+     (FiberSpan / LSP / IPLink / IGPAdjacency / SRLG / VPNService — none carry `igpArea`), its
+     target-area set is **the set of areas of the area-bearing objects directly reachable from it**
+     over the dependency-edge view (a FiberSpan riding the N0–N1 link touches the areas of N0 and
+     N1). An area-less seed therefore produces **one trail per area it touches**, never one
+     whole-network trail.
+   - **Run an area-scoped closure per target area `A`.** From the seed, walk the undirected
+     dependency-edge view admitting a neighbour `n` iff: `n` is area-bearing **and** `n.igpArea == A`;
+     **or** `n` is area-less. Crucially, an **area-less object never extends the frontier into a
+     *different* area's area-bearing objects**: when expanding from an area-less node, area-bearing
+     neighbours are admitted **only** if their area equals `A` (cross-area area-bearing neighbours
+     are pruned, as before), so the area-less connector mesh can no longer bridge areas. The
+     resulting member set contains the area-`A` area-bearing objects plus the area-less connectors
+     that sit within that area's reach.
+   - This makes **AC-2 hold by construction on the real graph**: no single trail spans two areas,
+     and there is no whole-network trail (the largest trail is strictly smaller than the whole
+     connected component on any multi-area topology). A **shared area-less object** reachable within
+     two areas appears in **both** areas' trails — that is legitimate overlap (AC-1), and the dedup
+     step keeps them distinct because their member sets differ.
+   - **Implementation note (dev):** the seed's target-area set and per-area closure replace the
+     current `_bounded_closure`'s single `seed_area` short-circuit; `_build_graph` already stamps
+     each nx node's `igp_area` from `NodeDto.attributes[policy.igpAreaKey]`, so no new input is
+     needed — only the traversal rule changes. When `policy.boundary.type != "igp-area"` (no
+     boundary), fall back to the existing whole-component closure unchanged (the
+     `test_no_boundary_policy_does_not_prune` behaviour is preserved).
+   - The no-whole-network-trail guarantee is verified on a **realistic full-topology unit fixture**
+     (mirroring the Simulator's area-less mesh) **and** on Simulator-generated data by the
+     **implemented** integration assertion **INT-IGPAREA** — not by `igpArea`-injecting
+     directly-adjacent-node fixtures.
 5. **SRLG union (AC-3):** for each SRLG group (edges of relation `MEMBER_OF`), merge the trails
    containing its co-member links into one trail so fate-shared links land together.
 6. Deduplicate identical member sets; assign a deterministic `trail_id`; record `seed`,
@@ -627,11 +726,17 @@ Topology Service and the policy from Knowledge. Unit tests use small fixture gra
 fixture `trailPolicy` (served by the Topology/Knowledge OpenAPI mocks) — e.g. a slice with
 `Port:PE1-LC2-P3 HOSTS Interface:PE1-LC2-P3.100 TERMINATES IPLink:PE1-PE2`, two LSP
 paths through a shared device, and two `IPLink`s in one `SRLG` — to exercise overlap, area
-bound, SRLG union, and Interface membership. **The unit fixtures inject `igpArea` on their
-nodes** to drive the step-4 prune logic; this proves the logic but **not** that real data carries
-`igpArea`. The IGP-area bound on real data is proven by the integration assertion **INT-IGPAREA**
-over a **Simulator-generated** multi-area topology (grounded, not injected `igpArea`) — see the
-Test plan.
+bound, SRLG union, and Interface membership. Beyond those small fixtures, the #225 fix adds a
+**realistic full-topology fixture** (`tests/fixtures.py` → a builder that mirrors the Simulator's
+Core-IP shape: N Nodes across `IGP_AREA_COUNT` areas, each with LineCard/Port/Interface, IPLinks
+between consecutive nodes, **FiberSpan/IGPAdjacency/LSP riding each link, and SRLG groups bundling
+adjacent IPLinks** — i.e. the **area-less connector mesh** that bridges areas in production). This
+fixture is the one that **fails on the current closure** (it produces a whole-network trail) and
+**passes only after the area-component fix** — it is the unit-level reproduction of the gate
+defect. The earlier tiny fixtures inject `igpArea` only on directly-adjacent area-bearing nodes and
+so cannot reproduce the area-less-mesh bridge; the IGP-area bound on real data is additionally
+proven by the **implemented** integration assertion **INT-IGPAREA** over a **Simulator-generated**
+multi-area topology (grounded, not injected `igpArea`) — see the Test plan.
 
 ## UI wireframes
 
@@ -675,7 +780,8 @@ metric + health signal.
 | Policy cache invalidation | (a) `knowledge.updated`-driven invalidate + lazy re-fetch; (b) TTL cache; (c) fetch every build | **(a)** — event-driven freshness with no per-build latency (Task 2); (c) adds latency to every build; (b) risks stale policy between TTL ticks. |
 | `domain` on the query API (Q1 + Q7) | (a) strictly REQUIRED with a clear 400, no default; (b) server-side `core-ip` default-domain fallback for backward-compat; (c) required on `getTrailsForObject` but defaulted on `listTrails` | **(a)** — chosen. A trail belongs to exactly one domain, so a per-object/listing lookup is meaningless without it; the spec freezes both params as required; and the live consumers (Enrichment, Codebook Generator) **already pass `domain` on every call**, so a default would be dead code that masks a forgotten-`domain` caller bug and could silently return wrong-domain trails once a second domain exists. (b) is rejected for that masking hazard; (c) is inconsistent. The `core-ip` default is kept **only** on the Kafka event path (legacy optional-`domain` producer) — a deliberately different path from the strict query API. |
 | Topology call shapes + snapshot scoping (Q3) | (a) pin to Topology's FROZEN query-API paths/params/DTOs (`NodeListDto`/`NeighborsDto`/`TraversalDto`/`NodeDto`) with `snapshotId=current|previous` scoping, snapshot taken from the triggering event; (b) treat Topology endpoints as TBD/design-stage and finalize later; (c) re-resolve the snapshot via a Topology lookup at build time | **(a)** — chosen. Topology's query API is now frozen (its API-freeze closed issue #24), so pinning the exact paths/DTOs removes the build-time ambiguity and lets the dev agent generate the client + mock directly from `services/topology/openapi.json`. Scoping every read to `snapshotId=current` (the in-scope snapshot the event carries) guarantees the graph slice matches the snapshot the trails are persisted under. (b) leaves a buildable gap; (c) adds a redundant lookup and risks reading a different snapshot than the event named. |
-| Proving the IGP-area bound (MVP-achievability fix) | (a) keep relying on unit fixtures that inject `igpArea` (status quo — the gate found this masks the real gap); (b) change the Trail Builder algorithm to fabricate/default an area when none is present; (c) confirm the closure reads `igpArea` from real `NodeDto.attributes` and add an **integration assertion on Simulator-generated data** (INT-IGPAREA) plus an E2E scenario | **(c)** — chosen. The root cause was upstream (no producer emitted `igpArea`), now fixed by Knowledge (`attributeCatalogue` `igpArea` + `trailPolicy` boundary) and the Simulator (grounded per-Node/Interface `igpArea`). Trail Builder's closure already reads `igpArea` from node attributes per the policy boundary key — the only missing piece was a test over **real** data, so we add INT-IGPAREA (Simulator-generated, grounded `igpArea`, asserts area-bounded trails + AC-2 no-whole-network-trail). (a) is the masking bug the gate flagged — rejected. (b) would invent data Trail Builder does not own (the area partition is the Simulator/topology's; defaulting would re-create whole-network trails or wrong bounds) and is a correctness hazard — rejected. No contract change: `igpArea` rides inside the already-frozen `NodeDto.attributes`; `TrailsBuiltEvent`/topics unchanged. |
+| IGP-area bounding semantics (the #225 fix) — how to keep the area-less connector mesh and area-less seeds from producing a whole-network trail | (a) **prune-cross-area-neighbour** (status quo): keep a member iff it is area-less or shares the seed's area; disable the prune when the seed is area-less. (b) **area-component closure**: bound per area — admit an area-less connector only *within* one area's reachable set, never as a bridge into another area's area-bearing objects; an area-less seed yields one trail per area it touches (shared area-less objects appear in multiple areas' trails as overlap). (c) **drop area-less object types from the closure graph entirely** (only Node/Interface participate). (d) **fabricate/default an area** on area-less objects (e.g. inherit from a neighbour). | **(b)** — chosen. It is the only option that bounds the **real** Core-IP graph, where areas are joined only through the area-less IPLink/SRLG/FiberSpan mesh: (a) is the shipped bug the gate caught — area-less seeds get no prune (the 181-member FiberSpan trail) and the area-less mesh bridges every area even from area-bearing seeds (rejected). (c) would **delete real fault-propagation members** (FiberSpan/IPLink/LSP are first-class cascade carriers and trail members per §5) and break AC-3 SRLG-union (which keys off the area-less SRLG/IPLink mesh) and the Fiber-seed requirement — rejected. (d) **invents data Trail Builder does not own** (the area partition belongs to the Simulator/topology) and would mis-assign a shared connector to a single area, dropping legitimate cross-area overlap — a correctness hazard, rejected. (b) keeps every member, honours overlap (AC-1) and SRLG-union (AC-3), and makes AC-2 hold by construction. **No contract change**: `igpArea` rides inside the already-frozen `NodeDto.attributes`; the Topology query API, `TrailsBuiltEvent`, and topics are unchanged. |
+| Proving the fix on real data + closing the mock-masking gap | (a) keep relying on the tiny `igpArea`-injecting fixtures (status quo — the gate found these mask the gap; the "INT-IGPAREA" assertion was never coded); (b) add a realistic full-topology unit fixture (mirroring the Simulator area-less mesh) that fails on the buggy closure, AND implement INT-IGPAREA as a real integration test on Simulator-generated data | **(b)** — chosen. The tiny fixtures join areas only by a direct area-bearing-to-area-bearing edge, which the old prune handled, so they pass while the real graph fails — classic present-but-untested masking. We add (1) a unit fixture reproducing the area-less-mesh bridge + an area-less seed, asserting multiple area-bounded trails and no whole-network trail (this is the unit reproduction that turns red on the current closure), and (2) the actually-implemented INT-IGPAREA integration test over real `igpArea`-bearing Simulator topology with a grounding precondition that fails loudly if `igpArea` ever reverts to unpopulated. (a) is the masking status quo — rejected. |
 
 ## Test plan
 
@@ -684,7 +790,7 @@ metric + health signal.
 | # | Acceptance criterion | Test | Asserts |
 |---|---|---|---|
 | 1 | Multi-trail overlap | `test_object_on_two_lsps_one_srlg_yields_three_trails` | `getTrailsForObject(X, domain)` returns at least 3 distinct trail ids. |
-| 2 | Policy-bounded (IGP area) | `test_no_trail_spans_two_igp_areas` (unit) **+ `INT-IGPAREA` (integration, the load-bearing guarantee — see below)** | unit: every trail's members share one IGP area; no whole-network trail. **Note:** the unit test reads `igpArea` from fixture node attributes — it injects `igpArea`, so it proves the *prune logic* but NOT that real data carries the attribute. The **actual AC-2 guarantee on real data** rests on integration assertion `INT-IGPAREA`, which runs on **Simulator-generated** topology (grounded `igpArea` on real nodes, no injection) and asserts a multi-area topology yields multiple area-bounded trails rather than one whole-network trail. |
+| 2 | Policy-bounded (IGP area) | `test_no_trail_spans_two_igp_areas` (unit, small) **+ `test_area_less_mesh_does_not_fuse_areas` (unit, realistic full-topology — the #225 reproduction) + `test_area_less_seed_yields_per_area_trails_not_whole_network` (unit) + `INT-IGPAREA` (integration, the load-bearing guarantee on real data — see below)** | unit (small): every trail's members share one IGP area; no whole-network trail. unit (realistic): on the full-topology fixture that mirrors the Simulator's **area-less connector mesh** (IPLink/SRLG/FiberSpan/LSP across `IGP_AREA_COUNT` areas), the build yields **multiple** area-bounded trails and **no** trail equals the whole connected component — this test **fails on the current closure** and passes only after the area-component fix. unit (area-less seed): a `FiberSpan`/`IPLink` seed produces **one trail per area it touches**, each single-area, never one whole-network trail (directly covers root-cause defect (c)(1)). **The AC-2 guarantee on real data** additionally rests on integration assertion `INT-IGPAREA`, now **implemented** (not prose), running on **Simulator-generated** topology (grounded `igpArea`, no injection) and asserting a multi-area topology yields multiple area-bounded trails rather than one whole-network trail. |
 | 3 | SRLG union | `test_two_links_sharing_srlg_in_same_trail` | both `IPLink`s of one SRLG appear in the same trail. |
 | 4 | `getTrailsForObject` completeness + frozen path/shape (P1-G4, P1-G10) | `test_get_trails_for_object_exact_set` | served at the frozen path `GET /trails/by-object?managedObjectId=&domain=`; returns the frozen shape `{ managedObjectId, domain, trailIds: string[] }`; `trailIds` equals the persisted set for the object, no more no fewer; empty `[]` when none. |
 | 5 | `getTrail` correctness + domain + viz readiness + frozen member shape (P1-G4) | `test_get_trail_returns_members_snapshot_domain_typed` | returns frozen `TrailDetail`: full `members` where **every member is `{ managedObjectId, objectType }`** (both fields present), `managedObjectId` matches `<objectType>:<id>` and `objectType` equals its parsed prefix; matching `snapshotId` + `domain`; `memberCount == len(members)`. |
@@ -713,26 +819,35 @@ metric + health signal.
 | 28 | First migration creates the owned schema idempotently (shared-DB readiness) | `test_schema_created_idempotently` | running `alembic upgrade head` against a fresh DB with no `trailbuilder` schema succeeds and creates `trailbuilder` (the `0001_create_schema` `CREATE SCHEMA IF NOT EXISTS` runs first); a second `upgrade`/re-run against an existing schema is a no-op and does not error. |
 | 29 | Tables + version table land in `trailbuilder`, not `public` (no shared-DB collision) | `test_tables_in_trailbuilder_schema` | after migration, `trail`, `trail_member`, `processed_event`, and the Alembic `alembic_version` table all exist in schema `trailbuilder` (queried via `information_schema.tables`) and **none** exists in `public`; the `trail_member.trail_id` FK targets `trailbuilder.trail`; the `member_count > 0` CHECK is present. |
 
-### Integration assertion on Simulator-generated data (MVP-achievability fix — the load-bearing AC-2 guarantee)
+### Integration assertion on Simulator-generated data (#225 — the load-bearing AC-2 guarantee, now IMPLEMENTED)
 
-The unit tests above exercise the closure on small fixture graph slices whose nodes carry an
-**injected** `igpArea`. They prove the *prune logic*, but — as the MVP-achievability gate found —
-they **cannot** prove the area-bound holds on real data, because the real gap was that no producer
-populated `igpArea` at all. The guarantee that the IGP-area bound (and therefore AC-2, the
-no-whole-network-trail property) holds **now rests on the integration assertion below**, which
-runs against **Simulator-generated** topology (grounded `igpArea` on real Nodes/Interfaces — **not**
-`igpArea`-injecting fixtures), on the integration stack (real Topology + real Knowledge + Kafka +
-PostgreSQL). It is the regression guard that the upstream fix (Knowledge `attributeCatalogue`
-`igpArea` + Simulator emit) stays wired through to Trail Builder's prune.
+The small unit tests exercise the closure on tiny fixtures whose areas are joined by a **direct
+area-bearing edge**; they pass on the buggy closure and so **masked** #225. The realistic
+full-topology unit test (`test_area_less_mesh_does_not_fuse_areas`) reproduces the gate defect at
+unit level. The remaining guarantee — that the fix holds on the **real** Topology + Knowledge +
+Simulator wiring, and that `igpArea` truly flows list/neighbors → client → closure on live data —
+rests on the integration assertion below, which is **implemented as a runnable test** in this
+revision (it was previously prose only and never ran — that is why it could not catch #225).
 
-| ID | Assertion (on Simulator-generated, multi-area topology — Testcontainers / integration stack) | Asserts |
+**Where it lives + how it runs (no longer prose).** `tests/integration/test_int_igparea.py`,
+marked `@pytest.mark.integration`, run on the `integration` Compose stack (real Topology + real
+Knowledge + Kafka + PostgreSQL) with `TOPOLOGY_SERVICE_MODE=real`, `KNOWLEDGE_SERVICE_MODE=real`.
+It is **not** in the default unit gate (which is mock-only per AC-12) — it runs in the
+integration-test stage. The test: (1) drives the Simulator P1 oracle to generate + ingest a
+multi-area snapshot (`IGP_AREA_COUNT≥2`, e.g. `p1-demo`/`IGP_AREA_COUNT=3`); (2) lets Trail Builder
+build via `topology.changed` (or `POST /trails/rebuild`); (3) reads every built trail back via
+`GET /trails?snapshotId=&domain=` + `GET /trails/{trailId}`, and for each member resolves its
+`igpArea` via Topology `GET /topology/nodes/{id}` (or the snapshot read), then asserts the three
+clauses below. The grounding precondition (c) makes it **fail loudly** rather than re-mask if
+`igpArea` ever stops flowing (the seam-regression guard the gate lesson demands).
+
+| ID | Assertion (on Simulator-generated, multi-area topology — integration stack) | Asserts |
 |---|---|---|
-| **INT-IGPAREA** | Drive a P1 build from a **Simulator-generated** snapshot configured with multiple IGP areas (`IGP_AREA_COUNT` ≥ 2, e.g. the `p1-demo` profile, `IGP_AREA_COUNT=3`) — the real Topology serves `NodeDto.attributes.igpArea` (grounded, not injected); Trail Builder runs the real closure over the real Knowledge `trailPolicy/default` (`boundary.attributeKey=igpArea`). | (a) **Area-bounded:** for every built trail, all members resolve (via Topology) to a **single** `igpArea` — no trail spans members of two different `igpArea` values. (b) **No whole-network trail (AC-2 on real data):** the multi-area topology yields **multiple** area-bounded trails (more than one trail, and no single trail contains the full connected dependency component / all areas); the largest trail's member count is strictly less than the whole connected-component size. (c) **Grounding precondition:** at least two distinct `igpArea` values are present in the snapshot the build consumed (so the assertion is meaningful — it fails loudly if `igpArea` ever reverts to unpopulated, which is exactly the regression the gate flagged). |
+| **INT-IGPAREA** | Drive a P1 build from a **Simulator-generated** snapshot with multiple IGP areas (`IGP_AREA_COUNT` ≥ 2, e.g. `p1-demo`, `IGP_AREA_COUNT=3`) — real Topology serves `NodeDto.attributes.igpArea` (grounded, not injected) on **both** list (`GET /topology/nodes`) and neighbors responses; Trail Builder runs the real closure over the real Knowledge `trailPolicy/default` (`boundary.attributeKey=igpArea`). | (a) **Area-bounded:** for every built trail, all area-bearing members resolve to a **single** `igpArea` — no trail spans two `igpArea` values. (b) **No whole-network trail (AC-2 on real data):** the multi-area topology yields **multiple** trails and **no** single trail contains the full connected dependency component / all areas; the largest trail's member count is **strictly less** than the whole connected-component size (directly catches the round-8 181-member whole-network trail). (c) **Grounding + seam precondition:** at least two distinct `igpArea` values are present in the snapshot the build consumed AND a sampled `GET /topology/nodes?objectType=Node` response carries `attributes.igpArea` (proves the attribute flows list/neighbors → client → closure end-to-end). (d) **Area-less-seed bound:** the trails seeded from `FiberSpan`/`IPLink` are each single-area, not whole-network. |
 
-This assertion is the explicit regression guard for the formerly-inert prune: if a future change
-drops `igpArea` from the Simulator emission or the Knowledge catalogue/policy, INT-IGPAREA fails
-(precondition (c) or area-bound (a)/(b)) rather than the gap silently re-masking behind
-`igpArea`-injecting unit fixtures.
+If a future change drops `igpArea` from the Simulator emission, the Knowledge catalogue/policy, or
+the Topology list/neighbors responses, INT-IGPAREA fails (precondition (c) or area-bound (a)/(b)/(d))
+rather than the gap silently re-masking behind `igpArea`-injecting unit fixtures.
 
 ### E2E scenarios (from this design unit's point of view)
 
@@ -755,7 +870,7 @@ Service-scoped end-to-end paths the integration stage exercises (Trail Builder +
 | 12 | Noise Filter snapshotId provenance (P2-GAP-09) | Noise Filter client calls `getTrail(trailId)` to populate `TransactionEvent.snapshotId` | `getTrail` 200 carries `snapshotId`; Noise Filter resolves the REQUIRED `TransactionEvent.snapshotId` for every emitted transaction; no hold/retry for a missing field. |
 | 13 | Consumer query with `domain` (Q1 + Q7) vs. without | Enrichment/Codebook clients call `GET /trails/by-object?managedObjectId=&domain=`; a malformed caller omits `domain` | the `domain`-bearing calls (the real consumer shape) return 200 with `{ managedObjectId, domain, trailIds }`; the `domain`-less call returns 400, never silently scoped to `core-ip`. |
 | 14 | Build pinned to frozen Topology shapes + event snapshot (Q3) | `topology.changed (snapshotId=S, core-ip)` against the live Topology Service | the build's graph reads hit the frozen `GET /topology/nodes` (list-by-type, `snapshotId=current`) and `GET /topology/traversal` paths and decode `NodeListDto`/`TraversalDto`; persisted trails and `trails.built` carry `snapshotId=S` taken from the event, with no Topology snapshot-resolution call. |
-| 15 | **IGP-area bound on Simulator-generated data (MVP-achievability fix; assertion INT-IGPAREA)** | A **Simulator-generated** multi-area snapshot (`IGP_AREA_COUNT` ≥ 2, grounded `igpArea` per Node/Interface — NOT injected fixtures) flows `topology.changed` then build against real Topology + real Knowledge `trailPolicy/default` (`boundary.attributeKey=igpArea`) | every built trail's members share one `igpArea` (no cross-area trail); the multi-area topology yields **multiple** area-bounded trails, not one whole-network trail (**AC-2 on real data**); at least two distinct `igpArea` values are present in the consumed snapshot. This is the regression guard that the formerly-inert area-prune now fires on real, `igpArea`-bearing data. |
+| 15 | **IGP-area bound on Simulator-generated data (#225 fix; implemented assertion INT-IGPAREA)** | A **Simulator-generated** multi-area snapshot (`IGP_AREA_COUNT` ≥ 2, grounded `igpArea` per Node/Interface — NOT injected fixtures) flows `topology.changed` then build against real Topology + real Knowledge `trailPolicy/default` (`boundary.attributeKey=igpArea`) | every built trail's area-bearing members share one `igpArea` (no cross-area trail); the multi-area topology yields **multiple** area-bounded trails, **not one whole-network trail** (**AC-2 on real data** — the exact round-8 failure); FiberSpan/IPLink-seeded trails are single-area; a sampled `GET /topology/nodes` carries `attributes.igpArea` (seam proof); at least two distinct `igpArea` values are in the consumed snapshot. Regression guard that the area-component bound fires on real, `igpArea`-bearing data and that `igpArea` flows the full seam. |
 | 16 | Fresh shared-DB migration readiness (AC-28/AC-29) | Trail Builder starts against a **fresh shared PostgreSQL** with no `trailbuilder` schema; startup runs `alembic upgrade head` then handles the first `topology.changed` | startup succeeds: `trailbuilder` is created, all three tables + `alembic_version` land in `trailbuilder` (nothing in `public`), and the first build persists/serves trails — proving the service composes on a clean shared DB without collision. |
 
 ## Config & observability

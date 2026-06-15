@@ -12,12 +12,74 @@ import httpx
 import pytest
 
 from codebook_generator.clients.base import IntegrationError, request_with_retry
-from codebook_generator.clients.knowledge import KnowledgeClient, _records
+from codebook_generator.clients.knowledge import (
+    KnowledgeClient,
+    _current_record,
+    _payload,
+    _records,
+)
 from codebook_generator.clients.trail_builder import TrailBuilderClient
+from codebook_generator.models import FaultOriginType, PropagationTemplate
 
 
 def _client(handler) -> httpx.Client:  # noqa: ANN001
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _knowledge_client(handler) -> KnowledgeClient:  # noqa: ANN001
+    return KnowledgeClient(
+        fault_origins_base_url="http://k.test",
+        propagation_templates_base_url="http://k.test",
+        alarm_type_vocabulary_base_url="http://k.test",
+        client=_client(handler),
+        max_retries=0,
+        backoff_ms=1,
+    )
+
+
+# The REAL Knowledge ``RecordResponse`` envelope shape (per services/knowledge/openapi.json):
+# {domain, recordType, recordId, version, isCurrent, payload:{...domain fields...}}.
+# The codebook-generator domain models live UNDER ``payload``, never at the envelope top level.
+_FAULT_ORIGIN_RECORD = {
+    "domain": "core-ip",
+    "recordType": "faultOriginType",
+    "recordId": "fo-fiberspan-fibercut",
+    "version": "v1",
+    "isCurrent": True,
+    "payload": {
+        "objectType": "FiberSpan",
+        "originAlarmType": "FiberCut",
+        "description": "A cut in a fiber span",
+    },
+}
+
+_PROPAGATION_RECORD = {
+    "domain": "core-ip",
+    "recordType": "propagationTemplate",
+    "recordId": "pt-hosts-fibercut-los",
+    "version": "v1",
+    "isCurrent": True,
+    "payload": {
+        "edgeType": "HOSTS",
+        "trigger": {"objectType": "FiberSpan", "alarmType": "FiberCut"},
+        "effect": {"objectType": "OpticalPort", "alarmType": "LOS"},
+        "traversal": {"direction": "downstream", "cardinality": "one-to-many"},
+        "ordering": 1,
+    },
+}
+
+
+# The seeded ``alarmTypeVocabulary`` record (recordId core-ip/alarmTypeVocabulary/default),
+# served via the SAME generic record route as a RecordResponse envelope; the tokens live
+# under ``payload.alarmTypes``, NOT at the envelope top level (#233).
+_ALARM_VOCAB_RECORD = {
+    "domain": "core-ip",
+    "recordType": "alarmTypeVocabulary",
+    "recordId": "core-ip/alarmTypeVocabulary/default",
+    "version": "v1",
+    "isCurrent": True,
+    "payload": {"alarmTypes": ["FiberCut", "LOS", "LinkDown"]},
+}
 
 
 def test_retry_succeeds_after_transient_5xx() -> None:
@@ -87,18 +149,134 @@ def test_records_normalizes_list_and_wrapped_shapes() -> None:
     assert _records(42) == []
 
 
-def test_knowledge_vocabulary_accepts_bare_list_shape() -> None:
-    """get_alarm_type_vocabulary handles both {alarmTypes:[...]} and a bare list."""
-    client = _client(lambda r: httpx.Response(200, json=["A", "B"]))
-    kc = KnowledgeClient(
-        fault_origins_base_url="http://k.test",
-        propagation_templates_base_url="http://k.test",
-        alarm_type_vocabulary_base_url="http://k.test",
-        client=client,
-        max_retries=0,
-        backoff_ms=1,
+def test_get_alarm_type_vocabulary_reads_record_payload() -> None:
+    """#233: a real alarmTypeVocabulary RecordResponse envelope yields the token STRINGS.
+
+    The route serves a LIST of envelopes; the tokens live under ``payload.alarmTypes``. The
+    result must be a ``list[str]`` of hashable tokens so ``set(...)`` works downstream
+    (vocabulary.validate_scenarios), NOT a list of envelope dicts.
+    """
+    kc = _knowledge_client(
+        lambda r: httpx.Response(200, json=[_ALARM_VOCAB_RECORD]),
     )
-    assert kc.get_alarm_type_vocabulary("core-ip") == ["A", "B"]
+    result = kc.get_alarm_type_vocabulary("core-ip")
+    assert result == ["FiberCut", "LOS", "LinkDown"]
+    assert all(isinstance(token, str) for token in result)
+    # The compile path does set(vocabulary); on the OLD top-level-.get code this would be a
+    # list of dicts and raise ``TypeError: unhashable type: 'dict'``.
+    assert set(result) == {"FiberCut", "LOS", "LinkDown"}
+
+
+def test_get_alarm_type_vocabulary_selects_current_record() -> None:
+    """When the route returns multiple versions, the ``isCurrent`` record's tokens win."""
+    stale = {
+        **_ALARM_VOCAB_RECORD,
+        "version": "v0",
+        "isCurrent": False,
+        "payload": {"alarmTypes": ["StaleOnly"]},
+    }
+    kc = _knowledge_client(
+        lambda r: httpx.Response(200, json=[stale, _ALARM_VOCAB_RECORD]),
+    )
+    assert kc.get_alarm_type_vocabulary("core-ip") == ["FiberCut", "LOS", "LinkDown"]
+
+
+def test_get_alarm_type_vocabulary_envelope_top_level_has_no_tokens() -> None:
+    """Regression guard (#233): the OLD code read the envelope TOP LEVEL ``alarmTypes``.
+
+    The real envelope has NO top-level ``alarmTypes`` (they are under ``payload``), so the
+    reverted ``body.get('alarmTypes')`` path would yield non-string envelope dicts / an empty
+    set. This pins that the tokens come from ``.payload`` and that ``set(...)`` of the result
+    is the token strings — a revert to the top-level read fails this test.
+    """
+    kc = _knowledge_client(
+        lambda r: httpx.Response(200, json=[_ALARM_VOCAB_RECORD]),
+    )
+    result = kc.get_alarm_type_vocabulary("core-ip")
+    # The buggy top-level read returns either [] (dict path, no top-level alarmTypes) or the
+    # list-of-envelope-dicts (bare-list path) — neither equals the real token strings.
+    assert result == ["FiberCut", "LOS", "LinkDown"]
+    assert result != []
+    assert _ALARM_VOCAB_RECORD not in result
+    # set() must succeed (would TypeError on a list of dicts from the old bare-list branch).
+    set(result)
+
+
+def test_current_record_selects_iscurrent_else_sole() -> None:
+    """_current_record picks isCurrent=True, else the sole record, and rejects empty."""
+    a = {"recordId": "a", "isCurrent": False}
+    b = {"recordId": "b", "isCurrent": True}
+    assert _current_record([a, b]) is b
+    assert _current_record([a]) is a
+    with pytest.raises(ValueError, match="no alarm-type-vocabulary record"):
+        _current_record([])
+
+
+# --- Regression #224: parse the Knowledge record ENVELOPE's .payload, not the envelope. ---
+
+
+def test_get_fault_origin_types_parses_record_payload() -> None:
+    """#224: a real fault-origin RecordResponse envelope decodes into a FaultOriginType.
+
+    The model fields (objectType/originAlarmType/description) live under ``payload``.
+    """
+    kc = _knowledge_client(lambda r: httpx.Response(200, json={"records": [_FAULT_ORIGIN_RECORD]}))
+    result = kc.get_fault_origin_types("core-ip")
+    assert result == [
+        FaultOriginType(
+            objectType="FiberSpan",
+            originAlarmType="FiberCut",
+            description="A cut in a fiber span",
+        )
+    ]
+
+
+def test_get_propagation_templates_parses_record_payload() -> None:
+    """#224: a real propagation-template RecordResponse envelope decodes into a template."""
+    kc = _knowledge_client(lambda r: httpx.Response(200, json={"records": [_PROPAGATION_RECORD]}))
+    result = kc.get_propagation_templates("core-ip")
+    assert len(result) == 1
+    template = result[0]
+    assert isinstance(template, PropagationTemplate)
+    assert template.edgeType == "HOSTS"
+    assert template.trigger.objectType == "FiberSpan"
+    assert template.trigger.alarmType == "FiberCut"
+    assert template.effect.objectType == "OpticalPort"
+    assert template.effect.alarmType == "LOS"
+
+
+def test_fault_origin_envelope_top_level_is_not_a_valid_model() -> None:
+    """Regression guard: validating the bare ENVELOPE (the old buggy behavior) must FAIL.
+
+    A revert to ``FaultOriginType.model_validate(item)`` would parse the envelope (which has
+    no ``objectType`` at the top level) and raise — this asserts that contract so a revert
+    is caught. (Mirrors trail-builder #209's contract-pin style.)
+    """
+    with pytest.raises(Exception):  # noqa: B017,PT011 - pydantic ValidationError
+        FaultOriginType.model_validate(_FAULT_ORIGIN_RECORD)
+
+
+def test_propagation_template_envelope_top_level_is_not_a_valid_model() -> None:
+    """Regression guard: the bare propagation ENVELOPE must FAIL model validation."""
+    with pytest.raises(Exception):  # noqa: B017,PT011 - pydantic ValidationError
+        PropagationTemplate.model_validate(_PROPAGATION_RECORD)
+
+
+def test_record_without_payload_key_fails_clearly() -> None:
+    """A malformed record missing ``payload`` must fail loudly, not silently pass."""
+    malformed = {"recordType": "faultOriginType", "recordId": "x"}  # no payload
+    kc = _knowledge_client(lambda r: httpx.Response(200, json={"records": [malformed]}))
+    with pytest.raises(Exception):  # noqa: B017,PT011
+        kc.get_fault_origin_types("core-ip")
+
+
+def test_payload_extracts_payload_and_rejects_missing() -> None:
+    """_payload returns the envelope's payload mapping and rejects a missing/invalid one."""
+    assert _payload({"payload": {"objectType": "X"}}) == {"objectType": "X"}
+    with pytest.raises(ValueError, match="payload"):
+        _payload({"recordType": "faultOriginType"})
+    with pytest.raises(ValueError, match="payload"):
+        _payload({"payload": ["not", "a", "mapping"]})
 
 
 def test_trail_builder_get_trail_returns_raw() -> None:

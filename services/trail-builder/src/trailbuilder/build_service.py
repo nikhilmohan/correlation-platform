@@ -33,8 +33,12 @@ _log = get_logger("trailbuilder.build")
 
 # The fault-capable seed object types per the Core IP §5 model. These name the
 # object types whose nodes seed the closure; they are not policy thresholds.
-# (Seeding from all node types is a superset that produces the same deduped trail
-# set, so this list is an optimisation hint, not a correctness constraint.)
+# This is a correctness constraint, NOT merely an optimisation hint: seeding from
+# every node type is NOT a harmless superset. A pure risk-GROUP node (SRLG) has no
+# closure-edge neighbours, so seeding from it yields a degenerate 1-member
+# ``SRLG:*``-only trail that survives dedup (no real trail equals it). The closure
+# therefore excludes risk-group object types (``closure.RISK_GROUP_OBJECT_TYPES``)
+# from the seed loop; an SRLG still co-trails as a MEMBER via the SRLG union.
 SEED_OBJECT_TYPES: tuple[str, ...] = (
     "Node",
     "LineCard",

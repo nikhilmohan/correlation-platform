@@ -166,6 +166,75 @@ def test_retention_prunes_oldest_snapshots_per_domain(repo: TrailRepository) -> 
     assert {t.trail_id for t in repo.list_trails("snap-3", "core-ip")} == {"t3"}
 
 
+def test_resolve_current_to_latest_persisted_snapshot(repo: TrailRepository) -> None:
+    """#226: the ``current`` sentinel resolves to the latest persisted snapshot for the domain.
+
+    Trails are persisted under the CONCRETE snapshotId from the triggering event
+    (e.g. SNAP-...). A query for ``current`` must map to that concrete snapshot,
+    not look for one literally named "current".
+    """
+    repo.persist_build("core-ip", "SNAP-0001", [_trail("t1", ("Node:A",), snapshot_id="SNAP-0001")])
+    repo.persist_build("core-ip", "SNAP-0002", [_trail("t2", ("Node:B",), snapshot_id="SNAP-0002")])
+
+    assert repo.resolve_snapshot_id("current", "core-ip") == "SNAP-0002"
+
+
+def test_resolve_previous_to_second_latest_snapshot(repo: TrailRepository) -> None:
+    """#226: ``previous`` resolves to the immediately-prior snapshot (topology current|previous)."""
+    repo.persist_build("core-ip", "SNAP-0001", [_trail("t1", ("Node:A",), snapshot_id="SNAP-0001")])
+    repo.persist_build("core-ip", "SNAP-0002", [_trail("t2", ("Node:B",), snapshot_id="SNAP-0002")])
+
+    assert repo.resolve_snapshot_id("previous", "core-ip") == "SNAP-0001"
+
+
+def test_resolve_concrete_snapshot_id_passes_through(repo: TrailRepository) -> None:
+    """#226: a concrete snapshotId is returned unchanged (no resolution applied)."""
+    repo.persist_build("core-ip", "SNAP-0001", [_trail("t1", ("Node:A",), snapshot_id="SNAP-0001")])
+    assert repo.resolve_snapshot_id("SNAP-0001", "core-ip") == "SNAP-0001"
+    # A concrete id that does not exist still passes through (the list query then returns 0).
+    assert repo.resolve_snapshot_id("SNAP-9999", "core-ip") == "SNAP-9999"
+
+
+def test_resolve_current_is_domain_scoped(repo: TrailRepository) -> None:
+    """#226: ``current`` resolves to the latest snapshot for the QUERIED domain, not globally."""
+    repo.persist_build(
+        "core-ip", "SNAP-CORE-1", [_trail("c1", ("Node:A",), snapshot_id="SNAP-CORE-1")]
+    )
+    repo.persist_build(
+        "metro",
+        "SNAP-METRO-1",
+        [_trail("m1", ("Node:B",), domain="metro", snapshot_id="SNAP-METRO-1")],
+    )
+
+    assert repo.resolve_snapshot_id("current", "core-ip") == "SNAP-CORE-1"
+    assert repo.resolve_snapshot_id("current", "metro") == "SNAP-METRO-1"
+
+
+def test_resolve_sentinel_with_no_persisted_snapshots_returns_none(repo: TrailRepository) -> None:
+    """#226: ``current``/``previous`` with nothing (or only one) persisted resolves to None.
+
+    None lets the caller fall back to listing under the literal sentinel (count 0),
+    rather than crashing — a graceful empty result.
+    """
+    assert repo.resolve_snapshot_id("current", "core-ip") is None
+    repo.persist_build("core-ip", "SNAP-0001", [_trail("t1", ("Node:A",), snapshot_id="SNAP-0001")])
+    # Only one snapshot persisted -> there is no "previous".
+    assert repo.resolve_snapshot_id("previous", "core-ip") is None
+
+
+def test_list_trails_resolves_current_to_latest_snapshot(repo: TrailRepository) -> None:
+    """#226 (repo-level): list_trails under the resolved ``current`` returns the latest trails."""
+    repo.persist_build(
+        "core-ip",
+        "SNAP-0439f418",
+        [_trail(f"t{i}", (f"Node:N{i}",), snapshot_id="SNAP-0439f418") for i in range(10)],
+    )
+    resolved = repo.resolve_snapshot_id("current", "core-ip")
+    assert resolved == "SNAP-0439f418"
+    listed = repo.list_trails(resolved, "core-ip")
+    assert len(listed) == 10
+
+
 def test_retention_floor_is_at_least_one() -> None:
     """A retention configured below 1 is clamped to 1 (never prunes everything)."""
     from trailbuilder.db.engine import create_all_in_schema, make_engine
