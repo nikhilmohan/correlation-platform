@@ -323,3 +323,239 @@ def realistic_coreip_slice(
             s.add_edge(GraphEdge(mesh, f"IPLink:N{i}_N{i + 1}", "RIDES_ON"))
 
     return s
+
+
+# ---------------------------------------------------------------------------
+# FAITHFUL Simulator-topology fixture (the #240 reproduction).
+#
+# The earlier ``realistic_coreip_slice`` under-modelled the real Simulator in the
+# two ways that let the #240 residual ship green: it used round-robin / block area
+# assignment instead of the Simulator's ROLE-BASED scheme (scattered area-0
+# backbone P/RR nodes, so many IPLinks GENUINELY terminate one area-0 + one
+# edge-area endpoint), and it had no shared area-less ``VPNService`` hub reachable
+# over ``SERVES`` (the bridge that produced the NULL-area whole-network trail).
+#
+# ``simulator_coreip_slice`` is a 1:1 structural replica of
+# ``services/simulator/src/simulator/domains/coreip/topology_model.py`` — same
+# role-based area assignment (``_area_for_role``), same HOSTED_ON/HOSTS/TERMINATES/
+# RIDES_ON/ADJACENCY_OVER/TRAVERSES/SERVES/MEMBER_OF edge vocabulary, same shared
+# ``VPNService:CUST-{i%5}`` hub, same SRLG bundling of adjacent IPLink pairs. It is
+# NOT injected with a convenient area layout; the areas fall out of the roles
+# exactly as on real Simulator-generated topology. This is the fixture the #240
+# tests run on, so they fail pre-fix exactly as the live P1 gate did and pass after.
+# ---------------------------------------------------------------------------
+
+# The Simulator's domain trail policy (the Knowledge-authored default for Core IP):
+# the full dependency-edge vocabulary the closure traverses, the igp-area boundary,
+# and the SRLG union rule. Mirrors ``fixtures.DEFAULT_POLICY`` / the live default.
+SIMULATOR_CLOSURE_EDGE_TYPES: tuple[str, ...] = (
+    "HOSTED_ON",
+    "HOSTS",
+    "TERMINATES",
+    "RIDES_ON",
+    "ADJACENCY_OVER",
+    "TRAVERSES",
+    "SERVES",
+)
+
+
+def _area_for_role(role: str, area_count: int, edge_area_index: int) -> str:
+    """Replica of the Simulator's role->area map (topology_model._area_for_role).
+
+    Backbone roles (``P``, ``RR``) -> ``area-0``; edge roles -> a numbered edge area
+    round-robined by an edge-node counter. Because P/RR nodes are SCATTERED through
+    the node index (every 3rd is P, every 7th is RR), area-0 backbone nodes are
+    interleaved with edge-area nodes — so consecutive nodes very frequently differ
+    in area and the IPLink between them is a GENUINE inter-area backbone link.
+    """
+    if role in ("P", "RR"):
+        return "area-0"
+    if area_count <= 1:
+        return "area-0"
+    return f"area-{1 + (edge_area_index % (area_count - 1))}"
+
+
+def _role_for_index(i: int) -> str:
+    """Replica of the Simulator's role assignment by node index."""
+    if i % 7 == 6:
+        return "RR"
+    if i % 3 == 0:
+        return "P"
+    if i % 5 == 4:
+        return "peering"
+    return "PE"
+
+
+def simulator_coreip_slice(
+    node_count: int = 20,
+    area_count: int = 3,
+    domain: str = "core-ip",
+    snapshot_id: str = "SNAP-sim",
+    interfaces_per_port: int = 1,
+) -> GraphSlice:
+    """Build a ``GraphSlice`` that is a 1:1 structural replica of the Simulator's
+    Core-IP topology (``topology_model.build_topology``).
+
+    Defaults (20 nodes / 3 areas) match the P1 gate run (SNAP-bf5a10aa) that proved
+    the #240 residual. Role-based areas, a shared ``VPNService`` hub over ``SERVES``,
+    and SRLG-bundled adjacent IPLinks are all present, so the closure is exercised
+    on the same shape that fails live — not a convenient injected layout.
+    """
+    s = GraphSlice(domain=domain, snapshot_id=snapshot_id)
+
+    def _add(mo_id: str, object_type: str, igp_area: str | None = None) -> None:
+        attrs: dict[str, object] = {}
+        if igp_area is not None:
+            attrs["igpArea"] = igp_area
+        s.add_node(GraphNode(managed_object_id=mo_id, object_type=object_type, attributes=attrs))
+
+    # Nodes + their role-based areas (scattered area-0 backbone).
+    nodes: list[tuple[str, str]] = []  # (managedObjectId, igpArea)
+    edge_area_index = 0
+    for i in range(node_count):
+        role = _role_for_index(i)
+        area = _area_for_role(role, area_count, edge_area_index)
+        if role not in ("P", "RR"):
+            edge_area_index += 1
+        moid = f"Node:N{i}"
+        _add(moid, "Node", area)
+        nodes.append((moid, area))
+
+    # Per-node LineCard -> Port -> Interface stack (HOSTED_ON node->lc->port,
+    # HOSTS port->interface). LineCard/Port are area-less hardware; the Interface
+    # carries the node's area (the Simulator stamps igpArea on Node + Interface).
+    for moid, area in nodes:
+        nid = moid.split(":", 1)[1]
+        lc = f"LineCard:{nid}-LC1"
+        port = f"Port:{nid}-LC1-P1"
+        _add(lc, "LineCard")
+        _add(port, "Port")
+        s.add_edge(GraphEdge(moid, lc, "HOSTED_ON"))
+        s.add_edge(GraphEdge(lc, port, "HOSTED_ON"))
+        for k in range(interfaces_per_port):
+            iface = f"Interface:{nid}-LC1-P1-if{k}"
+            _add(iface, "Interface", area)
+            s.add_edge(GraphEdge(port, iface, "HOSTS"))
+
+    def _first_iface(node_moid: str) -> str:
+        nid = node_moid.split(":", 1)[1]
+        return f"Interface:{nid}-LC1-P1-if0"
+
+    # IPLinks between consecutive nodes, terminated by both ends' first interface;
+    # a FiberSpan rides each link; an IGPAdjacency is reachable from BOTH the
+    # interface and the link; an LSP traverses each link and SERVES a shared
+    # area-less VPNService hub (the cross-area bridge the NULL-area trail rode).
+    iplinks: list[str] = []
+    for i in range(node_count - 1):
+        a = nodes[i][0].split(":", 1)[1]
+        b = nodes[i + 1][0].split(":", 1)[1]
+        if_a, if_b = _first_iface(nodes[i][0]), _first_iface(nodes[i + 1][0])
+        link = f"IPLink:{a}_{b}"
+        _add(link, "IPLink")
+        iplinks.append(link)
+        s.add_edge(GraphEdge(if_a, link, "TERMINATES"))
+        s.add_edge(GraphEdge(if_b, link, "TERMINATES"))
+        fiber = f"FiberSpan:F-{a}_{b}"
+        _add(fiber, "FiberSpan")
+        s.add_edge(GraphEdge(fiber, link, "RIDES_ON"))
+        adj = f"IGPAdjacency:{a}_{b}"
+        _add(adj, "IGPAdjacency")
+        s.add_edge(GraphEdge(if_a, adj, "ADJACENCY_OVER"))
+        s.add_edge(GraphEdge(link, adj, "ADJACENCY_OVER"))
+        lsp = f"LSP:{a}-{b}-1"
+        _add(lsp, "LSP")
+        s.add_edge(GraphEdge(link, lsp, "TRAVERSES"))
+        vpn = f"VPNService:CUST-{i % 5}"
+        if vpn not in s.nodes:
+            _add(vpn, "VPNService")
+        s.add_edge(GraphEdge(lsp, vpn, "SERVES"))
+
+    # SRLG groups bundle each adjacent pair of IPLinks (bidirectional MEMBER_OF).
+    for j in range(0, len(iplinks) - 1, 2):
+        srlg = f"SRLG:SRLG-{j // 2}"
+        _add(srlg, "SRLG")
+        s.add_edge(GraphEdge(srlg, iplinks[j], "MEMBER_OF"))
+        s.add_edge(GraphEdge(srlg, iplinks[j + 1], "MEMBER_OF"))
+        s.add_edge(GraphEdge(iplinks[j], srlg, "MEMBER_OF"))
+        s.add_edge(GraphEdge(iplinks[j + 1], srlg, "MEMBER_OF"))
+
+    return s
+
+
+# --- analytic helpers computed FROM the fixture (never hard-coded) ----------
+
+
+def genuine_inter_area_iplinks(slice_: GraphSlice, igp_key: str = "igpArea") -> set[str]:
+    """The IPLinks that GENUINELY span >1 IGP area — computed from the fixture.
+
+    An IPLink genuinely spans areas iff its two terminating Interfaces carry
+    different ``igpArea`` values. This is the ground truth the #240 tests assert
+    against (the cross-area connector count must equal this, NOT be hard-coded).
+    """
+    term_areas: dict[str, set[str]] = {}
+    for edge in slice_.edges:
+        if edge.relation == "TERMINATES" and edge.dst.startswith("IPLink:"):
+            area = slice_.nodes[edge.src].igp_area(igp_key) if edge.src in slice_.nodes else None
+            if area is not None:
+                term_areas.setdefault(edge.dst, set()).add(area)
+    return {link for link, areas in term_areas.items() if len(areas) > 1}
+
+
+def genuine_connector_areas(slice_: GraphSlice, igp_key: str = "igpArea") -> dict[str, set[str]]:
+    """The ground-truth area set each area-less connector GENUINELY belongs to.
+
+    Computed structurally from the fixture (not from the closure under test):
+
+      * an **IPLink** rides the areas of its terminating Interfaces, plus — through
+        SRLG fate-sharing — the areas of every co-member link in its SRLG group(s);
+      * a **FiberSpan / IGPAdjacency / LSP** rides exactly the areas of the IPLink(s)
+        it is directly attached to (it carries one link's areas, nothing more);
+      * an **SRLG** group rides the union of its co-member links' termination areas.
+
+    A connector legitimately appears in >1 area's trails iff its genuine area set
+    has >1 area. Any trail-area appearance OUTSIDE this set is a spurious leak.
+    """
+    node_area = {mo: n.igp_area(igp_key) for mo, n in slice_.nodes.items()}
+
+    def link_term_areas(link: str) -> set[str]:
+        return {
+            node_area[e.src]
+            for e in slice_.edges
+            if e.relation == "TERMINATES" and e.dst == link and node_area.get(e.src) is not None
+        }
+
+    # SRLG group -> co-member IPLinks.
+    srlg_links: dict[str, set[str]] = {}
+    for e in slice_.edges:
+        if e.relation == "MEMBER_OF":
+            if e.src.startswith("SRLG:") and e.dst.startswith("IPLink:"):
+                srlg_links.setdefault(e.src, set()).add(e.dst)
+            if e.dst.startswith("SRLG:") and e.src.startswith("IPLink:"):
+                srlg_links.setdefault(e.dst, set()).add(e.src)
+
+    out: dict[str, set[str]] = {}
+    for mo, area in node_area.items():
+        if area is not None:
+            continue  # area-bearing object, not a connector
+        otype = mo.split(":", 1)[0]
+        if mo.startswith("IPLink:"):
+            areas = set(link_term_areas(mo))
+            for links in srlg_links.values():
+                if mo in links:
+                    for link in links:
+                        areas |= link_term_areas(link)
+            out[mo] = areas
+        elif otype in ("FiberSpan", "IGPAdjacency", "LSP"):
+            links = {e.dst for e in slice_.edges if e.src == mo and e.dst.startswith("IPLink:")} | {
+                e.src for e in slice_.edges if e.dst == mo and e.src.startswith("IPLink:")
+            }
+            areas = set()
+            for link in links:
+                areas |= link_term_areas(link)
+            out[mo] = areas
+        elif mo.startswith("SRLG:"):
+            areas = set()
+            for link in srlg_links.get(mo, set()):
+                areas |= link_term_areas(link)
+            out[mo] = areas
+    return out
