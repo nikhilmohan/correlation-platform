@@ -142,10 +142,19 @@ class TrailClosure:
 
         target_areas = self._target_areas(graph, seed, connector_areas)
         if not target_areas:
-            # No area-bearing object anywhere in the seed's reach (a fully
-            # area-less island): fall back to a single unbounded set so the seed
-            # still yields its (area-less) trail rather than vanishing.
-            return [(self._reachable(graph, seed, None, connector_areas), None)]
+            # An area-less seed that genuinely rides NO area — e.g. a pure
+            # area-less HUB such as ``VPNService:CUST-*`` (reachable only across a
+            # SERVES/LSP fan-out, never directly terminating an area-bearing
+            # endpoint) — yields NO standalone trail. Returning an unbounded
+            # whole-component set here was issue #240's NULL-area whole-network
+            # trail: with a boundary active, the hub seeded a 170-member trail
+            # spanning the entire graph. The hub still appears as a MEMBER of every
+            # area trail whose IPLink/LSP genuinely reaches it (admitted by the
+            # per-area ``_reachable`` walk); it just never SEEDS an unbounded set.
+            # The unbounded fallback survives ONLY when there is no IGP-area
+            # boundary at all (``igp_key is None``, handled above) — never under an
+            # active boundary, so no NULL-area whole-network trail can form (#240).
+            return []
         return [(self._reachable(graph, seed, a, connector_areas), a) for a in sorted(target_areas)]
 
     def _target_areas(
@@ -173,19 +182,36 @@ class TrailClosure:
     ) -> dict[str, set[str]]:
         """Map each area-less connector to the set of areas it genuinely rides within.
 
-        The #234 fix. A connector "rides within" area ``X`` only when it actually
-        connects ``X``'s area-bearing objects — not merely when ``X`` is reachable
-        from it across a network-wide area-less mesh. Concretely a connector is
-        anchored to ``X`` iff it is, or is directly adjacent to, a **genuine
-        ``X``-conductor** — an area-less object that is *directly* adjacent to an
-        area-``X`` area-bearing object (e.g. an IPLink terminated by an area-``X``
-        Interface; a FiberSpan riding such an IPLink).
+        Issue #234 + the #240 residual. A connector "rides within" area ``X`` only
+        when it genuinely terminates / anchors to ``X``'s area-bearing **endpoints**
+        — NOT merely when ``X`` is mesh-reachable from it across the network-wide
+        area-less connector fabric (FiberSpan/LSP/IGPAdjacency rings, SRLG groups,
+        and shared hubs such as ``VPNService:CUST-*``).
 
-        Crucially a pure *transport* object (e.g. one FiberSpan riding every
-        IPLink network-wide) is **not** a conductor of any area — it is directly
-        adjacent to no area-bearing object — so it never propagates one area's
-        connectors into another area. It legitimately rides every area it directly
-        conducts, but it cannot make a single-area connector appear cross-area.
+        We classify each area-less object by whether it is **anchored** — directly
+        adjacent to at least one area-bearing object (``direct[n]`` non-empty). An
+        IPLink terminated by two area-``X`` interfaces is anchored to ``{X}``; an
+        IPLink terminated by an area-0 and an area-2 interface is a genuine
+        cross-area span anchored to ``{0, 2}``.
+
+        Area membership then propagates **only through anchored connectors** — a
+        chain ``anchored -> anchored -> …`` carries its area set, but propagation
+        *stops at* (never relays through) an **unanchored** connector. So:
+
+          * A genuine cross-area IPLink rides exactly its two terminating areas;
+            the FiberSpan/LSP/IGPAdjacency that ride only that one link inherit
+            exactly that link's area set — and nothing more.
+          * A pure area-less **hub** with no direct area-bearing neighbour — e.g.
+            ``VPNService:CUST-*`` (reached only across ``SERVES``) or a single
+            shared transport FiberSpan riding every IPLink — is *unanchored*. It
+            may *receive* the areas of the anchored connectors adjacent to it (so
+            it correctly rides every area it legitimately conducts), but because it
+            is never relayed *through*, it can NEVER bridge one area's connectors
+            into another area. This is what eliminates both the #234 wholesale
+            replication and the #240 hub-bridged NULL-area whole-network trail:
+            without a relaying hub, a single-area connector's area set stays
+            single-area and the hub itself targets no standalone area (it seeds no
+            trail — see ``_bounded_closures``).
 
         With no IGP-area boundary this is empty (every connector is unbounded).
         """
@@ -195,28 +221,34 @@ class TrailClosure:
         area_less = [n for n in graph.nodes if graph.nodes[n].get("igp_area") is None]
 
         # `direct[n]` — areas of the area-bearing objects DIRECTLY adjacent to the
-        # area-less object `n`. An `n` with a non-empty `direct[n]` is a genuine
-        # conductor of each of those areas.
+        # area-less object `n`. `n` is **anchored** iff `direct[n]` is non-empty;
+        # only anchored connectors genuinely terminate an area's endpoints.
         direct: dict[str, set[str]] = {}
         for n in area_less:
-            areas: set[str] = set()
-            for nb in self._undirected_neighbors(graph, n):
-                nb_area = graph.nodes[nb].get("igp_area")
-                if nb_area is not None:
-                    areas.add(nb_area)
-            direct[n] = areas
+            direct[n] = {
+                graph.nodes[nb].get("igp_area")  # type: ignore[misc]
+                for nb in self._undirected_neighbors(graph, n)
+                if graph.nodes[nb].get("igp_area") is not None
+            }
 
-        # A connector rides within area X iff it conducts X directly, or it is
-        # directly adjacent to a genuine X-conductor (e.g. a FiberSpan riding an
-        # IPLink that terminates on an area-X Interface). Traversal continues only
-        # *through* genuine X-conductors, so a network-wide transport object (no
-        # direct area-bearing neighbour, conductor of nothing) never bridges one
-        # area's connectors into another.
+        # Propagate area membership ALONG anchored connectors to a fixpoint: a
+        # connector adopts the area set of each anchored neighbour. Crucially the
+        # relayed-from neighbour must itself be anchored (`direct[nb]`), so an
+        # UNANCHORED hub is a propagation dead-end — it absorbs its anchored
+        # neighbours' areas but is never used as a conduit to spread them onward.
+        # Anchored-to-anchored chains converge in O(area_less * areas) iterations;
+        # bounded by the number of distinct areas, this terminates quickly.
         connector_areas: dict[str, set[str]] = {n: set(direct[n]) for n in area_less}
-        for n in area_less:
-            for nb in self._undirected_neighbors(graph, n):
-                if nb in direct:  # area-less neighbour
-                    connector_areas[n] |= direct[nb]
+        changed = True
+        while changed:
+            changed = False
+            for n in area_less:
+                for nb in self._undirected_neighbors(graph, n):
+                    # Relay ONLY through an anchored neighbour (a genuine
+                    # conductor); never through an unanchored hub.
+                    if direct.get(nb) and not connector_areas[nb] <= connector_areas[n]:
+                        connector_areas[n] |= connector_areas[nb]
+                        changed = True
         return connector_areas
 
     def _reachable(
@@ -288,17 +320,19 @@ class TrailClosure:
         """Co-trail SRLG-fate-shared links (policy ``srlgRule``) — area-safe (AC-3).
 
         For each SRLG group, every trail that already contains one of its co-member
-        links receives **all** of that group's co-member links. Because the SRLG
-        co-members are themselves **area-less** link objects, adding them never
-        drags a *different* area's area-bearing object (Node/Interface) into the
-        trail — so each trail stays single-area (AC-2 holds) while all co-member
-        links of an SRLG co-appear in any trail that touches the group (AC-3). A
-        shared SRLG group/link thus appears in **both** areas' trails as legitimate
-        overlap rather than fusing them into one whole-network trail (the #225
-        re-fuse the naive "merge the whole sets" union caused). ``areas`` is
-        index-parallel to ``member_sets`` (kept for the area context; the
-        link-level union is area-safe by construction). With no boundary this is
-        equivalent to the original co-member union.
+        links receives **all** of that group's co-member links plus the group node.
+        Because the SRLG co-members are themselves **area-less** link objects,
+        adding them never drags a *different* area's area-bearing object
+        (Node/Interface) into the trail — so each trail's area-BEARING members stay
+        single-area (AC-2 holds) while all co-member links of an SRLG co-appear in
+        any trail that touches the group (AC-3). SRLG fate-sharing is a GENUINE
+        cross-area relationship (the shared group is the cross-area conductor): a
+        group bundling two links in different areas legitimately co-appears in both
+        areas' trails as overlap rather than fusing the two areas' area-bearing
+        nodes into one whole-network trail (the #225 re-fuse the naive "merge the
+        whole sets" union caused). ``areas`` is index-parallel to ``member_sets``
+        (kept for context; the link-level union is area-safe by construction). With
+        no boundary this is equivalent to the original co-member union.
         """
         if policy.srlg_rule.mode != "union-members" or not policy.srlg_rule.srlg_edge_type:
             return member_sets
@@ -318,6 +352,13 @@ class TrailClosure:
                 continue
             # The area-less objects to co-trail: the co-member links + the SRLG
             # group node itself (so listTrails SRLG context is present on the trail).
+            # All are area-less, so adding them never drags a *different* area's
+            # area-bearing Node/Interface into the trail — the trail's area-BEARING
+            # members stay single-area (AC-2). SRLG fate-sharing is a GENUINE
+            # cross-area relationship: a group bundling two links in different areas
+            # legitimately co-appears in both areas' trails as overlap (the shared
+            # group is the cross-area conductor), which is why an SRLG-co-member
+            # link riding two areas is genuinely — not spuriously — inter-area.
             shared = set(co_members) | {group_node}
             for i, ms in enumerate(merged):
                 if ms & co_members:
