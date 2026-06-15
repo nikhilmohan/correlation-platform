@@ -33,6 +33,9 @@ class NebulaGraphRepositoryTest extends NebulaIntegrationBase {
         // core-ip domain plus one node in domain "metro" joined by an explicit cross-domain RIDES_ON.
         // A colon-bearing-VID Node (#213) plus a Site it is LOCATED_AT, to exercise by-id resolution
         // (getNode), objectsAtSite (which funnels through getNode), and the traversal start-node path.
+        // #254: two SITES (LON, FRA) each with their own placed device + hosted hierarchy, joined by
+        // a backbone IPLink between their interfaces, to prove the per-site projection is SITE-SCOPED
+        // (LON's result != FRA's result, far-site hierarchy not pulled in).
         List<GraphVertex> vertices = List.of(
                 v("FiberSpan:F1", "FiberSpan", "core-ip"),
                 v("IPLink:L1", "IPLink", "core-ip"),
@@ -40,13 +43,35 @@ class NebulaGraphRepositoryTest extends NebulaIntegrationBase {
                 v("SRLG:S1", "SRLG", "core-ip"),
                 v("Node:N12", "Node", "core-ip"),
                 v("Site:SITE1", "Site", "core-ip"),
-                v("IPLink:M1", "IPLink", "metro"));
+                v("IPLink:M1", "IPLink", "metro"),
+                // LON site subgraph
+                v("Site:LON-01", "Site", "core-ip"),
+                v("Node:LON-PE1", "Node", "core-ip"),
+                v("Port:LON-PE1-P1", "Port", "core-ip"),
+                v("Interface:LON-PE1-I1", "Interface", "core-ip"),
+                // FRA site subgraph
+                v("Site:FRA-01", "Site", "core-ip"),
+                v("Node:FRA-PE1", "Node", "core-ip"),
+                v("Port:FRA-PE1-P1", "Port", "core-ip"),
+                v("Interface:FRA-PE1-I1", "Interface", "core-ip"),
+                // backbone IPLink terminated by BOTH sites' interfaces (a site-spanning connectivity)
+                v("IPLink:LON-FRA", "IPLink", "core-ip"));
         List<GraphEdge> edges = List.of(
                 e("FiberSpan:F1", "IPLink:L1", "RIDES_ON", "core-ip"),
                 e("IPLink:L1", "IPLink:L2", "RIDES_ON", "core-ip"),
                 e("IPLink:L2", "SRLG:S1", "MEMBER_OF", "core-ip"),   // reachable only via MEMBER_OF
                 e("Node:N12", "Site:SITE1", "LOCATED_AT", "core-ip"), // device located at the site
-                e("IPLink:L2", "IPLink:M1", "RIDES_ON", "metro"));   // explicit cross-domain edge
+                e("IPLink:L2", "IPLink:M1", "RIDES_ON", "metro"),   // explicit cross-domain edge
+                // LON hierarchy + placement
+                e("Node:LON-PE1", "Site:LON-01", "LOCATED_AT", "core-ip"),
+                e("Port:LON-PE1-P1", "Node:LON-PE1", "HOSTED_ON", "core-ip"),
+                e("Port:LON-PE1-P1", "Interface:LON-PE1-I1", "HOSTS", "core-ip"),
+                e("Interface:LON-PE1-I1", "IPLink:LON-FRA", "TERMINATES", "core-ip"),
+                // FRA hierarchy + placement
+                e("Node:FRA-PE1", "Site:FRA-01", "LOCATED_AT", "core-ip"),
+                e("Port:FRA-PE1-P1", "Node:FRA-PE1", "HOSTED_ON", "core-ip"),
+                e("Port:FRA-PE1-P1", "Interface:FRA-PE1-I1", "HOSTS", "core-ip"),
+                e("Interface:FRA-PE1-I1", "IPLink:LON-FRA", "TERMINATES", "core-ip"));
         repo.writeSnapshot(vertices, edges);
     }
 
@@ -74,6 +99,31 @@ class NebulaGraphRepositoryTest extends NebulaIntegrationBase {
         // objectsAtSite -> getNode for each device; with the LOOKUP-by-id bug this returned empty -> 404.
         List<GraphVertex> objects = repo.objectsAtSite("Site:SITE1", "core-ip", SNAP);
         assertThat(objects.stream().map(GraphVertex::managedObjectId)).contains("Node:N12");
+    }
+
+    @Test
+    void objectsAtSiteIsSiteScoped_twoSitesReturnDistinctSubgraphs() {
+        // #254: each site's projection is its OWN bounded subgraph (located devices + hosted
+        // hierarchy + depth-1 connectivity), NOT the whole component. LON and FRA must DIFFER.
+        List<String> lon = repo.objectsAtSite("Site:LON-01", "core-ip", SNAP).stream()
+                .map(GraphVertex::managedObjectId).toList();
+        List<String> fra = repo.objectsAtSite("Site:FRA-01", "core-ip", SNAP).stream()
+                .map(GraphVertex::managedObjectId).toList();
+
+        // LON has its own located device + hosted hierarchy + the depth-1 backbone IPLink.
+        assertThat(lon).contains("Node:LON-PE1", "Port:LON-PE1-P1", "Interface:LON-PE1-I1",
+                "IPLink:LON-FRA");
+        // LON must NOT contain FRA's EXCLUSIVE hosted objects (the far-site hierarchy).
+        assertThat(lon).doesNotContain("Node:FRA-PE1", "Port:FRA-PE1-P1", "Interface:FRA-PE1-I1");
+        // Symmetrically for FRA.
+        assertThat(fra).contains("Node:FRA-PE1", "Port:FRA-PE1-P1", "Interface:FRA-PE1-I1",
+                "IPLink:LON-FRA");
+        assertThat(fra).doesNotContain("Node:LON-PE1", "Port:LON-PE1-P1", "Interface:LON-PE1-I1");
+        // The two site subgraphs are genuinely DISTINCT (not the same whole-graph payload).
+        assertThat(lon).isNotEqualTo(fra);
+        // Neither site pulls in the other, unrelated component (the RIDES_ON chain / SITE1 devices).
+        assertThat(lon).doesNotContain("Node:N12", "IPLink:L1", "FiberSpan:F1");
+        assertThat(fra).doesNotContain("Node:N12", "IPLink:L1", "FiberSpan:F1");
     }
 
     @Test

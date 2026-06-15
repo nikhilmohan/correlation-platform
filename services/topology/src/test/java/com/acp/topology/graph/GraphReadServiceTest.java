@@ -124,6 +124,42 @@ class GraphReadServiceTest {
         assertThat(edges).anyMatch(e -> !"LOCATED_AT".equals(e.relation()));
     }
 
+    @Test
+    void traverseEdgesAsksForRelationScopedEdgesOfTheClosureSet() {
+        // #252: GraphReadService builds the closure member set (start + reached node ids) and asks
+        // the repository for the relation-scoped edges among that set, then maps to EdgeDto.
+        List<NodeDto> reached = List.of(node("IPLink:L1"), node("IGPAdjacency:A1"));
+        List<String> relations = List.of("TERMINATES", "ADJACENCY_OVER");
+        when(repository.edgesAmong(
+                eq(List.of("Interface:I1", "IPLink:L1", "IGPAdjacency:A1")),
+                eq(relations), eq("core-ip"), eq("SNAP-1")))
+                .thenReturn(List.of(
+                        edge("Interface:I1", "IPLink:L1", "TERMINATES"),
+                        edge("IPLink:L1", "IGPAdjacency:A1", "ADJACENCY_OVER")));
+
+        List<EdgeDto> edges = service.traverseEdges("Interface:I1", reached, relations, "core-ip",
+                "SNAP-1");
+        assertThat(edges).hasSize(2);
+        assertThat(edges).extracting(EdgeDto::from, EdgeDto::to, EdgeDto::relation)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("Interface:I1", "IPLink:L1",
+                                "TERMINATES"),
+                        org.assertj.core.groups.Tuple.tuple("IPLink:L1", "IGPAdjacency:A1",
+                                "ADJACENCY_OVER"));
+        // The returned edgeIds round-trip back into GET /topology/edges/{edgeId}.
+        assertThat(EdgeId.decode(edges.get(0).edgeId()).from()).isEqualTo("Interface:I1");
+    }
+
+    @Test
+    void traverseEdgesReturnsEmptyNotNullForAnEdgelessClosure() {
+        // #252: when the repository finds no closure edges, the result is empty (never null).
+        when(repository.edgesAmong(any(List.class), any(List.class), eq("core-ip"), eq("SNAP-1")))
+                .thenReturn(List.of());
+        List<EdgeDto> edges = service.traverseEdges("Node:PE1", List.of(), List.of("RIDES_ON"),
+                "core-ip", "SNAP-1");
+        assertThat(edges).isNotNull().isEmpty();
+    }
+
     private static GraphEdge edge(String from, String to, String relation) {
         return new GraphEdge(from, to, relation, "core-ip", "SNAP-1", Map.of());
     }

@@ -150,6 +150,35 @@ class IngestionQueryIT extends NebulaIntegrationBase {
         // A specific multi-layer connectivity edge round-trips with correct from/to/relation.
         assertThat(objects.edges()).anyMatch(e -> e.relation().equals("TERMINATES")
                 && e.from().equals("Interface:PE1-LC2-P3-100") && e.to().equals("IPLink:PE1-PE2-1"));
+
+        // #254: the projection is DEPTH-1 connectivity-scoped — the IPLink/IGPAdjacency the site's
+        // hosted interfaces directly terminate/adjoin ARE present, but objects TWO hops out via the
+        // IPLink (FiberSpan/LSP/VPNService/SRLG ride/traverse/serve/member-of the IPLink, not the
+        // site's hosted members) are NOT pulled in — the projection does not re-expand a connectivity
+        // neighbor's far side.
+        assertThat(objects.nodes()).extracting(NodeDto::managedObjectId)
+                .contains("IPLink:PE1-PE2-1", "IGPAdjacency:PE1-PE2")
+                .doesNotContain("FiberSpan:LON-PAR-1", "LSP:PE1-PE2-primary", "VPNService:cust-A",
+                        "SRLG:srlg-7");
+
+        // #252: GET /topology/traversal returns the typed directed EDGES of the closure (not just
+        // reached node ids), relation-scoped, so the codebook can walk the cascade. From the
+        // interface over the fault-cascade relations, the closure carries the TERMINATES /
+        // ADJACENCY_OVER edges with correct from/to.
+        var traversal = query.traverse("Interface:PE1-LC2-P3-100",
+                List.of("TERMINATES", "ADJACENCY_OVER"), 3, "core-ip", "current", false);
+        assertThat(traversal.reached()).extracting(NodeDto::managedObjectId)
+                .contains("IPLink:PE1-PE2-1", "IGPAdjacency:PE1-PE2");
+        assertThat(traversal.edges()).isNotNull();
+        assertThat(traversal.edges()).anyMatch(e -> e.relation().equals("TERMINATES")
+                && e.from().equals("Interface:PE1-LC2-P3-100") && e.to().equals("IPLink:PE1-PE2-1"));
+        // Every closure edge is relation-scoped and has both endpoints in the closure node set.
+        var closureIds = new java.util.HashSet<String>();
+        closureIds.add("Interface:PE1-LC2-P3-100");
+        traversal.reached().forEach(n -> closureIds.add(n.managedObjectId()));
+        assertThat(traversal.edges()).allMatch(e ->
+                List.of("TERMINATES", "ADJACENCY_OVER").contains(e.relation())
+                        && closureIds.contains(e.from()) && closureIds.contains(e.to()));
     }
 
     @Test
