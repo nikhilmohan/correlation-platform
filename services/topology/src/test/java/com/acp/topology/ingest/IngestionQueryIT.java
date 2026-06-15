@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 import com.acp.eventmodel.EventCodec;
 import com.acp.topology.TestFixtures;
 import com.acp.topology.api.QueryService;
+import com.acp.topology.api.dto.EdgeDto;
 import com.acp.topology.api.dto.NodeDto;
 import com.acp.topology.api.dto.SiteListDto;
 import com.acp.topology.api.dto.SiteObjectsDto;
@@ -129,9 +130,55 @@ class IngestionQueryIT extends NebulaIntegrationBase {
         assertThat(sites.sites()).extracting(s -> s.siteId()).contains("Site:LON-DC1");
         assertThat(sites.sites().get(0).latitude()).isEqualTo(51.5);
 
+        // AC-22 / #245: the per-site projection returns the DEVICE-LEVEL SUBGRAPH — the located Node
+        // PLUS its hosted hierarchy (LineCard/Port/Interface via HOSTED_ON/HOSTS) PLUS the logical
+        // objects it connects to (IPLink/IGPAdjacency/FiberSpan/LSP/VPNService/SRLG) — and the edges
+        // among that set (the multi-layer connectivity relations the web-ui toggles), not only
+        // LOCATED_AT. (valid-all-core-ip-types.json places Node:PE1 at Site:LON-DC1.)
         SiteObjectsDto objects = query.objectsAtSite("Site:LON-DC1", "core-ip", "current");
-        assertThat(objects.nodes()).extracting(NodeDto::managedObjectId).contains("Node:PE1");
-        assertThat(objects.edges()).isNotEmpty();
+        assertThat(objects.nodes()).extracting(NodeDto::managedObjectId)
+                .contains("Node:PE1", "LineCard:PE1-LC2", "Port:PE1-LC2-P3",
+                        "Interface:PE1-LC2-P3-100", "IPLink:PE1-PE2-1");
+        assertThat(objects.nodeCount()).isEqualTo(objects.nodes().size());
+        assertThat(objects.edgeCount()).isEqualTo(objects.edges().size());
+
+        // The edge set must carry the LOCATED_AT to the site AND device-level connectivity edges.
+        assertThat(objects.edges()).extracting(EdgeDto::relation).contains("LOCATED_AT");
+        assertThat(objects.edges()).anyMatch(e -> !"LOCATED_AT".equals(e.relation()));
+        assertThat(objects.edges()).extracting(EdgeDto::relation)
+                .contains("HOSTED_ON", "HOSTS", "TERMINATES");
+        // A specific multi-layer connectivity edge round-trips with correct from/to/relation.
+        assertThat(objects.edges()).anyMatch(e -> e.relation().equals("TERMINATES")
+                && e.from().equals("Interface:PE1-LC2-P3-100") && e.to().equals("IPLink:PE1-PE2-1"));
+
+        // #254: the projection is DEPTH-1 connectivity-scoped — the IPLink/IGPAdjacency the site's
+        // hosted interfaces directly terminate/adjoin ARE present, but objects TWO hops out via the
+        // IPLink (FiberSpan/LSP/VPNService/SRLG ride/traverse/serve/member-of the IPLink, not the
+        // site's hosted members) are NOT pulled in — the projection does not re-expand a connectivity
+        // neighbor's far side.
+        assertThat(objects.nodes()).extracting(NodeDto::managedObjectId)
+                .contains("IPLink:PE1-PE2-1", "IGPAdjacency:PE1-PE2")
+                .doesNotContain("FiberSpan:LON-PAR-1", "LSP:PE1-PE2-primary", "VPNService:cust-A",
+                        "SRLG:srlg-7");
+
+        // #252: GET /topology/traversal returns the typed directed EDGES of the closure (not just
+        // reached node ids), relation-scoped, so the codebook can walk the cascade. From the
+        // interface over the fault-cascade relations, the closure carries the TERMINATES /
+        // ADJACENCY_OVER edges with correct from/to.
+        var traversal = query.traverse("Interface:PE1-LC2-P3-100",
+                List.of("TERMINATES", "ADJACENCY_OVER"), 3, "core-ip", "current", false);
+        assertThat(traversal.reached()).extracting(NodeDto::managedObjectId)
+                .contains("IPLink:PE1-PE2-1", "IGPAdjacency:PE1-PE2");
+        assertThat(traversal.edges()).isNotNull();
+        assertThat(traversal.edges()).anyMatch(e -> e.relation().equals("TERMINATES")
+                && e.from().equals("Interface:PE1-LC2-P3-100") && e.to().equals("IPLink:PE1-PE2-1"));
+        // Every closure edge is relation-scoped and has both endpoints in the closure node set.
+        var closureIds = new java.util.HashSet<String>();
+        closureIds.add("Interface:PE1-LC2-P3-100");
+        traversal.reached().forEach(n -> closureIds.add(n.managedObjectId()));
+        assertThat(traversal.edges()).allMatch(e ->
+                List.of("TERMINATES", "ADJACENCY_OVER").contains(e.relation())
+                        && closureIds.contains(e.from()) && closureIds.contains(e.to()));
     }
 
     @Test

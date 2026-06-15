@@ -91,8 +91,11 @@ public class QueryService {
             throw notFound("start node " + start + " not found");
         }
         List<NodeDto> reached = graph.traverse(start, relations, depth, dom, snapshotId, crossDomain);
+        // #252: include the typed directed edges of the closure (relation-scoped) so consumers can
+        // walk the cascade rather than seeing isolated nodes. Empty (never null) when edge-less.
+        List<EdgeDto> edges = graph.traverseEdges(start, reached, relations, dom, snapshotId);
         return new com.acp.topology.api.dto.TraversalDto(start, dom, relations, depth, crossDomain,
-                reached);
+                reached, edges);
     }
 
     public SiteListDto listSites(String domain, String snapshotRef) {
