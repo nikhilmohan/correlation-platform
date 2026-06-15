@@ -222,8 +222,9 @@ def test_area_less_seed_yields_per_area_trails_not_whole_network(seed_type: str)
     seeds = [n for n in graph.nodes if n.startswith(f"{seed_type}:")]
     assert seeds, f"expected at least one {seed_type} seed object in the fixture"
 
+    connector_areas = closure._connector_areas(graph, "igpArea")
     for seed in seeds:
-        bounded = closure._bounded_closures(graph, seed, igp_key="igpArea")
+        bounded = closure._bounded_closures(graph, seed, "igpArea", connector_areas)
         # Each area-less seed produces >= 1 bounded set, every one single-area and
         # strictly smaller than the whole connected component (never whole-network).
         assert bounded, f"{seed} produced no bounded set"
@@ -241,6 +242,78 @@ def test_area_less_seed_yields_per_area_trails_not_whole_network(seed_type: str)
     trails = closure.compute(s, REALISTIC_POLICY)
     assert len(trails) >= 2
     assert all(len(t.members) < component_size for t in trails)
+
+
+def test_single_area_connector_not_replicated_into_foreign_area_trails() -> None:
+    """#234 regression: a single-area area-less connector must NOT be replicated
+
+    into other areas' trails across the network-wide area-less transport mesh.
+
+    The fixture uses the ``block`` layout (contiguous per-area node blocks, so
+    consecutive nodes share an area and the connector between them is single-area)
+    PLUS ``shared_transport`` — one area-less ``FiberSpan:F-MESH`` riding EVERY
+    IPLink. That mesh is a genuine area-less-to-area-less chain in the closure-edge
+    view, so on the PR-merged #225 closure ANY area's seed walks the entire
+    connector inventory network-wide: a single-area connector such as
+    ``FiberSpan:F-N0_N1`` / ``IPLink:N0_N1`` (both endpoints in area-0) leaks
+    WHOLESALE into the area-1 and area-2 trails (the round-10 120-130-member
+    bloat). After the connector-mesh-area-scope fix a single-area connector rides
+    only its own area, so it appears only in that area's trails.
+
+    Pre-fix this assertion FAILS (the area-0-only span shows up as a member of
+    area-1 / area-2 trails); post-fix it PASSES.
+    """
+    s = realistic_coreip_slice(
+        node_count=9, area_count=3, area_layout="block", shared_transport=True
+    )
+    component_size = _connected_component_size(s, REALISTIC_POLICY)
+    trails = TrailClosure().compute(s, REALISTIC_POLICY)
+    assert trails, "expected at least one trail"
+
+    # area-0-only transport connectors: FiberSpans whose ONLY route to an
+    # area-bearing object is through area-0 nodes (every node in the N0/N1/N2 block
+    # is area-0, so F-N0_N1 / F-N1_N2 ride purely area-0). FiberSpans are NOT SRLG
+    # co-members (only IPLinks are MEMBER_OF an SRLG), so the only way they could
+    # reach an area-1 / area-2 trail is the network-wide area-less transport mesh —
+    # i.e. exactly the #234 wholesale-replication leak, with no legitimate
+    # fate-sharing route to confound the assertion.
+    area0_only_connectors = {"FiberSpan:F-N0_N1", "FiberSpan:F-N1_N2"}
+    for mo in area0_only_connectors:
+        assert mo in s.nodes, f"fixture must contain {mo}"
+
+    # Pre-fix (PR-merged #225) these area-0-only FiberSpans appear in the area-1 AND
+    # area-2 trails (reached across the F-MESH transport conduit); post-fix they ride
+    # only their own area-0.
+    foreign_leaks = [
+        (t.trail_id, t.igp_area, mo)
+        for t in trails
+        if t.igp_area not in (None, "area-0")
+        for mo in area0_only_connectors
+        if mo in t.members
+    ]
+    assert not foreign_leaks, (
+        "single-area (area-0) connector replicated into a foreign-area trail "
+        f"(the #234 mesh leak): {foreign_leaks}"
+    )
+
+    # Sanity: those area-0-only connectors DO still ride their own area-0 trails
+    # (the fix scopes them, it does not drop them).
+    area0_members = {m for t in trails if t.igp_area == "area-0" for m in t.members}
+    assert area0_only_connectors <= area0_members, (
+        "area-0-only connectors must still appear in area-0 trails; missing "
+        f"{sorted(area0_only_connectors - area0_members)}"
+    )
+
+    # And the bulk effect: with the network-wide mesh present, the pre-fix closure
+    # replicated the WHOLE area-less connector inventory into every area trail, so
+    # the largest trail approached the whole connected component. After per-area
+    # scoping no trail carries the foreign-area connector mesh, so the largest trail
+    # is materially smaller than the connected component.
+    largest = max(len(t.members) for t in trails)
+    assert largest < component_size * 0.65, (
+        f"connector-mesh bloat: largest trail {largest} is not materially smaller "
+        f"than the connected component {component_size} (#234 wholesale replication)"
+    )
 
 
 def test_no_degenerate_srlg_only_single_member_trail() -> None:
