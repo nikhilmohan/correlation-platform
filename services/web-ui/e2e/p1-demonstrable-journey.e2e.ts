@@ -222,6 +222,16 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
 
     const cyEl = page.locator('.cy-canvas');
+    // Wait for the site-graph load to COMPLETE before reading any counts. The heading renders
+    // immediately (even while "Loading site graph…" is shown), so reading the edge count here
+    // without this gate is a race: objectsAtSite is still in flight and 0 graph-edge rows exist.
+    // The component reflects graphLoading onto the canvas as data-cy-loading and clears it
+    // deterministically when objectsAtSite resolves; the "Loading…" placeholder disappears and
+    // the device/connection lists render. We assert the POST-RENDER truth, not the race window.
+    await expect(cyEl).toHaveAttribute('data-cy-loading', 'false');
+    await expect(page.getByTestId('graph-loading')).toHaveCount(0);
+    await expect(page.getByTestId('graph-node').first()).toBeVisible();
+
     const startEdges = await page.getByTestId('graph-edge').count();
     expect(startEdges).toBeGreaterThanOrEqual(1);
     await expect

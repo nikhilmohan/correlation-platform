@@ -1,12 +1,30 @@
 import { TestBed } from '@angular/core/testing';
 import { describe, expect, it } from 'vitest';
+import { Subject, throwError } from 'rxjs';
 import { TopologyStore } from './topology.store';
+import { TopologyClient } from '../api/topology.client';
+import { SiteObjectsDto } from '../api/models';
 import { layerForObjectType } from './layer-mapper';
 import { testProviders, flush } from '../../test-utils';
 
 function store(): TopologyStore {
   TestBed.configureTestingModule({ providers: [...testProviders()] });
   return TestBed.inject(TopologyStore);
+}
+
+/** Minimal valid SiteObjectsDto for the lifecycle tests (single node, no edges). */
+function objectsFor(siteId: string, nodeId: string): SiteObjectsDto {
+  return {
+    siteId,
+    domain: 'core-ip',
+    snapshotId: 'current',
+    nodeCount: 1,
+    edgeCount: 0,
+    nodes: [
+      { managedObjectId: nodeId, objectType: 'Router', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+    ],
+    edges: [],
+  };
 }
 
 describe('Topology & trails module (P1)', () => {
@@ -86,5 +104,74 @@ describe('Topology & trails module (P1)', () => {
     s.selectNode('Router:lon-r1');
     await flush();
     expect([...s.highlightedTrailIds()].sort()).toEqual(['TR-7', 'TR-8']);
+  });
+
+  // ── Load/render lifecycle (#253) — graphLoading gates the device-graph render deterministically ──
+  it('graphLoading is true while objects-at-site is in flight and clears to false on success (no race)', async () => {
+    const subject = new Subject<SiteObjectsDto>();
+    TestBed.configureTestingModule({
+      providers: [
+        ...testProviders(),
+        { provide: TopologyClient, useValue: { objectsAtSite: () => subject.asObservable(), listSites: () => new Subject() } },
+      ],
+    });
+    const s = TestBed.inject(TopologyStore);
+
+    s.selectSite('Site:LON');
+    // In flight: loading is TRUE and objects are cleared — the @if keeps the graph on "Loading…".
+    expect(s.graphLoading()).toBe(true);
+    expect(s.objects()).toBeNull();
+
+    // Response resolves → loading clears deterministically and objects() populates the render.
+    subject.next(objectsFor('Site:LON', 'Router:r1'));
+    subject.complete();
+    await flush();
+    expect(s.graphLoading()).toBe(false);
+    expect(s.objects()?.nodes.length).toBe(1);
+  });
+
+  it('graphLoading clears to false even when objects-at-site ERRORS (graph never stays stuck on Loading…)', async () => {
+    TestBed.configureTestingModule({
+      providers: [
+        ...testProviders(),
+        { provide: TopologyClient, useValue: { objectsAtSite: () => throwError(() => new Error('boom')), listSites: () => new Subject() } },
+      ],
+    });
+    const s = TestBed.inject(TopologyStore);
+
+    s.selectSite('Site:LON');
+    await flush();
+    // Error path: catchError emits null, the subscribe callback still runs → loading cleared.
+    expect(s.graphLoading()).toBe(false);
+    expect(s.objects()).toBeNull();
+  });
+
+  it('a stale objects-at-site response for a superseded site does not clobber the current load', async () => {
+    const first = new Subject<SiteObjectsDto>();
+    const second = new Subject<SiteObjectsDto>();
+    let call = 0;
+    TestBed.configureTestingModule({
+      providers: [
+        ...testProviders(),
+        {
+          provide: TopologyClient,
+          useValue: { objectsAtSite: () => (call++ === 0 ? first.asObservable() : second.asObservable()), listSites: () => new Subject() },
+        },
+      ],
+    });
+    const s = TestBed.inject(TopologyStore);
+
+    s.selectSite('Site:A');
+    s.selectSite('Site:B'); // supersedes the first request
+    // The first (stale) request resolves LATE — it must be ignored.
+    first.next(objectsFor('Site:A', 'A:1'));
+    await flush();
+    expect(s.graphLoading()).toBe(true); // still loading B, the stale A response was dropped
+    expect(s.objects()).toBeNull();
+
+    second.next(objectsFor('Site:B', 'B:1'));
+    await flush();
+    expect(s.graphLoading()).toBe(false);
+    expect(s.objects()?.nodes[0].managedObjectId).toBe('B:1');
   });
 });
