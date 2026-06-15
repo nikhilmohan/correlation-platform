@@ -10,7 +10,10 @@
     "build": "ng build",
     "lint": "eslint \"src/**/*.ts\"",
     "test": "vitest",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:mock": "E2E_MODE=mock playwright test",
+    "e2e:real": "E2E_MODE=real playwright test",
+    "e2e:list": "playwright test --list"
   },
   "dependencies": {
     "@angular/cdk": "^20.0.0",
