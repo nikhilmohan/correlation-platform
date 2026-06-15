@@ -347,12 +347,21 @@ class MockCollaborators:
             ]
             return httpx.Response(200, json={"records": records})
 
-        # Knowledge — alarm-type vocabulary
+        # Knowledge — alarm-type vocabulary. Served via the SAME generic record route as a
+        # LIST of ``RecordResponse`` envelopes; the tokens live under ``payload.alarmTypes``,
+        # NOT at the envelope top level (#233 — the prior flat ``{alarmTypes:[...]}`` mock
+        # masked the envelope-vs-payload bug).
         @self.router.route(method="GET", host="knowledge-av.test")
         def _vocab(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(200, json={"alarmTypes": _DOMAIN_DATA[domain]["vocabulary"]})
+            record = _record_envelope(
+                "alarmTypeVocabulary",
+                f"{domain}/alarmTypeVocabulary/default",
+                domain,
+                {"alarmTypes": _DOMAIN_DATA[domain]["vocabulary"]},
+            )
+            return httpx.Response(200, json=[record])
 
         # Topology — nodes (list by type) + traversal
         @self.router.route(method="GET", host="topology.test", path="/topology/nodes")
