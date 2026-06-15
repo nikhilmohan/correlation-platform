@@ -553,7 +553,7 @@ response shapes are now frozen.
 |---|---|---|
 | **P1-G1** | `POST /topology/snapshots` response | **`200` (synchronous)** — `SnapshotIngestResponse { snapshotId: string, domain: string, status: string, nodeCount: integer, edgeCount: integer, changeType: string }`. `snapshotId` is minted **inline during the lift**, so the call is synchronous (not 202/async). `snapshotId` + `status` are the mandatory minimum; `domain`, `nodeCount`, `edgeCount`, `changeType` are the justified richer fields a producer can ignore. |
 | **P1-G7** | `GET /topology/sites` response | **`SiteListDto { domain: string, snapshotId: string, count: integer, sites: SiteDto[] }`** where **`SiteDto { siteId: string, name: string, latitude: number, longitude: number, region: string }`** — the **envelope** form with **flat per-site geo fields** (`siteId` is the `Site` node's `managedObjectId`; `latitude`/`longitude`/`region` lifted out of `attributes` into flat fields). |
-| **P1-G8** | `GET /topology/sites/{siteId}/objects` response | **`SiteObjectsDto { siteId: string, domain: string, snapshotId: string, nodeCount: integer, edgeCount: integer, nodes: NodeDto[], edges: EdgeDto[] }`** — **nodes AND edges** (the intra-site and site-incident edges), so web-ui can render the device-level graph from one call. |
+| **P1-G8** | `GET /topology/sites/{siteId}/objects` response | **`SiteObjectsDto { siteId: string, domain: string, snapshotId: string, nodeCount: integer, edgeCount: integer, nodes: NodeDto[], edges: EdgeDto[] }`** — **nodes AND edges** of the **depth-1 site-scoped closure** (§C: located Nodes + their hosted hierarchy + one depth-1 connectivity hop; edges among that set + `LOCATED_AT`), so web-ui can render the device-level graph from one call. The `SiteObjectsDto` **shape is unchanged/frozen**; #245 + #254 changed only *which* nodes/edges populate it. |
 | **P1-G9** | `GET /topology/nodes/{managedObjectId}` response | **`NodeDto { managedObjectId: string, objectType: string, domain: string, snapshotId: string, name?: string, attributes: object }`** — **no separate `layer` field**; `layer` is **derived as `layer == objectType`**. The frozen NodeDto is the single shape; the rule "`layer` is `objectType`" is documented so web-ui maps `objectType` to `layer` (no duplicated field). |
 
 > **P1-G1 producer-vs-consumer resolution (200 over 202).** The Simulator's current upload-client
@@ -699,10 +699,10 @@ the `attributes` map (returned verbatim).
 | Resolve / get node + layer **(frozen — P1-G9)** | `GET /topology/nodes/{managedObjectId}` | **`NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }`** — **no separate `layer` field**; `layer == objectType` (documented derivation). | 404 unknown id; 400 malformed id |
 | Get edge **(realizable lookup — see "Edge identity & lookup")** | `GET /topology/edges/{edgeId}` where `edgeId` is the **opaque composite key** that **decodes to `(from, relation, to, snapshotId)`** | `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }` | 400 malformed `edgeId` (does not decode); 404 unknown (decodes but no such edge in the snapshot) |
 | Neighbors | `GET /topology/nodes/{managedObjectId}/neighbors?relation=RIDES_ON` (relation optional, repeatable; domain inferred from start) | `NeighborsDto { managedObjectId, domain, neighbors: [ { node: NodeDto, via: EdgeDto } ] }` (same-domain only unless `crossDomain=true`) | 404 unknown start |
-| Bounded traversal | `GET /topology/traversal?start={moId}&relation=RIDES_ON&relation=...&maxDepth=K&crossDomain=false` | `TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[] }` | 400 missing start/relation/maxDepth or maxDepth out of `[1..max]`; 404 unknown start |
+| Bounded traversal | `GET /topology/traversal?start={moId}&relation=RIDES_ON&relation=...&maxDepth=K&crossDomain=false` | **`TraversalDto { start, domain, relations[], maxDepth, crossDomain, reached: NodeDto[], edges: EdgeDto[] }`** — `edges` are the typed directed edges of the closure (#252): **relation-scoped** (only the requested `relations[]`), **both endpoints within the closure set** (origin + `reached`), **empty-not-null**. | 400 missing start/relation/maxDepth or maxDepth out of `[1..max]`; 404 unknown start |
 | List by type | `GET /topology/nodes?objectType=Port&domain=core-ip&snapshotId=current` | `NodeListDto { domain, objectType?, snapshotId, count, nodes: NodeDto[] }` | 400 unknown objectType |
 | **List sites (frozen — P1-G7)** | `GET /topology/sites?domain=core-ip&snapshotId=current` | **`SiteListDto { domain, snapshotId, count, sites: SiteDto[] }`** where **`SiteDto { siteId, name, latitude, longitude, region }`** — envelope with **flat per-site geo fields** (`siteId` = the Site node's `managedObjectId`; geo lifted out of `attributes`). | 400 unknown domain |
-| **List objects at a site (frozen — P1-G8)** | `GET /topology/sites/{siteId}/objects?domain=core-ip` | **`SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`** — **nodes AND edges** (devices `LOCATED_AT` the site + their intra-site / site-incident edges), so web-ui draws the device graph from one call. | 404 unknown site |
+| **List objects at a site (frozen — P1-G8)** | `GET /topology/sites/{siteId}/objects?domain=core-ip` | **`SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`** — **nodes AND edges** of the **depth-1 site-scoped closure** (§C), so web-ui draws the device graph from one call. | 404 unknown site |
 | List snapshots | `GET /topology/snapshots?domain=core-ip` | `SnapshotListDto { snapshots: [ { snapshotId, domain, changeType, status, nodeCount, edgeCount, ingestedAt } ] }` (at least current + previous per domain) | — |
 | Current snapshot | `GET /topology/snapshots/current?domain=core-ip` | `SnapshotSummaryDto { snapshotId, domain, changeType, nodeCount, edgeCount, ingestedAt }` | 404 if no snapshot yet for that domain |
 
@@ -723,15 +723,26 @@ operations back the web-ui's site-level visualization. `{siteId}` is a `managedO
 > stored `Site.attributes` JSON into the flat fields web-ui binds to. This resolves the divergence
 > (web-ui expected flat `siteId` + flat geo) **on Topology's side as the producer**.
 
-> **P1-G8 (`SiteObjectsDto` with edges).** `GET /topology/sites/{siteId}/objects` returns **both
-> `nodes` and `edges`**. `nodes` = the devices with a `LOCATED_AT` edge to the site (as before, but
-> the field is renamed from `objects` to `nodes` to match the device-graph shape); `edges` = the
-> intra-site edges among those devices **plus** their `LOCATED_AT` edges to the site, each as an
-> `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }`. web-ui draws the
-> device-level site graph from this **single** response (no per-node neighbors fan-out). `GraphReadService`
-> computes the edge set via `GO FROM <siteId> OVER LOCATED_AT REVERSELY` to get the device set, then
-> selects the edges whose `from` and `to` are both in that set (intra-site) union the `LOCATED_AT`
-> edges to the site — all snapshot- and domain-scoped (Algorithm §C).
+> **P1-G8 (`SiteObjectsDto` — the depth-1 site-scoped closure, with edges).** `GET
+> /topology/sites/{siteId}/objects` returns **both `nodes` and `edges`** for the **bounded, depth-1
+> site-scoped subgraph** (#245 + #254). `nodes` = the **closure set** = the `Node`s `LOCATED_AT` the
+> site, **plus** their hosted hierarchy (LineCard/Port/Interface via `HOSTS`/`HOSTED_ON` to a bounded
+> depth), **plus** exactly **one** depth-1 hop over the connectivity relations `{TERMINATES,
+> ADJACENCY_OVER, RIDES_ON, TRAVERSES, SERVES, MEMBER_OF}` from that hosted set (so the site's own
+> IPLinks/IGPAdjacency/LSP appear) — **without** re-expanding those neighbors' far-side hierarchy.
+> `edges` = the typed edges among that closure set (both endpoints in the set) **plus** the
+> `LOCATED_AT` edges to the site, each an `EdgeDto { edgeId, from, to, relation, domain, attributes,
+> snapshotId }` (empty-not-null). The projection **never traverses `LOCATED_AT`** (it only reads it
+> reversely once to seed the located set), so it **cannot hop site → site** and two different sites
+> return two **different** subgraphs — not the whole graph. `GraphReadService` computes this with
+> **batched set-based `GO` queries (no per-device N+1)**, all snapshot- and domain-scoped (Algorithm
+> §C). web-ui draws the device-level site graph from this **single** response.
+>
+> **Why the naive form was wrong (do not regress).** The literal "device set = nodes `LOCATED_AT` the
+> site; edges = both-endpoints-in-that-set + `LOCATED_AT`" algorithm returned **zero device-level
+> edges** (#245 — IPLinks/IGPAdjacency/LSPs are not `LOCATED_AT` the site, so no connectivity ever
+> surfaced); naively broadening it to a full closure produced an **unbounded whole-component graph**
+> (#254). The depth-1 closure above is the corrected middle ground.
 
 #### Edge identity & lookup — making `GET /topology/edges/{edgeId}` realizable (Q6)
 
@@ -915,12 +926,12 @@ sequenceDiagram
   C->>QC: GET /topology/traversal start equals Node:PE1 relation RIDES_ON maxDepth 3 crossDomain false
   QC->>QC: validate maxDepth in 1 to max infer domain from start
   QC->>GR: traverse start relations depth domain crossDomain
-  GR->>REPO: GO 1 TO K STEPS OVER relations WHERE snapshotId and domain match
+  GR->>REPO: GO 1 TO K STEPS OVER relations WHERE snapshotId and domain match yield dst AND edge
   REPO->>NEB: nGQL traversal
-  NEB-->>REPO: reached VIDs all within start domain
-  REPO-->>GR: vertices all within start domain
-  GR-->>QC: TraversalDto reached NodeDto array only RIDES_ON-reachable in domain
-  QC-->>C: 200 TraversalDto
+  NEB-->>REPO: reached VIDs plus traversed edges all within start domain
+  REPO-->>GR: vertices plus closure edges all within start domain
+  GR-->>QC: TraversalDto reached NodeDto array PLUS edges EdgeDto array relation-scoped both endpoints in closure empty-not-null
+  QC-->>C: 200 TraversalDto reached plus edges
 ```
 
 The traversal nGQL pins `domain` on every matched vertex/edge unless `crossDomain=true`, so a
@@ -950,19 +961,24 @@ sequenceDiagram
 
   UI->>QC: GET /topology/sites/Site:LON-DC1/objects domain core-ip
   QC->>GR: objectsAtSite siteId domain current
-  GR->>REPO: GO FROM siteId OVER LOCATED_AT REVERSELY WHERE snapshotId and domain
-  REPO->>NEB: nGQL device set
-  NEB-->>REPO: device VIDs located at the site
-  REPO-->>GR: device vertices located at the site
-  GR->>REPO: select intra-site edges both endpoints in device set plus LOCATED_AT edges to site
-  REPO->>NEB: nGQL edge set
+  GR->>REPO: step1 GO FROM siteId OVER LOCATED_AT REVERSELY WHERE snapshotId and domain
+  REPO->>NEB: nGQL located set
+  NEB-->>REPO: located Node VIDs (never traverses LOCATED_AT onward, no site to site)
+  GR->>REPO: step2 batched GO FROM located set OVER HOSTS HOSTED_ON to bounded depth
+  REPO->>NEB: nGQL hosted hierarchy
+  NEB-->>REPO: hosted set LineCard Port Interface
+  GR->>REPO: step3 exactly ONE depth-1 GO FROM hosted set OVER TERMINATES ADJACENCY_OVER RIDES_ON TRAVERSES SERVES MEMBER_OF
+  REPO->>NEB: nGQL depth-1 connectivity hop no second hop no far-side hierarchy
+  NEB-->>REPO: site own IPLinks IGPAdjacency LSP etc closure set
+  GR->>REPO: step4 edges among closure set both endpoints in set plus LOCATED_AT edges to site
+  REPO->>NEB: nGQL edge set batched
   NEB-->>REPO: edge rows
-  REPO-->>GR: device vertices plus edges
-  GR-->>QC: SiteObjectsDto nodes NodeDto array and edges EdgeDto array
+  REPO-->>GR: closure nodes plus edges
+  GR-->>QC: SiteObjectsDto nodes closure set and edges EdgeDto array empty-not-null
   alt site unknown
     QC-->>UI: 404 ApiError
   else
-    QC-->>UI: 200 SiteObjectsDto nodes plus edges P1-G8
+    QC-->>UI: 200 SiteObjectsDto depth-1 site-scoped closure P1-G8
   end
 ```
 
@@ -1127,7 +1143,8 @@ Decision rules:
 Inputs: `start` managedObjectId, a non-empty set of relations, `maxDepth K` (1 to configured max), the
 `domain` inferred from `start`, and a `crossDomain` flag (default `false`). Output: the set of nodes
 reachable from `start` using **only** the named relation edge types within K hops, **within the
-start's domain** unless `crossDomain=true` (and no node reachable solely via other edge types).
+start's domain** unless `crossDomain=true` (and no node reachable solely via other edge types),
+**together with the typed directed edges of that closure** (#252 — see below).
 
 ```mermaid
 flowchart TD
@@ -1136,11 +1153,11 @@ flowchart TD
   B -- yes --> C{K in 1 to maxConfigured}
   C -- no --> E[400 ApiError]
   C -- yes --> P{crossDomain false}
-  P -- yes --> D1[nGQL GO 1 TO K STEPS OVER relations pinned to start domain and snapshotId return distinct dst]
-  P -- no --> D2[nGQL GO 1 TO K STEPS OVER relations no domain pin follows explicit cross-domain edges return distinct dst]
-  D1 --> F[map reached VIDs to NodeDto dedupe by managedObjectId]
+  P -- yes --> D1[nGQL GO 1 TO K STEPS OVER relations pinned to start domain and snapshotId yield distinct dst AND the traversed edge]
+  P -- no --> D2[nGQL GO 1 TO K STEPS OVER relations no domain pin follows explicit cross-domain edges yield distinct dst AND the traversed edge]
+  D1 --> F[map reached VIDs to NodeDto dedupe by managedObjectId AND map traversed edges to EdgeDto]
   D2 --> F
-  F --> G[200 TraversalDto reached NodeDto array]
+  F --> G[200 TraversalDto reached NodeDto array PLUS edges EdgeDto array]
 ```
 
 The relation set is passed as the `OVER <relation>,<relation>...` clause so only the requested edge
@@ -1149,27 +1166,77 @@ matched edge/vertex to the start's `domain`, so the traversal **cannot wander in
 even if an explicit cross-domain edge exists (AC-21). `maxDepth` is bounded by
 `topology.traversal.max-depth` (config, not hard-coded — maps to `GO 1 TO K STEPS`).
 
-### §C — Site queries (list sites / objects located at a site, incl. edges)
+**Closure edges (`edges: EdgeDto[]` — #252).** The traversal response **also returns the typed
+directed edges of the closure**, so a consumer (e.g. the Codebook Generator building the propagation
+cascade) gets the wired subgraph from one call rather than re-fetching neighbors. The `GO … YIELD`
+additionally yields the traversed edge (its `(from, relation, to)` + props), and `GraphReadService`
+maps each to an `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }`. The edge set
+is:
+
+- **Relation-scoped:** **only** edges of the requested `relations[]` (the same `OVER` set) appear —
+  edges of other relation types are never included.
+- **Both endpoints within the closure:** every returned edge has **both** its `from` and `to` inside
+  the closure node set (the start origin **plus** the `reached` set), so it is an edge *of* the
+  returned subgraph, with no dangling endpoint pointing outside.
+- **Empty-not-null:** when the closure has no qualifying edges (e.g. an isolated `start` with no
+  reachable neighbor over the requested relations), `edges` is an **empty array**, never `null`.
+
+Domain scoping applies to edges exactly as to nodes: with `crossDomain=false` only same-domain edges
+are returned; with `crossDomain=true` the cross-domain edge(s) the traversal followed are included.
+
+### §C — Site queries (list sites / per-site depth-1 site-scoped projection, incl. edges)
 
 Inputs: `domain` (and optionally `siteId`), the current snapshot. Output: the domain's `Site` nodes
-(flat `SiteDto`), or the devices `LOCATED_AT` a given site **plus the edges** for the device graph.
+(flat `SiteDto`), or the **bounded, depth-1 site-scoped subgraph** for a given site (nodes **and**
+edges) for the device graph.
 
 - **List sites (P1-G7 flat `SiteDto`):** `LOOKUP ON Site WHERE Site.domain == <domain> AND
   Site.snapshotId == <current>`; for each `Site` vertex, lift `name`/`latitude`/`longitude`/`region`
   out of the stored `Site.attributes` JSON into a **flat `SiteDto { siteId, name, latitude, longitude,
   region }`** (`siteId` = the Site vertex VID/`managedObjectId`); wrap in `SiteListDto { domain,
   snapshotId, count, sites: SiteDto[] }` (AC-22).
-- **Objects at a site (P1-G8 nodes AND edges):** two-step, snapshot- and domain-scoped:
-  1. **Devices:** `GO FROM <siteId> OVER LOCATED_AT REVERSELY WHERE LOCATED_AT.snapshotId == <current>
-     AND LOCATED_AT.domain == <domain>` to get the device VID set; fetch each as a `NodeDto` to form
-     `nodes`.
-  2. **Edges:** the **intra-site** edges (both `from` and `to` in the device set) **plus** the
-     `LOCATED_AT` edges connecting each device to the site — fetched over the device set for the
-     current snapshot/domain and mapped to `EdgeDto { edgeId, from, to, relation, domain, attributes,
-     snapshotId }`.
+
+- **Objects at a site — the depth-1 site-scoped closure (P1-G8 nodes AND edges).** This is the
+  **shipped, correct** projection (#245 + #254). The naive "device set = nodes `LOCATED_AT` the site;
+  edges = both-endpoints-in-that-set + `LOCATED_AT`" algorithm is **wrong** and is **not** what runs:
+  it returned **zero device-level edges** (the #245 bug — IPLinks/IGPAdjacency/LSPs are *not* `LOCATED_AT`
+  the site, so no connectivity ever appeared), and naively broadening it produced an **unbounded
+  whole-component closure** (the #254 bug). The site projection is instead a **bounded, depth-1
+  site-scoped closure**, computed snapshot- and domain-scoped, with **batched set-based `GO` queries
+  (no per-device N+1)**:
+
+  1. **Located set (a):** the `Node`s `LOCATED_AT` the site —
+     `GO FROM <siteId> OVER LOCATED_AT REVERSELY WHERE LOCATED_AT.snapshotId == <current> AND
+     LOCATED_AT.domain == <domain>` → the located-node VID set.
+  2. **Hosted hierarchy (b):** from the located set, expand the hosting hierarchy over
+     **`HOSTS`/`HOSTED_ON`** to a **bounded depth** (`topology.site.hosted-depth`, default covering
+     `Node → LineCard → Port → Interface`) — one **batched** `GO … FROM <located set> OVER HOSTS,
+     HOSTED_ON …` per level, **not** one query per device. The located set **+** this hosted hierarchy
+     is the **hosted set**.
+  3. **Depth-1 connectivity hop (c):** from the **hosted set**, take **exactly ONE** depth-1 hop over
+     the connectivity relations **`{TERMINATES, ADJACENCY_OVER, RIDES_ON, TRAVERSES, SERVES,
+     MEMBER_OF}`** — `GO FROM <hosted set> OVER TERMINATES, ADJACENCY_OVER, RIDES_ON, TRAVERSES,
+     SERVES, MEMBER_OF WHERE …snapshotId/domain` — so the site's **own** IPLinks / IGPAdjacency / LSP /
+     VPNService / SRLG appear. **The boundary rule:** these depth-1 connectivity neighbors are added to
+     the **closure set**, but their **far-side hosting hierarchy is NOT re-expanded** (no second hop —
+     step (b) is **not** re-run on them), so the closure does not bleed into the rest of the network.
+  4. **Edges (d):** the typed edges among the **closure set** (located + hosted + the depth-1
+     connectivity neighbors) — both endpoints within the closure set — **plus** the `LOCATED_AT` edges
+     to the site, each mapped to `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId
+     }` (empty-not-null).
+
+  > **Boundary invariant (unambiguous):** **located → hosted hierarchy (bounded depth) → exactly one
+  > depth-1 connectivity hop → no second hop, and LOCATED_AT is NEVER traversed.** Because the
+  > projection never walks `LOCATED_AT` (it only reads it reversely once, in step 1, to seed the located
+  > set, and includes it as an edge in step 4), it **cannot hop site → site**: two different sites
+  > yield two **different** site-scoped subgraphs, never the whole graph. A future dev must not "fix"
+  > this back to the both-endpoints-LOCATED_AT form (re-introduces #245) nor drop the no-second-hop
+  > boundary (re-introduces #254).
+
   Return `SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges:
-  EdgeDto[] }` so web-ui draws the device-level graph from a **single** call (AC-22). Unknown site
-  yields 404. Both operations are domain-scoped.
+  EdgeDto[] }` (`nodes` = the closure set, `edges` = step (d)) so web-ui draws the device-level graph
+  from a **single** call (AC-22, AC-29). Unknown site yields 404. Both operations are domain-scoped,
+  and all `GO`s are **batched set-based** queries to avoid an N+1 per-device fan-out.
 
 ### §D — Robust startup bootstrap (storaged-ONLINE wait + self-healing readiness)
 
@@ -1312,11 +1379,12 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | Snapshot validation | (a) **JSON-Schema (`networknt`) for structural + code for semantic** (refs / objectType-prefix); (b) all-in-bean-validation; (c) all-in-code | **(a)**. The structural contract lives in `snapshot.schema.json` (the owned contract) — validate against it directly; cross-record semantics (dangling refs, `objectType` equals prefix) aren't expressible in plain JSON-Schema, so a thin semantic pass follows. `networknt` is already a repo dependency. |
 | `changeType` derivation | (a) **explicit query hint, default full-load (first ingest always full-load)**; (b) diff current vs incoming graph to auto-classify | **(a)**. MVP only distinguishes full-load vs incremental and the spec freezes the convention; auto-diff (b) is costly and unnecessary pre-`delete`. |
 | **`edgeId` for `GET /edges/{edgeId}` — realizable lookup (Q6)** | (a) **opaque but service-decodable composite token `edgeId = base64url("<snapshotId> <from> <relation> <to>")`** — decodes to the NebulaGraph edge key `(src=from, dst=to, edgetype=relation, rank=sha1(from,relation,to))`, resolved by a **direct keyed FETCH**; (b) a **one-way sha1** `edgeId` (the prior design) used as the edge rank; (c) sha1 `edgeId` plus a persisted `edgeId -> (src,dst,relation)` reverse-map + index; (d) drop the operation and fold edge retrieval into neighbors/traversal; (e) expose a NebulaGraph internal handle | **(a) — chosen.** NebulaGraph edges are keyed only by `(src, dst, rank, edgetype)`, so the URL id must be **resolvable back to that tuple**. **(b) is unrealizable** — a sha1 is one-way, there is no index from a rank-only hash to `(src,dst,edgetype)`, so `GET /topology/edges/{edgeId}` could never resolve (the gap). (a) makes `edgeId` a reversible encoding of exactly that key, so the fetch is a direct keyed `FETCH PROP ON <relation> "<from>" -> "<to>"@<rank>` — no scan, no extra store. The same token is the `edgeId` every `EdgeDto` already carries, so list responses round-trip into this op. It stays opaque to callers (AC-19). (c) needs an extra store/index + adds drift risk; (d) drops a published operation the spec lists; (e) leaks NebulaGraph internals. The `rank` is still the deterministic `sha1(from, relation, to)` so re-insert overwrites the same edge. |
+| **Bounded-traversal response shape (#252)** | (a) **`TraversalDto` returns `reached: NodeDto[]` AND `edges: EdgeDto[]`** (the closure edges, relation-scoped, both endpoints in the closure, empty-not-null); (b) `reached: NodeDto[]` only — the consumer re-derives edges with per-node `neighbors` calls | **(a) — chosen + shipped (human-approved field).** The Codebook Generator needs the **wired** subgraph to build the propagation cascade; returning the closure edges in the same response gives it the directed, typed edges of the traversal in one call. The edges are **relation-scoped** (only the requested `relations[]`) and have **both endpoints inside the closure** (origin + reached), so they describe exactly the returned subgraph; `edges` is **empty-not-null**. (b) forces every consumer into an N+1 `neighbors` fan-out and re-derivation of which edges are in-closure. This is a documentation of an **already-approved/shipped** additive field on `TraversalDto`, not a new contract. |
 | Producer-supplied vs minted `snapshotId` | (a) **honour producer-supplied if present, else mint UUID-based**; (b) always mint | **(a)** — spec AC-8/AC-9 require honouring a supplied id and minting when absent. |
 | **Ingestion response status (P1-G1)** | (a) **`200` synchronous, `SnapshotIngestResponse { snapshotId, domain, status, nodeCount, edgeCount, changeType }`**; (b) `202` accepted with a bare `{ snapshotId }` (the Simulator's prior assumption); (c) `201` created | **(a) — chosen + frozen.** The lift is synchronous — `snapshotId` is minted inline, the graph is persisted and the event emitted **before** the response returns — so the truthful status is `200`, not `202` (which implies async/queued). The richer body is additive over the bare `{ snapshotId }`; a producer needs only `snapshotId` + `status`. The Simulator aligns its upload client to the published `openapi.json`. (b) misrepresents a synchronous operation; (c) `201`/`Location` semantics don't fit (the resource is queried by `snapshotId`, not a created URL). |
 | **Snapshot-file schema home (P1-G2)** | (a) **one canonical `services/topology/schema/snapshot.schema.json` owned by Topology (the validator), referenced by the Simulator producer**; (b) the schema under `libs/event-model/`; (c) two lockstep copies (one in `services/topology/`, one in `services/simulator/`) | **(a) — chosen + frozen.** Co-locating the schema with its validating owner gives a single source of truth and contract-gated changes; the Simulator references the same file (CI lockstep guard). (b) wrongly conflates the HTTP-upload file contract with the Kafka event-model payloads. (c) is exactly the drift risk the gap flagged — two copies inevitably diverge. |
 | **`GET /topology/sites` shape (P1-G7)** | (a) **`SiteListDto` envelope with flat per-site `SiteDto { siteId, name, latitude, longitude, region }`**; (b) a bare top-level array `[{ siteId, ... }]`; (c) `SiteListDto` with each site a raw `NodeDto` (geo nested under `attributes`) | **(a) — chosen + frozen.** The envelope keeps `domain`/`snapshotId`/`count` so the caller knows the scope, while the **flat per-site geo** is exactly what web-ui's geo map binds to (`siteId` + top-level lat/lon/region). (c) is the prior shape that diverged from the consumer (geo nested, identity under `managedObjectId`). (b) loses the scope metadata. |
-| **`GET /topology/sites/{siteId}/objects` edges (P1-G8)** | (a) **return `nodes` AND `edges` (`SiteObjectsDto` with `edges: EdgeDto[]`)**; (b) `objects: NodeDto[]` only, web-ui composes the graph via per-node `neighbors` calls | **(a) — chosen + frozen.** The web-ui draws a device-level **graph**, which needs edges; returning them in one response is cleaner and avoids an N+1 `neighbors` fan-out that is not in the documented flow. The edge set is the intra-site edges plus the `LOCATED_AT` edges to the site. (b) pushes graph composition onto every consumer and multiplies round-trips. |
+| **`GET /topology/sites/{siteId}/objects` scope (P1-G8; #245 + #254)** | (a) **depth-1 site-scoped closure: located Nodes + their hosted hierarchy + exactly ONE depth-1 connectivity hop, returning `nodes` AND `edges` (`SiteObjectsDto` with `edges: EdgeDto[]`)**; (b) **narrow**: device set = nodes `LOCATED_AT` the site, edges = both-endpoints-in-that-set + `LOCATED_AT` (the original design wording — #245 bug); (c) **broad**: full connected-component closure (the first #254 broadening); (d) `objects: NodeDto[]` only, web-ui composes the graph via per-node `neighbors` calls | **(a) — chosen + shipped.** The web-ui draws a device-level **graph**, which needs edges. **(b) returns ZERO device-level edges (#245)** — IPLinks/IGPAdjacency/LSPs are not `LOCATED_AT` the site, so the both-endpoints-in-the-located-set rule excludes all real connectivity. **(c) is unbounded (#254)** — re-expanding neighbors' hierarchy walks the whole connected component (effectively the whole network). (a) is the corrected middle ground: take the located set, lift the hosted hierarchy (bounded depth), then exactly **one** depth-1 hop over `{TERMINATES, ADJACENCY_OVER, RIDES_ON, TRAVERSES, SERVES, MEMBER_OF}` with **no second hop** and **no `LOCATED_AT` traversal**, so the site's own connectivity appears, the boundary is bounded, and two sites yield two different subgraphs. Computed with **batched set-based `GO` queries (no per-device N+1)**. (d) pushes graph composition onto every consumer and multiplies round-trips. |
 | **Node `layer` representation (P1-G9)** | (a) **document `layer == objectType`; no separate field on `NodeDto`** (web-ui maps `objectType` to `layer`); (b) add an explicit `layer` field duplicating `objectType` | **(a) — chosen + frozen.** `objectType` already **is** the layer indicator (sourced from the vertex TAG); adding a separate `layer` field duplicates data and risks the two drifting. The frozen `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }` documents the derivation, so web-ui maps `objectType` to `layer` with no duplicated field. (b) is redundant storage + a drift hazard. |
 
 ---
@@ -1338,7 +1406,7 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | 8 | Producer-supplied `snapshotId` honoured | `SnapshotMetadataServiceTest#usesProducerSuppliedSnapshotId` + `IngestionQueryIT#suppliedIdFlowsToResponseAndEvent` | response + emitted event + PostgreSQL row carry the supplied id. |
 | 9 | Service mints `snapshotId` when absent | `SnapshotMetadataServiceTest#mintsUniqueSnapshotIdWhenAbsent` | non-empty, unique id returned in 200 and stored in PostgreSQL. |
 | 10 | Lifting to typed graph (full MVP-domain vocabulary incl. Site + Interface) | `LiftingServiceTest#liftsAllCoreIpTypesWithCorrectTagsAndEdges` + `IngestionQueryIT#allTypesAndRelationsQueryable` | each node (Node to SRLG **and Site and Interface**) lifts to the correct NebulaGraph TAG + returns correct `objectType` + `domain`; each edge lifts to the correct EDGE type (incl. **LOCATED_AT**, **HOSTS**, **TERMINATES**); types/relations come from the file, not hard-coded. |
-| 11 | Bounded traversal by edge type | `NebulaGraphRepositoryTest#traversalReturnsOnlyRidesOnReachableWithinDepth` (Testcontainers NebulaGraph) | `GO 1 TO K STEPS OVER RIDES_ON` returns exactly the expected RIDES_ON-reachable set within K; excludes nodes reachable only via other edge types. |
+| 11 | Bounded traversal by edge type **+ closure edges (#252)** | `NebulaGraphRepositoryTest#traversalReturnsOnlyRidesOnReachableWithinDepth` + `GraphReadServiceTest#traverseReturnsRelationScopedClosureEdges_bothEndpointsInClosure_emptyNotNull` + `OpenApiContractTest#traversalDtoIncludesEdgesField` (Testcontainers NebulaGraph) | `GO 1 TO K STEPS OVER RIDES_ON` returns exactly the expected RIDES_ON-reachable set within K and excludes nodes reachable only via other edge types; the `TraversalDto` **also** carries `edges: EdgeDto[]` that are **relation-scoped** (only the requested `relations[]`), have **both endpoints within the closure set** (origin + reached), and are **empty-not-null** when no qualifying edge exists; `openapi.json` declares the `edges` field on `TraversalDto`. |
 | 12 | `managedObjectId` resolution | `QueryControllerTest#getNodeReturnsObjectAndLayer_404WhenUnknown` | valid id yields NodeDto with layer (from TAG); unknown yields 404. |
 | 13 | List by type + neighbors | `QueryControllerTest#listByTypeReturnsOnlyThatType` + `#neighborsReturnsDirectlyConnected` | `?objectType=Port` (LOOKUP ON Port) yields only Ports; neighbors (GO OVER) returns all directly connected. |
 | 13b | **Get edge by realizable `edgeId` (Q6)** | `GraphReadServiceTest#getEdgeDecodesEdgeIdToKeyedFetch` + `QueryControllerTest#getEdgeRoundTripsAndReturns404And400` + `NebulaGraphRepositoryTest#getEdgeResolvesByDirectKeyedFetch` (Testcontainers NebulaGraph) | the `edgeId` carried in an `EdgeDto` from neighbors/traversal/site-objects **round-trips** straight into `GET /topology/edges/{edgeId}` and returns the same edge; the service base64url-**decodes** `edgeId` to `(snapshotId, from, relation, to)` and resolves it by a **direct keyed `FETCH PROP ON <relation> "<from>" -> "<to>"@<rank>`** (no scan/index); a malformed token yields **400**, a well-formed token with no such edge yields **404**; no NebulaGraph internal/rank/nGQL leaks in the body. |
@@ -1350,14 +1418,14 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | 19 | NebulaGraph abstraction boundary | `NebulaAbstractionBoundaryTest#noEndpointEnvLogOrBodyLeaksNebulaInternals` | no controller/DTO/env/log exposes a NebulaGraph host/port/space/conn string or raw nGQL result row; ArchUnit-style check that **only** `com.acp.topology.graph.NebulaGraphRepository` issues nGQL / touches the nebula-java `Session`. |
 | 20 | **Structured attributes stored + returned** (contract well-known keys, extensible) | `LiftingServiceTest#preservesAttributesVerbatim` + `IngestionQueryIT#attributesRoundTripUnchanged` | device/connection/Site `attributes` (vendor/model/equipmentType/role/capacity, linkType/protectionRole, lat/long/region) serialize to the NebulaGraph JSON-string property and round-trip unchanged in `NodeDto`/`EdgeDto`; no attribute-value validation performed. |
 | 21 | **Domain-scoped query isolation + explicit cross-domain edge** | `NebulaGraphRepositoryTest#traversalStaysWithinDomainByDefault` + `#crossDomainEdgeFollowedOnlyWhenOptIn` (Testcontainers NebulaGraph; fixture has two domains joined by one explicit cross-domain edge) | default traversal/neighbors/list never returns another domain's nodes even across an explicit cross-domain edge; with `crossDomain=true` the cross-domain edge is followed and the other-domain node is reached; list/site queries are domain-filtered. |
-| 22 | **Site + LOCATED_AT lift + site query API (frozen shapes — P1-G7/P1-G8)** | `LiftingServiceTest#liftsSiteAndLocatedAt` + `QueryControllerTest#listSitesReturnsFlatSiteDto` + `QueryControllerTest#objectsAtSiteReturnsNodesAndEdges_404WhenUnknownSite` (with `IngestionQueryIT#siteVisualizationPath`) | `Site` TAG + `LOCATED_AT` EDGE lift like any typed node/edge; `GET /topology/sites` returns **`SiteListDto { domain, snapshotId, count, sites: SiteDto[] }`** with each **flat `SiteDto { siteId, name, latitude, longitude, region }`** (geo lifted out of attributes); `GET /topology/sites/{siteId}/objects` returns **`SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`** (nodes AND edges); unknown site yields 404; all domain-scoped. |
+| 22 | **Site + LOCATED_AT lift + site query API (frozen shapes — P1-G7/P1-G8)** | `LiftingServiceTest#liftsSiteAndLocatedAt` + `QueryControllerTest#listSitesReturnsFlatSiteDto` + `QueryControllerTest#objectsAtSiteReturnsNodesAndEdges_404WhenUnknownSite` (with `IngestionQueryIT#siteVisualizationPath`) | `Site` TAG + `LOCATED_AT` EDGE lift like any typed node/edge; `GET /topology/sites` returns **`SiteListDto { domain, snapshotId, count, sites: SiteDto[] }`** with each **flat `SiteDto { siteId, name, latitude, longitude, region }`** (geo lifted out of attributes); `GET /topology/sites/{siteId}/objects` returns **`SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`** (the depth-1 site-scoped closure — see AC-29); unknown site yields 404; all domain-scoped. |
 | 23 | **objectType/relation validated vs Knowledge vocabulary** (de-frozen) | `VocabularyValidatorTest#acceptsTypesAndRelationsInDomainVocab_rejectsOthers` + `KnowledgeVocabClientTest#fetchesAndCachesVocabFromMock` + `IngestionControllerTest#failsClosedWhenVocabUnavailable` | accepted file uses only domain-vocab types/relations; unknown ones yield 422 (cross-refs AC-7/7b); client built/mocked from Knowledge's published OpenAPI, vocab cached with TTL; Knowledge unavailable + no cache yields 502, no write, no event (EH-6c). |
 | 24 | **`Interface` + `HOSTS`/`TERMINATES` lift, query + domain-vocab validation** (merged §5 model) | `LiftingServiceTest#liftsInterfaceAndHostsAndTerminates` + `QueryControllerTest#interfacesOnPortAndIpLinkTerminatedByInterface` + `VocabularyValidatorTest#acceptsInterfaceHostsTerminatesInCoreIpVocab` (with `IngestionQueryIT#interfaceLayeringQueryable`, Testcontainers) | a snapshot with `Interface` nodes + `HOSTS`/`TERMINATES` edges lifts via the generic typed path (TAG `Interface`, EDGE `HOSTS`/`TERMINATES`, `domain`+`attributes` preserved, no special-casing); they validate as members of the `core-ip` Knowledge vocabulary (absent from vocab yields 422); `GET /nodes?objectType=Interface` lists interfaces, `neighbors?relation=HOSTS` from a Port returns its interfaces, `neighbors?relation=TERMINATES` from an Interface returns its IPLink, and a `HOSTS`+`TERMINATES` traversal walks Port to Interface to IPLink — all domain-scoped. |
 | 25 | **Cross-store persistence split + atomic cut-over + no partial snapshot** | `IngestionPersistenceIT#nebulaWrittenThenPostgresCutOverMakesCurrent` + `IngestionPersistenceIT#postgresCutOverFailureLeavesPriorCurrentAndNoVisiblePartial` + `OrphanReaperTest#sweepsNebulaSnapshotIdsWithNoPostgresRow` (Testcontainers NebulaGraph + PostgreSQL) | graph data lands in NebulaGraph and becomes visible only after the PostgreSQL current-pointer commit; a forced PostgreSQL-tx failure leaves the prior snapshot `current`, the new graph data unreferenced and invisible, and 500 returned; the orphan reaper deletes NebulaGraph `snapshotId`s with no PostgreSQL row. |
 | 26 | **NebulaGraph bootstrap idempotent + waits for storaged `ONLINE` before `CREATE SPACE` (CRIT-1, S1/S4)** | `NebulaSchemaBootstrapIT#idempotentSpaceSchemaAndAddHostsAcrossRestarts` + `NebulaSchemaBootstrapIT#waitsForStoragedOnlineBeforeCreateSpace` (Testcontainers NebulaGraph, **fresh/empty volumes**) | on a fresh NebulaGraph, startup parses `SHOW HOSTS`, runs `ADD HOSTS` only if the storaged host is **not `ONLINE`** (not "no row"), then **polls until that host's `Status == ONLINE`** and **only then** issues `CREATE SPACE` (no `Host not enough!`); then `CREATE TAG/EDGE/INDEX IF NOT EXISTS` + `REBUILD`, waits until the space is usable; re-running the bootstrap is a **no-op** (no errors, no duplicate schema); readiness reports UP only once the space is usable. |
 | 27 | **Ingestion returns the frozen `200 SnapshotIngestResponse` (P1-G1)** | `IngestionControllerTest#postValidFileReturns200WithFrozenSnapshotIngestResponse` + `OpenApiContractTest#ingestionResponseMatchesFrozenSchema` | a valid POST yields **HTTP 200** (not 202) with body `{ snapshotId, domain, status, nodeCount, edgeCount, changeType }`; `snapshotId` non-empty + equals the value carried in the emitted event; the live response validates against the `SnapshotIngestResponse` schema in the checked-in `services/topology/openapi.json`. |
 | 28 | **`GET /topology/sites` returns the frozen flat `SiteDto` shape (P1-G7)** | `QueryControllerTest#listSitesReturnsFlatSiteDto` + `OpenApiContractTest#siteListMatchesFrozenSchema` | response is `SiteListDto { domain, snapshotId, count, sites: [...] }` and **each site is `{ siteId, name, latitude, longitude, region }`** with **flat** top-level geo (not nested under `attributes`, not a raw NodeDto); `siteId` equals the Site node's `managedObjectId`; validates against the checked-in `openapi.json`. |
-| 29 | **`GET /topology/sites/{siteId}/objects` returns nodes AND edges (P1-G8)** | `QueryControllerTest#objectsAtSiteReturnsNodesAndEdges_404WhenUnknownSite` + `GraphReadServiceTest#objectsAtSiteEdgesAreIntraSiteAndLocatedAt` + `OpenApiContractTest#siteObjectsMatchesFrozenSchema` | response is `SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`; `nodes` = devices `LOCATED_AT` the site; `edges` = intra-site edges (both endpoints in the device set) plus the `LOCATED_AT` edges to the site, each an `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }`; unknown site yields 404; validates against the checked-in `openapi.json`. |
+| 29 | **`GET /topology/sites/{siteId}/objects` returns the depth-1 site-scoped closure — nodes AND edges (P1-G8, #245 + #254)** | `QueryControllerTest#objectsAtSiteReturnsNodesAndEdges_404WhenUnknownSite` + `GraphReadServiceTest#objectsAtSiteReturnsDepth1SiteScopedClosureWithConnectivityEdges` + `GraphReadServiceTest#twoDistinctSitesReturnDifferentScopedSubgraphs` + `GraphReadServiceTest#siteClosureStopsAtDepth1_noSecondHopNoLocatedAtTraversal` + `OpenApiContractTest#siteObjectsMatchesFrozenSchema` | response is `SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`; `nodes` = the **closure set** (Nodes `LOCATED_AT` the site + their hosted hierarchy via `HOSTS`/`HOSTED_ON` to bounded depth + exactly one depth-1 hop over `{TERMINATES, ADJACENCY_OVER, RIDES_ON, TRAVERSES, SERVES, MEMBER_OF}`); `edges` = the typed edges among the closure set plus the `LOCATED_AT` edges to the site, each an `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }` (so device-level connectivity is non-empty — guards #245); the closure **stops at depth 1** (no far-side re-expansion — guards #254) and **never traverses `LOCATED_AT`**, so **two distinct sites return two different scoped subgraphs** (not the whole graph); unknown site yields 404; validates against the checked-in `openapi.json`. |
 | 30 | **`GET /topology/nodes/{managedObjectId}` returns the frozen `NodeDto`; `layer == objectType` (P1-G9)** | `QueryControllerTest#getNodeReturnsFrozenNodeDto_layerEqualsObjectType` + `OpenApiContractTest#nodeDtoMatchesFrozenSchema` | response is exactly `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }` with **no separate `layer` field**; the design + `openapi.json` document that `layer` is `objectType`; validates against the checked-in `openapi.json`. |
 | 31 | **Snapshot file validates against the single canonical schema; one home, no Simulator copy (P1-G2)** | `SnapshotSchemaCanonicalTest#validatesAgainstSingleCheckedInSchema` + `SnapshotSchemaCanonicalTest#exactlyOneCanonicalSchemaFileExists` (+ CI lockstep guard) | a conforming snapshot file validates against **`services/topology/schema/snapshot.schema.json`** and a malformed one fails; the canonical schema exists at that single path; **no** `services/simulator/schema/...` lockstep duplicate exists; the Simulator references this same file (CI lockstep guard fails the build on drift or a forked copy). |
 | 32 (spec **AC-25**) | **Interface model lifts and is queryable end-to-end — Port HOSTS Interface TERMINATES IPLink, ADJACENCY_OVER between interfaces (Core-IP §5 layering)** | `InterfaceModelTest#liftsInterfaceWithHostsTerminatesAndAdjacencyOver` + `InterfaceModelTest#listsInterfacesByObjectType` + `InterfaceModelTest#neighborsResolvePortHostsInterfaceTerminatesIpLink` + `InterfaceModelTest#adjacencyOverResolvesBetweenInterfaces` + `InterfaceModelTest#resolvesInterfaceManagedObjectIdToTypedNodeDto` + `InterfaceModelTest#interfaceTypeAndRelationsRejectedWhenAbsentFromDomainVocab` (with `IngestionQueryIT#interfaceLayeringQueryable`, Testcontainers NebulaGraph) | a small Port/Interface/IPLink/IGPAdjacency snapshot (`with-interfaces.json`) lifts via the generic typed path: each `Interface` becomes a typed `Interface` vertex (objectType `Interface`) and the `HOSTS` (Port to Interface), `TERMINATES` (Interface to IPLink), and `ADJACENCY_OVER` (Interface to IGPAdjacency) edges are all created on the correct endpoints — `domain`+`attributes` preserved, **no Interface-specific code path**. `GET /topology/nodes?objectType=Interface` lists exactly the interfaces; `GET /topology/nodes/{port}/neighbors?relation=HOSTS` returns the port's Interface and `GET /topology/nodes/{interface}/neighbors?relation=TERMINATES` returns its IPLink (so a HOSTS+TERMINATES traversal walks **Port to Interface to IPLink**); `GET /topology/nodes/{interface}/neighbors?relation=ADJACENCY_OVER` resolves **between interfaces** — an interface's ADJACENCY_OVER neighbor is the IGPAdjacency (adjacencies run between interfaces, not nodes). `GET /topology/nodes/{Interface:*}` returns the object as a typed `NodeDto` with `objectType == Interface` (layer == objectType). `Interface`/`HOSTS`/`TERMINATES`/`ADJACENCY_OVER` validate as members of the `core-ip` Knowledge vocabulary; an interface type/relation absent from the domain vocabulary yields **422** (cross-refs AC-7/7b). All domain-scoped, typed DTOs only. |
@@ -1388,11 +1456,11 @@ vocabulary. **Every spec acceptance criterion (1..25) maps 1:1 to a named test a
 | E1 | **Happy path P1 onboarding** | Simulator-style client POSTs a valid Core-IP snapshot (full MVP-domain vocabulary incl. **Site** + **LOCATED_AT** + structured **attributes**) then validate schema then validate types/relations vs the `core-ip` Knowledge vocabulary then lift (domain-tagged) then NebulaGraph persist then PostgreSQL current cut-over then emit `topology.changed` | 200 + `snapshotId` + `domain`; current snapshot queryable from NebulaGraph; attributes round-trip; exactly one `full-load` event whose `snapshotId` matches; payload deserialises to the frozen binding. |
 | E2 | **Reject malformed / unknown-for-domain, no side effects** | POST files with: a dangling edge ref; a bad generic moId; an `objectType` not in the `core-ip` vocabulary; a `relation` not in the `core-ip` vocabulary | each yields 422 `ApiError`; **nothing** in NebulaGraph; **no** PostgreSQL row; **no** event on `topology.changed`. |
 | E3 | **Re-ingest versioning** | POST snapshot v1 (full-load) then POST snapshot v2 (incremental) | two distinct `snapshotId`s; `GET /topology/snapshots` (PostgreSQL) lists current(v2)+previous(v1); v2 event `changeType=incremental`; oldest beyond previous evicted from NebulaGraph + PostgreSQL. |
-| E4 | **Query path for consumers (P2)** | After E1, a consumer does resolve then neighbors then bounded RIDES_ON traversal (depth 2), all domain-scoped | typed DTOs only (incl. `domain` + `attributes`); traversal returns exactly RIDES_ON-reachable nodes within the domain; unknown id yields 404; no NebulaGraph internals/nGQL in any body/log. |
+| E4 | **Query path for consumers (P2; traversal closure edges — #252)** | After E1, a consumer does resolve then neighbors then bounded RIDES_ON traversal (depth 2), all domain-scoped | typed DTOs only (incl. `domain` + `attributes`); traversal returns exactly RIDES_ON-reachable nodes within the domain **and** the closure `edges: EdgeDto[]` (relation-scoped, both endpoints in the closure, empty-not-null — so the Codebook Generator can build the propagation cascade from one call); unknown id yields 404; no NebulaGraph internals/nGQL in any body/log. |
 | E5 | **Event emit failure to DLQ (partial/failure path)** | Persist + cut-over succeed, then `topology.changed` broker send fails (broker injected-down) | snapshot remains current + queryable; envelope lands on `topology.changed.dlq` with error headers; ERROR log with `snapshotId`/`traceId`; no data loss. |
 | E6 | **Atomic cross-store write under NebulaGraph/PostgreSQL failure** | Force a PostgreSQL cut-over failure (or NebulaGraph write failure) mid-ingest | no visible partial snapshot; prior snapshot stays `current`; orphan NebulaGraph data reaper-swept; 500 `ApiError`; retry of the same POST succeeds cleanly. |
 | E7 | **OpenAPI contract integrity** | Build generates `openapi.json`; contract test runs live | checked-in `services/topology/openapi.json` matches live `/openapi.json`; ingestion + all query ops (incl. the two **site** ops) present; surface unchanged by the backend swap; drift fails CI. |
-| E8 | **Site-level visualization path (frozen shapes — P1-G7/P1-G8)** | After E1, web-ui-style caller: `GET /topology/sites?domain=core-ip` then `GET /topology/sites/{siteId}/objects` | sites returned as **flat `SiteDto { siteId, name, latitude, longitude, region }`** inside `SiteListDto`; objects-at-site returns **`nodes` AND `edges`** (devices LOCATED_AT the site plus their intra-site / LOCATED_AT edges), so a device graph renders from one call; domain-scoped; unknown site yields 404. |
+| E8 | **Site-level visualization path — depth-1 site-scoped closure (frozen shapes — P1-G7/P1-G8; #245 + #254)** | After E1, web-ui-style caller: `GET /topology/sites?domain=core-ip` then `GET /topology/sites/{siteId}/objects` for two distinct sites | sites returned as **flat `SiteDto { siteId, name, latitude, longitude, region }`** inside `SiteListDto`; objects-at-site returns the **depth-1 site-scoped closure** as **`nodes` AND `edges`** (Nodes LOCATED_AT the site + their hosted hierarchy + one depth-1 connectivity hop, with the site's own IPLinks/IGPAdjacency/LSP edges present — non-empty, guarding #245), so a device graph renders from one call; the two distinct sites return **different** subgraphs (bounded, never the whole graph — guarding #254); domain-scoped; unknown site yields 404. |
 | E9 | **Domain isolation + explicit cross-domain (structure path)** | Ingest a two-domain snapshot joined by one explicit cross-domain edge; traverse from a node default vs `crossDomain=true` | default traversal stays in the start domain (other-domain node **not** reached); `crossDomain=true` reaches the other-domain node only via the explicit cross-domain edge. (MVP data is single-domain; exercises the isolation structure on the integration stack.) |
 | E10 | **Vocabulary fail-closed (failure path)** | Knowledge domain-vocabulary endpoint made unavailable (no cached vocab), then POST a valid file | ingest rejected **502** `ApiError`; **no** NebulaGraph write, **no** PostgreSQL row, **no** event; ERROR logged with domain/`traceId`; succeeds once Knowledge is reachable again. |
 | E11 | **Interface layering path (merged §5 model — spec AC-25)** | Ingest `with-interfaces.json` (Port HOSTS Interface TERMINATES IPLink, ADJACENCY_OVER between interfaces) then validate vs `core-ip` vocab then lift then persist; then query the layering | 200 + `snapshotId`; `Interface` TAG and `HOSTS`/`TERMINATES`/`ADJACENCY_OVER` EDGEs lift like any typed object and validate as Core-IP vocab; `GET /nodes?objectType=Interface` lists them; `neighbors?relation=HOSTS` from a Port returns its interfaces; `neighbors?relation=TERMINATES` from an Interface returns its IPLink; `neighbors?relation=ADJACENCY_OVER` from an Interface returns the IGPAdjacency (adjacency resolves **between interfaces**, not nodes); a `HOSTS`+`TERMINATES` traversal walks Port to Interface to IPLink; `GET /nodes/{Interface:*}` resolves to a typed `NodeDto` with `objectType == Interface` — all domain-scoped, typed DTOs only. |
@@ -1430,6 +1498,7 @@ never forwarded to callers):**
 | `TOPOLOGY_POSTGRES_JDBC_URL` / `_USERNAME` / `_PASSWORD` | PostgreSQL snapshot-metadata connection (secret) | (required) |
 | `TOPOLOGY_INGEST_MAX_FILE_BYTES` | max snapshot body size (yields 413) | `10485760` |
 | `TOPOLOGY_TRAVERSAL_MAX_DEPTH` | upper bound for `maxDepth` (maps to `GO 1 TO K STEPS`) | `8` |
+| `TOPOLOGY_SITE_HOSTED_DEPTH` | bounded depth for the per-site projection's hosted-hierarchy expansion over `HOSTS`/`HOSTED_ON` (Node→LineCard→Port→Interface); the depth-1 connectivity hop after it is **always exactly 1** and not configurable (§C) | `4` |
 | `TOPOLOGY_SNAPSHOT_RETENTION` | retained snapshots per domain (current+previous) | `2` |
 | `TOPOLOGY_KNOWLEDGE_BASE_URL` | Knowledge Service base URL (domain-vocabulary API) | (required) |
 | `TOPOLOGY_KNOWLEDGE_MODE` | `mock` (stub from Knowledge OpenAPI) or `real` | `real` |

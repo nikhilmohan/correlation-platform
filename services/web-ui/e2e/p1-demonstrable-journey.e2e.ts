@@ -63,6 +63,13 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     const count = await markers.count();
     expect(count).toBeGreaterThanOrEqual(1);
 
+    // REAL UI: the MapLibre GL canvas paints, and one real map marker is drawn per accessible
+    // site-marker (the effect over store.sites() builds maplibregl.Marker[] one-to-one).
+    await expect(page.locator('.maplibregl-canvas')).toBeVisible();
+    const mapMarkers = page.locator('.maplibregl-marker');
+    await expect(mapMarkers.first()).toBeVisible();
+    expect(await mapMarkers.count()).toBe(count);
+
     if (MODE === 'real') {
       // P1-1: the p1-demo profile seeds 10 grounded sites; allow headroom for inter-site link
       // pseudo-sites the Topology graph may surface, but require AT LEAST the seeded 10.
@@ -102,11 +109,15 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   }, testInfo) => {
     await page.goto('/topology');
 
-    // Locate the drill-in anchor. REAL: the named LON-01 marker; MOCK: first marker (interceptor
-    // returns the same SiteObjectsDto for any siteId, so the first marker is a valid stand-in).
-    const markers = page.getByTestId('site-marker');
+    // Drill in by clicking a REAL MapLibre map marker (not the accessible list) — proving the
+    // rendered map is interactive. REAL: the named LON-01 marker; MOCK: the first map marker
+    // (the interceptor returns the same SiteObjectsDto for any siteId).
+    await expect(page.locator('.maplibregl-canvas')).toBeVisible();
+    const mapMarkers = page.locator('.maplibregl-marker');
     const anchor =
-      MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
+      MODE === 'real'
+        ? mapMarkers.filter({ hasText: DRILL_ANCHOR.name }).first()
+        : mapMarkers.first();
     await expect(anchor).toBeVisible();
     await anchor.click();
 
@@ -120,6 +131,19 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     // P1-2: realistic multi-layer topology — devices AND connections present (not a flat list).
     expect(await nodes.count()).toBeGreaterThanOrEqual(1);
     expect(await edges.count()).toBeGreaterThanOrEqual(1);
+
+    // REAL UI: Cytoscape paints a single <canvas> with a non-zero box and reflects the REAL
+    // render counts onto the .cy-canvas via the data-cy-* bridge. The rendered node count must
+    // equal the accessible graph-node count (the effect mirrors derivedNodes() into the graph).
+    const cyCanvas = page.locator('.cy-canvas canvas').first();
+    await expect(cyCanvas).toBeVisible();
+    const cyBox = await cyCanvas.boundingBox();
+    expect(cyBox?.width ?? 0).toBeGreaterThan(0);
+    expect(cyBox?.height ?? 0).toBeGreaterThan(0);
+    const cyEl = page.locator('.cy-canvas');
+    await expect
+      .poll(async () => Number(await cyEl.getAttribute('data-cy-node-count')))
+      .toBe(await nodes.count());
 
     // Selecting a device shows its attributes in the detail panel (spec AC 29). The panel always
     // surfaces the managedObjectId of the selected node — a real attribute read back from Topology.
@@ -162,6 +186,12 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
 
     const clusters = page.getByTestId('trail-cluster');
     const clusterCount = await clusters.count();
+    // REAL UI: the Cytoscape canvas reflects the trail count via the data-cy-trail-count bridge,
+    // which must equal the number of rendered trail-cluster rows (the effect reads store.trails()).
+    const cyEl = page.locator('.cy-canvas');
+    await expect
+      .poll(async () => Number(await cyEl.getAttribute('data-cy-trail-count')))
+      .toBe(clusterCount);
     if (clusterCount) {
       await expect(clusters.first()).toBeVisible();
       // Area-bounded: each cluster reports its own member count, so the overlay is a set of bounded
@@ -175,6 +205,50 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   });
 
   /**
+   * ── AC 28 (E2E) — logical-layer toggles drive the rendered graph ──────────────────────────────
+   * Toggling a layer off hides its edges in BOTH the accessible list and the real Cytoscape render
+   * (data-cy-edge-count drops); toggling every layer off leaves only nodes (0 edges, nodes remain).
+   * This proves the layer filter is wired through the store into the painted graph, not just the list.
+   */
+  test('AC 28 — toggling logical layers drives the rendered Cytoscape edge count [P1-2]', async ({
+    page,
+  }, testInfo) => {
+    await page.goto('/topology');
+    const markers = page.locator('.maplibregl-marker');
+    const anchor =
+      MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
+    await expect(anchor).toBeVisible();
+    await anchor.click();
+    await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
+
+    const cyEl = page.locator('.cy-canvas');
+    const startEdges = await page.getByTestId('graph-edge').count();
+    expect(startEdges).toBeGreaterThanOrEqual(1);
+    await expect
+      .poll(async () => Number(await cyEl.getAttribute('data-cy-edge-count')))
+      .toBe(startEdges);
+
+    // Toggle every logical layer OFF → the accessible edge list empties AND the real render has 0
+    // edges, while the nodes remain (all-off shows only nodes).
+    for (const layer of ['fiber', 'IP', 'IGP', 'LSP', 'service']) {
+      const box = page.getByTestId(`layer-${layer}`);
+      if (await box.isChecked()) {
+        await box.uncheck();
+      }
+    }
+    await expect(page.getByTestId('graph-edge')).toHaveCount(0);
+    await expect
+      .poll(async () => Number(await cyEl.getAttribute('data-cy-edge-count')))
+      .toBe(0);
+    expect(await page.getByTestId('graph-node').count()).toBeGreaterThanOrEqual(1);
+    await expect
+      .poll(async () => Number(await cyEl.getAttribute('data-cy-node-count')))
+      .toBeGreaterThanOrEqual(1);
+
+    await shot(page, testInfo, 'ac-28-layers-off');
+  });
+
+  /**
    * ── AC 33 (trail-member highlight) ───────────────────────────────────────────────────────────
    * solution-goals: P1-4. Selecting a trail-member device highlights all trails it belongs to
    * (getTrailsForObject). With no trail membership the click still succeeds and the view does not
@@ -183,22 +257,31 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
    */
   test('AC 33 — selecting a trail-member device highlights its trails [P1-4]', async ({ page }) => {
     await page.goto('/topology');
-    const markers = page.getByTestId('site-marker');
+    const markers = page.locator('.maplibregl-marker');
     const anchor =
       MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
+    await expect(anchor).toBeVisible();
     await anchor.click();
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
+
+    // Both graphical surfaces are role="application" with an ARIA label (spec AC 52).
+    await expect(page.getByRole('application', { name: /Device-level topology graph/i })).toBeVisible();
 
     const nodes = page.getByTestId('graph-node');
     await expect(nodes.first()).toBeVisible();
     await nodes.first().click();
 
     // If the selected device belongs to >=1 trail (getTrailsForObject), the membership badge
-    // appears. With no trail membership the click still succeeds (no error) — the visualization
-    // must not crash, which the assertion above (heading still visible) already guards.
+    // appears on the matching cluster AND the real Cytoscape render highlights it (the data-cy-
+    // highlight-count bridge goes > 0). With no trail membership the click still succeeds (no
+    // error) — the visualization must not crash, which the heading-still-visible guard covers.
+    const cyEl = page.locator('.cy-canvas');
     const highlighted = page.locator('[data-testid="trail-cluster"].highlighted');
     if (await highlighted.count()) {
       await expect(highlighted.first()).toBeVisible();
+      await expect
+        .poll(async () => Number(await cyEl.getAttribute('data-cy-highlight-count')))
+        .toBeGreaterThan(0);
     }
 
     // Sanity: the catalogue anchors module stays in lock-step with the seed (referenced so a drift
