@@ -244,44 +244,66 @@ public class NebulaGraphRepository implements GraphRepository {
         });
     }
 
+    /**
+     * Containment relations (device-internal hierarchy: Node → LineCard → Port → Interface). These
+     * stay WITHIN a device, so they are safe to expand recursively from the located devices without
+     * crossing the site boundary.
+     */
+    private static final List<String> CONTAINMENT = List.of("HOSTS", "HOSTED_ON");
+
+    /**
+     * Multi-layer connectivity relations (logical objects a hierarchy member terminates / rides /
+     * adjoins). These can span sites (a backbone IPLink touches two sites), so they are expanded
+     * exactly ONE hop from the site's hosted set — the immediate logical objects show, but their
+     * far-side hierarchy is never pulled in. LOCATED_AT is deliberately excluded (it is the
+     * site-placement edge, never a connectivity edge).
+     */
+    private static final List<String> CONNECTIVITY =
+            List.of("TERMINATES", "ADJACENCY_OVER", "RIDES_ON", "TRAVERSES", "SERVES", "MEMBER_OF");
+
     @Override
     public List<GraphVertex> objectsAtSite(String siteId, String domain, String snapshotId) {
-        // #245: the per-site projection must return the site's DEVICE-LEVEL SUBGRAPH, not only the
-        // devices directly LOCATED_AT the site. From the located devices (Nodes) we expand:
-        //   (a) their hosted hierarchy — LineCard / Port / Interface reachable over HOSTS / HOSTED_ON
-        //       (containment, recursive), and
-        //   (b) the logical objects those hierarchy members connect to over the multi-layer
-        //       connectivity relations (TERMINATES → IPLink, ADJACENCY_OVER → IGPAdjacency,
-        //       RIDES_ON → FiberSpan, TRAVERSES → LSP, SERVES → VPNService, MEMBER_OF → SRLG, …),
-        // so the web-ui can render and toggle the logical layers from one call (P1-G8 / AC-22).
-        // BFS is bounded by `topology.traversal.max-depth` and scoped to (domain, snapshotId); it
-        // NEVER traverses LOCATED_AT (so it cannot hop into another site) and it does NOT expand
-        // outward from a Node reached via connectivity (a placed Node is a site boundary — its own
-        // hierarchy belongs to its own site), so a backbone link's far end is included as an
-        // incident object without dragging in the far site's internal device graph.
+        // #254: the per-site projection is SCOPED TO THE SITE — it must NOT return a transitive
+        // closure across the whole component (every site was returning the same ~170-node graph) and
+        // it must NOT do an O(n) per-device traversal (the N+1 that made the call ~2.4s). "Objects at
+        // a site" = (1) the Nodes LOCATED_AT the site, (2) their hosted hierarchy (LineCard / Port /
+        // Interface) over the CONTAINMENT relations to a bounded depth, and (3) the IMMEDIATE
+        // (depth-1) multi-layer connectivity objects those hosted members terminate / ride / adjoin
+        // — WITHOUT then re-expanding those neighbors' far-side hierarchy (so a backbone IPLink's far
+        // end is shown as an incident object but the far site's internal device graph is not dragged
+        // in). Each layer is fanned out with ONE set-based `GO FROM <vid-list>` round-trip (not one
+        // query per frontier member), keeping a single-site call to a handful of round-trips. Scoped
+        // to (domain, snapshotId); LOCATED_AT is never traversed, so the projection cannot hop
+        // site→site.
         return sessions.execute(session -> {
             use(session);
-            java.util.LinkedHashSet<String> located = new java.util.LinkedHashSet<>(
-                    locatedDeviceIds(session, siteId, domain, snapshotId));
-            java.util.LinkedHashSet<String> inScope = new java.util.LinkedHashSet<>(located);
-            java.util.ArrayDeque<String> frontier = new java.util.ArrayDeque<>(located);
-            int maxDepth = traversalMaxDepth;
-            for (int depth = 0; depth < maxDepth && !frontier.isEmpty(); depth++) {
-                java.util.ArrayDeque<String> next = new java.util.ArrayDeque<>();
-                for (String moid : frontier) {
-                    for (String neighbor : connectedDeviceObjects(session, moid, domain, snapshotId)) {
-                        if (inScope.add(neighbor)) {
-                            // Do not expand outward from a Node reached via connectivity (it is a
-                            // different site's placement boundary). The originally-located Nodes ARE
-                            // expanded because they were seeded into the first frontier.
-                            if (!"Node".equals(objectTypeOf(neighbor))) {
-                                next.add(neighbor);
-                            }
-                        }
+            java.util.LinkedHashSet<String> inScope = new java.util.LinkedHashSet<>();
+            List<String> located = locatedDeviceIds(session, siteId, domain, snapshotId);
+            inScope.addAll(located);
+
+            // (2) Hosted hierarchy: recursively fan out over CONTAINMENT, one round-trip per layer,
+            //     bounded by the traversal max-depth backstop. Each layer expands only the members
+            //     newly discovered in the previous layer.
+            List<String> frontier = new ArrayList<>(located);
+            for (int depth = 0; depth < traversalMaxDepth && !frontier.isEmpty(); depth++) {
+                List<String> reached = goOver(session, frontier, CONTAINMENT, domain, snapshotId);
+                List<String> next = new ArrayList<>();
+                for (String moid : reached) {
+                    if (inScope.add(moid)) {
+                        next.add(moid);
                     }
                 }
                 frontier = next;
             }
+
+            // (3) Depth-1 connectivity: ONE set-based hop over the connectivity relations from the
+            //     full hosted set. The neighbors are added but NOT re-expanded (their far-side
+            //     hierarchy belongs to its own site).
+            List<String> hosted = new ArrayList<>(inScope);
+            for (String moid : goOver(session, hosted, CONNECTIVITY, domain, snapshotId)) {
+                inScope.add(moid);
+            }
+
             List<GraphVertex> out = new ArrayList<>();
             for (String moid : inScope) {
                 getNode(moid, domain, snapshotId).ifPresent(out::add);
@@ -309,19 +331,25 @@ public class NebulaGraphRepository implements GraphRepository {
     }
 
     /**
-     * The objects connected to {@code moid} over any relation EXCEPT LOCATED_AT, in BOTH directions
-     * (containment HOSTS/HOSTED_ON is directional; connectivity may be incoming or outgoing), scoped
-     * to (domain, snapshotId). LOCATED_AT is excluded so the closure never hops site→site.
+     * #254 (N+1 kill): fan out over {@code relations} from a SET of source VIDs in a SINGLE round
+     * trip per direction using {@code GO FROM <vid-list>} (NebulaGraph accepts a comma-separated
+     * vertex list). Both directions are queried (containment HOSTS/HOSTED_ON is directional;
+     * connectivity may be incoming or outgoing). Scoped to (domain, snapshotId). Returns the distinct
+     * reached neighbor VIDs.
      */
-    private List<String> connectedDeviceObjects(Session session, String moid, String domain,
-            String snapshotId) {
+    private List<String> goOver(Session session, List<String> sourceIds, List<String> relations,
+            String domain, String snapshotId) {
+        if (sourceIds.isEmpty()) {
+            return List.of();
+        }
+        String list = joinVids(sourceIds);
+        String over = joinRelations(relations);
         java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
         for (boolean reverse : new boolean[] {false, true}) {
-            String ngql = "GO FROM " + str(moid) + " OVER * " + (reverse ? "REVERSELY " : "")
+            String ngql = "GO FROM " + list + " OVER " + over + " " + (reverse ? "REVERSELY " : "")
                     + "WHERE properties(edge).snapshotId == " + str(snapshotId)
                     + " AND properties(edge).domain == " + str(domain)
-                    + " AND type(edge) != \"LOCATED_AT\" "
-                    + "YIELD " + (reverse ? "src(edge)" : "dst(edge)") + " AS neighbor;";
+                    + " YIELD " + (reverse ? "src(edge)" : "dst(edge)") + " AS neighbor;";
             ResultSet rs = execQuietly(session, ngql);
             if (rs == null) {
                 continue;
@@ -342,7 +370,7 @@ public class NebulaGraphRepository implements GraphRepository {
             return List.of();
         }
         java.util.Set<String> members = new java.util.HashSet<>(memberIds);
-        List<GraphEdge> out = new ArrayList<>();
+        java.util.LinkedHashSet<GraphEdge> out = new java.util.LinkedHashSet<>();
         for (String moid : memberIds) {
             for (GraphEdge e : neighbors(moid, List.of(), domain, snapshotId, false)) {
                 // Intra-site edges (both endpoints in the device set) plus LOCATED_AT to the site.
@@ -351,7 +379,32 @@ public class NebulaGraphRepository implements GraphRepository {
                 }
             }
         }
-        return out;
+        return new ArrayList<>(out);
+    }
+
+    @Override
+    public List<GraphEdge> edgesAmong(List<String> memberIds, List<String> relations, String domain,
+            String snapshotId) {
+        // #252: the relation-scoped traversal-closure edge set. Keep only edges whose BOTH endpoints
+        // are in the closure member set AND whose relation is one of the requested relations (the
+        // traversal is relation-scoped). De-dup. An empty membership (or no edges) yields an empty
+        // list (never null).
+        if (memberIds.isEmpty()) {
+            return List.of();
+        }
+        java.util.Set<String> members = new java.util.HashSet<>(memberIds);
+        java.util.Set<String> rels = relations == null ? java.util.Set.of()
+                : new java.util.HashSet<>(relations);
+        java.util.LinkedHashSet<GraphEdge> out = new java.util.LinkedHashSet<>();
+        for (String moid : memberIds) {
+            for (GraphEdge e : neighbors(moid, relations, domain, snapshotId, false)) {
+                if (members.contains(e.from()) && members.contains(e.to())
+                        && (rels.isEmpty() || rels.contains(e.relation()))) {
+                    out.add(e);
+                }
+            }
+        }
+        return new ArrayList<>(out);
     }
 
     // --- helpers (all inside the graph/ boundary) -----------------------------------------
@@ -384,6 +437,15 @@ public class NebulaGraphRepository implements GraphRepository {
     private static String objectTypeOf(String managedObjectId) {
         int idx = managedObjectId.indexOf(':');
         return idx > 0 ? managedObjectId.substring(0, idx) : managedObjectId;
+    }
+
+    /** Comma-separated, quoted VID list for a set-based {@code GO FROM <list>} (#254 N+1 kill). */
+    private static String joinVids(List<String> vids) {
+        List<String> quoted = new ArrayList<>();
+        for (String v : vids) {
+            quoted.add(str(v));
+        }
+        return String.join(", ", quoted);
     }
 
     private static String joinRelations(List<String> relations) {

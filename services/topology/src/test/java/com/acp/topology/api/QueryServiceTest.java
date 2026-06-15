@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
+import com.acp.topology.api.dto.EdgeDto;
 import com.acp.topology.api.dto.NodeDto;
 import com.acp.topology.api.dto.NodeListDto;
 import com.acp.topology.api.dto.SnapshotSummaryDto;
@@ -102,6 +103,54 @@ class QueryServiceTest {
         TraversalDto t = service.traverse("Node:PE1", List.of("RIDES_ON"), 12, "core-ip", null,
                 false);
         assertThat(t.maxDepth()).isEqualTo(12);
+    }
+
+    @Test
+    void traversalReturnsClosureEdgesAlongsideReached() {
+        // #252: the traversal response must carry the typed directed edges of the closure so the
+        // codebook-generator can walk the cascade. QueryService asks GraphReadService for the
+        // closure edges (origin + reached, relation-scoped) and threads them into the DTO.
+        currentSnapshotIs("core-ip", "SNAP-1");
+        when(graph.getNode("Interface:I1", "core-ip", "SNAP-1")).thenReturn(Optional.of(
+                new NodeDto("Interface:I1", "Interface", "core-ip", "SNAP-1", "I1", Map.of())));
+        List<NodeDto> reached = List.of(
+                new NodeDto("IPLink:L1", "IPLink", "core-ip", "SNAP-1", "L1", Map.of()),
+                new NodeDto("IGPAdjacency:A1", "IGPAdjacency", "core-ip", "SNAP-1", "A1", Map.of()));
+        when(graph.traverse(eq("Interface:I1"), any(), anyInt(), eq("core-ip"), eq("SNAP-1"),
+                anyBoolean())).thenReturn(reached);
+        EdgeDto e1 = new EdgeDto("ENC1", "Interface:I1", "IPLink:L1", "TERMINATES", "core-ip",
+                Map.of(), "SNAP-1");
+        EdgeDto e2 = new EdgeDto("ENC2", "IPLink:L1", "IGPAdjacency:A1", "ADJACENCY_OVER", "core-ip",
+                Map.of(), "SNAP-1");
+        when(graph.traverseEdges(eq("Interface:I1"), eq(reached), any(), eq("core-ip"),
+                eq("SNAP-1"))).thenReturn(List.of(e1, e2));
+
+        TraversalDto t = service.traverse("Interface:I1",
+                List.of("TERMINATES", "ADJACENCY_OVER"), 3, "core-ip", null, false);
+        assertThat(t.reached()).extracting(NodeDto::managedObjectId)
+                .containsExactly("IPLink:L1", "IGPAdjacency:A1");
+        assertThat(t.edges()).extracting(EdgeDto::relation)
+                .containsExactly("TERMINATES", "ADJACENCY_OVER");
+        assertThat(t.edges()).extracting(EdgeDto::from, EdgeDto::to)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("Interface:I1", "IPLink:L1"),
+                        org.assertj.core.groups.Tuple.tuple("IPLink:L1", "IGPAdjacency:A1"));
+    }
+
+    @Test
+    void traversalEdgesAreEmptyNotNullForAnEdgelessClosure() {
+        // #252: an edge-less closure must yield an empty (never null) edges list.
+        currentSnapshotIs("core-ip", "SNAP-1");
+        when(graph.getNode("Node:PE1", "core-ip", "SNAP-1")).thenReturn(Optional.of(
+                new NodeDto("Node:PE1", "Node", "core-ip", "SNAP-1", "PE1", Map.of())));
+        when(graph.traverse(eq("Node:PE1"), any(), anyInt(), eq("core-ip"), eq("SNAP-1"),
+                anyBoolean())).thenReturn(List.of());
+        when(graph.traverseEdges(eq("Node:PE1"), any(), any(), eq("core-ip"), eq("SNAP-1")))
+                .thenReturn(List.of());
+
+        TraversalDto t = service.traverse("Node:PE1", List.of("RIDES_ON"), 3, "core-ip", null,
+                false);
+        assertThat(t.edges()).isNotNull().isEmpty();
     }
 
     @Test

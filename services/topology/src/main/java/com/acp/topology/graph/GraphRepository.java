@@ -46,4 +46,12 @@ public interface GraphRepository {
 
     /** All edges whose endpoints are both in {@code memberIds}, within (domain, snapshotId). */
     List<GraphEdge> edgesAmong(List<String> memberIds, String domain, String snapshotId);
+
+    /**
+     * #252: relation-scoped variant of {@link #edgesAmong(List, String, String)} — every edge whose
+     * BOTH endpoints are in {@code memberIds} AND whose {@code relation} is one of {@code relations}
+     * (the traversal closure is relation-scoped, unlike the site projection). De-duplicated.
+     */
+    List<GraphEdge> edgesAmong(List<String> memberIds, List<String> relations, String domain,
+            String snapshotId);
 }

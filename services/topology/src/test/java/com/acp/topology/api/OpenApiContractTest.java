@@ -131,6 +131,16 @@ class OpenApiContractTest {
         // AC-29: SiteObjectsDto carries nodes AND edges.
         assertFields(schemas.get("SiteObjectsDto"),
                 "siteId", "domain", "snapshotId", "nodeCount", "edgeCount", "nodes", "edges");
+        // #252 (approved additive contract change): TraversalDto carries the typed directed EDGES of
+        // the closure alongside the reached nodes, so consumers (codebook forward-propagation) can
+        // walk the cascade. edges is an array of EdgeDto.
+        JsonNode traversalDto = schemas.get("TraversalDto");
+        assertFields(traversalDto,
+                "start", "domain", "relations", "maxDepth", "crossDomain", "reached", "edges");
+        assertThat(traversalDto.get("properties").get("edges").get("type").asText())
+                .isEqualTo("array");
+        assertThat(traversalDto.get("properties").get("edges").get("items").get("$ref").asText())
+                .isEqualTo("#/components/schemas/EdgeDto");
     }
 
     @Test
