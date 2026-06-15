@@ -271,13 +271,11 @@ class NebulaGraphRepositoryUnitTest {
     @Test
     void objectsAtSiteTraversesLocatedAtReverselyThenResolvesEachDevice() throws Exception {
         // The located-device step uses GO ... LOCATED_AT REVERSELY; resolution uses FETCH PROP.
-        // Here the located Node has no further connectivity (the closure step finds nothing), so the
-        // device-level subgraph is just the located Node.
+        // Here the located Node has no hosted hierarchy and no connectivity (both batched GO layers
+        // find nothing), so the device-level subgraph is just the located Node.
         ResultSet deviceRs = rowsOf(List.of(str("Node:PE1")));
         ResultSet nodeRs = rowsOf(List.of(str("Node:PE1"), str("Node"), str("core-ip"),
                 str("SNAP-1"), str("PE1"), str("{}")));
-        // The located-device GO carries LOCATED_AT REVERSELY; the closure GO carries OVER * and
-        // excludes LOCATED_AT — route the located one to the device row, the closure ones to empty.
         ResultSet empty = rowsOf();
         when(session.execute(anyString())).thenAnswer(inv -> {
             String q = inv.getArgument(0);
@@ -288,7 +286,7 @@ class NebulaGraphRepositoryUnitTest {
             if (q.contains("OVER LOCATED_AT REVERSELY")) {
                 return deviceRs;
             }
-            return empty; // closure GO * queries return no further objects
+            return empty; // the batched containment + connectivity GO layers return nothing further
         });
 
         List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
@@ -297,77 +295,58 @@ class NebulaGraphRepositoryUnitTest {
     }
 
     @Test
-    void objectsAtSiteExpandsHostedHierarchyAndConnectivityIntoTheDeviceSubgraph() throws Exception {
-        // #245: from the located Node, the closure must pull in the hosted hierarchy and the logical
-        // objects those members connect to, so the device-level subgraph is returned (not just the
-        // located Node). Topology for the test (mirrors valid-all-core-ip-types.json around one site):
+    void objectsAtSiteExpandsHostedHierarchyAndDepth1ConnectivityIntoTheSiteSubgraph()
+            throws Exception {
+        // #254: from the located Node, the projection pulls in (a) the hosted hierarchy over the
+        // CONTAINMENT relations (HOSTS/HOSTED_ON), then (b) ONE depth-1 hop over the CONNECTIVITY
+        // relations from the full hosted set. Topology around one site:
         //   Site:LON  <-LOCATED_AT-  Node:PE1
         //   Port:PE1-P3 -HOSTED_ON-> Node:PE1 ;  Port:PE1-P3 -HOSTS-> Interface:PE1-I1
         //   Interface:PE1-I1 -TERMINATES-> IPLink:L1
         // Expected in-scope set: Node:PE1, Port:PE1-P3, Interface:PE1-I1, IPLink:L1.
-        // The closure issues, per member, GO OVER * (forward) and GO OVER * REVERSELY, excluding
-        // LOCATED_AT; route the neighbor results by the source VID embedded in the GO query.
+        // The containment fan-out is one set-based GO FROM <list> OVER `HOSTS`,`HOSTED_ON` per layer;
+        // the connectivity fan-out is ONE GO FROM <list> OVER the connectivity relations.
         routeSiteSubgraph();
 
         List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
         assertThat(objects).extracting(GraphVertex::managedObjectId)
                 .contains("Node:PE1", "Port:PE1-P3", "Interface:PE1-I1", "IPLink:L1");
-        // The closure GO queries exclude LOCATED_AT so it never hops site→site.
+        // The projection's GO queries never traverse LOCATED_AT (so it cannot hop site→site).
         assertThat(executed.stream()
-                .filter(q -> q.startsWith("GO FROM") && q.contains("OVER *"))
-                .allMatch(q -> q.contains("type(edge) != \"LOCATED_AT\""))).isTrue();
+                .filter(q -> q.startsWith("GO FROM") && !q.contains("LOCATED_AT REVERSELY"))
+                .noneMatch(q -> q.contains("`LOCATED_AT`"))).isTrue();
     }
 
     @Test
-    void objectsAtSiteDoesNotExpandOutwardFromANodeReachedViaConnectivity() throws Exception {
-        // A backbone IPLink connects Interface:PE1-I1 (this site) to Interface:PE2-I1 (another site,
-        // hosted on Node:PE2 located at a DIFFERENT site). The closure includes the incident far-end
-        // objects reached BY connectivity, but must NOT expand a Node reached via connectivity into
-        // ITS OWN hierarchy (that belongs to the other site). So Node:PE2's hierarchy is NOT pulled
-        // in beyond what the IPLink directly touches.
-        ResultSet siteDevices = rowsOf(List.of(str("Node:PE1")));
-        ResultSet empty = rowsOf();
-        when(session.execute(anyString())).thenAnswer(inv -> {
-            String q = inv.getArgument(0);
-            executed.add(q);
-            if (q.startsWith("FETCH PROP")) {
-                return vertexRowFor(q);
-            }
-            if (q.contains("OVER LOCATED_AT REVERSELY")) {
-                return siteDevices;
-            }
-            if (q.startsWith("GO FROM \"Node:PE1\"")) {
-                // Node:PE1 connects (incoming) to Port:PE1-P3 over HOSTED_ON; route reverse only.
-                return q.contains("REVERSELY") ? oneNeighbor("Port:PE1-P3") : empty;
-            }
-            if (q.startsWith("GO FROM \"Port:PE1-P3\"")) {
-                // Port HOSTS Interface (forward); Port HOSTED_ON Node (forward, already in scope).
-                return q.contains("REVERSELY") ? empty
-                        : twoNeighbors("Interface:PE1-I1", "Node:PE1");
-            }
-            if (q.startsWith("GO FROM \"Interface:PE1-I1\"")) {
-                // Interface TERMINATES IPLink:L1 (forward).
-                return q.contains("REVERSELY") ? empty : oneNeighbor("IPLink:L1");
-            }
-            if (q.startsWith("GO FROM \"IPLink:L1\"")) {
-                // IPLink connects to Node:PE2 (a placed node of another site) — included as incident,
-                // but PE2 must NOT be expanded further.
-                return q.contains("REVERSELY") ? oneNeighbor("Node:PE2") : empty;
-            }
-            // Any GO from Node:PE2 would be the over-expansion we must NOT see.
-            return empty;
-        });
+    void objectsAtSiteIsSiteScoped_doesNotPullInFarSiteHierarchyAndIsBatchedNotPerDevice()
+            throws Exception {
+        // #254: a backbone IPLink connects this site's Interface to another site. The depth-1
+        // connectivity hop includes the far-end IPLink as an incident object, but the projection
+        // must NOT then re-expand it into the FAR SITE's hierarchy (no GO from IPLink:L1 happens —
+        // connectivity is one hop). It must also be BATCHED: each layer is a single set-based
+        // GO FROM <list>, not one GO per device (the N+1 that made the call ~2.4s).
+        routeSiteSubgraph();
 
         List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
+        // The far-side IPLink is the boundary — the far Node:PE2 (its hierarchy) is NOT pulled in.
         assertThat(objects).extracting(GraphVertex::managedObjectId)
-                .contains("Node:PE1", "Port:PE1-P3", "Interface:PE1-I1", "IPLink:L1", "Node:PE2");
-        // The far-side Node was reached via connectivity, so the closure must NOT have issued a
-        // GO from it (its hierarchy belongs to its own site).
-        assertThat(executed.stream().noneMatch(q -> q.startsWith("GO FROM \"Node:PE2\"")
-                && q.contains("OVER *"))).isTrue();
+                .doesNotContain("Node:PE2", "Port:PE2-P1", "Interface:PE2-I1");
+        // No second connectivity hop: there is no GO that fans out FROM the connectivity neighbor.
+        assertThat(executed.stream().noneMatch(q -> q.startsWith("GO FROM \"IPLink:L1\""))).isTrue();
+        // BATCHING: the projection issues a bounded, small number of GO queries (located + a couple
+        // of containment layers + one connectivity hop, each in BOTH directions) — NOT one-per-device
+        // proportional to the closure size. Lock in << the old per-member N+1.
+        long projectionGos = executed.stream()
+                .filter(q -> q.startsWith("GO FROM") && !q.contains("LOCATED_AT REVERSELY"))
+                .count();
+        assertThat(projectionGos).isLessThanOrEqualTo(8L);
     }
 
-    /** Route the per-member closure GO queries for the hosted-hierarchy + connectivity topology. */
+    /**
+     * Route the layered, set-based GO queries for the hosted-hierarchy + depth-1 connectivity
+     * topology. Each layer is a single {@code GO FROM <vid-list> OVER <rels>} (both directions);
+     * route by the relations the query is OVER and whether any source VID is in the layer.
+     */
     private void routeSiteSubgraph() throws Exception {
         ResultSet siteDevices = rowsOf(List.of(str("Node:PE1")));
         ResultSet empty = rowsOf();
@@ -381,15 +360,25 @@ class NebulaGraphRepositoryUnitTest {
                 if (q.contains("OVER LOCATED_AT REVERSELY")) {
                     return siteDevices;
                 }
-                if (q.startsWith("GO FROM \"Node:PE1\"")) {
-                    return q.contains("REVERSELY") ? oneNeighbor("Port:PE1-P3") : empty;
+                boolean containment = q.contains("`HOSTS`") || q.contains("`HOSTED_ON`");
+                boolean reverse = q.contains("REVERSELY");
+                if (containment) {
+                    // Layer 1: from Node:PE1, Port:PE1-P3 -HOSTED_ON-> Node:PE1 (incoming → REVERSELY).
+                    if (q.contains("\"Node:PE1\"") && reverse) {
+                        return oneNeighbor("Port:PE1-P3");
+                    }
+                    // Layer 2: from Port:PE1-P3, Port -HOSTS-> Interface (forward); -HOSTED_ON-> Node
+                    // (forward, already in scope).
+                    if (q.contains("\"Port:PE1-P3\"") && !reverse) {
+                        return twoNeighbors("Interface:PE1-I1", "Node:PE1");
+                    }
+                    // Layer 3: from Interface:PE1-I1, no further containment.
+                    return empty;
                 }
-                if (q.startsWith("GO FROM \"Port:PE1-P3\"")) {
-                    return q.contains("REVERSELY") ? empty
-                            : twoNeighbors("Interface:PE1-I1", "Node:PE1");
-                }
-                if (q.startsWith("GO FROM \"Interface:PE1-I1\"")) {
-                    return q.contains("REVERSELY") ? empty : oneNeighbor("IPLink:L1");
+                // Connectivity hop (single GO over the connectivity relations from the hosted set):
+                // Interface:PE1-I1 -TERMINATES-> IPLink:L1.
+                if (q.contains("\"Interface:PE1-I1\"") && !reverse) {
+                    return oneNeighbor("IPLink:L1");
                 }
             } catch (Exception e) {
                 throw new RuntimeException(e);
@@ -461,6 +450,51 @@ class NebulaGraphRepositoryUnitTest {
     @Test
     void edgesAmongShortCircuitsOnEmptyMembership() {
         assertThat(repo.edgesAmong(List.of(), "core-ip", "SNAP-1")).isEmpty();
+    }
+
+    @Test
+    void relationScopedEdgesAmongKeepsOnlyBothEndpointsInSetAndRequestedRelations() throws Exception {
+        // #252: the traversal-closure edge set keeps an edge only when BOTH endpoints are members AND
+        // the relation is one of the requested relations (relation-scoped). De-dup.
+        // Closure members: {Interface:I1, IPLink:L1, IGPAdjacency:A1}. Requested: TERMINATES,
+        // ADJACENCY_OVER. GO from Interface:I1 yields:
+        //   -> IPLink:L1 (member, TERMINATES)          [kept]
+        //   -> IGPAdjacency:A1 (member, ADJACENCY_OVER)[kept]
+        //   -> Port:P9 (non-member, HOSTED_ON via *)   [dropped: endpoint not in set]
+        // (The repository asks neighbors() with the requested relations, so HOSTED_ON would not even
+        //  be yielded by a relation-scoped GO; the both-endpoints + relation guard is belt-and-braces.)
+        ResultSet i1Neighbors = rowsOf(
+                List.of(str("Interface:I1"), str("IPLink:L1"), str("TERMINATES"), str("core-ip"),
+                        str("SNAP-1"), str("{}")),
+                List.of(str("Interface:I1"), str("IGPAdjacency:A1"), str("ADJACENCY_OVER"),
+                        str("core-ip"), str("SNAP-1"), str("{}")),
+                List.of(str("Interface:I1"), str("Port:P9"), str("ADJACENCY_OVER"), str("core-ip"),
+                        str("SNAP-1"), str("{}")));
+        ResultSet noNeighbors = rowsOf();
+        when(session.execute(anyString())).thenAnswer(inv -> {
+            String q = inv.getArgument(0);
+            executed.add(q);
+            if (q.startsWith("GO FROM \"Interface:I1\"")) {
+                return i1Neighbors;
+            }
+            return noNeighbors;
+        });
+
+        List<GraphEdge> closure = repo.edgesAmong(
+                List.of("Interface:I1", "IPLink:L1", "IGPAdjacency:A1"),
+                List.of("TERMINATES", "ADJACENCY_OVER"), "core-ip", "SNAP-1");
+        assertThat(closure).extracting(GraphEdge::to)
+                .containsExactlyInAnyOrder("IPLink:L1", "IGPAdjacency:A1"); // Port:P9 dropped
+        assertThat(closure).extracting(GraphEdge::relation)
+                .containsOnly("TERMINATES", "ADJACENCY_OVER");
+        // The neighbor GO is relation-scoped to the requested relations (not OVER *).
+        assertThat(executed.stream().anyMatch(q -> q.startsWith("GO FROM \"Interface:I1\"")
+                && q.contains("OVER `TERMINATES`,`ADJACENCY_OVER`"))).isTrue();
+    }
+
+    @Test
+    void relationScopedEdgesAmongShortCircuitsOnEmptyMembership() {
+        assertThat(repo.edgesAmong(List.of(), List.of("TERMINATES"), "core-ip", "SNAP-1")).isEmpty();
     }
 
     @Test

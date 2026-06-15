@@ -264,6 +264,13 @@ Topology is loaded by **file upload to an API**, not by a Kafka event:
     longitude, region). The web-ui visualizes topology **by site** and expands into the site's
     device-level graph; the Topology query API supports listing sites and the objects located at a
     site. Sites may nest in future (site hierarchy) — out of MVP scope.
+  - **Traversal closure edges (additive, #252).** The Topology query API's bounded-traversal
+    response (`GET /topology/traversal`) carries, in addition to the reached nodes, an **`edges`**
+    array — the typed directed edges of the closure (every edge whose both endpoints are in
+    `start` + `reached` and whose `relation` is one of the requested relations; relation-scoped).
+    This lets consumers (the **Codebook Generator's** forward-propagation) walk the cascade rather
+    than seeing isolated nodes. This is an **additive** field on `TraversalDto`; the frozen response
+    shape is published in `services/topology/openapi.json`.
   - **Device & connection attributes (structured, extensible).** Each node and edge carries an
     `attributes` map for descriptive properties. **Well-known keys** (recommended, extensible per
     domain): on devices — `vendor`, `model`, `equipmentType`, `role`, `capacity`; on connections —

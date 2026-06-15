@@ -559,6 +559,12 @@
             "items" : {
               "$ref" : "#/components/schemas/NodeDto"
             }
+          },
+          "edges" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/EdgeDto"
+            }
           }
         }
       },
