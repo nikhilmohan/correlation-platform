@@ -169,7 +169,8 @@ flowchart TD
 | `com.acp.topology.integration` | **`KnowledgeVocabClient`** — config-switchable client for the Knowledge Service's **frozen** domain-vocabulary operation **`GET /domains/{domain}/vocabulary`** → `{domain, objectTypes[], relations[], version}` (object-type set + relation vocabulary per `domain`, gap P1-G11); short-TTL cache; mock (WireMock/Prism stub from Knowledge's published OpenAPI, same frozen path/shape) in unit tests, real Knowledge in integration. Path defaults to `/domains/{domain}/vocabulary` (no override needed to start in isolation). |
 | `com.acp.topology.events` | `TopologyEventPublisher` (build `TypedEnvelope<TopologyChangedEvent>`, idempotent produce), `DlqPublisher`. |
 | `com.acp.topology.config` | `@ConfigurationProperties` beans (Kafka, **NebulaGraph** connection, **PostgreSQL** connection, limits, Knowledge integration toggles), idempotent Kafka producer config, `NebulaPool` bean, JSON Schema loader. |
-| `com.acp.topology.observability` | Health indicators (**NebulaGraph graphd reachable**, **PostgreSQL reachable**, Kafka reachable), Micrometer meters, MDC enrichment (`snapshotId`, `domain`, `traceId`). |
+| `com.acp.topology.observability` | **`StartupBootstrapRunner`** (runs the NebulaGraph bootstrap on `ApplicationReadyEvent` and **re-attempts it in a bounded background retry loop on failure** — self-healing, never one-shot-latches DOWN; CRIT-2), the readiness `HealthIndicator` (reflects **true current `graphReady` state**: storaged `ONLINE` + space usable + PostgreSQL migrated + Kafka reachable; recovers automatically), Micrometer meters (incl. bootstrap attempts / storaged-online-wait / ready-time), MDC enrichment (`snapshotId`, `domain`, `traceId`). |
+| `com.acp.topology.graph` (bootstrap) | **`NebulaSchemaBootstrap`** lives here (the only nGQL issuer). Its `ensureStoragedOnline()` parses `SHOW HOSTS` and **polls until the storaged host's `Status == ONLINE`** (not "a row exists"; bounded by deadline) **before** `CREATE SPACE` (CRIT-1), then `waitUntilSpaceUsable` + idempotent `CREATE TAG/EDGE/INDEX IF NOT EXISTS`. All thresholds config-from-env. |
 
 ---
 
@@ -990,36 +991,83 @@ Cross-domain reach is possible **only** because an explicit cross-domain edge wa
 snapshot file. The MVP ingests and tests one domain (`core-ip`) only; the path is designed and tested
 for the structure, not exercised in MVP data.
 
-### Flow E — Startup bootstrap: NebulaGraph storaged registration + idempotent space/schema (P1 readiness)
+### Flow E — Startup bootstrap: robust, self-healing NebulaGraph readiness (P1 readiness; conforms to the Startup-Robustness Standard)
+
+> **This flow conforms to `docs/startup-robustness-standard.md`** (S1 true-readiness predicates, S2
+> bounded retry + deadline, S3 self-healing readiness, S4 idempotency, S5 config-from-env, S6
+> clean-volume cold-start test). It **redesigns** the previous one-shot bootstrap that exposed the
+> **critical P1 cold-start bug class** (CRIT-1, CRIT-2 below) — only surfaced on **clean volumes**
+> (`docker compose down -v`), latent on warm volumes that carry prior state.
+
+**The two critical bugs this redesign fixes (clean-volume cold start):**
+
+- **CRIT-1 — `ADD HOSTS` then immediate `CREATE SPACE` with no wait for `ONLINE`.** A freshly
+  `ADD HOSTS`-ed NebulaGraph storaged host is **listed but `OFFLINE` for ~10-30s** before metad marks
+  it `Status ONLINE`. `CREATE SPACE` issued ~immediately after fails with **`Host not enough!`**. And
+  the readiness predicate was wrong: the old code treated **`SHOW HOSTS rowsSize() > 0`** (a row
+  *exists*) as "registered" — but a host can be **listed yet `OFFLINE`**. The **correct** predicate is
+  the storaged host showing **`Status ONLINE`** (parsed from `SHOW HOSTS`). Fix: after `ADD HOSTS`,
+  **poll `SHOW HOSTS` until that storaged host is `ONLINE`** (bounded, with deadline — S1/S2) **before**
+  `CREATE SPACE`. (`waitUntilSpaceUsable` already polled `USE space` 30x1s — that is the right shape;
+  the gap was the missing equivalent **wait-for-storaged-ONLINE before `CREATE SPACE`**.)
+- **CRIT-2 — one-shot bootstrap that latches readiness DOWN forever.** The old
+  `@EventListener(ApplicationReadyEvent)` ran `bootstrapSchema()` exactly once in try/catch; on any
+  exception it set `graphReady=false` and **never retried** — so a transient cold-start race became a
+  **permanent** outage ("useless solution"). Fix: on failure, schedule a **bounded background retry**
+  (backoff + overall deadline — S2/S3); the readiness probe reflects **true current state** and **flips
+  UP automatically** when a later attempt succeeds — **never one-shot-latches DOWN**.
 
 ```mermaid
-sequenceDiagram
-  autonumber
-  participant SVC as Topology Service startup
-  participant NEB as NebulaGraph graphd
-  participant PG as PostgreSQL
-  participant K as Kafka
-
-  SVC->>NEB: connect NebulaPool to hosts 9669
-  SVC->>NEB: SHOW HOSTS check storaged registered
-  alt storaged not registered
-    SVC->>NEB: ADD HOSTS nebula-storaged 9779 idempotent
-    SVC->>NEB: wait until storaged ONLINE
-  end
-  SVC->>NEB: CREATE SPACE IF NOT EXISTS topology then wait usable
-  SVC->>NEB: USE topology then CREATE TAG and EDGE and INDEX IF NOT EXISTS then REBUILD
-  SVC->>PG: Flyway migrate snapshot metadata table
-  SVC->>K: verify broker reachable
-  Note over SVC,K: readiness DOWN until NebulaGraph space usable, PostgreSQL migrated, Kafka reachable
-  SVC->>SVC: orphan-snapshot reaper delete NebulaGraph snapshotIds with no PostgreSQL row
+flowchart TD
+  A[ApplicationReadyEvent then start StartupBootstrapRunner] --> B[attempt bootstrap]
+  B --> C{NebulaPool connect to graphd 9669}
+  C -- not reachable --> RETRY[transient, schedule bounded background retry, backoff, until ready or overall deadline, readiness stays DOWN not latched]
+  C -- reachable --> D[SHOW HOSTS, parse storaged Status]
+  D --> E{storaged host Status ONLINE}
+  E -- no row or OFFLINE and not yet ADDed --> F[ADD HOSTS storaged host idempotent]
+  F --> G[poll SHOW HOSTS until that host Status ONLINE, bounded by storaged-online deadline]
+  E -- already ONLINE --> H[CREATE SPACE IF NOT EXISTS topology]
+  G --> I{ONLINE within deadline}
+  I -- no --> RETRY
+  I -- yes --> H
+  H --> J[waitUntilSpaceUsable, poll USE space until succeeds, bounded by space-usable deadline]
+  J --> K{usable within deadline}
+  K -- no --> RETRY
+  K -- yes --> L[USE space then CREATE TAG and EDGE and INDEX IF NOT EXISTS then REBUILD, idempotent]
+  L --> M[Flyway migrate topology_meta schema, abort-on-fail]
+  M --> N[verify Kafka reachable and topics present]
+  N --> O[orphan-snapshot reaper, delete NebulaGraph snapshotIds with no PostgreSQL row]
+  O --> P[set graphReady true, readiness UP]
+  RETRY --> Q{overall startup deadline reached}
+  Q -- no --> B
+  Q -- yes --> R[stop retrying, readiness stays DOWN, log fatal with last cause, liveness stays UP]
 ```
 
-> **storaged ADD HOSTS bootstrap.** NebulaGraph requires the storaged daemon(s) to be **registered with
-> metad** (`ADD HOSTS "nebula-storaged":9779;`) before any space is usable — the same one-shot the
-> deferred `nebula-init` Compose job would run. The service performs this **idempotently** on startup
-> (check `SHOW HOSTS`, run `ADD HOSTS` only if absent), so it is robust whether or not a separate init
-> job ran first. The space/schema/index creation is likewise idempotent (`IF NOT EXISTS`). Readiness is
-> not reported UP until the space is usable, PostgreSQL is migrated, and Kafka is reachable (EH-11).
+> **storaged readiness — `ONLINE`, not "a row exists" (CRIT-1, S1).** NebulaGraph requires the storaged
+> daemon to be **registered with metad** (`ADD HOSTS "nebula-storaged":9779;`) **and to reach
+> `Status ONLINE`** before any space is usable. `NebulaSchemaBootstrap` parses `SHOW HOSTS` for the
+> configured storaged host and treats it ready **only** when its `Status` column is `ONLINE` — never
+> when a row merely exists. It runs `ADD HOSTS` **only if** the host is absent/OFFLINE (idempotent, S4),
+> then **polls `SHOW HOSTS` until `ONLINE`**, bounded by `topology.nebula.storaged-online-deadline-ms`
+> with `topology.nebula.poll-interval-ms` backoff (S2/S5). Only then is `CREATE SPACE` issued. This is
+> robust whether or not a separate `nebula-init`/compose `service_healthy` step ran first (issue #204
+> was the infra-layer sibling of this same class).
+>
+> **Self-healing readiness (CRIT-2, S3).** `StartupBootstrapRunner` runs the bootstrap on
+> `ApplicationReadyEvent`; **on any failure it schedules a bounded background retry** (a single-thread
+> scheduler, backoff `topology.nebula.retry-backoff-ms`, capped, until ready **or** the overall
+> `topology.startup.deadline-ms`). `graphReady` is set **true only on full success** and the readiness
+> `HealthIndicator` reflects that **current** state — so readiness **recovers automatically** when a
+> retry succeeds; it is **never** one-shot-latched DOWN. Liveness stays UP throughout (the process is
+> alive); only readiness gates ingest/query traffic. If the overall deadline is hit, retrying stops,
+> readiness stays DOWN, and a fatal cause is logged (predictable bounded window — S2). Every threshold
+> is config-from-env (S5; see Config & observability).
+>
+> **Bounded, predictable window (S2).** Target: readiness within **120s** of dependencies becoming
+> available on clean volumes; hard overall deadline default **180s** (`topology.startup.deadline-ms`).
+> Idempotent across restarts and retries (S4): all DDL is `IF NOT EXISTS`, `ADD HOSTS` only when not
+> ONLINE, Flyway history-guarded, reaper a no-op when there are no orphans. Readiness is not UP until
+> the space is usable, PostgreSQL is migrated, and Kafka is reachable (EH-11).
 
 ---
 
@@ -1123,6 +1171,71 @@ Inputs: `domain` (and optionally `siteId`), the current snapshot. Output: the do
   EdgeDto[] }` so web-ui draws the device-level graph from a **single** call (AC-22). Unknown site
   yields 404. Both operations are domain-scoped.
 
+### §D — Robust startup bootstrap (storaged-ONLINE wait + self-healing readiness)
+
+Implements Flow E and `docs/startup-robustness-standard.md`. This is the **concrete redesign** of the
+two buggy classes for the dev agent.
+
+**`NebulaSchemaBootstrap.bootstrap()` — ordered, each step bounded by a deadline (S1/S2/S4):**
+
+1. **Connect.** Acquire a `Session` from the `NebulaPool`. Connection-refused / pool-exhausted is
+   **transient** → throw a `BootstrapTransientException` (the runner retries).
+2. **storaged ONLINE (CRIT-1 fix).** `ensureStoragedOnline()`:
+   - `SHOW HOSTS;` → **parse rows**, find the row for the configured `topology.nebula.storaged-host`
+     (match on the `Host` + `Port` columns), read its **`Status`** column. The readiness predicate is
+     **`Status == "ONLINE"`** — *not* `rowsSize() > 0`.
+   - If the host is **absent or not ONLINE and not yet ADDed this run**: run `ADD HOSTS
+     "<host>":<port>;` (idempotent — a no-op if already added).
+   - **Poll `SHOW HOSTS` every `topology.nebula.poll-interval-ms`** until the host's `Status` is
+     `ONLINE`, **bounded by `topology.nebula.storaged-online-deadline-ms`** (default 60000). On deadline
+     → `BootstrapTransientException("storaged not ONLINE within deadline")` (runner retries).
+   ```ngql
+   SHOW HOSTS;   -- parse the "Host","Port","Status" columns; ready only when Status == ONLINE
+   ADD HOSTS "nebula-storaged":9779;   -- only if absent / not ONLINE; idempotent
+   -- then re-run SHOW HOSTS on an interval until that host's Status == ONLINE, or deadline
+   ```
+3. **`CREATE SPACE`** — only **after** storaged is ONLINE: `CREATE SPACE IF NOT EXISTS topology (...)`
+   (idempotent, S4).
+4. **`waitUntilSpaceUsable()`** — poll `USE topology;` every `poll-interval-ms` until it succeeds,
+   bounded by `topology.nebula.space-usable-deadline-ms` (default 60000). On deadline → transient.
+5. **Schema** — `USE topology; CREATE TAG/EDGE/INDEX IF NOT EXISTS ...; REBUILD ...` (all idempotent).
+
+**`StartupBootstrapRunner` — self-healing, never-latch (CRIT-2 fix, S3):**
+
+```text
+onApplicationReady():
+  if !bootstrapEnabled: return                       // test toggle, unchanged
+  attempt()                                          // first attempt inline
+
+attempt():                                            // runs on the retry scheduler thread
+  try:
+    graphRepository.bootstrapSchema()                 // NebulaSchemaBootstrap.bootstrap()
+    flyway already migrated by Spring; verify Kafka reachable + topics present
+    orphanReaper.reap()
+    graphReady.set(true)                              // readiness flips UP — true current state
+    log.info("startup bootstrap complete")
+  catch BootstrapTransientException | transient e:
+    graphReady is left false (NOT latched — recovers on next success)
+    if elapsedSinceStart < topology.startup.deadline-ms:
+        scheduler.schedule(this::attempt, backoff(retry-backoff-ms, capped))   // RE-ATTEMPT
+        log.warn("bootstrap attempt failed; retrying in {}ms", backoff)
+    else:
+        log.error("startup deadline {}ms exceeded; readiness stays DOWN", deadline, e)  // bounded
+  catch fatal e (bad config / auth rejected / invalid migration):
+    log.error("fatal bootstrap failure; not retrying", e)   // fail fast, no deadline burn
+```
+
+- The readiness `HealthIndicator` returns UP **iff `graphReady` is true** — reflecting **current**
+  state, so a later successful retry flips it UP automatically. There is **no permanent latch**.
+- Idempotent (S4): re-attempts and restarts re-run the same `IF NOT EXISTS` DDL with no double-apply;
+  `ADD HOSTS` runs only when the host is not already ONLINE.
+- All four thresholds (`poll-interval-ms`, `storaged-online-deadline-ms`, `space-usable-deadline-ms`,
+  `retry-backoff-ms`, plus the overall `startup.deadline-ms`) are **config-from-env** (S5) — no
+  hard-coded numbers in code.
+
+This is covered by tests **AC-26 / AC-33 / AC-34** (incl. the **clean-volume cold-start** Testcontainers
+test, AC-33) and E2E **E12 / E14**.
+
 ---
 
 ## Seed data & examples
@@ -1168,7 +1281,7 @@ First-class. Every failure mode has a defined outcome; nothing silently drops.
 | EH-8 | `topology.changed` send ultimately fails | `DlqPublisher` to `topology.changed.dlq` (envelope + error headers) | ingest already 200 (persist + cut-over succeeded); failure is async | ERROR with `snapshotId`,`traceId` | snapshot persisted + current; event on DLQ for replay |
 | EH-9 | NebulaGraph abstraction leak attempt | nGQL/NebulaGraph access confined to `graph/` behind the `GraphRepository` port; controllers/DTOs/logs never carry NebulaGraph host/port/space/raw nGQL result rows | typed DTOs only | n/a | none (AC-19) |
 | EH-10 | NebulaGraph write fails, or PostgreSQL cut-over tx fails (cross-store, no shared tx) | NebulaGraph-write failure means no PostgreSQL row written (data unreferenced, reaper-swept). PostgreSQL-tx failure means tx rolled back, prior snapshot stays `current`, new NebulaGraph data unreferenced (reaper-swept). Visibility is gated solely on the PostgreSQL `current` pointer. | **500** `ApiError` | ERROR | **no visible partial snapshot**; orphan NebulaGraph data swept by the orphan-snapshot reaper |
-| EH-11 | NebulaGraph (space not usable / storaged not registered) or PostgreSQL or Kafka unreachable at startup | readiness probe DOWN; bootstrap (ADD HOSTS, CREATE SPACE, Flyway) retries; not ready until all reachable | 503 from probe | ERROR | service does not accept ingests until ready |
+| EH-11 | NebulaGraph (space not usable / **storaged not `ONLINE`** — not merely listed) or PostgreSQL or Kafka unreachable at startup | readiness probe DOWN (true current state, **not latched**); `StartupBootstrapRunner` schedules a **bounded background retry** (backoff, until ready or `topology.startup.deadline-ms`); the bootstrap **polls storaged to `ONLINE` before `CREATE SPACE`** and `USE space` until usable; readiness flips **UP automatically** on a later successful attempt; never latches DOWN forever (CRIT-1/CRIT-2; `docs/startup-robustness-standard.md` S1/S2/S3). | 503 from probe while DOWN | WARN per failed attempt, ERROR only if the overall deadline is exceeded | service does not accept ingests until readiness UP; recovers without restart once the dependency becomes ready |
 | EH-12 | Unknown `managedObjectId` on query | `GraphReadService` returns empty so 404 | **404** `ApiError` | INFO | none (AC-12) |
 | EH-13 | `maxDepth` out of range / missing `start`/`relation` on traversal | request validation | **400** `ApiError` | WARN | none |
 | EH-14 | Re-ingest of identical content | **not** treated as a duplicate — new `snapshotId`, new `eventId`, new event | 200 with new `snapshotId` | INFO | new snapshot; prior becomes previous (AC-14) |
@@ -1190,6 +1303,9 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | **Snapshot spanning two stores** | (a) **`snapshotId` property on every NebulaGraph vertex/edge inside ONE stable space, with the PostgreSQL row as the authoritative current/previous pointer**; (b) a NebulaGraph SPACE per snapshot; (c) a PostgreSQL row only, graph untagged | **(a) — chosen.** `CREATE SPACE` is heavy and async in NebulaGraph (partition allocation + propagation to storaged); a property tag inside one space makes a write a stamped insert, a read a `WHERE …snapshotId ==` predicate, and eviction a bounded delete. The PostgreSQL row remains system-of-record for which `snapshotId` is current. (b) pays space-creation cost per ingest and doubles bootstrap; (c) cannot isolate current vs previous in the graph. |
 | **Cross-store atomicity** | (a) **order writes so the PostgreSQL current-pointer commit is the cut-over, NebulaGraph data invisible until then, orphan reaper sweeps unreferenced graph data**; (b) a distributed/2-phase transaction across NebulaGraph + PostgreSQL; (c) write the graph as current first, then PostgreSQL | **(a) — chosen.** NebulaGraph and PostgreSQL are separate DBs with no shared transaction (a graph store + a separate relational store cannot share one tx). Gating visibility on the PostgreSQL current pointer means a reader never sees half a snapshot; a failed ingest leaves only unreferenced NebulaGraph data the reaper deletes. (b) NebulaGraph has no XA/2PC support. (c) would briefly expose a partial/uncommitted snapshot as current. |
 | **NebulaGraph space/schema bootstrap** | (a) **idempotent on service startup (`SHOW HOSTS` then `ADD HOSTS`, `CREATE SPACE/TAG/EDGE/INDEX IF NOT EXISTS`, wait-until-usable, readiness-gated)**; (b) a separate `nebula-init` one-shot Compose job only; (c) manual operator step | **(a) — chosen.** The service must work whether or not the deferred `nebula-init` job ran, so it performs the `ADD HOSTS` + space/schema creation idempotently itself and gates readiness on the space being usable. It cooperates with (b) if present (all `IF NOT EXISTS`), but does not depend on it. (c) is not automatable/testable. |
+| **storaged-readiness predicate before `CREATE SPACE` (CRIT-1)** | (a) **poll `SHOW HOSTS` until the storaged host shows `Status ONLINE`, bounded by a deadline, then `CREATE SPACE`**; (b) treat `SHOW HOSTS rowsSize() > 0` (a row exists) as "registered" and `CREATE SPACE` immediately (the buggy code); (c) a fixed `Thread.sleep(30s)` after `ADD HOSTS` | **(a) — chosen + standard.** A freshly `ADD HOSTS`-ed storaged host is **listed but `OFFLINE` for ~10-30s**; (b) therefore hits `CREATE SPACE` while OFFLINE and fails with `Host not enough!` — this is the audited cold-start bug, only visible on clean volumes. The **true** readiness predicate is `Status == ONLINE` parsed from `SHOW HOSTS`, polled to a deadline (`docs/startup-robustness-standard.md` S1/S2). (c) is fragile (the delay is not deterministic — sometimes too short, always wasteful) and not config-from-env. |
+| **Bootstrap failure handling — self-heal vs one-shot (CRIT-2)** | (a) **bounded background retry with backoff + overall deadline; readiness reflects true current state and recovers automatically; never latches**; (b) run once in try/catch, on failure set `graphReady=false` and never retry (the buggy code — latches DOWN forever); (c) retry forever, no deadline | **(a) — chosen + standard.** (b) turns a transient cold-start race into a **permanent** outage (the "useless solution" failure mode the user named) — readiness never recovers. (a) re-attempts in the background until ready or the configurable `topology.startup.deadline-ms`, and the readiness probe flips UP automatically on success (S3). (c) is unbounded — the startup window becomes unpredictable, which violates the bounded-window requirement (S2). |
+| **Startup window / thresholds** | (a) **configurable target (120s) + hard deadline (180s) + per-step deadlines, all env-config**; (b) hard-coded timeouts (e.g. fixed `30 x 1s`); (c) no timeout (block until success) | **(a) — chosen + standard.** Predictable, bounded, and tunable per environment (CI vs. a slow cold-start host) with no code change (CLAUDE.md no-hard-coded-thresholds rule, S5). (b) cannot adapt to a slower machine and bakes magic numbers into code. (c) can hang indefinitely. |
 | **LOOKUP-by-property indexing** | (a) **TAG/EDGE indexes on `(domain, snapshotId)` per type, `REBUILD` once**; (b) no index, MATCH-scan; (c) index on every property | **(a)**. NebulaGraph **requires** an index for any property predicate (`domain`/`snapshotId`/list-by-type); without one, LOOKUP fails. Indexing the scope keys makes domain+snapshot reads index-efficient; objectType is implied by the TAG so needs no separate index. (b) is not even valid for property filters. (c) over-indexes (write cost) with no read benefit for unused keys. |
 | **Domain isolation** | (a) **`domain` property on every vertex/edge in ONE space, domain-tagged** (queries domain-scoped by default; cross-domain only via explicit edges + opt-in); (b) a SPACE per domain; (c) a separate graph store per domain | **(a) — chosen.** Mirrors the `snapshotId`-property isolation: simplest (one space), every query domain-scoped via `WHERE domain ==` (index-backed), and supports cross-domain out of the box (an explicit cross-domain edge connects two domain-tagged vertices; `crossDomain=true` drops the pin). (b)/(c) hard-partition the store, multiply bootstrap, and make the contract's cross-domain edges impossible without cross-space joins NebulaGraph does not support cleanly. |
 | **Object-type / relation vocabulary** | (a) **de-frozen, Knowledge-authored per `domain`, validated at ingest** via `KnowledgeVocabClient`; (b) frozen hard-coded set; (c) accept any token | **(a) — chosen, per merged contract.** Each domain's vocabulary is Knowledge data so a new domain needs no event-model or topology code change; Topology validates ingest against it (fail closed if unavailable). (b) blocks multi-domain and contradicts the merged invariant. (c) loses the reject-unknown-relation guarantee (AC-7). A short-TTL cache keeps the dependency cheap. |
@@ -1238,13 +1354,15 @@ or persisted (AC-16), even though the frozen event-model schema leaves it a free
 | 23 | **objectType/relation validated vs Knowledge vocabulary** (de-frozen) | `VocabularyValidatorTest#acceptsTypesAndRelationsInDomainVocab_rejectsOthers` + `KnowledgeVocabClientTest#fetchesAndCachesVocabFromMock` + `IngestionControllerTest#failsClosedWhenVocabUnavailable` | accepted file uses only domain-vocab types/relations; unknown ones yield 422 (cross-refs AC-7/7b); client built/mocked from Knowledge's published OpenAPI, vocab cached with TTL; Knowledge unavailable + no cache yields 502, no write, no event (EH-6c). |
 | 24 | **`Interface` + `HOSTS`/`TERMINATES` lift, query + domain-vocab validation** (merged §5 model) | `LiftingServiceTest#liftsInterfaceAndHostsAndTerminates` + `QueryControllerTest#interfacesOnPortAndIpLinkTerminatedByInterface` + `VocabularyValidatorTest#acceptsInterfaceHostsTerminatesInCoreIpVocab` (with `IngestionQueryIT#interfaceLayeringQueryable`, Testcontainers) | a snapshot with `Interface` nodes + `HOSTS`/`TERMINATES` edges lifts via the generic typed path (TAG `Interface`, EDGE `HOSTS`/`TERMINATES`, `domain`+`attributes` preserved, no special-casing); they validate as members of the `core-ip` Knowledge vocabulary (absent from vocab yields 422); `GET /nodes?objectType=Interface` lists interfaces, `neighbors?relation=HOSTS` from a Port returns its interfaces, `neighbors?relation=TERMINATES` from an Interface returns its IPLink, and a `HOSTS`+`TERMINATES` traversal walks Port to Interface to IPLink — all domain-scoped. |
 | 25 | **Cross-store persistence split + atomic cut-over + no partial snapshot** | `IngestionPersistenceIT#nebulaWrittenThenPostgresCutOverMakesCurrent` + `IngestionPersistenceIT#postgresCutOverFailureLeavesPriorCurrentAndNoVisiblePartial` + `OrphanReaperTest#sweepsNebulaSnapshotIdsWithNoPostgresRow` (Testcontainers NebulaGraph + PostgreSQL) | graph data lands in NebulaGraph and becomes visible only after the PostgreSQL current-pointer commit; a forced PostgreSQL-tx failure leaves the prior snapshot `current`, the new graph data unreferenced and invisible, and 500 returned; the orphan reaper deletes NebulaGraph `snapshotId`s with no PostgreSQL row. |
-| 26 | **NebulaGraph bootstrap idempotent (storaged ADD HOSTS + space/schema)** | `NebulaSchemaBootstrapIT#idempotentSpaceSchemaAndAddHostsAcrossRestarts` (Testcontainers NebulaGraph) | on a fresh NebulaGraph, startup runs `ADD HOSTS` (only if storaged unregistered) then `CREATE SPACE/TAG/EDGE/INDEX IF NOT EXISTS` + `REBUILD`, waits until the space is usable, and re-running the bootstrap is a no-op (no errors, no duplicate schema); readiness reports UP only once the space is usable. |
+| 26 | **NebulaGraph bootstrap idempotent + waits for storaged `ONLINE` before `CREATE SPACE` (CRIT-1, S1/S4)** | `NebulaSchemaBootstrapIT#idempotentSpaceSchemaAndAddHostsAcrossRestarts` + `NebulaSchemaBootstrapIT#waitsForStoragedOnlineBeforeCreateSpace` (Testcontainers NebulaGraph, **fresh/empty volumes**) | on a fresh NebulaGraph, startup parses `SHOW HOSTS`, runs `ADD HOSTS` only if the storaged host is **not `ONLINE`** (not "no row"), then **polls until that host's `Status == ONLINE`** and **only then** issues `CREATE SPACE` (no `Host not enough!`); then `CREATE TAG/EDGE/INDEX IF NOT EXISTS` + `REBUILD`, waits until the space is usable; re-running the bootstrap is a **no-op** (no errors, no duplicate schema); readiness reports UP only once the space is usable. |
 | 27 | **Ingestion returns the frozen `200 SnapshotIngestResponse` (P1-G1)** | `IngestionControllerTest#postValidFileReturns200WithFrozenSnapshotIngestResponse` + `OpenApiContractTest#ingestionResponseMatchesFrozenSchema` | a valid POST yields **HTTP 200** (not 202) with body `{ snapshotId, domain, status, nodeCount, edgeCount, changeType }`; `snapshotId` non-empty + equals the value carried in the emitted event; the live response validates against the `SnapshotIngestResponse` schema in the checked-in `services/topology/openapi.json`. |
 | 28 | **`GET /topology/sites` returns the frozen flat `SiteDto` shape (P1-G7)** | `QueryControllerTest#listSitesReturnsFlatSiteDto` + `OpenApiContractTest#siteListMatchesFrozenSchema` | response is `SiteListDto { domain, snapshotId, count, sites: [...] }` and **each site is `{ siteId, name, latitude, longitude, region }`** with **flat** top-level geo (not nested under `attributes`, not a raw NodeDto); `siteId` equals the Site node's `managedObjectId`; validates against the checked-in `openapi.json`. |
 | 29 | **`GET /topology/sites/{siteId}/objects` returns nodes AND edges (P1-G8)** | `QueryControllerTest#objectsAtSiteReturnsNodesAndEdges_404WhenUnknownSite` + `GraphReadServiceTest#objectsAtSiteEdgesAreIntraSiteAndLocatedAt` + `OpenApiContractTest#siteObjectsMatchesFrozenSchema` | response is `SiteObjectsDto { siteId, domain, snapshotId, nodeCount, edgeCount, nodes: NodeDto[], edges: EdgeDto[] }`; `nodes` = devices `LOCATED_AT` the site; `edges` = intra-site edges (both endpoints in the device set) plus the `LOCATED_AT` edges to the site, each an `EdgeDto { edgeId, from, to, relation, domain, attributes, snapshotId }`; unknown site yields 404; validates against the checked-in `openapi.json`. |
 | 30 | **`GET /topology/nodes/{managedObjectId}` returns the frozen `NodeDto`; `layer == objectType` (P1-G9)** | `QueryControllerTest#getNodeReturnsFrozenNodeDto_layerEqualsObjectType` + `OpenApiContractTest#nodeDtoMatchesFrozenSchema` | response is exactly `NodeDto { managedObjectId, objectType, domain, snapshotId, name?, attributes }` with **no separate `layer` field**; the design + `openapi.json` document that `layer` is `objectType`; validates against the checked-in `openapi.json`. |
 | 31 | **Snapshot file validates against the single canonical schema; one home, no Simulator copy (P1-G2)** | `SnapshotSchemaCanonicalTest#validatesAgainstSingleCheckedInSchema` + `SnapshotSchemaCanonicalTest#exactlyOneCanonicalSchemaFileExists` (+ CI lockstep guard) | a conforming snapshot file validates against **`services/topology/schema/snapshot.schema.json`** and a malformed one fails; the canonical schema exists at that single path; **no** `services/simulator/schema/...` lockstep duplicate exists; the Simulator references this same file (CI lockstep guard fails the build on drift or a forked copy). |
 | 32 (spec **AC-25**) | **Interface model lifts and is queryable end-to-end — Port HOSTS Interface TERMINATES IPLink, ADJACENCY_OVER between interfaces (Core-IP §5 layering)** | `InterfaceModelTest#liftsInterfaceWithHostsTerminatesAndAdjacencyOver` + `InterfaceModelTest#listsInterfacesByObjectType` + `InterfaceModelTest#neighborsResolvePortHostsInterfaceTerminatesIpLink` + `InterfaceModelTest#adjacencyOverResolvesBetweenInterfaces` + `InterfaceModelTest#resolvesInterfaceManagedObjectIdToTypedNodeDto` + `InterfaceModelTest#interfaceTypeAndRelationsRejectedWhenAbsentFromDomainVocab` (with `IngestionQueryIT#interfaceLayeringQueryable`, Testcontainers NebulaGraph) | a small Port/Interface/IPLink/IGPAdjacency snapshot (`with-interfaces.json`) lifts via the generic typed path: each `Interface` becomes a typed `Interface` vertex (objectType `Interface`) and the `HOSTS` (Port to Interface), `TERMINATES` (Interface to IPLink), and `ADJACENCY_OVER` (Interface to IGPAdjacency) edges are all created on the correct endpoints — `domain`+`attributes` preserved, **no Interface-specific code path**. `GET /topology/nodes?objectType=Interface` lists exactly the interfaces; `GET /topology/nodes/{port}/neighbors?relation=HOSTS` returns the port's Interface and `GET /topology/nodes/{interface}/neighbors?relation=TERMINATES` returns its IPLink (so a HOSTS+TERMINATES traversal walks **Port to Interface to IPLink**); `GET /topology/nodes/{interface}/neighbors?relation=ADJACENCY_OVER` resolves **between interfaces** — an interface's ADJACENCY_OVER neighbor is the IGPAdjacency (adjacencies run between interfaces, not nodes). `GET /topology/nodes/{Interface:*}` returns the object as a typed `NodeDto` with `objectType == Interface` (layer == objectType). `Interface`/`HOSTS`/`TERMINATES`/`ADJACENCY_OVER` validate as members of the `core-ip` Knowledge vocabulary; an interface type/relation absent from the domain vocabulary yields **422** (cross-refs AC-7/7b). All domain-scoped, typed DTOs only. |
+| 33 (**clean-volume cold-start — the test that would have caught CRIT-1**) | **From empty volumes, the service reaches readiness within the deadline against a real NebulaGraph (S6)** | `ColdStartReadinessIT#reachesReadinessFromEmptyVolumesWithinDeadline` + `ColdStartReadinessIT#createSpaceSucceedsOnlyAfterStoragedOnline` (Testcontainers: real **NebulaGraph metad+storaged+graphd from a fresh container/empty volumes**, started so storaged is `ADD HOSTS`-ed but **not yet `ONLINE`**) | starting Topology against a **just-up** NebulaGraph (storaged ADDed but transiently `OFFLINE`) **does not** fail with `Host not enough!`: the bootstrap **waits for `Status ONLINE`** then `CREATE SPACE` succeeds; the **readiness probe goes UP within `topology.startup.deadline-ms`** (asserted with Awaitility against the actual deadline) and the first ingest then succeeds. **Note (false-confidence guard):** the existing **mock-`Session` unit test cannot catch CRIT-1** — a stubbed session never reproduces the ADDed-but-OFFLINE storaged window or space propagation, so it passes even with the bug; only this **real-NebulaGraph, empty-volume** test exercises the true timing. This test is mandatory per `docs/startup-robustness-standard.md` S6. |
+| 34 (**self-healing readiness — the test that would have caught CRIT-2**) | **A failed bootstrap is retried in the background and readiness recovers; it never latches DOWN; the window is bounded (S2/S3)** | `StartupBootstrapRunnerTest#failedBootstrapRetriesAndDoesNotLatchDown` + `StartupBootstrapRunnerTest#readinessFlipsUpWhenLaterAttemptSucceeds` + `StartupBootstrapRunnerTest#stopsRetryingAtOverallDeadline` + `ColdStartReadinessIT#recoversWithoutRestartWhenDependencyBecomesReadyLate` (unit: injected `GraphRepository` that throws transient then succeeds, fake clock/scheduler; IT: NebulaGraph started **after** Topology) | a first attempt that throws a transient failure leaves `graphReady=false` **without latching** and **schedules a bounded background retry**; when a later attempt succeeds, the readiness probe **flips UP automatically with no restart**; retries stop at the configurable overall deadline (readiness stays DOWN, ERROR logged) so the window is **bounded and predictable**; a fatal (bad-config) failure fails fast without burning the deadline. Asserts the one-shot-latch bug (set DOWN once, never retry) is gone. |
 
 (Unit tests mock the `GraphRepository`/`SnapshotRepository` ports + Kafka **+ the Knowledge
 vocabulary endpoint (stub from Knowledge's published OpenAPI)**; the `…IT` and the
@@ -1253,6 +1371,15 @@ Kafka**. The Core-IP object-type + relation set is supplied as the `core-ip` Kno
 so the spec's original nine-types / six-relations criteria are exercised as the MVP domain's authored
 vocabulary. **Every spec acceptance criterion (1..25) maps 1:1 to a named test above** — spec **AC-25**
 (the Interface model end-to-end) maps to row **32** (`InterfaceModelTest` + `IngestionQueryIT`).)
+
+> **Startup-robustness coverage (CRIT-1/CRIT-2, `docs/startup-robustness-standard.md`).** Rows **26**
+> (waits for storaged `ONLINE` before `CREATE SPACE` + idempotent), **33** (the mandatory
+> **clean-volume cold-start** test on a real NebulaGraph from empty volumes — the test that would have
+> caught CRIT-1), and **34** (self-healing readiness — bounded background retry, never-latch, recovers
+> automatically, bounded deadline — would have caught CRIT-2) cover the redesigned bootstrap. **A
+> mock-`Session` / stubbed-dependency unit test cannot catch this class** (it never reproduces the
+> ADDed-but-OFFLINE storaged window or space propagation) — so rows 33/34 use **real dependencies from
+> empty volumes** (S6), not mocks.
 
 ### E2E scenarios (from the Topology Service's point of view)
 
@@ -1269,12 +1396,15 @@ vocabulary. **Every spec acceptance criterion (1..25) maps 1:1 to a named test a
 | E9 | **Domain isolation + explicit cross-domain (structure path)** | Ingest a two-domain snapshot joined by one explicit cross-domain edge; traverse from a node default vs `crossDomain=true` | default traversal stays in the start domain (other-domain node **not** reached); `crossDomain=true` reaches the other-domain node only via the explicit cross-domain edge. (MVP data is single-domain; exercises the isolation structure on the integration stack.) |
 | E10 | **Vocabulary fail-closed (failure path)** | Knowledge domain-vocabulary endpoint made unavailable (no cached vocab), then POST a valid file | ingest rejected **502** `ApiError`; **no** NebulaGraph write, **no** PostgreSQL row, **no** event; ERROR logged with domain/`traceId`; succeeds once Knowledge is reachable again. |
 | E11 | **Interface layering path (merged §5 model — spec AC-25)** | Ingest `with-interfaces.json` (Port HOSTS Interface TERMINATES IPLink, ADJACENCY_OVER between interfaces) then validate vs `core-ip` vocab then lift then persist; then query the layering | 200 + `snapshotId`; `Interface` TAG and `HOSTS`/`TERMINATES`/`ADJACENCY_OVER` EDGEs lift like any typed object and validate as Core-IP vocab; `GET /nodes?objectType=Interface` lists them; `neighbors?relation=HOSTS` from a Port returns its interfaces; `neighbors?relation=TERMINATES` from an Interface returns its IPLink; `neighbors?relation=ADJACENCY_OVER` from an Interface returns the IGPAdjacency (adjacency resolves **between interfaces**, not nodes); a `HOSTS`+`TERMINATES` traversal walks Port to Interface to IPLink; `GET /nodes/{Interface:*}` resolves to a typed `NodeDto` with `objectType == Interface` — all domain-scoped, typed DTOs only. |
-| E12 | **Fresh-stack bootstrap path** | Bring up NebulaGraph (metad+storaged+graphd) + PostgreSQL + Kafka, then start Topology with no pre-existing space | startup registers storaged (`ADD HOSTS`) if needed, creates the space/schema/indexes idempotently, migrates PostgreSQL, gates readiness until the space is usable; first ingest then succeeds. Restarting Topology re-runs the bootstrap as a no-op. |
+| E12 | **Clean-volume cold-start path (CRIT-1; would have caught the bug)** | `docker compose down -v` then `up` (empty volumes): NebulaGraph metad+storaged+graphd + PostgreSQL + Kafka, then start Topology with **no pre-existing space and storaged just ADDed (transiently OFFLINE)** | startup parses `SHOW HOSTS`, `ADD HOSTS` storaged if not `ONLINE`, **polls until `Status ONLINE` then `CREATE SPACE`** (no `Host not enough!`), creates schema/indexes idempotently, migrates PostgreSQL, gates readiness until the space is usable; readiness reaches **UP within the configured deadline (~120s target, 180s hard)**; first ingest then succeeds. Restarting Topology re-runs the bootstrap as a no-op (idempotent). This is the cold-start path the audit exposed. |
+| E14 | **Self-healing readiness path (CRIT-2; would have caught the bug)** | Start Topology **before** NebulaGraph is up (or with storaged not yet ONLINE), then bring NebulaGraph up shortly after — within the deadline | Topology's readiness stays DOWN (not latched) while it **retries the bootstrap in the background** with backoff; when NebulaGraph becomes ready, a retry succeeds and readiness **flips UP automatically with no restart**; the window stays bounded by the configurable deadline. Confirms the bootstrap never one-shot-latches DOWN forever. |
 | E13 | **Frozen producer-contract integrity (data-integration freeze — P1-G1/G2/G7/G8/G9)** | Build generates `openapi.json`; a Simulator-style upload client + a web-ui-style query client (both generated from the published `openapi.json`) run against the live service; a producer validates a generated snapshot file against the single canonical schema | ingestion returns **200 `SnapshotIngestResponse`** (the generated upload client reads `snapshotId` from the 200 body); `GET /topology/sites` returns flat `SiteDto`; `GET /topology/sites/{siteId}/objects` returns nodes+edges; `GET /topology/nodes/{moId}` returns the frozen `NodeDto` (layer == objectType); the snapshot file validates against the one canonical `services/topology/schema/snapshot.schema.json`; all live shapes match the checked-in `openapi.json` (drift fails CI). |
 
 These run on the `integration` branch against the Compose stack (real NebulaGraph + PostgreSQL + Kafka
-+ real Knowledge for vocabulary); E2/E5/E6/E10 are the failure/partial paths, E12 the
-bootstrap/readiness path, and E13 the frozen producer-contract integrity path consumers build against.
++ real Knowledge for vocabulary); E2/E5/E6/E10 are the failure/partial paths, **E12 the clean-volume
+cold-start path and E14 the self-healing readiness path** (the two startup-robustness paths that would
+have caught CRIT-1/CRIT-2, per `docs/startup-robustness-standard.md`), and E13 the frozen
+producer-contract integrity path consumers build against.
 
 ---
 
@@ -1290,7 +1420,13 @@ never forwarded to callers):**
 | `TOPOLOGY_NEBULA_SPACE` | NebulaGraph space name | `topology` |
 | `TOPOLOGY_NEBULA_USERNAME` / `_PASSWORD` | NebulaGraph credentials (secret) | (required) |
 | `TOPOLOGY_NEBULA_POOL_MAX` / `_MIN` | nebula-java `NebulaPool` sizing | `20` / `2` |
-| `TOPOLOGY_NEBULA_STORAGED_HOST` | storaged host:port for the idempotent `ADD HOSTS` bootstrap (e.g. `nebula-storaged:9779`) | (required) |
+| `TOPOLOGY_NEBULA_STORAGED_HOST` | storaged host:port for the idempotent `ADD HOSTS` bootstrap + the `SHOW HOSTS` ONLINE-poll match (e.g. `nebula-storaged:9779`) | (required) |
+| `TOPOLOGY_NEBULA_POLL_INTERVAL_MS` | backoff interval for the `SHOW HOSTS`-ONLINE / `USE space`-usable polls (S2/S5) | `1000` |
+| `TOPOLOGY_NEBULA_STORAGED_ONLINE_DEADLINE_MS` | max wait for the storaged host to reach `Status ONLINE` before `CREATE SPACE` (CRIT-1/S1) | `60000` |
+| `TOPOLOGY_NEBULA_SPACE_USABLE_DEADLINE_MS` | max wait for `USE space` to succeed after `CREATE SPACE` | `60000` |
+| `TOPOLOGY_NEBULA_RETRY_BACKOFF_MS` | backoff between background bootstrap re-attempts on transient failure (capped; S2/S3) | `5000` |
+| `TOPOLOGY_STARTUP_DEADLINE_MS` | overall self-healing startup deadline — bound the predictable window; after this, retries stop and readiness stays DOWN (S2/S3) | `180000` |
+| `TOPOLOGY_NEBULA_BOOTSTRAP_ON_STARTUP` | enable startup bootstrap (set `false` in unit tests that mock the graph) | `true` |
 | `TOPOLOGY_POSTGRES_JDBC_URL` / `_USERNAME` / `_PASSWORD` | PostgreSQL snapshot-metadata connection (secret) | (required) |
 | `TOPOLOGY_INGEST_MAX_FILE_BYTES` | max snapshot body size (yields 413) | `10485760` |
 | `TOPOLOGY_TRAVERSAL_MAX_DEPTH` | upper bound for `maxDepth` (maps to `GO 1 TO K STEPS`) | `8` |
@@ -1304,14 +1440,19 @@ Kafka producer is explicitly idempotent: `enable.idempotence=true`, `acks=all`,
 `max.in.flight.requests.per.connection<=5`, `retries` set. Emitted `schemaVersion`=1.
 
 **Observability:**
-- `/health` (Actuator) — liveness + **readiness** gated on **NebulaGraph space usable** + **PostgreSQL
-  reachable** + Kafka reachable (EH-11). Readiness DOWN until the bootstrap (ADD HOSTS, CREATE SPACE,
-  Flyway) completes.
+- `/health` (Actuator) — **liveness** (process alive, stays UP throughout bootstrap) + **readiness**
+  gated on **storaged `ONLINE`** + **NebulaGraph space usable** + **PostgreSQL migrated** + Kafka
+  reachable (EH-11). Readiness reflects **true current state** (not a one-shot latch): it is DOWN while
+  the bootstrap is incomplete and flips **UP automatically** once a (possibly retried) attempt succeeds,
+  within the bounded `topology.startup.deadline-ms` window (CRIT-2; `docs/startup-robustness-standard.md`
+  S1/S2/S3).
 - `/metrics` (Prometheus via Micrometer) — counters/timers: `topology_ingest_total{result,domain}`,
   `topology_validation_failures_total{rule,domain}` (incl. `rule=domain-vocabulary`),
   `topology_knowledge_vocab_fetch_total{result}`, `topology_knowledge_vocab_unavailable_total`,
   `topology_snapshot_minted_total`, `topology_nebula_write_seconds`, `topology_nebula_orphan_reaped_total`,
-  `topology_events_emitted_total`, `topology_events_dlq_total`, `topology_query_seconds{op}`.
+  `topology_events_emitted_total`, `topology_events_dlq_total`, `topology_query_seconds{op}`,
+  **`topology_bootstrap_attempts_total{result}`**, **`topology_bootstrap_storaged_online_wait_seconds`**,
+  **`topology_bootstrap_ready_seconds`** (time from start to readiness UP — observe the bounded window).
 - **Structured JSON logs** (Logback JSON), MDC carries `snapshotId` + `domain` + `traceId` where in
   scope; one log line per significant op (ingest received, validation result, snapshot minted, NebulaGraph
   write, PostgreSQL cut-over, event emitted, query served, error). Logs never carry NebulaGraph
@@ -1326,10 +1467,16 @@ Kafka producer is explicitly idempotent: `enable.idempotence=true`, `acks=all`,
   `com.acp:event-model:0.1.0` and the **nebula-java** client (`com.vesoft:client`, Apache-2.0).
 - **Migrations / bootstrap:**
   - **PostgreSQL:** Flyway on startup creates the `topology_meta.snapshot` table + indexes.
-  - **NebulaGraph:** `NebulaSchemaBootstrap` on startup registers storaged
-    (`ADD HOSTS "nebula-storaged":9779;` if not already registered via `SHOW HOSTS`), then
-    `CREATE SPACE/TAG/EDGE/INDEX IF NOT EXISTS` + `REBUILD`, waiting until the space is usable.
-    Idempotent across restarts and cooperative with the deferred `nebula-init` Compose job.
+  - **NebulaGraph:** `NebulaSchemaBootstrap` on startup parses `SHOW HOSTS`, runs
+    `ADD HOSTS "nebula-storaged":9779;` only if the storaged host is **not `Status ONLINE`**, then
+    **polls `SHOW HOSTS` until that host is `ONLINE`** (bounded) **before** `CREATE SPACE IF NOT
+    EXISTS`, then `waitUntilSpaceUsable` (`USE space` poll), then `CREATE TAG/EDGE/INDEX IF NOT EXISTS`
+    + `REBUILD`. `StartupBootstrapRunner` runs this and, on transient failure, **retries it in the
+    background** (backoff + overall deadline) so readiness self-heals — **never one-shot-latches DOWN**
+    (CRIT-1/CRIT-2; `docs/startup-robustness-standard.md`). Idempotent across restarts/retries and
+    cooperative with the deferred `nebula-init` Compose job. **Bounded predictable window:** readiness
+    within ~120s of dependencies being available (hard deadline `topology.startup.deadline-ms`, default
+    180s).
 - **Container / Compose:** `eclipse-temurin:17-jdk` base; Dockerfile + Docker Compose entry that
   `depends_on` the merged infra services — **`nebula-graphd`** (port 9669), `nebula-metad`,
   `nebula-storaged` (vesoft/nebula-* v3.8.0, Apache-2.0), **`postgres:16`** (snapshot metadata), and

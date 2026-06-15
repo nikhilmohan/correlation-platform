@@ -35,6 +35,9 @@ public class TopologyProperties {
     @NestedConfigurationProperty
     private final Snapshot snapshot = new Snapshot();
 
+    @NestedConfigurationProperty
+    private final Startup startup = new Startup();
+
     public Nebula getNebula() {
         return nebula;
     }
@@ -59,6 +62,10 @@ public class TopologyProperties {
         return snapshot;
     }
 
+    public Startup getStartup() {
+        return startup;
+    }
+
     /** NebulaGraph connection (internal-only — never exposed to callers or logs). */
     public static class Nebula {
         /** Comma-separated host:port list for graphd, e.g. {@code nebula-graphd:9669}. */
@@ -72,6 +79,26 @@ public class TopologyProperties {
         private String storagedHost = "nebula-storaged:9779";
         /** Whether NebulaSchemaBootstrap runs ADD HOSTS / CREATE SPACE on startup. */
         private boolean bootstrapOnStartup = true;
+        /**
+         * Backoff interval for the {@code SHOW HOSTS}-ONLINE and {@code USE space}-usable polls
+         * (S2/S5). {@code TOPOLOGY_NEBULA_POLL_INTERVAL_MS}.
+         */
+        private long pollIntervalMs = 1000;
+        /**
+         * Max wait for the configured storaged host to reach {@code Status ONLINE} before
+         * {@code CREATE SPACE} (CRIT-1 / S1). {@code TOPOLOGY_NEBULA_STORAGED_ONLINE_DEADLINE_MS}.
+         */
+        private long storagedOnlineDeadlineMs = 60_000;
+        /**
+         * Max wait for {@code USE space} to succeed after {@code CREATE SPACE} (space-propagation
+         * window). {@code TOPOLOGY_NEBULA_SPACE_USABLE_DEADLINE_MS}.
+         */
+        private long spaceUsableDeadlineMs = 60_000;
+        /**
+         * Backoff between background bootstrap re-attempts on a transient failure (capped by the
+         * overall startup deadline; S2/S3). {@code TOPOLOGY_NEBULA_RETRY_BACKOFF_MS}.
+         */
+        private long retryBackoffMs = 5_000;
 
         public String getHosts() {
             return hosts;
@@ -136,6 +163,38 @@ public class TopologyProperties {
         public void setBootstrapOnStartup(boolean bootstrapOnStartup) {
             this.bootstrapOnStartup = bootstrapOnStartup;
         }
+
+        public long getPollIntervalMs() {
+            return pollIntervalMs;
+        }
+
+        public void setPollIntervalMs(long pollIntervalMs) {
+            this.pollIntervalMs = pollIntervalMs;
+        }
+
+        public long getStoragedOnlineDeadlineMs() {
+            return storagedOnlineDeadlineMs;
+        }
+
+        public void setStoragedOnlineDeadlineMs(long storagedOnlineDeadlineMs) {
+            this.storagedOnlineDeadlineMs = storagedOnlineDeadlineMs;
+        }
+
+        public long getSpaceUsableDeadlineMs() {
+            return spaceUsableDeadlineMs;
+        }
+
+        public void setSpaceUsableDeadlineMs(long spaceUsableDeadlineMs) {
+            this.spaceUsableDeadlineMs = spaceUsableDeadlineMs;
+        }
+
+        public long getRetryBackoffMs() {
+            return retryBackoffMs;
+        }
+
+        public void setRetryBackoffMs(long retryBackoffMs) {
+            this.retryBackoffMs = retryBackoffMs;
+        }
     }
 
     /** Kafka producer config (idempotent). */
@@ -175,7 +234,13 @@ public class TopologyProperties {
 
     /** Traversal bounds. */
     public static class Traversal {
-        private int maxDepth = 8;
+        /**
+         * Generous runaway backstop for bounded traversal (#214). Topology HONOURS the
+         * caller-requested depth up to this cap; it does not impose a build-policy opinion —
+         * traversal depth is the trail-builder's concern (trail-builder requests 12). Raised
+         * 8 → 32; env-configurable via {@code TOPOLOGY_TRAVERSAL_MAX_DEPTH}.
+         */
+        private int maxDepth = 32;
 
         public int getMaxDepth() {
             return maxDepth;
@@ -245,6 +310,26 @@ public class TopologyProperties {
 
         public void setRetention(int retention) {
             this.retention = retention;
+        }
+    }
+
+    /**
+     * Self-healing startup bootstrap window (Startup-Robustness Standard S2/S3). All config from env.
+     */
+    public static class Startup {
+        /**
+         * Overall self-healing startup deadline — bounds the predictable window. After this elapses,
+         * background bootstrap retries stop and readiness stays DOWN (no unbounded loop; S2/S3).
+         * {@code TOPOLOGY_STARTUP_DEADLINE_MS}. Default 180000ms (hard deadline; 120s target).
+         */
+        private long deadlineMs = 180_000;
+
+        public long getDeadlineMs() {
+            return deadlineMs;
+        }
+
+        public void setDeadlineMs(long deadlineMs) {
+            this.deadlineMs = deadlineMs;
         }
     }
 }

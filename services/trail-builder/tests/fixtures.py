@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 import httpx
 import respx
 
+from trailbuilder.models import GraphEdge, GraphNode, GraphSlice
+
 DEFAULT_POLICY = {
     "closureEdgeTypes": [
         "HOSTED_ON",
@@ -146,7 +148,10 @@ def install_knowledge_stub(
 ) -> respx.MockRouter:
     """Install respx routes for the Knowledge trailPolicy read API.
 
-    ``policies`` maps domain -> trailPolicy payload dict.
+    ``policies`` maps domain -> trailPolicy payload dict. The route mirrors Knowledge's
+    published RecordController contract: ``GET /domains/{domain}/trail-policies/{recordId}``
+    where ``recordId`` is the seeded slash-bearing id ``core-ip/trailPolicy/default``,
+    URL-encoded so the slashes survive as one path segment (the controller decodes once).
     """
     router = respx.mock(base_url=base_url, assert_all_called=False)
 
@@ -161,14 +166,160 @@ def install_knowledge_stub(
             json={
                 "domain": domain,
                 "recordType": "trailPolicy",
-                "recordId": "default",
+                "recordId": "core-ip/trailPolicy/default",
                 "version": "1",
                 "isCurrent": True,
                 "payload": payload,
             },
         )
 
-    router.get(url__regex=r".*/domains/(?P<domain>[^/?]+)/trailPolicy/default(\?.*)?$").mock(
+    # The recordId path segment is URL-encoded (slashes -> %2F), so it is a single,
+    # slashless path segment captured here as ``[^/?]+``.
+    router.get(url__regex=r".*/domains/(?P<domain>[^/?]+)/trail-policies/[^/?]+(\?.*)?$").mock(
         side_effect=_policy
     )
     return router
+
+
+# ---------------------------------------------------------------------------
+# Realistic full-topology graph-slice fixture (the #225 reproduction).
+#
+# Mirrors the Simulator's Core-IP shape: N Nodes spread across `area_count` IGP
+# areas, each Node carrying a LineCard -> Port -> Interface stack; consecutive
+# Nodes joined by an IPLink; and — crucially — areas are joined ONLY through an
+# *area-less connector mesh* (FiberSpan + IGPAdjacency + LSP riding each link, and
+# SRLG groups bundling adjacent IPLinks). NONE of those connectors carries
+# `igpArea`. There is NO direct area-bearing-to-area-bearing cross-area edge:
+# the only thing bridging two areas is the area-less mesh — exactly the real-data
+# shape the old tiny fixtures never reproduced.
+#
+# On the old closure this fuses into ONE whole-network trail (an area-less seed
+# gets no prune at all, and an area-bearing seed leaks across the area-less mesh).
+# After the area-component fix it yields multiple area-bounded trails and no
+# whole-network trail.
+# ---------------------------------------------------------------------------
+
+
+def _area_of(index: int, area_count: int, node_count: int, area_layout: str) -> str:
+    """Map a node index to its IGP area under the chosen layout.
+
+    * ``"round-robin"`` (default) — ``index % area_count``: consecutive nodes are
+      always in *different* areas, so every inter-node connector is genuinely
+      cross-area (the original #225 fixture shape).
+    * ``"block"`` — contiguous blocks of nodes per area (the Simulator's real
+      shape): consecutive nodes within a block share an area, so a connector
+      between them is **single-area**, while the connector that straddles a block
+      boundary is genuinely **cross-area**. This is the shape that exposes the
+      connector-mesh-area-scope leak (#234): a single-area connector must NOT be
+      replicated into the other areas' trails.
+    """
+    if area_layout == "block":
+        block = max(1, -(-node_count // area_count))  # ceil division
+        return f"area-{min(index // block, area_count - 1)}"
+    return f"area-{index % area_count}"
+
+
+def realistic_coreip_slice(
+    node_count: int = 9,
+    area_count: int = 3,
+    domain: str = "core-ip",
+    snapshot_id: str = "snap-real",
+    area_layout: str = "round-robin",
+    shared_transport: bool = False,
+) -> GraphSlice:
+    """Build a ``GraphSlice`` mirroring the Simulator's area-less-mesh topology.
+
+    Areas are bridged ONLY through area-less IPLink/SRLG/FiberSpan/LSP/IGPAdjacency
+    connectors — never through a direct area-bearing edge. Returns the slice the
+    closure runs on directly (no Topology client involved).
+
+    ``area_layout`` selects how node indices map to IGP areas — ``"round-robin"``
+    (the original #225 shape, every inter-node connector cross-area) or ``"block"``
+    (contiguous per-area blocks, so some connectors are single-area and some are
+    cross-area — the shape that exercises the connector-mesh-area-scope fix #234).
+
+    ``shared_transport`` adds the gate's **network-wide area-less mesh**: a single
+    area-less transport object that rides EVERY IPLink (a shared
+    conduit/transport-mesh), creating an area-less-to-area-less chain that makes
+    every connector reachable from every area's closure. This reproduces the #234
+    leak — on the PR-merged #225 closure it replicates single-area connectors
+    (e.g. ``FiberSpan:F-N0_N1`` between two area-0 Nodes) WHOLESALE into every
+    area trail; after the connector-mesh-area-scope fix a single-area connector
+    rides only its own area.
+    """
+    s = GraphSlice(domain=domain, snapshot_id=snapshot_id)
+
+    def _add(mo_id: str, object_type: str, igp_area: str | None = None) -> None:
+        attrs: dict[str, object] = {}
+        if igp_area is not None:
+            attrs["igpArea"] = igp_area
+        s.add_node(GraphNode(managed_object_id=mo_id, object_type=object_type, attributes=attrs))
+
+    # Per-node area-bearing stack: Node -> LineCard -> Port -> Interface, all in
+    # the node's area (the Simulator stamps igpArea on Node + Interface; LineCard
+    # and Port are area-less hardware, but they sit *inside* one node's reach).
+    for i in range(node_count):
+        area = _area_of(i, area_count, node_count, area_layout)
+        node = f"Node:N{i}"
+        lc = f"LineCard:N{i}-LC0"
+        port = f"Port:N{i}-LC0-P0"
+        iface = f"Interface:N{i}-LC0-P0.0"
+        _add(node, "Node", igp_area=area)
+        _add(lc, "LineCard")  # area-less hardware
+        _add(port, "Port")  # area-less hardware
+        _add(iface, "Interface", igp_area=area)
+        s.add_edge(GraphEdge(node, lc, "CONTAINS"))
+        s.add_edge(GraphEdge(lc, port, "HOSTS"))
+        s.add_edge(GraphEdge(port, iface, "HOSTS"))
+
+    # The area-less connector mesh between consecutive nodes. Each adjacent pair
+    # (N_i, N_{i+1}) is joined by an IPLink (area-less) terminated by both ends'
+    # interfaces, a FiberSpan + IGPAdjacency + LSP riding the same link, and an
+    # SRLG group bundling adjacent IPLinks into a fate-shared chain. Consecutive
+    # nodes may be in DIFFERENT areas (i and i+1 differ mod area_count), so this
+    # mesh is the *only* thing that could bridge areas.
+    for i in range(node_count - 1):
+        a, b = f"N{i}", f"N{i + 1}"
+        iplink = f"IPLink:{a}_{b}"
+        fiber = f"FiberSpan:F-{a}_{b}"
+        adj = f"IGPAdjacency:ADJ-{a}_{b}"
+        lsp = f"LSP:LSP-{a}_{b}"
+        iface_a = f"Interface:{a}-LC0-P0.0"
+        iface_b = f"Interface:{b}-LC0-P0.0"
+        _add(iplink, "IPLink")  # area-less
+        _add(fiber, "FiberSpan")  # area-less
+        _add(adj, "IGPAdjacency")  # area-less
+        _add(lsp, "LSP")  # area-less
+        # Interfaces TERMINATE the IPLink (the area-bearing endpoints of the link).
+        s.add_edge(GraphEdge(iface_a, iplink, "TERMINATES"))
+        s.add_edge(GraphEdge(iface_b, iplink, "TERMINATES"))
+        # The area-less layer objects ride the link.
+        s.add_edge(GraphEdge(fiber, iplink, "RIDES_ON"))
+        s.add_edge(GraphEdge(adj, iplink, "ADJACENCY_OVER"))
+        s.add_edge(GraphEdge(lsp, iplink, "TRAVERSES"))
+
+    # SRLG groups bundling adjacent IPLinks into a fate-shared chain — the
+    # network-wide area-less bridge that fused everything in the gate (#225).
+    for i in range(node_count - 2):
+        srlg = f"SRLG:SRLG-{i}"
+        _add(srlg, "SRLG")  # area-less
+        link0 = f"IPLink:N{i}_N{i + 1}"
+        link1 = f"IPLink:N{i + 1}_N{i + 2}"
+        s.add_edge(GraphEdge(link0, srlg, "MEMBER_OF"))
+        s.add_edge(GraphEdge(link1, srlg, "MEMBER_OF"))
+
+    # Optional network-wide area-less transport mesh (the #234 gate shape): one
+    # area-less transport object that RIDES_ON every IPLink. This is a genuine
+    # area-less-to-area-less chain in the closure-edge view — IPLink_X <-RIDES_ON-
+    # TransportMesh -RIDES_ON-> IPLink_Y — so from any area's seed the closure can
+    # walk the ENTIRE connector mesh network-wide. On the PR-merged #225 closure
+    # this admits every area-less connector into every area's trail (the bloat);
+    # the connector-mesh-area-scope fix restricts admission to connectors that
+    # genuinely ride within the area.
+    if shared_transport:
+        mesh = "FiberSpan:F-MESH"  # one shared area-less transport conduit
+        _add(mesh, "FiberSpan")  # area-less, no igpArea
+        for i in range(node_count - 1):
+            s.add_edge(GraphEdge(mesh, f"IPLink:N{i}_N{i + 1}", "RIDES_ON"))
+
+    return s

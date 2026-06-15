@@ -54,7 +54,9 @@ def test_policy_client_honours_backoff_between_retries(settings, monkeypatch) ->
     monkeypatch.setattr(_retry.time, "sleep", lambda x: slept.append(x))
 
     router = __import__("respx").mock(base_url=BASE, assert_all_called=False)
-    router.get("/domains/core-ip/trailPolicy/default").mock(return_value=httpx.Response(500))
+    router.get("/domains/core-ip/trail-policies/core-ip%2FtrailPolicy%2Fdefault").mock(
+        return_value=httpx.Response(500)
+    )
     with router:
         client = KnowledgePolicyClient(s, client=httpx.Client(base_url=BASE))
         with pytest.raises(IntegrationError):

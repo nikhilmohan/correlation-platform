@@ -1,13 +1,23 @@
 """``KnowledgePolicyClient`` — domain-scoped trail policy from the Knowledge API.
 
-Reads the ``trailPolicy`` record for a domain via the frozen Knowledge read API
-(``GET /domains/{domain}/trailPolicy/default`` -> ``RecordResponse`` whose
-``payload`` is the trail policy). Caches per domain; ``invalidate(domain)`` drops
-the cache so the next ``get_policy`` re-fetches (driven by ``knowledge.updated``).
-No policy value is hard-coded.
+Reads the ``trailPolicy`` record for a domain via the frozen Knowledge read API. The
+RecordController route is ``GET /domains/{domain}/{recordTypePathSegment}/{recordId}``
+where ``recordTypePathSegment`` is the kebab-case form of the ``RecordType`` enum
+(``TRAIL_POLICY`` -> ``trail-policies``) and ``recordId`` is the seeded, slash-bearing
+id ``core-ip/trailPolicy/default``. The recordId is URL-encoded so its slashes survive
+as a single path segment; Knowledge ``URLDecoder.decode``s it once on the way in. So the
+canonical request is::
+
+    GET /domains/{domain}/trail-policies/core-ip%2FtrailPolicy%2Fdefault
+
+-> ``RecordResponse`` whose ``payload`` is the trail policy. Caches per domain;
+``invalidate(domain)`` drops the cache so the next ``get_policy`` re-fetches (driven by
+``knowledge.updated``). No policy value is hard-coded.
 """
 
 from __future__ import annotations
+
+from urllib.parse import quote
 
 import httpx
 
@@ -16,7 +26,21 @@ from ..models import Boundary, SrlgRule, TrailPolicy
 from ._retry import backoff_before_retry
 from .errors import IntegrationError
 
-_RECORD_ID = "default"
+# Knowledge's kebab-case RecordType.pathSegment() for TRAIL_POLICY (NOT the "trailPolicy"
+# enum id). Drift from Knowledge's published segments is caught by a unit test.
+POLICY_PATH_SEGMENT = "trail-policies"
+# The seeded recordId for the default trail policy (core-ip.json). It is a slash-bearing
+# id; URL-encoded into a single path segment below.
+POLICY_RECORD_ID = "core-ip/trailPolicy/default"
+
+
+def _policy_path(domain: str) -> str:
+    """Build the exact Knowledge RecordController path for ``domain``'s trail policy.
+
+    The recordId's embedded slashes are percent-encoded (``safe=""``) so the whole
+    recordId is one path segment, matching Knowledge's single ``URLDecoder.decode``.
+    """
+    return f"/domains/{domain}/{POLICY_PATH_SEGMENT}/{quote(POLICY_RECORD_ID, safe='')}"
 
 
 class KnowledgePolicyClient:
@@ -50,7 +74,7 @@ class KnowledgePolicyClient:
 
     def ping(self) -> bool:
         try:
-            self._client.get(f"/domains/{self._settings.default_domain}/trailPolicy/{_RECORD_ID}")
+            self._client.get(_policy_path(self._settings.default_domain))
             return True
         except httpx.HTTPError:
             return False
@@ -63,7 +87,7 @@ class KnowledgePolicyClient:
         last: Exception | None = None
         for i in range(attempts):
             try:
-                resp = self._client.get(f"/domains/{domain}/trailPolicy/{_RECORD_ID}")
+                resp = self._client.get(_policy_path(domain))
                 resp.raise_for_status()
                 body = resp.json()
                 return _policy_from_record(body)

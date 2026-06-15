@@ -136,7 +136,14 @@ def create_app(container: Container) -> FastAPI:
         c: Container = Depends(get_container),
     ) -> ListTrailsResponse:
         QUERY_REQUESTS_TOTAL.labels(op="listTrails").inc()
-        trails = c.repository.list_trails(snapshotId, domain, limit=limit, offset=offset)
+        # Resolve the snapshot-scope sentinel (current|previous, as the web-ui and
+        # Topology use) to the concrete persisted snapshotId before querying — trails
+        # are persisted under the concrete id carried by the topology.changed event,
+        # never "current" (#226). A concrete snapshotId passes through unchanged.
+        # When a sentinel cannot be resolved (no snapshot for the domain) we fall
+        # back to the literal so the query returns a clean empty result.
+        resolved = c.repository.resolve_snapshot_id(snapshotId, domain) or snapshotId
+        trails = c.repository.list_trails(resolved, domain, limit=limit, offset=offset)
         summaries = [
             TrailSummary(
                 trailId=t.trail_id,
@@ -147,8 +154,10 @@ def create_app(container: Container) -> FastAPI:
             )
             for t in trails
         ]
+        # Echo the RESOLVED concrete snapshotId so the UI shows which snapshot it is
+        # viewing (still a plain string — no contract change to the response shape).
         return ListTrailsResponse(
-            snapshotId=snapshotId, domain=domain, count=len(summaries), trails=summaries
+            snapshotId=resolved, domain=domain, count=len(summaries), trails=summaries
         )
 
     @app.get(
