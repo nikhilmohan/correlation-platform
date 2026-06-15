@@ -160,7 +160,14 @@ The Topology Service's canonical phase-map row (from `docs/architecture.md` → 
   - `GET /topology/nodes/{managedObjectId}/neighbors` — return direct neighbors (optionally
     filtered by edge type).
   - `GET /topology/traversal` — bounded traversal from a start `managedObjectId` over
-    specified edge type(s), up to a caller-supplied depth bound.
+    specified edge type(s), up to a caller-supplied depth bound. **Frozen response: `TraversalDto
+    { start, domain, relations, maxDepth, crossDomain, reached: NodeDto[], edges: EdgeDto[] }`** —
+    `reached` are the distinct nodes reachable within the bound, and **`edges` (#252) are the typed
+    directed edges of that closure**: every edge whose `from` and `to` are both in the closure node
+    set (`start` + `reached`) **and** whose `relation` is one of the requested `relations` (the
+    traversal is **relation-scoped**, so only the requested edge types appear). The edges let
+    consumers (e.g. the Codebook Generator's forward-propagation) walk the cascade rather than
+    seeing isolated nodes; an edge-less closure returns an empty (never null) `edges` array.
   - `GET /topology/nodes` — list nodes, filterable by `objectType`.
   - `GET /topology/sites` — list sites. **Frozen response: `SiteListDto { domain, snapshotId, count,
     sites: SiteDto[] }`** where **`SiteDto { siteId, name, latitude, longitude, region }`** has
@@ -336,7 +343,10 @@ Each criterion maps to a single unit test (JUnit 5).
 11. **Bounded traversal by edge type.** Given a known synthetic topology, a bounded traversal
     request over a specified edge type (e.g., RIDES_ON) from a given start node returns exactly
     the expected set of reachable nodes within the depth bound, and no nodes reachable only via
-    other edge types.
+    other edge types. The response also includes **`edges` (#252)** — the typed directed edges of
+    the closure (every edge whose both endpoints are in `start` + `reached` and whose `relation` is
+    one of the requested relations); the edges carry the correct `from`/`to`/`relation`, include the
+    origin's outgoing edge(s), and an edge-less closure returns an empty (never null) `edges` array.
 
 12. **`managedObjectId` resolution.** `GET /topology/nodes/{managedObjectId}` with a valid
     `<objectType>:<id>` value returns the node object and its layer; an unknown

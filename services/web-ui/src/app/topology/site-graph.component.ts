@@ -8,6 +8,7 @@ import {
   OnDestroy,
   OnInit,
   ViewChild,
+  computed,
   effect,
   inject,
   input,
@@ -60,11 +61,16 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
           #cyEl
           class="cy-canvas"
           role="application"
+          [attr.data-cy-loading]="store.graphLoading()"
+          [attr.data-cy-node-count]="bridgeNodeCount()"
+          [attr.data-cy-edge-count]="bridgeEdgeCount()"
+          [attr.data-cy-trail-count]="bridgeTrailCount()"
+          [attr.data-cy-highlight-count]="highlightCount()"
           aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
         ></div>
 
         @if (store.graphLoading()) {
-          <p aria-busy="true">Loading site graph…</p>
+          <p data-testid="graph-loading" aria-busy="true">Loading site graph…</p>
         } @else if (store.objects()) {
           <h2>Devices</h2>
           <ul class="obj-list" aria-label="Devices in this site">
@@ -215,6 +221,23 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly cyReady = signal(false);
   private graphEffect: EffectRef;
 
+  /**
+   * Deterministic test/render bridge — bound onto the .cy-canvas via [attr.data-cy-*] in the
+   * template (NOT written imperatively), so the counts track the store signals through normal
+   * change detection and are correct the moment objectsAtSite resolves, independent of Cytoscape
+   * readiness and ViewChild timing. While loading the counts read 0; once graphLoading clears they
+   * reflect the same data the accessible node/edge lists render from. A reader (Playwright) that
+   * waits for data-cy-loading="false" therefore observes the genuinely-loaded counts, never a
+   * race-window zero. The painted Cytoscape graph mirrors the identical data, so the canvas and the
+   * bridge never disagree.
+   */
+  readonly bridgeNodeCount = computed(() => (this.store.graphLoading() ? 0 : this.store.derivedNodes().length));
+  readonly bridgeEdgeCount = computed(() => (this.store.graphLoading() ? 0 : this.store.visibleEdges().length));
+  readonly bridgeTrailCount = computed(() => (this.store.graphLoading() ? 0 : this.store.trails().length));
+
+  /** Painted-graph highlight count (AC 31/32), reflected onto the canvas by renderGraph(). */
+  readonly highlightCount = signal(0);
+
   constructor() {
     // Mirror the store into the Cytoscape graph whenever any driving signal changes, once cy
     // is built. Created in the injection context (constructor); gated on cyReady so it no-ops
@@ -327,14 +350,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
 
     cy.layout({ name: 'cose' }).run();
 
-    // Test bridge: expose REAL render counts on the canvas element for the Playwright suite.
-    const el = this.cyEl?.nativeElement;
-    if (el) {
-      el.dataset['cyNodeCount'] = String(cy.nodes().length);
-      el.dataset['cyEdgeCount'] = String(cy.edges().length);
-      el.dataset['cyHighlightCount'] = String(highlightCount);
-      el.dataset['cyTrailCount'] = String(trails.length);
-    }
+    // The node/edge/trail counts are reflected onto the canvas via [attr.data-cy-*] template
+    // bindings (from the same store signals this graph mirrors), so they need no imperative write
+    // here. The highlight count is only known after painting, so publish it to its signal — which
+    // the template binds onto data-cy-highlight-count.
+    this.highlightCount.set(highlightCount);
   }
 
   /** managedObjectIds that are members of any trail in the highlighted set. */
