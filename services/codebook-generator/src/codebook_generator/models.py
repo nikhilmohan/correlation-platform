@@ -8,7 +8,7 @@ envelope/payload contract types come from ``acp_event_model`` and are never rede
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --- Knowledge: fault-origin types ---
@@ -68,10 +68,18 @@ class NodeListDto(BaseModel):
 
 
 class TraversalEdge(BaseModel):
-    """A directed, typed edge in a bounded traversal result."""
+    """A directed, typed edge in a bounded traversal result.
 
-    source: str
-    target: str
+    Conforms to Topology's published ``EdgeDto`` (``services/topology/openapi.json``):
+    the directed endpoints are wired as ``from``/``to`` on the wire. ``from`` is a Python
+    keyword, so it is bound via a Pydantic field alias to ``from_``; ``populate_by_name``
+    keeps construction by field name (``from_=...``) working in tests/fixtures.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    to: str
     relation: str
 
 
