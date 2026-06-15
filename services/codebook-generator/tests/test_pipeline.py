@@ -163,7 +163,21 @@ def test_vocabulary_violation_routes_trigger_to_dlq(
                 },
             )
         if path.endswith("/alarm-type-vocabulary"):
-            return httpx.Response(200, json={"alarmTypes": ["FiberFault"]})  # no BogusAlarm
+            # Real Knowledge RecordResponse envelope (list-of-records, tokens under
+            # ``payload.alarmTypes``); ``FiberFault`` only — ``BogusAlarm`` is out-of-vocab.
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "domain": "core-ip",
+                        "recordType": "alarmTypeVocabulary",
+                        "recordId": "core-ip/alarmTypeVocabulary/default",
+                        "version": "v1",
+                        "isCurrent": True,
+                        "payload": {"alarmTypes": ["FiberFault"]},
+                    }
+                ],
+            )
         if path == "/topology/nodes":
             return httpx.Response(
                 200,

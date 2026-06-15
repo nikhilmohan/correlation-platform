@@ -12,7 +12,12 @@ import httpx
 import pytest
 
 from codebook_generator.clients.base import IntegrationError, request_with_retry
-from codebook_generator.clients.knowledge import KnowledgeClient, _payload, _records
+from codebook_generator.clients.knowledge import (
+    KnowledgeClient,
+    _current_record,
+    _payload,
+    _records,
+)
 from codebook_generator.clients.trail_builder import TrailBuilderClient
 from codebook_generator.models import FaultOriginType, PropagationTemplate
 
@@ -61,6 +66,19 @@ _PROPAGATION_RECORD = {
         "traversal": {"direction": "downstream", "cardinality": "one-to-many"},
         "ordering": 1,
     },
+}
+
+
+# The seeded ``alarmTypeVocabulary`` record (recordId core-ip/alarmTypeVocabulary/default),
+# served via the SAME generic record route as a RecordResponse envelope; the tokens live
+# under ``payload.alarmTypes``, NOT at the envelope top level (#233).
+_ALARM_VOCAB_RECORD = {
+    "domain": "core-ip",
+    "recordType": "alarmTypeVocabulary",
+    "recordId": "core-ip/alarmTypeVocabulary/default",
+    "version": "v1",
+    "isCurrent": True,
+    "payload": {"alarmTypes": ["FiberCut", "LOS", "LinkDown"]},
 }
 
 
@@ -131,18 +149,67 @@ def test_records_normalizes_list_and_wrapped_shapes() -> None:
     assert _records(42) == []
 
 
-def test_knowledge_vocabulary_accepts_bare_list_shape() -> None:
-    """get_alarm_type_vocabulary handles both {alarmTypes:[...]} and a bare list."""
-    client = _client(lambda r: httpx.Response(200, json=["A", "B"]))
-    kc = KnowledgeClient(
-        fault_origins_base_url="http://k.test",
-        propagation_templates_base_url="http://k.test",
-        alarm_type_vocabulary_base_url="http://k.test",
-        client=client,
-        max_retries=0,
-        backoff_ms=1,
+def test_get_alarm_type_vocabulary_reads_record_payload() -> None:
+    """#233: a real alarmTypeVocabulary RecordResponse envelope yields the token STRINGS.
+
+    The route serves a LIST of envelopes; the tokens live under ``payload.alarmTypes``. The
+    result must be a ``list[str]`` of hashable tokens so ``set(...)`` works downstream
+    (vocabulary.validate_scenarios), NOT a list of envelope dicts.
+    """
+    kc = _knowledge_client(
+        lambda r: httpx.Response(200, json=[_ALARM_VOCAB_RECORD]),
     )
-    assert kc.get_alarm_type_vocabulary("core-ip") == ["A", "B"]
+    result = kc.get_alarm_type_vocabulary("core-ip")
+    assert result == ["FiberCut", "LOS", "LinkDown"]
+    assert all(isinstance(token, str) for token in result)
+    # The compile path does set(vocabulary); on the OLD top-level-.get code this would be a
+    # list of dicts and raise ``TypeError: unhashable type: 'dict'``.
+    assert set(result) == {"FiberCut", "LOS", "LinkDown"}
+
+
+def test_get_alarm_type_vocabulary_selects_current_record() -> None:
+    """When the route returns multiple versions, the ``isCurrent`` record's tokens win."""
+    stale = {
+        **_ALARM_VOCAB_RECORD,
+        "version": "v0",
+        "isCurrent": False,
+        "payload": {"alarmTypes": ["StaleOnly"]},
+    }
+    kc = _knowledge_client(
+        lambda r: httpx.Response(200, json=[stale, _ALARM_VOCAB_RECORD]),
+    )
+    assert kc.get_alarm_type_vocabulary("core-ip") == ["FiberCut", "LOS", "LinkDown"]
+
+
+def test_get_alarm_type_vocabulary_envelope_top_level_has_no_tokens() -> None:
+    """Regression guard (#233): the OLD code read the envelope TOP LEVEL ``alarmTypes``.
+
+    The real envelope has NO top-level ``alarmTypes`` (they are under ``payload``), so the
+    reverted ``body.get('alarmTypes')`` path would yield non-string envelope dicts / an empty
+    set. This pins that the tokens come from ``.payload`` and that ``set(...)`` of the result
+    is the token strings — a revert to the top-level read fails this test.
+    """
+    kc = _knowledge_client(
+        lambda r: httpx.Response(200, json=[_ALARM_VOCAB_RECORD]),
+    )
+    result = kc.get_alarm_type_vocabulary("core-ip")
+    # The buggy top-level read returns either [] (dict path, no top-level alarmTypes) or the
+    # list-of-envelope-dicts (bare-list path) — neither equals the real token strings.
+    assert result == ["FiberCut", "LOS", "LinkDown"]
+    assert result != []
+    assert _ALARM_VOCAB_RECORD not in result
+    # set() must succeed (would TypeError on a list of dicts from the old bare-list branch).
+    set(result)
+
+
+def test_current_record_selects_iscurrent_else_sole() -> None:
+    """_current_record picks isCurrent=True, else the sole record, and rejects empty."""
+    a = {"recordId": "a", "isCurrent": False}
+    b = {"recordId": "b", "isCurrent": True}
+    assert _current_record([a, b]) is b
+    assert _current_record([a]) is a
+    with pytest.raises(ValueError, match="no alarm-type-vocabulary record"):
+        _current_record([])
 
 
 # --- Regression #224: parse the Knowledge record ENVELOPE's .payload, not the envelope. ---
