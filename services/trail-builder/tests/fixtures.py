@@ -200,17 +200,52 @@ def install_knowledge_stub(
 # ---------------------------------------------------------------------------
 
 
+def _area_of(index: int, area_count: int, node_count: int, area_layout: str) -> str:
+    """Map a node index to its IGP area under the chosen layout.
+
+    * ``"round-robin"`` (default) — ``index % area_count``: consecutive nodes are
+      always in *different* areas, so every inter-node connector is genuinely
+      cross-area (the original #225 fixture shape).
+    * ``"block"`` — contiguous blocks of nodes per area (the Simulator's real
+      shape): consecutive nodes within a block share an area, so a connector
+      between them is **single-area**, while the connector that straddles a block
+      boundary is genuinely **cross-area**. This is the shape that exposes the
+      connector-mesh-area-scope leak (#234): a single-area connector must NOT be
+      replicated into the other areas' trails.
+    """
+    if area_layout == "block":
+        block = max(1, -(-node_count // area_count))  # ceil division
+        return f"area-{min(index // block, area_count - 1)}"
+    return f"area-{index % area_count}"
+
+
 def realistic_coreip_slice(
     node_count: int = 9,
     area_count: int = 3,
     domain: str = "core-ip",
     snapshot_id: str = "snap-real",
+    area_layout: str = "round-robin",
+    shared_transport: bool = False,
 ) -> GraphSlice:
     """Build a ``GraphSlice`` mirroring the Simulator's area-less-mesh topology.
 
     Areas are bridged ONLY through area-less IPLink/SRLG/FiberSpan/LSP/IGPAdjacency
     connectors — never through a direct area-bearing edge. Returns the slice the
     closure runs on directly (no Topology client involved).
+
+    ``area_layout`` selects how node indices map to IGP areas — ``"round-robin"``
+    (the original #225 shape, every inter-node connector cross-area) or ``"block"``
+    (contiguous per-area blocks, so some connectors are single-area and some are
+    cross-area — the shape that exercises the connector-mesh-area-scope fix #234).
+
+    ``shared_transport`` adds the gate's **network-wide area-less mesh**: a single
+    area-less transport object that rides EVERY IPLink (a shared
+    conduit/transport-mesh), creating an area-less-to-area-less chain that makes
+    every connector reachable from every area's closure. This reproduces the #234
+    leak — on the PR-merged #225 closure it replicates single-area connectors
+    (e.g. ``FiberSpan:F-N0_N1`` between two area-0 Nodes) WHOLESALE into every
+    area trail; after the connector-mesh-area-scope fix a single-area connector
+    rides only its own area.
     """
     s = GraphSlice(domain=domain, snapshot_id=snapshot_id)
 
@@ -224,7 +259,7 @@ def realistic_coreip_slice(
     # the node's area (the Simulator stamps igpArea on Node + Interface; LineCard
     # and Port are area-less hardware, but they sit *inside* one node's reach).
     for i in range(node_count):
-        area = f"area-{i % area_count}"
+        area = _area_of(i, area_count, node_count, area_layout)
         node = f"Node:N{i}"
         lc = f"LineCard:N{i}-LC0"
         port = f"Port:N{i}-LC0-P0"
@@ -272,5 +307,19 @@ def realistic_coreip_slice(
         link1 = f"IPLink:N{i + 1}_N{i + 2}"
         s.add_edge(GraphEdge(link0, srlg, "MEMBER_OF"))
         s.add_edge(GraphEdge(link1, srlg, "MEMBER_OF"))
+
+    # Optional network-wide area-less transport mesh (the #234 gate shape): one
+    # area-less transport object that RIDES_ON every IPLink. This is a genuine
+    # area-less-to-area-less chain in the closure-edge view — IPLink_X <-RIDES_ON-
+    # TransportMesh -RIDES_ON-> IPLink_Y — so from any area's seed the closure can
+    # walk the ENTIRE connector mesh network-wide. On the PR-merged #225 closure
+    # this admits every area-less connector into every area's trail (the bloat);
+    # the connector-mesh-area-scope fix restricts admission to connectors that
+    # genuinely ride within the area.
+    if shared_transport:
+        mesh = "FiberSpan:F-MESH"  # one shared area-less transport conduit
+        _add(mesh, "FiberSpan")  # area-less, no igpArea
+        for i in range(node_count - 1):
+            s.add_edge(GraphEdge(mesh, f"IPLink:N{i}_N{i + 1}", "RIDES_ON"))
 
     return s
