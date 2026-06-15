@@ -40,6 +40,15 @@ class TrailClosure:
         # extension point (other boundary strategies plug in here).
         igp_key = policy.boundary.attribute_key if policy.boundary.type == "igp-area" else None
 
+        # Per-connector area anchoring (the #234 fix). An area-less connector
+        # "rides within" an area only when it genuinely connects that area's
+        # area-bearing objects — NOT merely when it is reachable from that area
+        # across a network-wide area-less mesh. ``connector_areas[c]`` is the set
+        # of areas a given area-less connector legitimately rides within; an
+        # area-less neighbour is admitted to area ``A``'s closure only when
+        # ``A in connector_areas[neighbour]``.
+        connector_areas = self._connector_areas(graph, igp_key)
+
         # 1. Per-seed, area-bounded transitive closure over the dependency edges.
         #    An area-less seed yields ONE member set per area it touches; each set
         #    carries the area it is bounded to (None when unbounded). A member set
@@ -57,7 +66,7 @@ class TrailClosure:
             # co-trailing union in step 2.
             if graph.nodes[seed].get("object_type") in RISK_GROUP_OBJECT_TYPES:
                 continue
-            for members, area in self._bounded_closures(graph, seed, igp_key):
+            for members, area in self._bounded_closures(graph, seed, igp_key, connector_areas):
                 member_sets.append(frozenset(members))
                 areas.append(area)
                 seeds.append(seed)
@@ -102,83 +111,134 @@ class TrailClosure:
         graph: nx.MultiDiGraph,
         seed: str,
         igp_key: str | None,
+        connector_areas: dict[str, set[str]],
     ) -> list[tuple[set[str], str | None]]:
-        """Return the seed's area-bounded reachable set(s) — the #225 fix.
+        """Return the seed's area-bounded reachable set(s) — the #225 / #234 fix.
 
         The edge view is undirected (a Port and its IPLink correlate regardless of
         edge direction). With NO IGP-area boundary (``igp_key`` is ``None``) this
         is a single unbounded whole-component closure (the Phase-B fallback).
 
-        With an IGP-area boundary it bounds by **area component**, not by a
-        "differs-from-seed" prune:
+        With an IGP-area boundary it bounds by **area component**:
 
           * Determine the seed's **target area(s)**: its own ``igpArea`` if it is
-            area-bearing; otherwise the set of areas of the area-bearing objects
-            directly reachable from it over the dependency-edge view (so an
-            area-less FiberSpan/IPLink/LSP seed produces one set per area it
-            touches — never a whole-network set).
+            area-bearing; otherwise the areas the seed *genuinely rides within*
+            (``connector_areas[seed]``) — so an area-less FiberSpan/IPLink/LSP seed
+            that rides a single area produces only that area's set, never one set
+            per area it is merely mesh-reachable from.
           * Run a closure **per target area `A`**: from the seed, admit a
-            neighbour iff it is area-less OR its area equals ``A``. Crucially an
-            **area-less object never extends the frontier into a *different*
-            area's area-bearing object** — when expanding, a cross-area
-            area-bearing neighbour is pruned. So the area-less connector mesh can
-            no longer bridge areas, and there is no whole-network trail (AC-2).
+            neighbour iff it is an area-``A`` area-bearing object, or an area-less
+            connector that genuinely rides within area ``A``
+            (``A in connector_areas[neighbour]``). An area-less connector that
+            rides only *another* area is pruned — so the network-wide area-less
+            mesh can neither bridge areas (AC-2) nor replicate single-area
+            connectors into foreign area trails (#234).
 
-        A shared area-less object reachable within two areas lands in BOTH areas'
-        sets — legitimate overlap (AC-1), kept distinct by dedup since the member
-        sets differ.
+        A connector that genuinely rides two areas (a cross-area span) lands in
+        BOTH areas' sets — legitimate overlap (AC-1), kept distinct by dedup.
         """
         if igp_key is None:
-            return [(self._reachable(graph, seed, target_area=None), None)]
+            return [(self._reachable(graph, seed, None, connector_areas), None)]
 
-        target_areas = self._target_areas(graph, seed)
+        target_areas = self._target_areas(graph, seed, connector_areas)
         if not target_areas:
             # No area-bearing object anywhere in the seed's reach (a fully
             # area-less island): fall back to a single unbounded set so the seed
             # still yields its (area-less) trail rather than vanishing.
-            return [(self._reachable(graph, seed, target_area=None), None)]
-        return [(self._reachable(graph, seed, target_area=a), a) for a in sorted(target_areas)]
+            return [(self._reachable(graph, seed, None, connector_areas), None)]
+        return [(self._reachable(graph, seed, a, connector_areas), a) for a in sorted(target_areas)]
 
-    def _target_areas(self, graph: nx.MultiDiGraph, seed: str) -> set[str]:
+    def _target_areas(
+        self,
+        graph: nx.MultiDiGraph,
+        seed: str,
+        connector_areas: dict[str, set[str]],
+    ) -> set[str]:
         """The IGP area(s) a seed is bounded to.
 
-        Its own area if area-bearing; else the areas of the area-bearing objects
-        directly reachable from it over the dependency-edge view.
+        Its own area if area-bearing; else the areas the area-less seed genuinely
+        rides within (``connector_areas``) — NOT every area it is mesh-reachable
+        from. An area-less seed that rides one area therefore targets only that
+        area; a genuine cross-area span targets both.
         """
         seed_area = graph.nodes[seed].get("igp_area")
         if seed_area is not None:
             return {seed_area}
-        areas: set[str] = set()
-        seen: set[str] = {seed}
-        frontier = [seed]
-        # Walk only through area-less objects to discover the area-bearing
-        # objects this area-less seed touches (each defines a target area).
-        while frontier:
-            current = frontier.pop()
-            for neighbor in self._undirected_neighbors(graph, current):
-                if neighbor in seen:
-                    continue
-                seen.add(neighbor)
-                n_area = graph.nodes[neighbor].get("igp_area")
-                if n_area is not None:
-                    areas.add(n_area)
-                else:
-                    frontier.append(neighbor)
-        return areas
+        return set(connector_areas.get(seed, set()))
+
+    def _connector_areas(
+        self,
+        graph: nx.MultiDiGraph,
+        igp_key: str | None,
+    ) -> dict[str, set[str]]:
+        """Map each area-less connector to the set of areas it genuinely rides within.
+
+        The #234 fix. A connector "rides within" area ``X`` only when it actually
+        connects ``X``'s area-bearing objects — not merely when ``X`` is reachable
+        from it across a network-wide area-less mesh. Concretely a connector is
+        anchored to ``X`` iff it is, or is directly adjacent to, a **genuine
+        ``X``-conductor** — an area-less object that is *directly* adjacent to an
+        area-``X`` area-bearing object (e.g. an IPLink terminated by an area-``X``
+        Interface; a FiberSpan riding such an IPLink).
+
+        Crucially a pure *transport* object (e.g. one FiberSpan riding every
+        IPLink network-wide) is **not** a conductor of any area — it is directly
+        adjacent to no area-bearing object — so it never propagates one area's
+        connectors into another area. It legitimately rides every area it directly
+        conducts, but it cannot make a single-area connector appear cross-area.
+
+        With no IGP-area boundary this is empty (every connector is unbounded).
+        """
+        if igp_key is None:
+            return {}
+
+        area_less = [n for n in graph.nodes if graph.nodes[n].get("igp_area") is None]
+
+        # `direct[n]` — areas of the area-bearing objects DIRECTLY adjacent to the
+        # area-less object `n`. An `n` with a non-empty `direct[n]` is a genuine
+        # conductor of each of those areas.
+        direct: dict[str, set[str]] = {}
+        for n in area_less:
+            areas: set[str] = set()
+            for nb in self._undirected_neighbors(graph, n):
+                nb_area = graph.nodes[nb].get("igp_area")
+                if nb_area is not None:
+                    areas.add(nb_area)
+            direct[n] = areas
+
+        # A connector rides within area X iff it conducts X directly, or it is
+        # directly adjacent to a genuine X-conductor (e.g. a FiberSpan riding an
+        # IPLink that terminates on an area-X Interface). Traversal continues only
+        # *through* genuine X-conductors, so a network-wide transport object (no
+        # direct area-bearing neighbour, conductor of nothing) never bridges one
+        # area's connectors into another.
+        connector_areas: dict[str, set[str]] = {n: set(direct[n]) for n in area_less}
+        for n in area_less:
+            for nb in self._undirected_neighbors(graph, n):
+                if nb in direct:  # area-less neighbour
+                    connector_areas[n] |= direct[nb]
+        return connector_areas
 
     def _reachable(
         self,
         graph: nx.MultiDiGraph,
         seed: str,
         target_area: str | None,
+        connector_areas: dict[str, set[str]],
     ) -> set[str]:
         """Undirected reachable set, optionally bounded to ``target_area``.
 
         When ``target_area`` is ``None`` this is the whole connected component
-        (unbounded fallback). Otherwise an area-bearing neighbour is admitted only
-        if its area equals ``target_area``; an area-less neighbour is admitted but
-        never bridges into a *different* area's area-bearing object (that is what
-        the per-neighbour area check enforces on every expansion step).
+        (unbounded fallback). Otherwise:
+
+          * an **area-bearing** neighbour is admitted only when its area equals
+            ``target_area``;
+          * an **area-less connector** neighbour is admitted only when it
+            *genuinely rides within* ``target_area`` (#234) —
+            ``target_area in connector_areas[neighbour]``. A connector that rides
+            only another area is pruned, so neither the area-less mesh as a whole
+            (AC-2) nor an individual single-area connector (#234) can leak into a
+            foreign area's trail.
         """
         reachable: set[str] = {seed}
         frontier = [seed]
@@ -187,18 +247,30 @@ class TrailClosure:
             for neighbor in self._undirected_neighbors(graph, current):
                 if neighbor in reachable:
                     continue
-                if target_area is not None:
-                    n_area = graph.nodes[neighbor].get("igp_area")
-                    # Area-bearing neighbour: admit only within the target area.
-                    # Area-less neighbour (n_area is None): admit as a connector
-                    # within this area's reach — but because every area-bearing
-                    # neighbour reached *through* it is itself area-checked here,
-                    # it can never bridge into another area's objects.
-                    if n_area is not None and n_area != target_area:
-                        continue
+                if target_area is not None and not self._admits(
+                    graph, neighbor, target_area, connector_areas
+                ):
+                    continue
                 reachable.add(neighbor)
                 frontier.append(neighbor)
         return reachable
+
+    @staticmethod
+    def _admits(
+        graph: nx.MultiDiGraph,
+        node: str,
+        target_area: str,
+        connector_areas: dict[str, set[str]],
+    ) -> bool:
+        """Whether ``node`` may be admitted to ``target_area``'s reachable set.
+
+        An area-bearing node is admitted only within its own area; an area-less
+        connector only when it genuinely rides within ``target_area``.
+        """
+        node_area = graph.nodes[node].get("igp_area")
+        if node_area is not None:
+            return node_area == target_area
+        return target_area in connector_areas.get(node, set())
 
     @staticmethod
     def _undirected_neighbors(graph: nx.MultiDiGraph, node: str) -> set[str]:
