@@ -34,6 +34,7 @@ public class NebulaGraphRepository implements GraphRepository {
     private final NebulaSchemaBootstrap bootstrap;
     private final TopologyProperties.Nebula config;
     private final ObjectMapper mapper;
+    private final int traversalMaxDepth;
 
     public NebulaGraphRepository(NebulaSessionProvider sessions, NebulaSchemaBootstrap bootstrap,
             TopologyProperties properties, ObjectMapper mapper) {
@@ -41,6 +42,7 @@ public class NebulaGraphRepository implements GraphRepository {
         this.bootstrap = bootstrap;
         this.config = properties.getNebula();
         this.mapper = mapper;
+        this.traversalMaxDepth = properties.getTraversal().getMaxDepth();
     }
 
     @Override
@@ -244,23 +246,94 @@ public class NebulaGraphRepository implements GraphRepository {
 
     @Override
     public List<GraphVertex> objectsAtSite(String siteId, String domain, String snapshotId) {
+        // #245: the per-site projection must return the site's DEVICE-LEVEL SUBGRAPH, not only the
+        // devices directly LOCATED_AT the site. From the located devices (Nodes) we expand:
+        //   (a) their hosted hierarchy — LineCard / Port / Interface reachable over HOSTS / HOSTED_ON
+        //       (containment, recursive), and
+        //   (b) the logical objects those hierarchy members connect to over the multi-layer
+        //       connectivity relations (TERMINATES → IPLink, ADJACENCY_OVER → IGPAdjacency,
+        //       RIDES_ON → FiberSpan, TRAVERSES → LSP, SERVES → VPNService, MEMBER_OF → SRLG, …),
+        // so the web-ui can render and toggle the logical layers from one call (P1-G8 / AC-22).
+        // BFS is bounded by `topology.traversal.max-depth` and scoped to (domain, snapshotId); it
+        // NEVER traverses LOCATED_AT (so it cannot hop into another site) and it does NOT expand
+        // outward from a Node reached via connectivity (a placed Node is a site boundary — its own
+        // hierarchy belongs to its own site), so a backbone link's far end is included as an
+        // incident object without dragging in the far site's internal device graph.
         return sessions.execute(session -> {
             use(session);
-            String ngql = "GO FROM " + str(siteId) + " OVER LOCATED_AT REVERSELY "
-                    + "WHERE properties(edge).snapshotId == " + str(snapshotId)
-                    + " AND properties(edge).domain == " + str(domain)
-                    + " YIELD src(edge) AS device;";
-            ResultSet rs = execQuietly(session, ngql);
-            List<GraphVertex> out = new ArrayList<>();
-            if (rs == null) {
-                return out;
+            java.util.LinkedHashSet<String> located = new java.util.LinkedHashSet<>(
+                    locatedDeviceIds(session, siteId, domain, snapshotId));
+            java.util.LinkedHashSet<String> inScope = new java.util.LinkedHashSet<>(located);
+            java.util.ArrayDeque<String> frontier = new java.util.ArrayDeque<>(located);
+            int maxDepth = traversalMaxDepth;
+            for (int depth = 0; depth < maxDepth && !frontier.isEmpty(); depth++) {
+                java.util.ArrayDeque<String> next = new java.util.ArrayDeque<>();
+                for (String moid : frontier) {
+                    for (String neighbor : connectedDeviceObjects(session, moid, domain, snapshotId)) {
+                        if (inScope.add(neighbor)) {
+                            // Do not expand outward from a Node reached via connectivity (it is a
+                            // different site's placement boundary). The originally-located Nodes ARE
+                            // expanded because they were seeded into the first frontier.
+                            if (!"Node".equals(objectTypeOf(neighbor))) {
+                                next.add(neighbor);
+                            }
+                        }
+                    }
+                }
+                frontier = next;
             }
-            for (int i = 0; i < rs.rowsSize(); i++) {
-                String moid = asString(rs.rowValues(i).values().get(0));
+            List<GraphVertex> out = new ArrayList<>();
+            for (String moid : inScope) {
                 getNode(moid, domain, snapshotId).ifPresent(out::add);
             }
             return out;
         });
+    }
+
+    /** The Nodes directly LOCATED_AT the site (reverse over LOCATED_AT), scoped to (domain, snap). */
+    private List<String> locatedDeviceIds(Session session, String siteId, String domain,
+            String snapshotId) {
+        String ngql = "GO FROM " + str(siteId) + " OVER LOCATED_AT REVERSELY "
+                + "WHERE properties(edge).snapshotId == " + str(snapshotId)
+                + " AND properties(edge).domain == " + str(domain)
+                + " YIELD src(edge) AS device;";
+        ResultSet rs = execQuietly(session, ngql);
+        List<String> out = new ArrayList<>();
+        if (rs == null) {
+            return out;
+        }
+        for (int i = 0; i < rs.rowsSize(); i++) {
+            out.add(asString(rs.rowValues(i).values().get(0)));
+        }
+        return out;
+    }
+
+    /**
+     * The objects connected to {@code moid} over any relation EXCEPT LOCATED_AT, in BOTH directions
+     * (containment HOSTS/HOSTED_ON is directional; connectivity may be incoming or outgoing), scoped
+     * to (domain, snapshotId). LOCATED_AT is excluded so the closure never hops site→site.
+     */
+    private List<String> connectedDeviceObjects(Session session, String moid, String domain,
+            String snapshotId) {
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        for (boolean reverse : new boolean[] {false, true}) {
+            String ngql = "GO FROM " + str(moid) + " OVER * " + (reverse ? "REVERSELY " : "")
+                    + "WHERE properties(edge).snapshotId == " + str(snapshotId)
+                    + " AND properties(edge).domain == " + str(domain)
+                    + " AND type(edge) != \"LOCATED_AT\" "
+                    + "YIELD " + (reverse ? "src(edge)" : "dst(edge)") + " AS neighbor;";
+            ResultSet rs = execQuietly(session, ngql);
+            if (rs == null) {
+                continue;
+            }
+            for (int i = 0; i < rs.rowsSize(); i++) {
+                String neighbor = asString(rs.rowValues(i).values().get(0));
+                if (neighbor != null) {
+                    out.add(neighbor);
+                }
+            }
+        }
+        return new ArrayList<>(out);
     }
 
     @Override

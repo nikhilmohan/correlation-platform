@@ -97,6 +97,37 @@ class GraphReadServiceTest {
                 .containsExactlyInAnyOrder("LOCATED_AT", "ADJACENCY_OVER");
     }
 
+    @Test
+    void edgesForSiteIncludesMultiLayerConnectivityEdgesOfTheDeviceSubgraph() {
+        // #245: given the EXPANDED device-level node set (located Node + hosted hierarchy +
+        // connected logical objects), the per-site edge set must include the multi-layer
+        // connectivity edges the web-ui maps to logical layers — not only LOCATED_AT.
+        List<NodeDto> nodes = List.of(
+                node("Node:PE1"), node("LineCard:PE1-LC2"), node("Port:PE1-P3"),
+                node("Interface:PE1-I1"), node("IPLink:L1"), node("IGPAdjacency:A1"),
+                node("FiberSpan:F1"));
+        List<String> ids = List.of("Node:PE1", "LineCard:PE1-LC2", "Port:PE1-P3",
+                "Interface:PE1-I1", "IPLink:L1", "IGPAdjacency:A1", "FiberSpan:F1");
+        when(repository.edgesAmong(ids, "core-ip", "SNAP-1")).thenReturn(List.of(
+                edge("Node:PE1", "Site:LON-DC1", "LOCATED_AT"),
+                edge("Port:PE1-P3", "Node:PE1", "HOSTED_ON"),
+                edge("Port:PE1-P3", "Interface:PE1-I1", "HOSTS"),
+                edge("Interface:PE1-I1", "IPLink:L1", "TERMINATES"),
+                edge("Interface:PE1-I1", "IGPAdjacency:A1", "ADJACENCY_OVER"),
+                edge("FiberSpan:F1", "IPLink:L1", "RIDES_ON")));
+
+        List<EdgeDto> edges = service.edgesForSite("Site:LON-DC1", nodes, "core-ip", "SNAP-1");
+        assertThat(edges).extracting(EdgeDto::relation)
+                .contains("LOCATED_AT", "HOSTED_ON", "HOSTS", "TERMINATES", "ADJACENCY_OVER",
+                        "RIDES_ON");
+        // At least one true device-level connectivity edge (not just LOCATED_AT) is present.
+        assertThat(edges).anyMatch(e -> !"LOCATED_AT".equals(e.relation()));
+    }
+
+    private static GraphEdge edge(String from, String to, String relation) {
+        return new GraphEdge(from, to, relation, "core-ip", "SNAP-1", Map.of());
+    }
+
     private static NodeDto node(String moid) {
         return new NodeDto(moid, moid.substring(0, moid.indexOf(':')), "core-ip", "SNAP-1", null,
                 Map.of());
