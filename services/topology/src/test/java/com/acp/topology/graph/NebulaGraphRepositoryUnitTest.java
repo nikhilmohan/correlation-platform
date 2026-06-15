@@ -270,15 +270,149 @@ class NebulaGraphRepositoryUnitTest {
 
     @Test
     void objectsAtSiteTraversesLocatedAtReverselyThenResolvesEachDevice() throws Exception {
-        // GO ... LOCATED_AT REVERSELY yields one device; then getNode (FETCH PROP) resolves it.
+        // The located-device step uses GO ... LOCATED_AT REVERSELY; resolution uses FETCH PROP.
+        // Here the located Node has no further connectivity (the closure step finds nothing), so the
+        // device-level subgraph is just the located Node.
         ResultSet deviceRs = rowsOf(List.of(str("Node:PE1")));
         ResultSet nodeRs = rowsOf(List.of(str("Node:PE1"), str("Node"), str("core-ip"),
                 str("SNAP-1"), str("PE1"), str("{}")));
-        routeByPrefix(Map.of("GO FROM", deviceRs, "FETCH PROP", nodeRs));
+        // The located-device GO carries LOCATED_AT REVERSELY; the closure GO carries OVER * and
+        // excludes LOCATED_AT — route the located one to the device row, the closure ones to empty.
+        ResultSet empty = rowsOf();
+        when(session.execute(anyString())).thenAnswer(inv -> {
+            String q = inv.getArgument(0);
+            executed.add(q);
+            if (q.startsWith("FETCH PROP")) {
+                return nodeRs;
+            }
+            if (q.contains("OVER LOCATED_AT REVERSELY")) {
+                return deviceRs;
+            }
+            return empty; // closure GO * queries return no further objects
+        });
 
         List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
         assertThat(objects).extracting(GraphVertex::managedObjectId).containsExactly("Node:PE1");
         assertThat(executed.stream().anyMatch(q -> q.contains("OVER LOCATED_AT REVERSELY"))).isTrue();
+    }
+
+    @Test
+    void objectsAtSiteExpandsHostedHierarchyAndConnectivityIntoTheDeviceSubgraph() throws Exception {
+        // #245: from the located Node, the closure must pull in the hosted hierarchy and the logical
+        // objects those members connect to, so the device-level subgraph is returned (not just the
+        // located Node). Topology for the test (mirrors valid-all-core-ip-types.json around one site):
+        //   Site:LON  <-LOCATED_AT-  Node:PE1
+        //   Port:PE1-P3 -HOSTED_ON-> Node:PE1 ;  Port:PE1-P3 -HOSTS-> Interface:PE1-I1
+        //   Interface:PE1-I1 -TERMINATES-> IPLink:L1
+        // Expected in-scope set: Node:PE1, Port:PE1-P3, Interface:PE1-I1, IPLink:L1.
+        // The closure issues, per member, GO OVER * (forward) and GO OVER * REVERSELY, excluding
+        // LOCATED_AT; route the neighbor results by the source VID embedded in the GO query.
+        routeSiteSubgraph();
+
+        List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
+        assertThat(objects).extracting(GraphVertex::managedObjectId)
+                .contains("Node:PE1", "Port:PE1-P3", "Interface:PE1-I1", "IPLink:L1");
+        // The closure GO queries exclude LOCATED_AT so it never hops site→site.
+        assertThat(executed.stream()
+                .filter(q -> q.startsWith("GO FROM") && q.contains("OVER *"))
+                .allMatch(q -> q.contains("type(edge) != \"LOCATED_AT\""))).isTrue();
+    }
+
+    @Test
+    void objectsAtSiteDoesNotExpandOutwardFromANodeReachedViaConnectivity() throws Exception {
+        // A backbone IPLink connects Interface:PE1-I1 (this site) to Interface:PE2-I1 (another site,
+        // hosted on Node:PE2 located at a DIFFERENT site). The closure includes the incident far-end
+        // objects reached BY connectivity, but must NOT expand a Node reached via connectivity into
+        // ITS OWN hierarchy (that belongs to the other site). So Node:PE2's hierarchy is NOT pulled
+        // in beyond what the IPLink directly touches.
+        ResultSet siteDevices = rowsOf(List.of(str("Node:PE1")));
+        ResultSet empty = rowsOf();
+        when(session.execute(anyString())).thenAnswer(inv -> {
+            String q = inv.getArgument(0);
+            executed.add(q);
+            if (q.startsWith("FETCH PROP")) {
+                return vertexRowFor(q);
+            }
+            if (q.contains("OVER LOCATED_AT REVERSELY")) {
+                return siteDevices;
+            }
+            if (q.startsWith("GO FROM \"Node:PE1\"")) {
+                // Node:PE1 connects (incoming) to Port:PE1-P3 over HOSTED_ON; route reverse only.
+                return q.contains("REVERSELY") ? oneNeighbor("Port:PE1-P3") : empty;
+            }
+            if (q.startsWith("GO FROM \"Port:PE1-P3\"")) {
+                // Port HOSTS Interface (forward); Port HOSTED_ON Node (forward, already in scope).
+                return q.contains("REVERSELY") ? empty
+                        : twoNeighbors("Interface:PE1-I1", "Node:PE1");
+            }
+            if (q.startsWith("GO FROM \"Interface:PE1-I1\"")) {
+                // Interface TERMINATES IPLink:L1 (forward).
+                return q.contains("REVERSELY") ? empty : oneNeighbor("IPLink:L1");
+            }
+            if (q.startsWith("GO FROM \"IPLink:L1\"")) {
+                // IPLink connects to Node:PE2 (a placed node of another site) — included as incident,
+                // but PE2 must NOT be expanded further.
+                return q.contains("REVERSELY") ? oneNeighbor("Node:PE2") : empty;
+            }
+            // Any GO from Node:PE2 would be the over-expansion we must NOT see.
+            return empty;
+        });
+
+        List<GraphVertex> objects = repo.objectsAtSite("Site:LON", "core-ip", "SNAP-1");
+        assertThat(objects).extracting(GraphVertex::managedObjectId)
+                .contains("Node:PE1", "Port:PE1-P3", "Interface:PE1-I1", "IPLink:L1", "Node:PE2");
+        // The far-side Node was reached via connectivity, so the closure must NOT have issued a
+        // GO from it (its hierarchy belongs to its own site).
+        assertThat(executed.stream().noneMatch(q -> q.startsWith("GO FROM \"Node:PE2\"")
+                && q.contains("OVER *"))).isTrue();
+    }
+
+    /** Route the per-member closure GO queries for the hosted-hierarchy + connectivity topology. */
+    private void routeSiteSubgraph() throws Exception {
+        ResultSet siteDevices = rowsOf(List.of(str("Node:PE1")));
+        ResultSet empty = rowsOf();
+        when(session.execute(anyString())).thenAnswer(inv -> {
+            String q = inv.getArgument(0);
+            executed.add(q);
+            try {
+                if (q.startsWith("FETCH PROP")) {
+                    return vertexRowFor(q);
+                }
+                if (q.contains("OVER LOCATED_AT REVERSELY")) {
+                    return siteDevices;
+                }
+                if (q.startsWith("GO FROM \"Node:PE1\"")) {
+                    return q.contains("REVERSELY") ? oneNeighbor("Port:PE1-P3") : empty;
+                }
+                if (q.startsWith("GO FROM \"Port:PE1-P3\"")) {
+                    return q.contains("REVERSELY") ? empty
+                            : twoNeighbors("Interface:PE1-I1", "Node:PE1");
+                }
+                if (q.startsWith("GO FROM \"Interface:PE1-I1\"")) {
+                    return q.contains("REVERSELY") ? empty : oneNeighbor("IPLink:L1");
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+            return empty;
+        });
+    }
+
+    /** A FETCH PROP vertex row for whichever VID the query addresses (objectType = the VID prefix). */
+    private ResultSet vertexRowFor(String fetchQuery) throws Exception {
+        int q1 = fetchQuery.indexOf('"');
+        int q2 = fetchQuery.indexOf('"', q1 + 1);
+        String vid = fetchQuery.substring(q1 + 1, q2);
+        String ot = vid.substring(0, vid.indexOf(':'));
+        return rowsOf(List.of(str(vid), str(ot), str("core-ip"), str("SNAP-1"), str(""), str("{}")));
+    }
+
+    private ResultSet oneNeighbor(String moid) throws Exception {
+        return rowsOf(List.of(str(moid)));
+    }
+
+    private ResultSet twoNeighbors(String a, String b) throws Exception {
+        return rowsOf(List.of(str(a)), List.of(str(b)));
     }
 
     @Test

@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 import com.acp.eventmodel.EventCodec;
 import com.acp.topology.TestFixtures;
 import com.acp.topology.api.QueryService;
+import com.acp.topology.api.dto.EdgeDto;
 import com.acp.topology.api.dto.NodeDto;
 import com.acp.topology.api.dto.SiteListDto;
 import com.acp.topology.api.dto.SiteObjectsDto;
@@ -129,9 +130,26 @@ class IngestionQueryIT extends NebulaIntegrationBase {
         assertThat(sites.sites()).extracting(s -> s.siteId()).contains("Site:LON-DC1");
         assertThat(sites.sites().get(0).latitude()).isEqualTo(51.5);
 
+        // AC-22 / #245: the per-site projection returns the DEVICE-LEVEL SUBGRAPH — the located Node
+        // PLUS its hosted hierarchy (LineCard/Port/Interface via HOSTED_ON/HOSTS) PLUS the logical
+        // objects it connects to (IPLink/IGPAdjacency/FiberSpan/LSP/VPNService/SRLG) — and the edges
+        // among that set (the multi-layer connectivity relations the web-ui toggles), not only
+        // LOCATED_AT. (valid-all-core-ip-types.json places Node:PE1 at Site:LON-DC1.)
         SiteObjectsDto objects = query.objectsAtSite("Site:LON-DC1", "core-ip", "current");
-        assertThat(objects.nodes()).extracting(NodeDto::managedObjectId).contains("Node:PE1");
-        assertThat(objects.edges()).isNotEmpty();
+        assertThat(objects.nodes()).extracting(NodeDto::managedObjectId)
+                .contains("Node:PE1", "LineCard:PE1-LC2", "Port:PE1-LC2-P3",
+                        "Interface:PE1-LC2-P3-100", "IPLink:PE1-PE2-1");
+        assertThat(objects.nodeCount()).isEqualTo(objects.nodes().size());
+        assertThat(objects.edgeCount()).isEqualTo(objects.edges().size());
+
+        // The edge set must carry the LOCATED_AT to the site AND device-level connectivity edges.
+        assertThat(objects.edges()).extracting(EdgeDto::relation).contains("LOCATED_AT");
+        assertThat(objects.edges()).anyMatch(e -> !"LOCATED_AT".equals(e.relation()));
+        assertThat(objects.edges()).extracting(EdgeDto::relation)
+                .contains("HOSTED_ON", "HOSTS", "TERMINATES");
+        // A specific multi-layer connectivity edge round-trips with correct from/to/relation.
+        assertThat(objects.edges()).anyMatch(e -> e.relation().equals("TERMINATES")
+                && e.from().equals("Interface:PE1-LC2-P3-100") && e.to().equals("IPLink:PE1-PE2-1"));
     }
 
     @Test
