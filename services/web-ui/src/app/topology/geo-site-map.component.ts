@@ -262,6 +262,9 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       attributionControl: false,
     });
 
+    // Zoom / compass controls (operator-driven map zoom + pan; scrollZoom/dragPan are on by default).
+    this.map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
     // Fit to the extent of the current sites (fallback to the UK/EU bbox when there are none).
     this.map.fitBounds(this.siteExtent(), { padding: 40, animate: false });
 

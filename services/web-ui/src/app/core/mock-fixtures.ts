@@ -8,12 +8,14 @@ import {
   IncidentVM,
   ListTrailsResponse,
   ModelParamsRecord,
+  NeighborsDto,
   ObservedChatterPage,
   PatternPage,
   RunStatsPage,
   SiteListDto,
   SiteObjectsDto,
   StatsVM,
+  TraversalDto,
   TrailDetail,
   TrailsForObjectResponse,
 } from '../api/models';
@@ -145,28 +147,129 @@ const SITE_OBJECTS: SiteObjectsDto = {
       snapshotId: 'current',
       attributes: {},
     },
+    // LOCATED_AT placement edges device→Site so nodeSiteMap is populated at root (compound boxes).
+    ...['Router:lon-r1', 'Interface:lon-r1-e1', 'FiberSpan:lon-fra-1', 'LSP:lon-fra-lsp1', 'SRLG:srlg-2', 'LineCard:lon-r1-lc1'].map(
+      (id, i) => ({
+        edgeId: `loc-lon-${i}`,
+        from: id,
+        to: 'Site:LON',
+        relation: 'LOCATED_AT',
+        domain: 'core-ip',
+        snapshotId: 'current',
+        attributes: {},
+      }),
+    ),
   ],
 };
+
+// Second site (Frankfurt) — its own objects + LOCATED_AT edges so rooting at it shows its own box,
+// and so cross-site expand / trail-explode (which pulls FRA nodes) produces a SECOND site box.
+const FRA_OBJECTS: SiteObjectsDto = {
+  siteId: 'Site:FRA',
+  domain: 'core-ip',
+  snapshotId: 'current',
+  nodeCount: 3,
+  edgeCount: 2,
+  nodes: [
+    { managedObjectId: 'Router:fra-r1', objectType: 'Router', domain: 'core-ip', snapshotId: 'current', name: 'fra-r1', attributes: { vendor: 'Acme', model: 'R8000', equipmentType: 'router' } },
+    { managedObjectId: 'Interface:fra-r1-e1', objectType: 'Interface', domain: 'core-ip', snapshotId: 'current', name: 'e1', attributes: { vendor: 'Acme', model: 'X1', equipmentType: 'port' } },
+    { managedObjectId: 'FiberSpan:lon-fra-1', objectType: 'FiberSpan', domain: 'core-ip', snapshotId: 'current', name: 'LON-FRA fiber', attributes: { capacity: '100G' } },
+  ],
+  edges: [
+    { edgeId: 'fe-1', from: 'Router:fra-r1', to: 'Interface:fra-r1-e1', relation: 'HAS_PORT', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+    ...['Router:fra-r1', 'Interface:fra-r1-e1'].map((id, i) => ({
+      edgeId: `loc-fra-${i}`,
+      from: id,
+      to: 'Site:FRA',
+      relation: 'LOCATED_AT',
+      domain: 'core-ip',
+      snapshotId: 'current',
+      attributes: {},
+    })),
+  ],
+};
+
+const SITE_OBJECTS_BY_ID: Record<string, SiteObjectsDto> = {
+  'Site:LON': SITE_OBJECTS,
+  'Site:FRA': FRA_OBJECTS,
+};
+
+/**
+ * Neighbour fixtures keyed by node id. The Router:lon-r1 entry pulls a node in ANOTHER site
+ * (Router:fra-r1) plus a LOCATED_AT edge to Site:FRA, so an EXPAND of lon-r1 crosses the site
+ * boundary → distinct-site count 1 → 2. Trail members in FRA resolve through here too (so a
+ * trail-explode pulls the cross-site member node + its LOCATED_AT placement).
+ */
+const NEIGHBORS_BY_ID: Record<string, NeighborsDto> = {
+  'Router:lon-r1': {
+    managedObjectId: 'Router:lon-r1',
+    domain: 'core-ip',
+    neighbors: [
+      {
+        node: { managedObjectId: 'Router:fra-r1', objectType: 'Router', domain: 'core-ip', snapshotId: 'current', name: 'fra-r1', attributes: { vendor: 'Acme', model: 'R8000' } },
+        via: { edgeId: 'nx-1', from: 'Router:lon-r1', to: 'Router:fra-r1', relation: 'ADJACENCY_OVER', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+      },
+      {
+        // Carry the cross-site placement so nodeSiteMap learns Router:fra-r1 → Site:FRA on expand.
+        node: { managedObjectId: 'Site:FRA', objectType: 'Site', domain: 'core-ip', snapshotId: 'current', name: 'Frankfurt PoP', attributes: {} },
+        via: { edgeId: 'nx-2', from: 'Router:fra-r1', to: 'Site:FRA', relation: 'LOCATED_AT', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+      },
+    ],
+  },
+  'Router:fra-r1': {
+    managedObjectId: 'Router:fra-r1',
+    domain: 'core-ip',
+    neighbors: [
+      {
+        node: { managedObjectId: 'Interface:fra-r1-e1', objectType: 'Interface', domain: 'core-ip', snapshotId: 'current', name: 'e1', attributes: {} },
+        via: { edgeId: 'nx-3', from: 'Router:fra-r1', to: 'Interface:fra-r1-e1', relation: 'HAS_PORT', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+      },
+      {
+        node: { managedObjectId: 'Site:FRA', objectType: 'Site', domain: 'core-ip', snapshotId: 'current', name: 'Frankfurt PoP', attributes: {} },
+        via: { edgeId: 'nx-4', from: 'Router:fra-r1', to: 'Site:FRA', relation: 'LOCATED_AT', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+      },
+    ],
+  },
+};
+
+function neighborsFor(managedObjectId: string): NeighborsDto {
+  return (
+    NEIGHBORS_BY_ID[managedObjectId] ?? {
+      managedObjectId,
+      domain: 'core-ip',
+      neighbors: [],
+    }
+  );
+}
+
+function objectsForSite(siteId: string): SiteObjectsDto {
+  return SITE_OBJECTS_BY_ID[siteId] ?? { ...SITE_OBJECTS, siteId };
+}
 
 const TRAILS: ListTrailsResponse = {
   snapshotId: 'current',
   domain: 'core-ip',
   count: 2,
   trails: [
-    { trailId: 'TR-7', domain: 'core-ip', memberCount: 3, igpArea: '0.0.0.0', srlgGroup: null },
+    { trailId: 'TR-7', domain: 'core-ip', memberCount: 4, igpArea: '0.0.0.0', srlgGroup: null },
     { trailId: 'TR-8', domain: 'core-ip', memberCount: 2, igpArea: '0.0.0.0', srlgGroup: 'SRLG-2' },
   ],
 };
 
+// TR-7 spans TWO sites (LON + FRA) so selectTrail explodes cross-site and the distinct-site count
+// increases (Router:fra-r1 resolves through NEIGHBORS_BY_ID, pulling its LOCATED_AT → Site:FRA).
 const TRAIL_DETAIL: TrailDetail = {
   trailId: 'TR-7',
   domain: 'core-ip',
   snapshotId: 'current',
-  memberCount: 3,
+  memberCount: 4,
+  igpArea: '0.0.0.0',
+  srlgGroup: null,
   members: [
     { managedObjectId: 'Router:lon-r1', objectType: 'Router' },
     { managedObjectId: 'Interface:lon-r1-e1', objectType: 'Interface' },
     { managedObjectId: 'FiberSpan:lon-fra-1', objectType: 'FiberSpan' },
+    { managedObjectId: 'Router:fra-r1', objectType: 'Router' },
   ],
 };
 
@@ -348,8 +451,11 @@ const LABELS: GroundTruthLabel[] = [
 ];
 
 export const MOCK_FIXTURES: MockHandler[] = [
-  { matches: (r) => has(r.url, '/topology/sites/') && has(r.url, '/objects'), respond: () => SITE_OBJECTS },
+  { matches: (r) => has(r.url, '/topology/sites/') && has(r.url, '/objects'), respond: (r) => objectsForSite(siteIdFromObjectsUrl(r)) },
   { matches: (r) => has(r.url, '/topology/sites'), respond: () => SITES },
+  // Neighbours MUST be matched BEFORE the generic /topology/nodes/ (resolveNode) handler.
+  { matches: (r) => has(r.url, '/topology/nodes/') && has(r.url, '/neighbors'), respond: (r) => neighborsFor(neighborsNodeId(r)) },
+  { matches: (r) => has(r.url, '/topology/traversal'), respond: (r) => traversalFor(r) },
   { matches: (r) => has(r.url, '/topology/nodes/'), respond: () => SITE_OBJECTS.nodes[0] },
   { matches: (r) => has(r.url, '/trails/by-object'), respond: () => TRAILS_FOR_OBJECT },
   { matches: (r) => /\/trails\/[^/?]+$/.test(r.url.split('?')[0]), respond: () => TRAIL_DETAIL },
@@ -372,6 +478,36 @@ export const MOCK_FIXTURES: MockHandler[] = [
 
 function paramOf(req: HttpRequest<unknown>, key: string): string | null {
   return req.params.get(key);
+}
+
+/** Parse the siteId from /topology/sites/{siteId}/objects (mirrors incidentById's id parse). */
+function siteIdFromObjectsUrl(req: HttpRequest<unknown>): string {
+  const m = req.url.split('?')[0].match(/\/topology\/sites\/([^/]+)\/objects/);
+  return m ? decodeURIComponent(m[1]) : 'Site:LON';
+}
+
+/** Parse the node id from /topology/nodes/{id}/neighbors. */
+function neighborsNodeId(req: HttpRequest<unknown>): string {
+  const m = req.url.split('?')[0].match(/\/topology\/nodes\/([^/]+)\/neighbors/);
+  return m ? decodeURIComponent(m[1]) : '';
+}
+
+/** TraversalDto for /topology/traversal — a small bounded reach from `start` via its neighbours. */
+function traversalFor(req: HttpRequest<unknown>): TraversalDto {
+  const start = paramOf(req, 'start') ?? 'Router:lon-r1';
+  const relation = paramOf(req, 'relation') ?? 'ADJACENCY_OVER';
+  const maxDepth = Number(paramOf(req, 'maxDepth') ?? '1');
+  const crossDomain = paramOf(req, 'crossDomain') === 'true';
+  const n = neighborsFor(start);
+  return {
+    start,
+    domain: 'core-ip',
+    relations: [relation],
+    maxDepth,
+    crossDomain,
+    reached: n.neighbors.map((x) => x.node),
+    edges: n.neighbors.map((x) => x.via),
+  };
 }
 
 function filterPatterns(req: HttpRequest<unknown>): PatternPage {

@@ -52,6 +52,32 @@ export interface SiteObjectsDto {
   edges: EdgeDto[];
 }
 
+/**
+ * One neighbour of a node: the neighbour `node` and the `via` edge connecting them. Mirrors the
+ * Topology OpenAPI `Neighbor` schema (the producer names it `Neighbor`; we use `NeighborEntry`
+ * for the local view-model — the wire shape `{node, via}` is identical).
+ */
+export interface NeighborEntry {
+  node: NodeDto;
+  via: EdgeDto;
+}
+/** GET /topology/nodes/{id}/neighbors — Topology OpenAPI `NeighborsDto`. */
+export interface NeighborsDto {
+  managedObjectId: string;
+  domain: string;
+  neighbors: NeighborEntry[];
+}
+/** GET /topology/traversal — Topology OpenAPI `TraversalDto` (bounded BFS, maxDepth ≤ 32). */
+export interface TraversalDto {
+  start: string;
+  domain: string;
+  relations: string[];
+  maxDepth: number;
+  crossDomain: boolean;
+  reached: NodeDto[];
+  edges: EdgeDto[];
+}
+
 // ---- Trail Builder (frozen P1-G4/G10) ----
 export interface TrailSummary {
   trailId: string;

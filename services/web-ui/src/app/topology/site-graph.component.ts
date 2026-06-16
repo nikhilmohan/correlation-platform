@@ -23,21 +23,23 @@ import { LayerToggleComponent } from './layer-toggle.component';
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
 // is fetched only when this view is shown, and unit tests can mock it.
 import type cytoscape from 'cytoscape';
-import type { Core as CyCore, ElementDefinition } from 'cytoscape';
+import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } from 'cytoscape';
 
 /**
- * Site-level device graph (spec tasks 7-9, AC 27-32). Built from BOTH `nodes` and `edges` of the
- * single `SiteObjectsDto` response (no neighbour fan-out). Cytoscape.js is the real visual
- * renderer, driven by an Angular effect() over the store signals (derivedNodes / visibleEdges /
- * trails / highlightedTrailIds / selectedObjectId). The accessible node/edge/trail lists are kept
- * as a WCAG complement / test source of truth (same data, same data-testids). Layer toggles filter
- * the visible edges (AC 28); selecting a device highlights all its trails (AC 31/32); the detail
- * panel shows the selected node/edge attributes.
+ * Site-level EXPLORER graph (spec tasks 7-9, AC 27-32). The graph is an ACCUMULATING set held in
+ * the store (nodeMap/edgeMap): rooting at a site seeds it; the operator then grows it explicitly
+ * via per-node EXPAND controls (pull neighbours, cross-site/cross-domain on opt-in) or by selecting
+ * a TRAIL (explode the topology to include the trail's full, possibly cross-site, member path).
+ * Nothing auto-grows.
  *
- * Render strategy: Cytoscape draws into a single <canvas>; the effect mirrors the store into the
+ * Site boundaries render as Cytoscape COMPOUND PARENT nodes — one labelled box per distinct site in
+ * nodeSiteMap; device nodes are parented into their site box. Layout is breadthfirst while a single
+ * site is shown and switches to a deterministic `cose` (compound-aware) once ≥2 site boxes appear.
+ *
+ * Render strategy: Cytoscape draws into a single <canvas>; an effect mirrors the store into the
  * graph and reflects render counts onto the .cy-canvas element via data-cy-* attributes so the
- * Playwright suite can assert the REAL render (node/edge/highlight/trail counts). In jsdom (unit
- * tests) Cytoscape init is guarded; `cyInitAttempted` is flipped true to prove the path executed.
+ * Playwright suite can assert the REAL render. In jsdom (unit tests) init is guarded; the
+ * accessible node/edge/trail lists are the WCAG complement / test source of truth.
  */
 @Component({
   selector: 'app-site-graph',
@@ -66,40 +68,71 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
     @if (store.activeTrailId(); as t) {
       <p class="active-trail" data-testid="active-trail">Active trail: {{ t }}</p>
     }
+    @if (store.capReached()) {
+      <p class="cap-note" role="status" data-testid="cap-reached">
+        Node limit reached — collapse or reset to explore elsewhere.
+      </p>
+    }
 
     <div class="layout">
       <section class="graph-area">
         <app-layer-toggle />
 
-        <div
-          #cyEl
-          class="cy-canvas"
-          role="application"
-          [attr.data-cy-loading]="store.graphLoading()"
-          [attr.data-cy-node-count]="bridgeNodeCount()"
-          [attr.data-cy-edge-count]="bridgeEdgeCount()"
-          [attr.data-cy-trail-count]="bridgeTrailCount()"
-          [attr.data-cy-highlight-count]="highlightCount()"
-          [attr.data-cy-layout-done]="layoutDone()"
-          [attr.data-cy-node-spread]="nodeSpread()"
-          aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
-        ></div>
+        <div class="cy-wrap">
+          <div
+            #cyEl
+            class="cy-canvas"
+            role="application"
+            [attr.data-cy-loading]="store.graphLoading()"
+            [attr.data-cy-node-count]="bridgeNodeCount()"
+            [attr.data-cy-edge-count]="bridgeEdgeCount()"
+            [attr.data-cy-trail-count]="bridgeTrailCount()"
+            [attr.data-cy-highlight-count]="highlightCount()"
+            [attr.data-cy-layout-done]="layoutDone()"
+            [attr.data-cy-node-spread]="nodeSpread()"
+            [attr.data-cy-site-count]="bridgeSiteCount()"
+            [attr.data-cy-expanded-node-count]="store.expandedNodeIds().size"
+            [attr.data-cy-zoom]="zoomLevel()"
+            aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
+          ></div>
 
-        <ul class="layer-legend" aria-label="Graph layer legend">
-          @for (item of LAYER_LEGEND; track item.layer) {
-            <li>
-              <span class="dot" [style.background]="item.color" aria-hidden="true"></span>{{ item.layer }}
-            </li>
+          <!-- Zoom / fit / reset controls overlaid on the canvas (operator-driven, keyboard-reachable). -->
+          <div class="cy-controls" role="group" aria-label="Graph zoom controls">
+            <button type="button" data-testid="zoom-in" aria-label="Zoom in" (click)="zoomIn()">+</button>
+            <button type="button" data-testid="zoom-out" aria-label="Zoom out" (click)="zoomOut()">−</button>
+            <button type="button" data-testid="zoom-fit" aria-label="Fit graph" (click)="fit()">Fit</button>
+            <button type="button" data-testid="zoom-reset" aria-label="Reset graph to site root" (click)="reset()">
+              Reset
+            </button>
+          </div>
+        </div>
+
+        <div class="legends">
+          <ul class="layer-legend" aria-label="Graph layer legend">
+            @for (item of LAYER_LEGEND; track item.layer) {
+              <li>
+                <span class="dot" [style.background]="item.color" aria-hidden="true"></span>{{ item.layer }}
+              </li>
+            }
+          </ul>
+          @if (siteLegend().length) {
+            <ul class="site-legend" aria-label="Site boundary legend" data-testid="site-legend">
+              @for (s of siteLegend(); track s.siteId) {
+                <li data-testid="site-legend-item">
+                  <span class="swatch" [style.border-color]="s.color" aria-hidden="true"></span>{{ s.name }}
+                </li>
+              }
+            </ul>
           }
-        </ul>
+        </div>
 
         @if (store.graphLoading()) {
           <p data-testid="graph-loading" aria-busy="true">Loading site graph…</p>
-        } @else if (store.objects()) {
+        } @else if (store.hasGraph()) {
           <h2>Devices</h2>
           <ul class="obj-list" aria-label="Devices in this site">
             @for (node of store.derivedNodes(); track node.managedObjectId) {
-              <li>
+              <li class="obj-row">
                 <button
                   type="button"
                   class="obj"
@@ -111,6 +144,19 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
                 >
                   {{ node.name ?? node.managedObjectId }}
                   <span class="layer-tag">{{ node.derivedLayer }}</span>
+                  @if (siteFor(node.managedObjectId); as sn) {
+                    <span class="site-tag" data-testid="node-site-tag">site: {{ sn }}</span>
+                  }
+                </button>
+                <button
+                  type="button"
+                  class="expand-btn"
+                  data-testid="expand-node"
+                  [disabled]="store.capReached()"
+                  [attr.aria-label]="'Expand neighbours of ' + (node.name ?? node.managedObjectId)"
+                  (click)="store.expandNode(node.managedObjectId)"
+                >
+                  +expand
                 </button>
               </li>
             }
@@ -141,19 +187,60 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
           @if (store.trails().length) {
             <ul class="trail-overlay" aria-label="Trail clusters overlaid on the graph">
               @for (trail of store.trails(); track trail.trailId) {
-                <li
-                  data-testid="trail-cluster"
-                  [class.highlighted]="store.highlightedTrailIds().has(trail.trailId)"
-                >
-                  {{ trail.trailId }} ({{ trail.memberCount }} members)
-                  @if (store.highlightedTrailIds().has(trail.trailId)) {
-                    <span class="badge badge-new">member</span>
-                  }
+                <li>
+                  <button
+                    type="button"
+                    class="trail-btn"
+                    data-testid="trail-cluster"
+                    [class.selected]="store.selectedTrailId() === trail.trailId"
+                    [class.highlighted]="store.highlightedTrailIds().has(trail.trailId)"
+                    [attr.aria-pressed]="store.selectedTrailId() === trail.trailId"
+                    (click)="store.selectTrail(trail.trailId)"
+                  >
+                    {{ trail.trailId }} ({{ trail.memberCount }} members)
+                    @if (store.highlightedTrailIds().has(trail.trailId)) {
+                      <span class="badge badge-new">member</span>
+                    }
+                  </button>
                 </li>
               }
             </ul>
           } @else {
             <p class="empty-state">No trails for this snapshot.</p>
+          }
+
+          <!-- Selected-trail detail: full member path (each a button → select that device), area/SRLG. -->
+          @if (store.selectedTrailDetail(); as td) {
+            <section class="trail-detail" data-testid="trail-detail" aria-label="Selected trail detail">
+              <h2>Trail {{ td.trailId }}</h2>
+              <p class="muted">
+                {{ td.memberCount }} members
+                @if (td.igpArea) {
+                  · IGP area {{ td.igpArea }}
+                }
+                @if (td.srlgGroup) {
+                  · SRLG {{ td.srlgGroup }}
+                }
+              </p>
+              <ul class="trail-members" aria-label="Trail members">
+                @for (m of td.members; track m.managedObjectId) {
+                  <li>
+                    <button
+                      type="button"
+                      class="obj"
+                      data-testid="trail-member"
+                      (click)="store.selectNode(m.managedObjectId)"
+                    >
+                      {{ m.managedObjectId }}
+                      <span class="layer-tag">{{ m.objectType }}</span>
+                    </button>
+                  </li>
+                }
+              </ul>
+              <button type="button" class="clear-trail" data-testid="clear-trail" (click)="store.clearTrail()">
+                Clear trail
+              </button>
+            </section>
           }
         } @else {
           <p class="empty-state">No objects at this site.</p>
@@ -183,19 +270,24 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
       .crumb-link:hover {
         text-decoration: underline;
       }
-      .crumb-sep {
-        color: var(--text-muted);
-      }
+      .crumb-sep,
       .crumb-current {
         color: var(--text-muted);
+      }
+      .cap-note {
+        color: var(--warn);
+        font-size: 0.85rem;
       }
       .layout {
         display: grid;
         grid-template-columns: 2fr 1fr;
         gap: 1rem;
       }
+      .cy-wrap {
+        position: relative;
+      }
       .cy-canvas {
-        height: 280px;
+        height: 360px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: #0b1220;
@@ -203,17 +295,54 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
         position: relative;
         overflow: hidden;
       }
-      .layer-legend {
+      .cy-controls {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        z-index: 2;
+      }
+      .cy-controls button {
+        width: 2rem;
+        height: 2rem;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        line-height: 1;
+      }
+      .cy-controls button[data-testid='zoom-fit'],
+      .cy-controls button[data-testid='zoom-reset'] {
+        width: auto;
+        padding: 0 0.4rem;
+        font-size: 0.7rem;
+      }
+      .cy-controls button:hover {
+        border-color: var(--accent);
+      }
+      .legends {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.5rem;
+        margin-bottom: 0.8rem;
+      }
+      .layer-legend,
+      .site-legend {
         list-style: none;
         display: flex;
         flex-wrap: wrap;
         gap: 0.8rem;
         padding: 0;
-        margin: 0 0 0.8rem;
+        margin: 0;
         font-size: 0.8rem;
         color: var(--text-muted);
       }
-      .layer-legend li {
+      .layer-legend li,
+      .site-legend li {
         display: inline-flex;
         align-items: center;
         gap: 0.35rem;
@@ -224,6 +353,14 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
         height: 0.7rem;
         border-radius: 50%;
       }
+      .site-legend .swatch {
+        display: inline-block;
+        width: 0.8rem;
+        height: 0.8rem;
+        border-radius: 3px;
+        border: 2px solid var(--border);
+        background: rgba(255, 255, 255, 0.04);
+      }
       .obj-list {
         list-style: none;
         padding: 0;
@@ -232,12 +369,38 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
         flex-wrap: wrap;
         gap: 0.4rem;
       }
+      .obj-row {
+        display: inline-flex;
+        align-items: stretch;
+        gap: 0;
+      }
       .obj {
         background: var(--surface-2);
         color: var(--text);
         border: 1px solid var(--border);
         border-radius: 6px;
         padding: 0.3rem 0.6rem;
+      }
+      .obj-row .obj {
+        border-top-right-radius: 0;
+        border-bottom-right-radius: 0;
+      }
+      .expand-btn {
+        background: var(--surface);
+        color: var(--accent);
+        border: 1px solid var(--border);
+        border-left: none;
+        border-radius: 0 6px 6px 0;
+        padding: 0 0.4rem;
+        font-size: 0.72rem;
+        cursor: pointer;
+      }
+      .expand-btn:hover:not(:disabled) {
+        border-color: var(--accent);
+      }
+      .expand-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
       }
       .obj.selected {
         border-color: var(--accent);
@@ -251,6 +414,11 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
         font-size: 0.78rem;
         margin-left: 0.3rem;
       }
+      .site-tag {
+        color: var(--accent);
+        font-size: 0.72rem;
+        margin-left: 0.3rem;
+      }
       .trail-overlay {
         list-style: none;
         padding: 0;
@@ -259,9 +427,50 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
         flex-direction: column;
         gap: 0.3rem;
       }
-      .trail-overlay .highlighted {
+      .trail-btn {
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.3rem 0.6rem;
+        text-align: left;
+        cursor: pointer;
+        width: 100%;
+      }
+      .trail-btn.highlighted {
         color: var(--new);
         font-weight: 600;
+      }
+      .trail-btn.selected {
+        border-color: var(--accent);
+        outline: 2px solid var(--accent);
+      }
+      .trail-detail {
+        margin-top: 1rem;
+        padding: 0.6rem;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+      .trail-members {
+        list-style: none;
+        padding: 0;
+        margin: 0.4rem 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+      }
+      .clear-trail {
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.3rem 0.6rem;
+        cursor: pointer;
+      }
+      .muted {
+        color: var(--text-muted);
+        font-size: 0.85rem;
       }
       .active-trail {
         color: var(--accent);
@@ -299,6 +508,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   };
   readonly LAYER_LEGEND = Object.entries(SiteGraphComponent.LAYER_COLORS).map(([layer, color]) => ({ layer, color }));
 
+  /** Small deterministic palette for site-boundary boxes (by site index). */
+  static readonly SITE_COLORS = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#fb7185', '#facc15'];
+
   private cytoscape: typeof cytoscape | null = null;
   private cy: CyCore | null = null;
   private readonly cyReady = signal(false);
@@ -310,38 +522,57 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly layoutDone = signal(false);
   /** Max(bbox width, bbox height) of all laid-out nodes — ~0 when collapsed to a blob. */
   readonly nodeSpread = signal(0);
+  /** Current cytoscape zoom level (bridged to data-cy-zoom). */
+  readonly zoomLevel = signal(1);
 
-  /** Identity key for the STRUCTURE of the graph (node + edge id sets). A change to this key means
-   *  the graph must be rebuilt and re-laid-out; selection/highlight changes must NOT touch it. */
+  /** Gate so cy.fit() runs only on the FIRST layout + explicit Fit/Reset — never on a same-scope
+   *  expand/merge relayout, preserving the operator's manual zoom/pan. */
+  private firstFitDone = false;
+  /** Distinct-site count at the last auto-fit. When the graph gains a NEW site box (a major scope
+   *  change — e.g. a cross-site expand or trail explode) we re-fit ONCE so the new box is on-screen;
+   *  same-site expands do not re-fit (manual zoom/pan preserved). */
+  private lastFittedSiteCount = 0;
+
+  /** Stable ordering of site ids → index, so a site keeps the same colour as the graph grows. */
+  private siteOrder = new Map<string, number>();
+
+  /** Identity key for the STRUCTURE of the graph (node + edge id sets + site parenting). A change
+   *  to this key means the graph must be rebuilt and re-laid-out; selection/highlight must NOT. */
   private readonly structureKey = computed(() => {
     const nodeIds = this.store.derivedNodes().map((n) => n.managedObjectId);
     const edgeIds = this.store.visibleEdges().map((e) => e.edgeId);
-    return `${nodeIds.join(',')}|${edgeIds.join(',')}`;
+    // Include the site-parenting so a newly-arrived LOCATED_AT edge re-parents + relays out.
+    const siteMap = this.store.nodeSiteMap();
+    const parenting = nodeIds.map((id) => `${id}:${siteMap.get(id) ?? ''}`).join(',');
+    return `${nodeIds.join(',')}|${edgeIds.join(',')}|${parenting}`;
   });
 
   /**
    * Deterministic test/render bridge — bound onto the .cy-canvas via [attr.data-cy-*] in the
-   * template (NOT written imperatively), so the counts track the store signals through normal
-   * change detection and are correct the moment objectsAtSite resolves, independent of Cytoscape
-   * readiness and ViewChild timing. While loading the counts read 0; once graphLoading clears they
-   * reflect the same data the accessible node/edge lists render from. A reader (Playwright) that
-   * waits for data-cy-loading="false" therefore observes the genuinely-loaded counts, never a
-   * race-window zero. The painted Cytoscape graph mirrors the identical data, so the canvas and the
-   * bridge never disagree.
+   * template so the counts track the store signals through normal change detection, correct the
+   * moment data resolves, independent of Cytoscape readiness. While loading the counts read 0.
    */
   readonly bridgeNodeCount = computed(() => (this.store.graphLoading() ? 0 : this.store.derivedNodes().length));
   readonly bridgeEdgeCount = computed(() => (this.store.graphLoading() ? 0 : this.store.visibleEdges().length));
   readonly bridgeTrailCount = computed(() => (this.store.graphLoading() ? 0 : this.store.trails().length));
+  readonly bridgeSiteCount = computed(() => (this.store.graphLoading() ? 0 : this.store.distinctSiteIds().length));
 
-  /** Painted-graph highlight count (AC 31/32), reflected onto the canvas by renderGraph(). */
+  /** Painted-graph highlight count (AC 31/32), reflected onto the canvas by applyDecoration(). */
   readonly highlightCount = signal(0);
 
+  /** Site legend rows (id + name + colour) for the distinct sites in the current graph. */
+  readonly siteLegend = computed(() => {
+    const order = this.assignSiteOrder(this.store.distinctSiteIds());
+    return this.store.distinctSiteIds().map((siteId) => ({
+      siteId,
+      name: this.store.siteName(siteId),
+      color: SiteGraphComponent.SITE_COLORS[(order.get(siteId) ?? 0) % SiteGraphComponent.SITE_COLORS.length],
+    }));
+  });
+
   constructor() {
-    // EFFECT SPLIT (avoids the cose-on-every-change blob):
-    //
-    // STRUCTURE effect — rebuild the graph elements and run the deterministic layout ONLY when the
-    // node/edge id-set key changes (a genuinely different graph). Created in the injection context;
-    // gated on cyReady so it no-ops until the sized graph exists.
+    // STRUCTURE effect — rebuild the graph elements + run the deterministic layout ONLY when the
+    // node/edge/parenting id-set key changes (a genuinely different graph).
     this.structureEffect = effect(() => {
       const key = this.structureKey(); // tracked: rebuild only when the id-sets change
       void key;
@@ -351,20 +582,20 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         return;
       }
       this.rebuildAndLayout(nodes, edges);
-      // Re-apply decoration after a structural rebuild (the rebuild dropped all classes).
-      this.applyDecoration(this.store.trails(), this.store.highlightedTrailIds(), this.store.selectedObjectId());
+      this.applyDecoration();
     });
 
-    // DECORATION effect — selection / trail highlight only toggle classes on the existing graph;
-    // NO layout is run, so the node positions stay put (no blob, no re-shuffle on click).
+    // DECORATION effect — selection / trail highlight only toggle classes; NO layout (no blob).
     this.decorationEffect = effect(() => {
-      const trails = this.store.trails();
-      const highlighted = this.store.highlightedTrailIds();
-      const selectedId = this.store.selectedObjectId();
+      // Track the decoration inputs explicitly.
+      this.store.selectedObjectId();
+      this.store.selectedTrailId();
+      this.store.trailMemberIds();
+      this.store.highlightedTrailIds();
       if (!this.cyReady() || !this.cy) {
         return;
       }
-      this.applyDecoration(trails, highlighted, selectedId);
+      this.applyDecoration();
     });
   }
 
@@ -380,6 +611,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     this.nav.toTopology();
   }
 
+  /** Site of a device for the accessible row tag (friendly name), or null if unknown. */
+  siteFor(managedObjectId: string): string | null {
+    const siteId = this.store.nodeSiteMap().get(managedObjectId);
+    return siteId ? this.store.siteName(siteId) : null;
+  }
+
   async ngAfterViewInit(): Promise<void> {
     this.cyInitAttempted = true;
     const el = this.cyEl?.nativeElement;
@@ -393,12 +630,30 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       this.cy = cy({
         container: el,
         elements: [],
-        // No layout here — the structure effect runs the deterministic layout once the canvas is sized.
         style: [
           {
-            selector: 'node',
+            selector: 'node[?isSiteParent]',
             style: {
-              // Node fill by derived logical layer (operator colour-coding).
+              // Labelled site-boundary box (compound parent): low-opacity bg, per-site border colour.
+              'background-color': 'data(boxColor)',
+              'background-opacity': 0.08,
+              'border-color': 'data(boxColor)',
+              'border-width': 2,
+              shape: 'round-rectangle',
+              label: 'data(label)',
+              color: 'data(boxColor)',
+              'font-size': 11,
+              'font-weight': 'bold',
+              'text-valign': 'top',
+              'text-halign': 'center',
+              'text-margin-y': -4,
+              padding: '18px',
+            },
+          },
+          {
+            selector: 'node[!isSiteParent]',
+            style: {
+              // Leaf node fill by derived logical layer (operator colour-coding) — unchanged.
               'background-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
               label: 'data(label)',
               color: '#f1f5f9',
@@ -414,7 +669,6 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           {
             selector: 'edge',
             style: {
-              // Edge colour by derived layer (falls back to a neutral wire).
               'line-color': (e) => colors[e.data('layer') as string] ?? '#475569',
               'curve-style': 'bezier',
               width: 2,
@@ -427,7 +681,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         ],
       });
 
-      this.cy.on('tap', 'node', (evt) => {
+      this.cy.on('tap', 'node[!isSiteParent]', (evt) => {
         const id = evt.target.id();
         this.zone.run(() => this.store.selectNode(id));
       });
@@ -435,19 +689,19 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         const id = evt.target.id();
         this.zone.run(() => this.store.selectEdge(id));
       });
+      // Keep the zoom bridge live as the operator pans/zooms by mouse/trackpad.
+      this.cy.on('zoom', () => this.zone.run(() => this.zoomLevel.set(this.roundZoom())));
 
-      // Reflect a settled deterministic layout onto the canvas bridge so Playwright can wait for it.
       this.cy.on('layoutstop', () =>
         this.zone.run(() => {
           this.layoutDone.set(true);
           this.publishSpread();
+          this.zoomLevel.set(this.roundZoom());
         }),
       );
 
-      // SIZE GUARD: do NOT flip cyReady (which triggers the structure effect's first layout) until
-      // the canvas has a real, non-zero box — laying out into a 0x0 container collapses every node
-      // onto the origin (the blob). A ResizeObserver flips ready on the first non-zero size, then on
-      // later resizes calls cy.resize() and re-runs the layout so the graph stays fitted.
+      // SIZE GUARD: don't flip cyReady (first layout) until the canvas has a real, non-zero box —
+      // laying out into a 0x0 container collapses every node onto the origin (the blob).
       this.resizeObserver = new ResizeObserver(() => {
         if (!this.cy) {
           return;
@@ -457,24 +711,22 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             this.zone.run(() => this.cyReady.set(true));
           } else {
             this.cy.resize();
-            this.relayout();
           }
         }
       });
       this.resizeObserver.observe(el);
 
-      // If the element is already sized at init (common once attached), flip ready immediately.
       if (el.clientWidth > 0 && el.clientHeight > 0) {
         this.zone.run(() => this.cyReady.set(true));
       }
     } catch {
-      // jsdom / no-canvas environment: keep the accessible lists as the rendering surface. The
-      // cyInitAttempted flag above proves the guarded path executed.
+      // jsdom / no-canvas environment: keep the accessible lists as the rendering surface.
     }
   }
 
-  /** STRUCTURE: rebuild the graph elements from the current node/edge sets and run a deterministic
-   *  layout. Called only when the structure key changes (or after the first size-guarded ready). */
+  /** STRUCTURE: rebuild the graph elements (compound site boxes + leaf nodes + edges) and run a
+   *  deterministic layout. Existing node positions are locked across an expand relayout so already-
+   *  placed nodes stay put and the operator's view is preserved. */
   private rebuildAndLayout(
     nodes: ReturnType<TopologyStore['derivedNodes']>,
     edges: ReturnType<TopologyStore['visibleEdges']>,
@@ -484,52 +736,118 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
     const nodeIds = new Set(nodes.map((n) => n.managedObjectId));
+    const siteMap = this.store.nodeSiteMap();
+    const distinctSites = this.store.distinctSiteIds();
+    const order = this.assignSiteOrder(distinctSites);
 
-    const elements: ElementDefinition[] = [
-      ...nodes.map((n) => ({
-        data: { id: n.managedObjectId, label: n.name ?? n.managedObjectId, layer: n.derivedLayer },
-      })),
-      // visibleEdges() is already layer-filtered by the store (AC 28) — do NOT re-filter here.
-      // Only drop edges whose endpoints are not in the current node set (defensive — keeps cytoscape valid).
-      ...edges
-        .filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to))
-        .map((e) => ({
-          data: { id: e.edgeId, source: e.from, target: e.to, relation: e.relation, layer: e.derivedLayer },
-        })),
-    ];
+    // Preserve positions of nodes already laid out so an expand doesn't reshuffle the whole graph.
+    const prevPos = new Map<string, { x: number; y: number }>();
+    cy.nodes('[!isSiteParent]').forEach((n) => {
+      prevPos.set(n.id(), { ...n.position() });
+    });
+
+    const parentDefs: ElementDefinition[] = distinctSites.map((siteId) => ({
+      data: {
+        id: this.siteParentId(siteId),
+        label: this.store.siteName(siteId),
+        isSiteParent: true,
+        boxColor: SiteGraphComponent.SITE_COLORS[(order.get(siteId) ?? 0) % SiteGraphComponent.SITE_COLORS.length],
+      },
+    }));
+
+    const leafDefs: ElementDefinition[] = nodes.map((n) => {
+      const siteId = siteMap.get(n.managedObjectId);
+      return {
+        data: {
+          id: n.managedObjectId,
+          label: n.name ?? n.managedObjectId,
+          layer: n.derivedLayer,
+          isSiteParent: false,
+          ...(siteId ? { parent: this.siteParentId(siteId) } : {}),
+        },
+      };
+    });
+
+    const edgeDefs: ElementDefinition[] = edges
+      .filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to))
+      .map((e) => ({
+        data: { id: e.edgeId, source: e.from, target: e.to, relation: e.relation, layer: e.derivedLayer },
+      }));
 
     cy.elements().remove();
-    cy.add(elements);
-    this.relayout();
+    cy.add([...parentDefs, ...leafDefs, ...edgeDefs]);
+
+    // When the SITE SCOPE grows (a new site box) we run a FULL relayout (no locking) so the
+    // compound-aware cose can place all boxes legibly and we re-fit to show the new box. For a
+    // same-scope expand we lock already-placed nodes so only the NEW nodes are positioned and the
+    // operator's view is preserved.
+    const scopeGrew = distinctSites.length > this.lastFittedSiteCount;
+    const locked: NodeSingular[] = [];
+    if (!scopeGrew) {
+      cy.nodes('[!isSiteParent]').forEach((n) => {
+        const p = prevPos.get(n.id());
+        if (p) {
+          n.position(p);
+          n.lock();
+          locked.push(n);
+        }
+      });
+    }
+
+    this.runLayout(distinctSites.length);
+    for (const n of locked) {
+      n.unlock();
+    }
   }
 
-  /** Size the canvas, run the deterministic breadthfirst layout, then fit with padding. No `cose`
-   *  (which collapses to a blob in a freshly-sized container); breadthfirst is built-in (no dep). */
-  private relayout(): void {
+  /** Run the size-appropriate deterministic layout. breadthfirst for a single site box; cose
+   *  (compound-aware, deterministic) once ≥2 site boxes appear. animate:false so layoutstop fires
+   *  and the layout-done bridge stays reliable. Fit only on the first layout (firstFitDone gate). */
+  private runLayout(siteCount: number): void {
     const cy = this.cy;
-    if (!cy || cy.nodes().length === 0) {
+    if (!cy || cy.nodes('[!isSiteParent]').length === 0) {
       this.publishSpread();
       return;
     }
     cy.resize();
-    cy.layout({ name: 'breadthfirst', animate: false, spacingFactor: 1.2, padding: 20 }).run();
-    cy.fit(undefined, 20);
+    const layout =
+      siteCount > 1
+        ? cy.layout({
+            name: 'cose',
+            animate: false,
+            randomize: false,
+            componentSpacing: 120,
+            nodeRepulsion: () => 12000,
+            idealEdgeLength: () => 80,
+            nestingFactor: 1.2,
+            gravity: 0.4,
+            numIter: 1000,
+            padding: 20,
+          } as unknown as LayoutOptions)
+        : cy.layout({ name: 'breadthfirst', animate: false, spacingFactor: 1.2, padding: 20 });
+    layout.run();
+    // Auto-fit on the FIRST layout, and once more whenever the graph gains a NEW site box (a major
+    // scope change, e.g. a cross-site expand / trail explode) so the new box is visible. Same-site
+    // expands do NOT re-fit, preserving the operator's manual zoom/pan.
+    if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
+      cy.fit(undefined, 20);
+      this.firstFitDone = true;
+      this.lastFittedSiteCount = siteCount;
+    }
     this.publishSpread();
   }
 
-  /** DECORATION: toggle selected/highlighted/trail-member classes only — NEVER runs a layout, so
-   *  node positions stay put when the operator clicks around (no blob/re-shuffle on select). */
-  private applyDecoration(
-    trails: ReturnType<TopologyStore['trails']>,
-    highlighted: ReadonlySet<string>,
-    selectedId: string | null,
-  ): void {
+  /** DECORATION: toggle selected/highlighted/trail-member classes only — NEVER runs a layout. The
+   *  highlight set is the FULL trail member set when a trail is selected (fixes the hollow 1-node
+   *  highlight), else the device-anchored set. */
+  private applyDecoration(): void {
     const cy = this.cy;
     if (!cy) {
       return;
     }
     cy.elements().removeClass('highlighted selected trail-member');
-    const highlightMemberIds = this.trailMemberObjectIds(trails, highlighted);
+    const memberIds = this.trailMemberObjectIds();
+    const selectedId = this.store.selectedObjectId();
     let highlightCount = 0;
     if (selectedId) {
       const sel = cy.getElementById(selectedId);
@@ -537,14 +855,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         sel.addClass('selected');
       }
     }
-    cy.nodes().forEach((n) => {
-      if (highlightMemberIds.has(n.id())) {
+    cy.nodes('[!isSiteParent]').forEach((n) => {
+      if (memberIds.has(n.id())) {
         n.addClass('highlighted');
         highlightCount++;
       }
     });
     cy.edges().forEach((e) => {
-      if (highlightMemberIds.has(e.source().id()) && highlightMemberIds.has(e.target().id())) {
+      if (memberIds.has(e.source().id()) && memberIds.has(e.target().id())) {
         e.addClass('trail-member');
         highlightCount++;
       }
@@ -552,44 +870,93 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     this.highlightCount.set(highlightCount);
   }
 
-  /** Publish the laid-out node spread (max bbox dimension) onto its signal — bridged to the canvas
-   *  via [attr.data-cy-node-spread]. ~0 when nodes are collapsed onto each other (a blob). */
+  /** Publish the laid-out leaf-node spread (max bbox dimension) — ~0 when collapsed to a blob. */
   private publishSpread(): void {
     const cy = this.cy;
-    if (!cy || cy.nodes().length === 0) {
+    const leaves = cy?.nodes('[!isSiteParent]');
+    if (!cy || !leaves || leaves.length === 0) {
       this.nodeSpread.set(0);
       return;
     }
-    const bb = cy.nodes().boundingBox();
+    const bb = leaves.boundingBox();
     this.nodeSpread.set(Math.round(Math.max(bb.w, bb.h)));
   }
 
-  /** managedObjectIds that are members of any trail in the highlighted set. */
-  private trailMemberObjectIds(
-    trails: ReturnType<TopologyStore['trails']>,
-    highlighted: ReadonlySet<string>,
-  ): Set<string> {
-    // The TrailSummary list carries no member ids; on-select highlight is anchored to the
-    // selected device, so the selected node always highlights when its trails are in the set.
-    // We additionally light up any node whose managedObjectId equals a highlighted trail id is
-    // not applicable; membership for the cy overlay is the selected node (kept consistent with
-    // the accessible list's isTrailMemberNode rule).
+  /**
+   * The managedObjectIds to highlight on the painted graph. When a trail is explicitly selected this
+   * is its FULL member set (the cross-site path lights up — fixes the previous hollow 1-node
+   * behaviour). Otherwise it falls back to the device-anchored highlight (selected node when its
+   * trails are in the highlighted set).
+   */
+  private trailMemberObjectIds(): Set<string> {
+    if (this.store.selectedTrailId() && this.store.trailMemberIds().size > 0) {
+      return new Set(this.store.trailMemberIds());
+    }
     const ids = new Set<string>();
-    if (highlighted.size > 0) {
+    if (this.store.highlightedTrailIds().size > 0) {
       const sel = this.store.selectedObjectId();
       if (sel) {
         ids.add(sel);
       }
     }
-    // Reference `trails` so the param stays meaningful and the count is exposed via the bridge.
-    void trails;
     return ids;
   }
 
   isTrailMemberNode(managedObjectId: string): boolean {
-    // A node is highlighted if any of its trails is in the highlighted set; the membership is
-    // resolved on select via getTrailsForObject, so we reflect the currently-selected device.
+    if (this.store.selectedTrailId() && this.store.trailMemberIds().size > 0) {
+      return this.store.trailMemberIds().has(managedObjectId);
+    }
     return this.store.selectedObjectId() === managedObjectId && this.store.highlightedTrailIds().size > 0;
+  }
+
+  // ── Zoom / fit / reset controls ──────────────────────────────────────────────────────────────
+  zoomIn(): void {
+    this.zoomAbout(1.2);
+  }
+  zoomOut(): void {
+    this.zoomAbout(1 / 1.2);
+  }
+  private zoomAbout(factor: number): void {
+    const cy = this.cy;
+    if (!cy) {
+      return;
+    }
+    const ext = cy.extent();
+    cy.zoom({ level: cy.zoom() * factor, position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 } });
+    this.zoomLevel.set(this.roundZoom());
+  }
+  fit(): void {
+    const cy = this.cy;
+    if (!cy) {
+      return;
+    }
+    cy.fit(undefined, 20);
+    this.zoomLevel.set(this.roundZoom());
+  }
+  reset(): void {
+    // Reset re-roots the graph at the site (discards expansions) and re-fits on the next layout.
+    this.firstFitDone = false;
+    this.lastFittedSiteCount = 0;
+    this.store.collapseToRoot();
+  }
+
+  private roundZoom(): number {
+    return this.cy ? Math.round(this.cy.zoom() * 1000) / 1000 : 1;
+  }
+
+  // ── Site colour ordering ─────────────────────────────────────────────────────────────────────
+  /** Assign / reuse a stable index for each site id so colours don't shuffle as the graph grows. */
+  private assignSiteOrder(siteIds: readonly string[]): Map<string, number> {
+    for (const id of siteIds) {
+      if (!this.siteOrder.has(id)) {
+        this.siteOrder.set(id, this.siteOrder.size);
+      }
+    }
+    return this.siteOrder;
+  }
+
+  private siteParentId(siteId: string): string {
+    return `site::${siteId}`;
   }
 
   ngOnDestroy(): void {
