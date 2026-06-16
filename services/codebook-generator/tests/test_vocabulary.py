@@ -32,7 +32,7 @@ def test_validate_accepts_in_vocabulary_signature() -> None:
     """A signature whose every alarmType is in the domain vocabulary passes."""
     scenario = _scenario(
         [
-            ("FiberFault", "FiberSpan:f1"),
+            ("FiberCut", "FiberSpan:f1"),
             ("LinkDown", "IPLink:l1"),
             ("LSPDown", "LSP:s1"),
             ("ReachabilityLoss", "VPNService:v1"),
@@ -44,7 +44,7 @@ def test_validate_accepts_in_vocabulary_signature() -> None:
 
 def test_validate_rejects_out_of_vocabulary_token() -> None:
     """A symptom alarmType outside the domain vocabulary fails the compile."""
-    scenario = _scenario([("FiberFault", "FiberSpan:f1"), ("BogusAlarm", "IPLink:l1")])
+    scenario = _scenario([("FiberCut", "FiberSpan:f1"), ("BogusAlarm", "IPLink:l1")])
     with pytest.raises(VocabularyError) as exc:
         validate_scenarios([scenario], CORE_IP_VOCABULARY)
     # Error names the offending token and object for diagnosability.
@@ -55,10 +55,10 @@ def test_validate_rejects_out_of_vocabulary_token() -> None:
 def test_root_cause_alarm_type_is_origin_own_symptom() -> None:
     """rootCauseAlarmType is the alarmType of the symptom on the fault-origin object."""
     scenario = _scenario(
-        [("FiberFault", "FiberSpan:f1"), ("LinkDown", "IPLink:l1")],
+        [("FiberCut", "FiberSpan:f1"), ("LinkDown", "IPLink:l1")],
         origin="FiberSpan:f1",
     )
-    assert root_cause_alarm_type(scenario) == "FiberFault"
+    assert root_cause_alarm_type(scenario) == "FiberCut"
 
 
 def test_root_cause_falls_back_to_first_symptom_when_origin_absent() -> None:

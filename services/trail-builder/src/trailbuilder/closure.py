@@ -232,12 +232,28 @@ class TrailClosure:
             }
 
         # Propagate area membership ALONG anchored connectors to a fixpoint: a
-        # connector adopts the area set of each anchored neighbour. Crucially the
-        # relayed-from neighbour must itself be anchored (`direct[nb]`), so an
-        # UNANCHORED hub is a propagation dead-end — it absorbs its anchored
-        # neighbours' areas but is never used as a conduit to spread them onward.
-        # Anchored-to-anchored chains converge in O(area_less * areas) iterations;
-        # bounded by the number of distinct areas, this terminates quickly.
+        # connector adopts the areas its anchored neighbour is itself DIRECTLY
+        # anchored to (``direct[nb]``) — NOT that neighbour's full accumulated set
+        # (``connector_areas[nb]``).
+        #
+        # The #240 RESIDUAL was relaying ``connector_areas[nb]`` here: an anchored
+        # connector that *also* rides a genuine cross-area link accumulated that
+        # link's foreign area, then relayed the whole accumulated set onward — so a
+        # genuinely SINGLE-area link adjacent to it inherited the foreign area and
+        # leaked into a foreign area's trail. Concretely, an IGPAdjacency anchored
+        # to an area-0 interface that rides both a single-area (area-0) IPLink and a
+        # cross-area (area-0/area-1) IPLink accumulated {0,1}, then back-propagated
+        # area-1 into the single-area link. Relaying only ``direct[nb]`` (the areas
+        # ``nb`` genuinely terminates) carries area membership exactly ONE anchored
+        # hop — a connector rides an area only when it directly anchors that area or
+        # directly rides a connector that terminates it — so a genuine cross-area
+        # span still rides both its termination areas (``direct`` of its endpoints),
+        # while a single-area connector can never acquire a foreign area conducted
+        # *through* a shared neighbour. Crucially the relayed-from neighbour must
+        # itself be anchored (``direct[nb]`` non-empty), so an UNANCHORED hub
+        # (``VPNService:CUST-*``, a shared transport mesh) is a propagation
+        # dead-end — it absorbs its anchored neighbours' direct areas but is never a
+        # conduit. Converges in O(area_less * areas) iterations.
         connector_areas: dict[str, set[str]] = {n: set(direct[n]) for n in area_less}
         changed = True
         while changed:
@@ -245,9 +261,11 @@ class TrailClosure:
             for n in area_less:
                 for nb in self._undirected_neighbors(graph, n):
                     # Relay ONLY through an anchored neighbour (a genuine
-                    # conductor); never through an unanchored hub.
-                    if direct.get(nb) and not connector_areas[nb] <= connector_areas[n]:
-                        connector_areas[n] |= connector_areas[nb]
+                    # conductor) and ONLY that neighbour's DIRECT anchor areas —
+                    # never its transitively-accumulated set, never an unanchored hub.
+                    nb_direct = direct.get(nb)
+                    if nb_direct and not nb_direct <= connector_areas[n]:
+                        connector_areas[n] |= nb_direct
                         changed = True
         return connector_areas
 
