@@ -307,7 +307,8 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         position: relative;
       }
       .cy-canvas {
-        height: 360px;
+        height: 480px;
+        min-height: 420px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: #0b1220;
@@ -895,24 +896,40 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     const layout =
       siteCount > 1
         ? cy.layout({
+            // Compound-aware, DETERMINISTIC cose. Higher repulsion + componentSpacing spread the
+            // distinct site boxes well apart (so two sites read as two clearly-separated clusters,
+            // not one blob); the larger nesting factor keeps each box's devices loosely packed
+            // inside its boundary so the canvas fills rather than bunching at the top.
             name: 'cose',
             animate: false,
             randomize: false,
-            componentSpacing: 120,
-            nodeRepulsion: () => 12000,
-            idealEdgeLength: () => 80,
-            nestingFactor: 1.2,
-            gravity: 0.4,
-            numIter: 1000,
-            padding: 20,
+            componentSpacing: 220,
+            nodeRepulsion: () => 28000,
+            idealEdgeLength: () => 110,
+            nestingFactor: 1.4,
+            gravity: 0.25,
+            numIter: 1500,
+            padding: 40,
+            nodeDimensionsIncludeLabels: true,
           } as unknown as LayoutOptions)
-        : cy.layout({ name: 'breadthfirst', animate: false, spacingFactor: 1.2, padding: 20 });
+        : cy.layout({
+            // Single site: breadthfirst, but circle-packed and well-spaced so devices fan out across
+            // the canvas instead of stacking near the top edge.
+            name: 'breadthfirst',
+            animate: false,
+            circle: true,
+            spacingFactor: 1.6,
+            padding: 40,
+            nodeDimensionsIncludeLabels: true,
+            avoidOverlap: true,
+          } as unknown as LayoutOptions);
     layout.run();
     // Auto-fit on the FIRST layout, and once more whenever the graph gains a NEW site box (a major
     // scope change, e.g. a cross-site expand / trail explode) so the new box is visible. Same-site
-    // expands do NOT re-fit, preserving the operator's manual zoom/pan.
+    // expands do NOT re-fit, preserving the operator's manual zoom/pan. Pad generously so the laid-out
+    // graph fills the canvas centred rather than hugging the top edge.
     if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
-      cy.fit(undefined, 20);
+      cy.fit(undefined, 40);
       this.firstFitDone = true;
       this.lastFittedSiteCount = siteCount;
     }
@@ -1012,7 +1029,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     if (!cy) {
       return;
     }
-    cy.fit(undefined, 20);
+    cy.fit(undefined, 40);
     this.zoomLevel.set(this.roundZoom());
   }
   reset(): void {
