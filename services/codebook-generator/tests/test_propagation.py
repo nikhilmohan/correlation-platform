@@ -54,10 +54,16 @@ def _signature(object_type: str) -> list[tuple[str, str]]:
 
 
 def test_fiber_cut_signature_matches_expected_cascade() -> None:
-    """AC-1: FiberSpan origin -> [FiberFault, LinkDown, LSPDown, ReachabilityLoss]."""
+    """AC-1: FiberSpan origin -> [FiberCut, LinkDown, LSPDown, ReachabilityLoss].
+
+    The seed/origin symptom is `FiberCut` (the FiberSpan fault-origin's real emitted token,
+    per the live Knowledge core-ip seed), NOT `FiberFault` (#262). The cascade tail
+    LinkDown(IPLink) -> LSPDown(LSP) -> ReachabilityLoss(VPNService) is the real multi-symptom
+    fiber-cut signature and must be derived over the RIDES_ON -> TRAVERSES -> SERVES closure.
+    """
     fiber = _signature("FiberSpan")
     assert fiber == [
-        ("FiberFault", "FiberSpan:f1"),
+        ("FiberCut", "FiberSpan:f1"),
         ("LinkDown", "IPLink:l1"),
         ("LSPDown", "LSP:s1"),
         ("ReachabilityLoss", "VPNService:v1"),

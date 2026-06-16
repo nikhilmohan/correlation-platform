@@ -74,6 +74,11 @@ export default defineConfig({
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
+    // Headless chromium has no GPU; force SwiftShader (software WebGL) so the MapLibre GL map and
+    // the Cytoscape graph actually paint their <canvas> in CI/headless runs (real-UI assertions).
+    launchOptions: {
+      args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'],
+    },
   },
 
   // Expose the resolved mode/base to specs and the run summary.

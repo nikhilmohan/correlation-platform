@@ -15,7 +15,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 /**
  * The Core IP seed pack loads through the SAME validated write path (dogfood) and matches the
  * design's magnitudes: a single object-type/edge-relation/alarm-type vocabulary record, 7
- * fault-origin types, 28 propagation templates, 4 model-param sets, and the attribute catalogue
+ * fault-origin types, 27 propagation templates, 4 model-param sets, and the attribute catalogue
  * carrying the well-known {@code igpArea} device key (design "Seed data"). This proves the seed is
  * not rejected by validation (vocabularies authored first, then cross-referencing records) and
  * that onboarding the MVP domain is records-only.
@@ -51,10 +51,10 @@ class SeedPackTest extends AbstractKnowledgeIT {
     }
 
     @Test
-    void propagationTemplates_28Seeded() throws Exception {
+    void propagationTemplates_27Seeded() throws Exception {
         mockMvc.perform(get("/domains/core-ip/propagation-templates"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$", hasSize(28)));
+                .andExpect(jsonPath("$", hasSize(27)));
     }
 
     @Test

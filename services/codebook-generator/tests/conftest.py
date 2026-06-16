@@ -101,9 +101,13 @@ def fake_producer() -> FakeProducer:
 # Domain-parameterized collaborator data (frozen producer shapes)            #
 # --------------------------------------------------------------------------- #
 # Core IP fault-origin types with their self-emitted origin alarm tokens.
+# Tokens mirror the live Knowledge core-ip seed taxonomy
+# (services/knowledge/src/main/resources/seed/core-ip.json): a FiberSpan fault-origin emits
+# `FiberCut` (NOT `FiberFault`) and a LineCard emits `LineCardFault` (#262 — the prior
+# synthetic `FiberFault`/`CardFault` tokens silently masked the live seed mismatch).
 CORE_IP_FAULT_ORIGINS = [
-    {"objectType": "FiberSpan", "originAlarmType": "FiberFault"},
-    {"objectType": "LineCard", "originAlarmType": "CardFault"},
+    {"objectType": "FiberSpan", "originAlarmType": "FiberCut"},
+    {"objectType": "LineCard", "originAlarmType": "LineCardFault"},
     {"objectType": "Port", "originAlarmType": "LOS"},
     {"objectType": "Interface", "originAlarmType": "InterfaceDown"},
     {"objectType": "Node", "originAlarmType": "NodeDown"},
@@ -111,10 +115,13 @@ CORE_IP_FAULT_ORIGINS = [
 
 # Core IP propagation templates — per-edge-type cascade rules (alarmType-vocabulary tokens).
 CORE_IP_TEMPLATES = [
-    # Fiber cut: FiberSpan -RIDES_ON-> IPLink
+    # Fiber cut: FiberSpan -RIDES_ON-> IPLink. Triggers on `FiberCut` — the FiberSpan
+    # fault-origin's own emitted token — so the cascade actually fires (#262). The live seed
+    # had a `FiberFault` trigger that never matched the `FiberCut` origin and collapsed the
+    # fiber-cut scenario to a root-only symptom; this fixture reflects the corrected taxonomy.
     {
         "edgeType": "RIDES_ON",
-        "trigger": {"objectType": "FiberSpan", "alarmType": "FiberFault"},
+        "trigger": {"objectType": "FiberSpan", "alarmType": "FiberCut"},
         "effect": {"objectType": "IPLink", "alarmType": "LinkDown"},
     },
     # Interface fault: Interface -TERMINATES-> IPLink
@@ -147,10 +154,11 @@ CORE_IP_TEMPLATES = [
         "trigger": {"objectType": "Port", "alarmType": "LOS"},
         "effect": {"objectType": "Interface", "alarmType": "InterfaceDown"},
     },
-    # Line-card fault: LineCard -HOSTED_ON-> Port
+    # Line-card fault: LineCard -HOSTED_ON-> Port. Triggers on `LineCardFault` (the live seed's
+    # LineCard origin token), not the prior synthetic `CardFault` (#262 taxonomy alignment).
     {
         "edgeType": "HOSTED_ON",
-        "trigger": {"objectType": "LineCard", "alarmType": "CardFault"},
+        "trigger": {"objectType": "LineCard", "alarmType": "LineCardFault"},
         "effect": {"objectType": "Port", "alarmType": "PortDown"},
     },
     # Port (when reached via HOSTED_ON, state PortDown) -HOSTS-> Interface
@@ -161,9 +169,14 @@ CORE_IP_TEMPLATES = [
     },
 ]
 
+# alarmType-vocabulary tokens — mirrors the live core-ip seed taxonomy: the fiber-cut origin
+# token is `FiberCut` and the line-card origin token is `LineCardFault` (#262). `FiberFault`
+# is retained as a valid vocabulary member (it exists in the live seed) but is no longer the
+# FiberSpan origin/trigger token.
 CORE_IP_VOCABULARY = [
+    "FiberCut",
     "FiberFault",
-    "CardFault",
+    "LineCardFault",
     "LOS",
     "PortDown",
     "InterfaceDown",
@@ -186,6 +199,18 @@ TRANSPORT_TEMPLATES = [
     },
 ]
 TRANSPORT_VOCABULARY = ["AmpFault", "ChannelLoss"]
+
+
+def _record_envelope(record_type: str, record_id: str, domain: str, payload: dict) -> dict:
+    """Wrap a domain payload in the frozen Knowledge ``RecordResponse`` envelope (#224)."""
+    return {
+        "domain": domain,
+        "recordType": record_type,
+        "recordId": record_id,
+        "version": "v1",
+        "isCurrent": True,
+        "payload": payload,
+    }
 
 
 # Per-domain topology graphs: object instances per fault-origin type, and per-instance closures.
@@ -217,9 +242,9 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("VPNService:v1", "VPNService", "core-ip"),
         ],
         "edges": [
-            {"source": "FiberSpan:f1", "target": "IPLink:l1", "relation": "RIDES_ON"},
-            {"source": "IPLink:l1", "target": "LSP:s1", "relation": "TRAVERSES"},
-            {"source": "LSP:s1", "target": "VPNService:v1", "relation": "SERVES"},
+            {"from": "FiberSpan:f1", "to": "IPLink:l1", "relation": "RIDES_ON"},
+            {"from": "IPLink:l1", "to": "LSP:s1", "relation": "TRAVERSES"},
+            {"from": "LSP:s1", "to": "VPNService:v1", "relation": "SERVES"},
         ],
     },
     # Interface cascade: i1 TERMINATES l1, i1 ADJACENCY_OVER a1, l1 TRAVERSES s1, s1 SERVES v1
@@ -231,10 +256,10 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("VPNService:v1", "VPNService", "core-ip"),
         ],
         "edges": [
-            {"source": "Interface:i1", "target": "IPLink:l1", "relation": "TERMINATES"},
-            {"source": "Interface:i1", "target": "IGPAdjacency:a1", "relation": "ADJACENCY_OVER"},
-            {"source": "IPLink:l1", "target": "LSP:s1", "relation": "TRAVERSES"},
-            {"source": "LSP:s1", "target": "VPNService:v1", "relation": "SERVES"},
+            {"from": "Interface:i1", "to": "IPLink:l1", "relation": "TERMINATES"},
+            {"from": "Interface:i1", "to": "IGPAdjacency:a1", "relation": "ADJACENCY_OVER"},
+            {"from": "IPLink:l1", "to": "LSP:s1", "relation": "TRAVERSES"},
+            {"from": "LSP:s1", "to": "VPNService:v1", "relation": "SERVES"},
         ],
     },
     # Port fault: p1 HOSTS i1, then i1's interface cascade (TERMINATES l1)
@@ -244,8 +269,8 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("IPLink:l1", "IPLink", "core-ip"),
         ],
         "edges": [
-            {"source": "Port:p1", "target": "Interface:i1", "relation": "HOSTS"},
-            {"source": "Interface:i1", "target": "IPLink:l1", "relation": "TERMINATES"},
+            {"from": "Port:p1", "to": "Interface:i1", "relation": "HOSTS"},
+            {"from": "Interface:i1", "to": "IPLink:l1", "relation": "TERMINATES"},
         ],
     },
     # Line-card fault: c1 HOSTED_ON p1 and p2 (two ports), each HOSTS an interface
@@ -257,10 +282,10 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("Interface:i2", "Interface", "core-ip"),
         ],
         "edges": [
-            {"source": "LineCard:c1", "target": "Port:p1", "relation": "HOSTED_ON"},
-            {"source": "LineCard:c1", "target": "Port:p2", "relation": "HOSTED_ON"},
-            {"source": "Port:p1", "target": "Interface:i1", "relation": "HOSTS"},
-            {"source": "Port:p2", "target": "Interface:i2", "relation": "HOSTS"},
+            {"from": "LineCard:c1", "to": "Port:p1", "relation": "HOSTED_ON"},
+            {"from": "LineCard:c1", "to": "Port:p2", "relation": "HOSTED_ON"},
+            {"from": "Port:p1", "to": "Interface:i1", "relation": "HOSTS"},
+            {"from": "Port:p2", "to": "Interface:i2", "relation": "HOSTS"},
         ],
     },
 }
@@ -271,7 +296,7 @@ TRANSPORT_NODES: dict[str, list[dict]] = {
 TRANSPORT_CLOSURES: dict[str, dict] = {
     "OpticalAmp:o1": {
         "reached": [_node("OpticalChannel:ch1", "OpticalChannel", "transport")],
-        "edges": [{"source": "OpticalAmp:o1", "target": "OpticalChannel:ch1", "relation": "FEEDS"}],
+        "edges": [{"from": "OpticalAmp:o1", "to": "OpticalChannel:ch1", "relation": "FEEDS"}],
     },
 }
 
@@ -311,26 +336,45 @@ class MockCollaborators:
         return [r for r in self.requests if path_substring in r.url.path]
 
     def _wire(self) -> None:
-        # Knowledge — fault-origin types
+        # Knowledge — fault-origin types. Served as frozen ``RecordResponse`` envelopes
+        # ({recordType, recordId, payload:{...}}) to match the real Knowledge contract;
+        # the domain fields live under ``payload`` (see #224).
         @self.router.route(method="GET", host="knowledge-fo.test")
         def _fault_origins(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(200, json=_DOMAIN_DATA[domain]["fault_origins"])
+            records = [
+                _record_envelope("faultOriginType", f"fo-{i}", domain, payload)
+                for i, payload in enumerate(_DOMAIN_DATA[domain]["fault_origins"])
+            ]
+            return httpx.Response(200, json={"records": records})
 
-        # Knowledge — propagation templates
+        # Knowledge — propagation templates (same ``RecordResponse`` envelope shape, #224).
         @self.router.route(method="GET", host="knowledge-pt.test")
         def _templates(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(200, json=_DOMAIN_DATA[domain]["templates"])
+            records = [
+                _record_envelope("propagationTemplate", f"pt-{i}", domain, payload)
+                for i, payload in enumerate(_DOMAIN_DATA[domain]["templates"])
+            ]
+            return httpx.Response(200, json={"records": records})
 
-        # Knowledge — alarm-type vocabulary
+        # Knowledge — alarm-type vocabulary. Served via the SAME generic record route as a
+        # LIST of ``RecordResponse`` envelopes; the tokens live under ``payload.alarmTypes``,
+        # NOT at the envelope top level (#233 — the prior flat ``{alarmTypes:[...]}`` mock
+        # masked the envelope-vs-payload bug).
         @self.router.route(method="GET", host="knowledge-av.test")
         def _vocab(request: httpx.Request) -> httpx.Response:
             self._record(request)
             domain = request.url.path.split("/")[2]
-            return httpx.Response(200, json={"alarmTypes": _DOMAIN_DATA[domain]["vocabulary"]})
+            record = _record_envelope(
+                "alarmTypeVocabulary",
+                f"{domain}/alarmTypeVocabulary/default",
+                domain,
+                {"alarmTypes": _DOMAIN_DATA[domain]["vocabulary"]},
+            )
+            return httpx.Response(200, json=[record])
 
         # Topology — nodes (list by type) + traversal
         @self.router.route(method="GET", host="topology.test", path="/topology/nodes")

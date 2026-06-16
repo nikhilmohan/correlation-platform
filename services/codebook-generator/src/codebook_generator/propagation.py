@@ -40,11 +40,11 @@ def build_closure_graph(origin: NodeDto, traversal: TraversalDto) -> nx.MultiDiG
         graph.add_node(node.managedObjectId, objectType=node.objectType)
     for edge in traversal.edges:
         # Tolerate traversal nodes that only appear as edge endpoints.
-        if edge.source not in graph:
-            graph.add_node(edge.source, objectType=_infer_type(edge.source))
-        if edge.target not in graph:
-            graph.add_node(edge.target, objectType=_infer_type(edge.target))
-        graph.add_edge(edge.source, edge.target, relation=edge.relation)
+        if edge.from_ not in graph:
+            graph.add_node(edge.from_, objectType=_infer_type(edge.from_))
+        if edge.to not in graph:
+            graph.add_node(edge.to, objectType=_infer_type(edge.to))
+        graph.add_edge(edge.from_, edge.to, relation=edge.relation)
     return graph
 
 
