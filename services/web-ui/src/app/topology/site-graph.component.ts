@@ -100,6 +100,8 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
                   type="button"
                   class="obj"
                   data-testid="graph-edge"
+                  [attr.data-relation]="edge.relation"
+                  [attr.data-layer]="edge.derivedLayer"
                   [class.selected]="store.selectedEdgeId() === edge.edgeId"
                   (click)="store.selectEdge(edge.edgeId)"
                   [attr.aria-pressed]="store.selectedEdgeId() === edge.edgeId"

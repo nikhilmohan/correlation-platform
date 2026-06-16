@@ -238,6 +238,19 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
       .poll(async () => Number(await cyEl.getAttribute('data-cy-edge-count')))
       .toBe(startEdges);
 
+    // #263 — the previously-unmapped SRLG `MEMBER_OF` relation maps to the `fiber` layer; toggling
+    // ONLY `fiber` off must remove that specific edge (proves the relation→layer mapping is wired,
+    // not just the aggregate all-off count). The SRLG edge exists in both the mock fixture and the
+    // real Topology site subgraph; guard so the assertion only runs where the edge is present.
+    const srlgEdge = page.locator('[data-testid="graph-edge"][data-relation="MEMBER_OF"]');
+    const hasSrlg = (await srlgEdge.count()) > 0;
+    if (hasSrlg) {
+      await expect(srlgEdge).toHaveCount(1);
+      await page.getByTestId('layer-fiber').uncheck();
+      await expect(srlgEdge).toHaveCount(0); // SRLG edge specifically disappears with `fiber` off
+      await page.getByTestId('layer-fiber').check(); // restore for the all-off pass below
+    }
+
     // Toggle every logical layer OFF → the accessible edge list empties AND the real render has 0
     // edges, while the nodes remain (all-off shows only nodes).
     for (const layer of ['fiber', 'IP', 'IGP', 'LSP', 'service']) {

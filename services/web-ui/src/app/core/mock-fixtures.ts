@@ -41,8 +41,8 @@ const SITE_OBJECTS: SiteObjectsDto = {
   siteId: 'Site:LON',
   domain: 'core-ip',
   snapshotId: 'current',
-  nodeCount: 4,
-  edgeCount: 3,
+  nodeCount: 6,
+  edgeCount: 5,
   nodes: [
     {
       managedObjectId: 'Router:lon-r1',
@@ -76,6 +76,22 @@ const SITE_OBJECTS: SiteObjectsDto = {
       name: 'lsp1',
       attributes: {},
     },
+    {
+      managedObjectId: 'SRLG:srlg-2',
+      objectType: 'SRLG',
+      domain: 'core-ip',
+      snapshotId: 'current',
+      name: 'SRLG-2',
+      attributes: { riskGroup: 'shared-conduit' },
+    },
+    {
+      managedObjectId: 'LineCard:lon-r1-lc1',
+      objectType: 'LineCard',
+      domain: 'core-ip',
+      snapshotId: 'current',
+      name: 'lc1',
+      attributes: { slot: 1 },
+    },
   ],
   edges: [
     {
@@ -101,6 +117,30 @@ const SITE_OBJECTS: SiteObjectsDto = {
       from: 'Router:lon-r1',
       to: 'LSP:lon-fra-lsp1',
       relation: 'CARRIES',
+      domain: 'core-ip',
+      snapshotId: 'current',
+      attributes: {},
+    },
+    // ── #263 regression fixtures ──────────────────────────────────────────────────────────────
+    // Two typed edges whose endpoint-prefix derivation used to fall through to the un-toggleable
+    // `other` layer (so they survived all-layers-off): an SRLG `MEMBER_OF` (shared-risk fiber
+    // grouping) and a `HOSTED_ON` structural containment. The relation→layer mapping now governs
+    // them (MEMBER_OF → fiber, HOSTED_ON → IGP), so all-off renders 0 edges. Mirrors the real
+    // Topology site subgraph that surfaced #263.
+    {
+      edgeId: 'e-4',
+      from: 'FiberSpan:lon-fra-1',
+      to: 'SRLG:srlg-2',
+      relation: 'MEMBER_OF',
+      domain: 'core-ip',
+      snapshotId: 'current',
+      attributes: { srlgGroup: 'SRLG-2' },
+    },
+    {
+      edgeId: 'e-5',
+      from: 'LineCard:lon-r1-lc1',
+      to: 'Router:lon-r1',
+      relation: 'HOSTED_ON',
       domain: 'core-ip',
       snapshotId: 'current',
       attributes: {},
