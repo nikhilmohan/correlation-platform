@@ -26,10 +26,11 @@ def _scenario(origin: str, origin_type: str, symptoms: list[tuple[str, str]]) ->
     )
 
 
+# FiberSpan origin token is `FiberCut` (live core-ip seed taxonomy, #262).
 _FIBER = _scenario(
     "FiberSpan:f1",
     "FiberSpan",
-    [("FiberFault", "FiberSpan:f1"), ("LinkDown", "IPLink:l1")],
+    [("FiberCut", "FiberSpan:f1"), ("LinkDown", "IPLink:l1")],
 )
 
 
@@ -55,7 +56,7 @@ def test_persist_then_read_meta_and_scenarios(store: CodebookStore) -> None:
     # Store rewrites the scenarioId to a codebook-scoped id.
     assert scenarios[0].scenarioId == scenario_id(cb, "FiberSpan:f1")
     assert scenarios[0].faultOriginType == "FiberSpan"
-    assert scenarios[0].predictedSymptoms[0].alarmType == "FiberFault"
+    assert scenarios[0].predictedSymptoms[0].alarmType == "FiberCut"
     assert scenarios[0].trailIds == ["TRAIL-1"]
 
 
