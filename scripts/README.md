@@ -57,7 +57,7 @@ SITE_COUNT=12 ./scripts/demo-up.sh     # all 12 catalogue PoPs
   ```bash
   docker compose run --rm -e PHASE=p1 -e TOPOLOGY_API_MODE=real \
     -e TOPOLOGY_API_BASE_URL=http://topology:8080 -e KNOWLEDGE_MODE=real \
-    -e SITE_COUNT=10 simulator --phase p1
+    -e KNOWLEDGE_API_BASE_URL=http://knowledge:8080 -e SITE_COUNT=10 simulator --phase p1
   ```
 - Blank map / stale UI: rebuild without `--fast` so the latest web-ui bundle (incl. `public/geo/europe.json`)
   is served — `./scripts/demo-up.sh`.

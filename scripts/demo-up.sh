@@ -95,6 +95,7 @@ if $DC run --rm \
      -e TOPOLOGY_API_MODE=real \
      -e TOPOLOGY_API_BASE_URL=http://topology:8080 \
      -e KNOWLEDGE_MODE=real \
+     -e KNOWLEDGE_API_BASE_URL=http://knowledge:8080 \
      -e SITE_COUNT="$SITE_COUNT" \
      -e IGP_AREA_COUNT="$IGP_AREA_COUNT" \
      -e TOPOLOGY_NODE_COUNT="$TOPOLOGY_NODE_COUNT" \
@@ -103,7 +104,7 @@ if $DC run --rm \
   ok "Topology snapshot ingested."
 else
   warn "Simulator ingest returned non-zero. The stack is up; re-run the ingest with:"
-  warn "  $DC run --rm -e PHASE=p1 -e TOPOLOGY_API_MODE=real -e TOPOLOGY_API_BASE_URL=http://topology:8080 -e KNOWLEDGE_MODE=real -e SITE_COUNT=$SITE_COUNT simulator --phase p1"
+  warn "  $DC run --rm -e PHASE=p1 -e TOPOLOGY_API_MODE=real -e TOPOLOGY_API_BASE_URL=http://topology:8080 -e KNOWLEDGE_MODE=real -e KNOWLEDGE_API_BASE_URL=http://knowledge:8080 -e SITE_COUNT=$SITE_COUNT simulator --phase p1"
   exit 1
 fi
 
