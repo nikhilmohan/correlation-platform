@@ -96,7 +96,8 @@ def test_get_scenario_returns_signature_and_trails(client: TestClient, compiled:
     assert resp.status_code == 200
     body = resp.json()
     assert body["faultOriginType"] == "FiberSpan"
-    assert body["predictedSymptoms"][0]["alarmType"] == "FiberFault"
+    # The FiberSpan origin's own emitted token is `FiberCut` (live core-ip seed taxonomy, #262).
+    assert body["predictedSymptoms"][0]["alarmType"] == "FiberCut"
     assert body["trailIds"] == ["TRAIL-1"]
     _validate(body, _response_schema("/codebooks/{codebookId}/scenarios/{scenarioId}"))
 
@@ -214,14 +215,16 @@ def test_trail_signatures_shape(client: TestClient, compiled: str) -> None:
 
 
 def test_trail_signatures_root_cause_is_origin_alarm(client: TestClient, compiled: str) -> None:
-    """AC-22: rootCauseAlarmType is the FiberSpan origin's own alarm (FiberFault), not type."""
+    """AC-22: rootCauseAlarmType is the FiberSpan origin's own alarm (FiberCut), not type."""
     body = client.get(f"/codebooks/{compiled}/trail-signatures").json()
     fiber = next(
         s
         for s in body["trailSignatures"]
         if s["scenarioId"] == scenario_id(compiled, "FiberSpan:f1")
     )
-    assert fiber["rootCauseAlarmType"] == "FiberFault"
+    # The origin alarm is the FiberSpan fault-origin's own emitted token, `FiberCut`
+    # (live core-ip seed taxonomy, #262) — not the object type `FiberSpan`.
+    assert fiber["rootCauseAlarmType"] == "FiberCut"
     assert fiber["rootCauseAlarmType"] != "FiberSpan"
 
 

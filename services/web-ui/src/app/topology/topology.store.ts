@@ -33,6 +33,10 @@ export class TopologyStore {
   readonly highlightedTrailIds = signal<ReadonlySet<string>>(new Set());
   readonly activeTrailId = signal<string | null>(null);
 
+  /** The siteId of the in-flight objects-at-site request; stale responses are dropped (guards
+   *  against a slower prior request clobbering the current site / clearing loading wrongly). */
+  private pendingObjectsSiteId: string | null = null;
+
   readonly derivedNodes = computed<DerivedNode[]>(() =>
     (this.objects()?.nodes ?? []).map((n) => ({ ...n, derivedLayer: layerForObjectType(n.objectType) })),
   );
@@ -73,13 +77,23 @@ export class TopologyStore {
   selectSite(siteId: string): void {
     this.selectedSiteId.set(siteId);
     this.graphLoading.set(true);
+    this.objects.set(null);
     this.selectedObjectId.set(null);
     this.selectedEdgeId.set(null);
     this.highlightedTrailIds.set(new Set());
+    // Tag this request so a slower/stale in-flight response for a previously-selected site can
+    // never clobber the current one or wrongly clear the loading state (single stable load per
+    // selected site). The loading flag is cleared deterministically on BOTH success and error
+    // (catchError emits null → the subscribe callback still runs), so the graph never stays stuck
+    // on "Loading site graph…".
+    this.pendingObjectsSiteId = siteId;
     this.topo
       .objectsAtSite(siteId)
       .pipe(catchError(() => of(null)))
       .subscribe((res) => {
+        if (this.pendingObjectsSiteId !== siteId) {
+          return; // a newer selectSite superseded this request — ignore the stale response.
+        }
         this.objects.set(res);
         this.graphLoading.set(false);
       });
