@@ -2,6 +2,7 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { catchError, forkJoin, of } from 'rxjs';
 import { TopologyClient } from '../api/topology.client';
 import { TrailBuilderClient } from '../api/trail-builder.client';
+import { ApiConfigService } from '../core/api-config.service';
 import {
   EdgeDto,
   LogicalLayer,
@@ -20,10 +21,13 @@ export interface DerivedEdge extends EdgeDto {
   derivedLayer: LogicalLayer;
 }
 
-/** Cap on the number of distinct nodes the accumulating explorer graph will hold. Operator-driven
- *  expansion stops adding NEW nodes once this is reached (existing edges between present nodes still
- *  merge) and `capReached` flips true so the UI can disable further expansion. Keeps the graph
- *  legible and Cytoscape responsive. */
+/** Documented DEFAULT cap on the number of distinct device nodes the accumulating explorer graph
+ *  will hold (OQ-12). The EFFECTIVE cap is resolved from env config (`TOPOLOGY_NODE_CAP`, same
+ *  default) via `ApiConfigService` so it is operator-configurable per deployment (spec: a
+ *  configurable cap). All-or-nothing semantics (AC 57): if an expansion's NEW deduped nodes would
+ *  push the total OVER the cap, the WHOLE expansion is rejected (no partial add) and `capReached`
+ *  flips true so the UI disables further expansion. Edges between already-present nodes still merge
+ *  even at the cap. Keeps the graph legible and Cytoscape responsive. */
 export const NODE_CAP = 250;
 
 /**
@@ -39,6 +43,12 @@ export const NODE_CAP = 250;
 export class TopologyStore {
   private readonly topo = inject(TopologyClient);
   private readonly trailBuilder = inject(TrailBuilderClient);
+  private readonly apiConfig = inject(ApiConfigService);
+
+  /** Effective node cap (env-config `TOPOLOGY_NODE_CAP`, default {@link NODE_CAP}). */
+  get nodeCap(): number {
+    return this.apiConfig.topologyNodeCap;
+  }
 
   readonly sites = signal<SiteDto[]>([]);
   readonly sitesLoading = signal<boolean>(false);
@@ -213,13 +223,17 @@ export class TopologyStore {
         if (!res) {
           return;
         }
-        this.mergeGraph(
+        const merged = this.mergeGraph(
           res.neighbors.map((n) => n.node),
           res.neighbors.map((n) => n.via),
         );
-        const next = new Set(this.expandedNodeIds());
-        next.add(managedObjectId);
-        this.expandedNodeIds.set(next);
+        // Only mark the node expanded when the expansion was actually applied; an all-or-nothing
+        // rejection at the cap (AC 57) leaves the graph — and the expanded set — unchanged.
+        if (merged) {
+          const next = new Set(this.expandedNodeIds());
+          next.add(managedObjectId);
+          this.expandedNodeIds.set(next);
+        }
       });
   }
 
@@ -337,41 +351,55 @@ export class TopologyStore {
   }
 
   /**
-   * Merge nodes + edges into the accumulating graph, deduping by id and enforcing NODE_CAP. New
-   * nodes stop being added at the cap (capReached flips true) but edges between already-present
-   * nodes still merge. Performs exactly ONE write to each of nodeMap/edgeMap (single structureKey
-   * change → one cytoscape relayout per logical merge).
+   * Merge nodes + edges into the accumulating graph, deduping by id, with an **ALL-OR-NOTHING**
+   * node cap (AC 56, 57). The cap check is on the DEDUPED NEW node set (nodes not already present):
+   *
+   *   - **Fits** (`nodeMap.size + newNodes.length ≤ cap`) → additive merge of the new nodes + new
+   *     edges (deduped by `edgeId`), ONE write each (single structureKey change → one relayout).
+   *   - **Would overflow** → reject the WHOLE expansion: add **nothing** (no partial add — AC 57),
+   *     set `capReached = true`. The visible cap notice + disabled expand controls then surface it.
+   *   - **Zero new nodes** (re-expand of a fully-present node, or an edges-only merge between
+   *     already-present nodes) → never overflows; the new edges still merge even at the cap (AC 56).
+   *
+   * @returns true when nodes/edges were merged, false when the whole expansion was rejected at cap.
    */
-  private mergeGraph(nodes: readonly NodeDto[], edges: readonly EdgeDto[]): void {
-    const nextNodes = new Map(this.nodeMap());
-    let capped = this.capReached();
+  private mergeGraph(nodes: readonly NodeDto[], edges: readonly EdgeDto[]): boolean {
+    const current = this.nodeMap();
+    const cap = this.nodeCap;
+
+    // Deduped NEW node set: present-once, not already in the graph (first-seen wins).
+    const newNodes = new Map<string, NodeDto>();
     for (const n of nodes) {
-      if (!n) {
+      if (!n || current.has(n.managedObjectId) || newNodes.has(n.managedObjectId)) {
         continue;
       }
-      if (nextNodes.has(n.managedObjectId)) {
-        continue; // dedupe — keep the first seen
+      newNodes.set(n.managedObjectId, n);
+    }
+
+    // ALL-OR-NOTHING (AC 57): if the deduped NEW nodes would push the total over the cap, reject the
+    // whole expansion — add NOTHING (not even edges) and flag capReached so the UI can react. An
+    // expansion with zero new nodes can never overflow (covers AC 56 re-expand + edges-only merges).
+    if (newNodes.size > 0 && current.size + newNodes.size > cap) {
+      if (!this.capReached()) {
+        this.capReached.set(true);
       }
-      if (nextNodes.size >= NODE_CAP) {
-        capped = true;
-        continue; // at cap — stop adding NEW nodes
-      }
-      nextNodes.set(n.managedObjectId, n);
+      return false;
+    }
+
+    // Fits — additive merge. One write to each map keeps the structureKey changing exactly once.
+    const nextNodes = new Map(current);
+    for (const [id, n] of newNodes) {
+      nextNodes.set(id, n);
     }
     const nextEdges = new Map(this.edgeMap());
     for (const e of edges) {
-      if (!e) {
-        continue;
-      }
-      if (nextEdges.has(e.edgeId)) {
+      if (!e || nextEdges.has(e.edgeId)) {
         continue;
       }
       nextEdges.set(e.edgeId, e);
     }
     this.nodeMap.set(nextNodes);
     this.edgeMap.set(nextEdges);
-    if (capped !== this.capReached()) {
-      this.capReached.set(capped);
-    }
+    return true;
   }
 }

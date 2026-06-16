@@ -19,6 +19,7 @@ import { ErrorBannerService } from '../core/error-banner.service';
 import { NavigationService } from '../core/navigation.service';
 import { AttributeDetailPanelComponent } from './attribute-detail-panel.component';
 import { LayerToggleComponent } from './layer-toggle.component';
+import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor } from './type-icon-mapper';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
 // is fetched only when this view is shown, and unit tests can mock it.
@@ -92,6 +93,7 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
             [attr.data-cy-node-spread]="nodeSpread()"
             [attr.data-cy-site-count]="bridgeSiteCount()"
             [attr.data-cy-expanded-node-count]="store.expandedNodeIds().size"
+            [attr.data-cy-icon-types]="distinctIconKeyCount()"
             [attr.data-cy-zoom]="zoomLevel()"
             aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
           ></div>
@@ -124,6 +126,14 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
               }
             </ul>
           }
+          <ul class="icon-legend" aria-label="Network element type icon legend" data-testid="icon-legend">
+            @for (item of ICON_LEGEND; track item.key) {
+              <li data-testid="icon-legend-item" [attr.data-icon]="item.key">
+                <img class="icon-glyph" [src]="iconUrlForKey(item.key)" alt="" aria-hidden="true" width="16" height="16" />
+                {{ item.label }}
+              </li>
+            }
+          </ul>
         </div>
 
         @if (store.graphLoading()) {
@@ -137,11 +147,21 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
                   type="button"
                   class="obj"
                   data-testid="graph-node"
+                  [attr.data-icon]="iconKeyFor(node.objectType)"
+                  [attr.data-object-type]="node.objectType"
                   [class.selected]="store.selectedObjectId() === node.managedObjectId"
                   [class.trail-member]="isTrailMemberNode(node.managedObjectId)"
                   (click)="store.selectNode(node.managedObjectId)"
                   [attr.aria-pressed]="store.selectedObjectId() === node.managedObjectId"
                 >
+                  <img
+                    class="node-icon"
+                    [src]="iconUrlFor(node.objectType)"
+                    alt=""
+                    aria-hidden="true"
+                    width="16"
+                    height="16"
+                  />
                   {{ node.name ?? node.managedObjectId }}
                   <span class="layer-tag">{{ node.derivedLayer }}</span>
                   @if (siteFor(node.managedObjectId); as sn) {
@@ -361,6 +381,32 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         border: 2px solid var(--border);
         background: rgba(255, 255, 255, 0.04);
       }
+      .icon-legend {
+        list-style: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        padding: 0;
+        margin: 0;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+      }
+      .icon-legend li {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+      .icon-glyph {
+        display: inline-block;
+        width: 1rem;
+        height: 1rem;
+      }
+      .node-icon {
+        width: 0.95rem;
+        height: 0.95rem;
+        margin-right: 0.3rem;
+        vertical-align: -2px;
+      }
       .obj-list {
         list-style: none;
         padding: 0;
@@ -508,6 +554,27 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   };
   readonly LAYER_LEGEND = Object.entries(SiteGraphComponent.LAYER_COLORS).map(([layer, color]) => ({ layer, color }));
 
+  /** Network-element type-icon legend (objectType → glyph), rendered beneath the layer legend. */
+  readonly ICON_LEGEND = ICON_LEGEND;
+
+  /** Resolved icon KEY for an objectType (the `data-icon` bridge value, `generic` fallback — AC 71). */
+  iconKeyFor(objectType: string | undefined | null): string {
+    return iconKeyForObjectType(objectType);
+  }
+  /** Same-origin bundle URL for an objectType's icon (used by the accessible row `<img>`, AC 72). */
+  iconUrlFor(objectType: string | undefined | null): string {
+    return iconUrlFor(objectType);
+  }
+  /** Same-origin bundle URL for an icon KEY (used by the legend rows). */
+  iconUrlForKey(key: string): string {
+    const base = typeof document !== 'undefined' && document.baseURI ? document.baseURI : '/';
+    return new URL(`icons/${key}.svg`, base).href;
+  }
+  /** Count of DISTINCT type-icon keys currently rendered (bridged as data-cy-icon-types — AC 70). */
+  readonly distinctIconKeyCount = computed(
+    () => new Set(this.store.derivedNodes().map((n) => iconKeyForObjectType(n.objectType))).size,
+  );
+
   /** Small deterministic palette for site-boundary boxes (by site index). */
   static readonly SITE_COLORS = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#fb7185', '#facc15'];
 
@@ -653,8 +720,20 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           {
             selector: 'node[!isSiteParent]',
             style: {
-              // Leaf node fill by derived logical layer (operator colour-coding) — unchanged.
-              'background-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
+              // Network-element TYPE ICON as the node glyph (AC 70-72): a same-origin bundled SVG
+              // resolved from the node's objectType, drawn contained over a dark chip. The DERIVED
+              // LOGICAL LAYER stays readable as the node's coloured BORDER/ring (both type-icon AND
+              // layer are encoded). A generic.svg fallback guarantees no node is ever icon-less.
+              'background-image': (n) => iconUrlFor(n.data('objectType') as string),
+              'background-fit': 'contain',
+              'background-clip': 'none',
+              'background-opacity': 1,
+              'background-width': '80%',
+              'background-height': '80%',
+              'background-color': '#0b1220',
+              'border-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
+              'border-width': 3,
+              shape: 'round-rectangle',
               label: 'data(label)',
               color: '#f1f5f9',
               'font-size': 9,
@@ -662,8 +741,8 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
               'text-outline-color': '#0b1220',
               'text-valign': 'bottom',
               'text-margin-y': 2,
-              width: 22,
-              height: 22,
+              width: 30,
+              height: 30,
             },
           },
           {
@@ -762,6 +841,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           id: n.managedObjectId,
           label: n.name ?? n.managedObjectId,
           layer: n.derivedLayer,
+          // objectType drives the type-icon background-image; `icon` is the resolved key (AC 70-72).
+          objectType: n.objectType,
+          icon: iconKeyForObjectType(n.objectType),
           isSiteParent: false,
           ...(siteId ? { parent: this.siteParentId(siteId) } : {}),
         },
