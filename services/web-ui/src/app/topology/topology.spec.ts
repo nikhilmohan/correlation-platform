@@ -4,7 +4,7 @@ import { Subject, throwError } from 'rxjs';
 import { TopologyStore } from './topology.store';
 import { TopologyClient } from '../api/topology.client';
 import { SiteObjectsDto } from '../api/models';
-import { layerForObjectType } from './layer-mapper';
+import { layerForEdge, layerForObjectType, layerForRelation, TOGGLEABLE_LAYERS } from './layer-mapper';
 import { testProviders, flush } from '../../test-utils';
 
 function store(): TopologyStore {
@@ -41,8 +41,8 @@ describe('Topology & trails module (P1)', () => {
     s.selectSite('Site:LON');
     await flush();
     expect(s.selectedSiteId()).toBe('Site:LON');
-    expect(s.objects()?.nodes.length).toBe(4);
-    expect(s.objects()?.edges.length).toBe(3);
+    expect(s.objects()?.nodes.length).toBe(6);
+    expect(s.objects()?.edges.length).toBe(5);
   });
 
   it('AC 28 — layer is derived from objectType; toggling hides matching edges; all-off shows only nodes', async () => {
@@ -63,7 +63,53 @@ describe('Topology & trails module (P1)', () => {
       s.setLayerVisible(layer, false);
     }
     expect(s.visibleEdges().length).toBe(0);
-    expect(s.derivedNodes().length).toBe(4);
+    expect(s.derivedNodes().length).toBe(6);
+  });
+
+  // ── #263 — every rendered edge resolves to one of the FIVE toggleable layers ────────────────
+  it('AC 28 (#263) — the typed edge `relation` maps to a toggleable layer (no edge left in `other`)', () => {
+    // Every Topology §5 relation (and the Core-IP snapshot relations) resolves to a layer.
+    expect(layerForRelation('MEMBER_OF')).toBe('fiber'); // SRLG = shared-risk fiber grouping
+    expect(layerForRelation('RIDES_ON')).toBe('fiber');
+    expect(layerForRelation('HOSTED_ON')).toBe('IGP'); // structural chassis containment
+    expect(layerForRelation('HOSTS')).toBe('IP');
+    expect(layerForRelation('ADJACENCY_OVER')).toBe('IGP');
+    expect(layerForRelation('TRAVERSES')).toBe('LSP');
+    expect(layerForRelation('SERVES')).toBe('service');
+    expect(layerForRelation('LOCATED_AT')).toBe('IGP'); // device→Site placement is structural
+    // The two relations that previously fell through to `other` now have a real layer.
+    expect(layerForEdge({ edgeId: 'x', from: 'FiberSpan:a', to: 'SRLG:s', relation: 'MEMBER_OF', domain: 'd', snapshotId: 'c', attributes: {} })).toBe('fiber');
+    expect(layerForEdge({ edgeId: 'y', from: 'LineCard:l', to: 'Router:r', relation: 'HOSTED_ON', domain: 'd', snapshotId: 'c', attributes: {} })).toBe('IGP');
+  });
+
+  it('AC 28 (#263) — toggling ONLY the five logical layers off leaves 0 edges; the SRLG/containment edges are governed too', async () => {
+    const s = store();
+    s.selectSite('Site:LON');
+    await flush();
+
+    // The fixture includes the previously-unmapped SRLG MEMBER_OF (e-4) + HOSTED_ON containment (e-5).
+    const layers = s.derivedEdges().map((e) => e.derivedLayer);
+    expect(layers).not.toContain('other'); // no rendered edge is left un-toggleable
+    const member = s.derivedEdges().find((e) => e.relation === 'MEMBER_OF');
+    const hosted = s.derivedEdges().find((e) => e.relation === 'HOSTED_ON');
+    expect(member?.derivedLayer).toBe('fiber');
+    expect(hosted?.derivedLayer).toBe('IGP');
+
+    // Toggling JUST 'fiber' off hides the SRLG edge specifically (mapping is exercised, not aggregate).
+    s.setLayerVisible('fiber', false);
+    expect(s.visibleEdges().some((e) => e.relation === 'MEMBER_OF')).toBe(false);
+    s.setLayerVisible('fiber', true);
+    // Toggling JUST 'IGP' off hides the HOSTED_ON containment edge specifically.
+    s.setLayerVisible('IGP', false);
+    expect(s.visibleEdges().some((e) => e.relation === 'HOSTED_ON')).toBe(false);
+    s.setLayerVisible('IGP', true);
+
+    // Turning off ONLY the five toggleable layers (NOT 'other') → 0 edges, all nodes remain.
+    for (const layer of TOGGLEABLE_LAYERS) {
+      s.setLayerVisible(layer, false);
+    }
+    expect(s.visibleEdges().length).toBe(0);
+    expect(s.derivedNodes().length).toBe(6);
   });
 
   it('AC 29 — node detail shows vendor/model/equipmentType + unknown keys generic', async () => {

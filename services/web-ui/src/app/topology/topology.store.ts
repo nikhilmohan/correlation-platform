@@ -3,7 +3,7 @@ import { catchError, of } from 'rxjs';
 import { TopologyClient } from '../api/topology.client';
 import { TrailBuilderClient } from '../api/trail-builder.client';
 import { EdgeDto, LogicalLayer, NodeDto, SiteDto, SiteObjectsDto, TrailSummary } from '../api/models';
-import { ALL_LAYERS, layerForObjectType } from './layer-mapper';
+import { ALL_LAYERS, layerForEdge, layerForObjectType } from './layer-mapper';
 
 export interface DerivedNode extends NodeDto {
   derivedLayer: LogicalLayer;
@@ -43,7 +43,11 @@ export class TopologyStore {
   readonly derivedEdges = computed<DerivedEdge[]>(() =>
     (this.objects()?.edges ?? []).map((e) => ({
       ...e,
-      derivedLayer: layerForObjectType(this.endpointObjectType(e)),
+      // Edge layer is driven by the typed `relation` (every Topology §5 relation resolves to one of
+      // the five toggleable layers), falling back to the endpoint objectType only for an unknown
+      // relation. This is what makes AC 28's all-off → 0 edges invariant hold (#263): no rendered
+      // edge is left in the un-toggleable `other` layer.
+      derivedLayer: layerForEdge(e),
     })),
   );
 
@@ -146,11 +150,5 @@ export class TopologyStore {
   activateTrail(trailId: string): void {
     this.activeTrailId.set(trailId);
     this.highlightedTrailIds.set(new Set([trailId]));
-  }
-
-  private endpointObjectType(edge: EdgeDto): string {
-    // Derive the edge's logical layer from its endpoints' typed managedObjectId prefix.
-    const prefix = edge.from.split(':')[0];
-    return prefix || edge.relation;
   }
 }

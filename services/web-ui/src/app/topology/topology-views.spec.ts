@@ -130,23 +130,26 @@ describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => 
     expect(Number(canvas.dataset['cyNodeCount'])).toBe(store.derivedNodes().length);
   });
 
-  it('AC 28 — after load, toggling every layer off drives the bridge edge-count to 0 with nodes remaining', async () => {
+  it('AC 28 (#263) — toggling ONLY the five logical layers off drives the bridge edge-count to 0 with nodes remaining', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     const canvas: HTMLElement = fixture.nativeElement.querySelector('.cy-canvas');
 
-    // Pre-condition: loaded, non-zero rendered edges.
+    // Pre-condition: loaded, non-zero rendered edges, none stranded in the un-toggleable `other` layer.
     expect(store.graphLoading()).toBe(false);
     expect(Number(canvas.dataset['cyEdgeCount'])).toBeGreaterThanOrEqual(1);
+    expect(store.derivedEdges().map((e) => e.derivedLayer)).not.toContain('other');
 
-    for (const layer of ['fiber', 'IP', 'IGP', 'LSP', 'service', 'other'] as const) {
+    // Toggle only the FIVE operator-facing layers (exactly what the LayerToggleComponent / Playwright
+    // does — `other` has no checkbox). Pre-#263 this left the SRLG/containment edges rendered.
+    for (const layer of ['fiber', 'IP', 'IGP', 'LSP', 'service'] as const) {
       store.setLayerVisible(layer, false);
     }
     fixture.detectChanges();
     await flush();
     fixture.detectChanges();
 
-    // All layers off → 0 visible edges (list + bridge), nodes remain.
+    // All five layers off → 0 visible edges (list + bridge), nodes remain.
     expect(fixture.nativeElement.querySelectorAll('[data-testid="graph-edge"]').length).toBe(0);
     expect(Number(canvas.dataset['cyEdgeCount'])).toBe(0);
     expect(Number(canvas.dataset['cyNodeCount'])).toBeGreaterThanOrEqual(1);
