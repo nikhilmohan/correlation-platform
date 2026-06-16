@@ -78,7 +78,8 @@ service APIs directly.
     between them) must be included in the `design.md` for this service — it is a required
     design-stage deliverable.
 
-- Topology & trails module: **site-level topology visualization, backed by the `Site` entity.**
+- Topology & trails module: **explorable, site-bounded topology visualization backed by the
+  `Site` entity.**
   The entry view is a **geo map** (MapLibre GL / deck.gl) showing each `Site` returned by the
   Topology Service **site query API** (`GET /topology/sites`). Expanding a site fetches the
   objects located at that site via the **objects-at-site query** and renders the site's
@@ -99,6 +100,46 @@ service APIs directly.
     trail cluster boundaries are overlaid from the Trail Builder trail-viz API
     (`listTrails(snapshotId)`, `getTrail(trailId)`, `getTrailsForObject(managedObjectId)`);
     selecting a device highlights all trails it belongs to.
+  - **Explorable / dynamically-extendable topology:** from any device already rendered in the
+    graph, the operator can **expand** that device to pull its neighbours into the graph using
+    the Topology Service neighbours query (`GET /topology/nodes/{managedObjectId}/neighbors`),
+    accumulating nodes and edges **additively** (existing nodes/edges are never removed). A
+    single expansion may reach devices in other sites; cross-domain expansion is available as
+    an explicit opt-in (using the `crossDomain=true` query parameter). A configurable node-cap
+    prevents runaway expansion: when the total rendered node count would exceed the cap, the
+    expansion is rejected and the operator receives visible feedback. Re-expanding a node whose
+    neighbours are already present in the graph produces no duplicates.
+  - **Site boundaries:** each rendered device node is visually attributed to its `Site`
+    (via the `LOCATED_AT` relation returned by the Topology query API). When the device graph
+    spans multiple sites — after a cross-site expand or after a trail highlights devices across
+    sites — each site's devices are enclosed in a distinct, labelled visual boundary group.
+    At least two distinct site groups are visible when the graph contains devices from two or
+    more sites.
+  - **Trail navigation and explode:** a trail can be **selected** (not merely displayed as a
+    boundary overlay). Selecting a trail fetches its full detail from the Trail Builder
+    `getTrail(trailId)` API (`GET /trails/{trailId}`) and highlights every member in
+    `TrailDetail.members` — not just the device the operator last clicked. If the trail's
+    members include devices at sites not currently loaded in the device graph, those
+    sites/devices are automatically fetched and added to the graph so the complete trail span
+    is visible. A trail-detail panel shows `trailId`, `igpArea`, `srlgGroup`, and the list of
+    `members` (each `managedObjectId` is interactive — activating it selects that device in
+    the graph). The operator can clear the trail selection; clearing restores the graph to its
+    unselected state without removing nodes or edges that were added to show the trail. The
+    existing behaviour — selecting a **device** highlights all trails it belongs to (via
+    `getTrailsForObject`) — is preserved and reconciled with trail-select: both can be active
+    simultaneously (trail-select highlights the trail's members; device-select shows that
+    device's trail memberships).
+  - **Network-element type icons:** every device node in the graph is rendered with an icon
+    that represents its `objectType` as returned in the `NodeDto.objectType` field from the
+    Topology query API. The Core IP domain `objectType` set is: Node (Router), LineCard, Port,
+    Interface, FiberSpan, IPLink, IGPAdjacency, LSP, VPNService, SRLG. An `objectType` value
+    not in this set falls back to a **generic icon** — the node is always rendered, never
+    invisible. All icons are **bundled offline** in the application (no CDN/external URL);
+    consistent with the offline-only licensing constraint.
+  - **Zoom and pan:** both the geo map and the device graph support **zoom** and **pan**. Each
+    canvas provides explicit zoom controls: zoom in, zoom out, fit-to-viewport (fit all current
+    content), and reset to default zoom. The operator can also pan freely. Zoom-control
+    interactions must be keyboard-accessible (WCAG 2.1 AA).
 
 - Pattern review & XAI module: list discovered patterns from the Pattern Manager (pattern
   read API) with support, confidence, lift, RCA, timing, codebook overlap, and supporting
@@ -279,35 +320,79 @@ service APIs directly.
    device, highlight all trails that device belongs to (a device may appear in multiple
    overlapping trails).
 
-10. **List and present discovered patterns with full XAI.** Fetch discovered patterns from the
+10. **Expand a device node to pull its neighbours into the graph (explorable topology).** When
+    the operator triggers an expand action on a device already rendered in the graph, call the
+    Topology Service neighbours query (`GET /topology/nodes/{managedObjectId}/neighbors`) and
+    **additively** merge the returned `NeighborsDto.neighbors` (nodes + connecting edges) into
+    the currently rendered graph. Existing nodes and edges are never removed or replaced.
+    If the `crossDomain` opt-in is active, pass `crossDomain=true` to the neighbours query.
+    If adding the new nodes would cause the total rendered node count to exceed the configured
+    node cap, reject the expansion and display an operator-visible message; no partial add is
+    applied. Re-expanding a node whose neighbours are already present produces no duplicates
+    (deduplicate on `managedObjectId`).
+
+11. **Render site-boundary groupings on the device graph.** For each device node in the
+    rendered graph, use the `siteId` association returned by the Topology query API (via the
+    `LOCATED_AT` relation / `SiteObjectsDto`) to attribute the node to its site. Enclose all
+    nodes of the same site within a distinct, labelled visual boundary group. When the graph
+    spans multiple sites (after cross-site expansion or a cross-site trail explode), each
+    site's boundary group is rendered and labelled independently.
+
+12. **Navigate trails by selection and explode cross-site spans.** Allow the operator to
+    **select a trail** directly (from the trail-list overlay or a trail detail link). On trail
+    select: call the Trail Builder `getTrail(trailId)` API (`GET /trails/{trailId}`), fetch
+    the full `TrailDetail`, and highlight every device in `TrailDetail.members` in the graph.
+    If any member device belongs to a site not yet loaded in the graph, fetch and add those
+    sites' device subgraphs so the full trail span is visible. Display a trail-detail panel
+    showing `trailId`, `igpArea`, `srlgGroup`, and the `members` list; each `managedObjectId`
+    in the members list is interactive (activating it selects that device in the graph).
+    Provide a clear-trail-selection action that removes the trail highlight without removing
+    nodes/edges from the graph. The existing device-select-to-trail-membership flow
+    (`getTrailsForObject`) is preserved alongside trail-select.
+
+13. **Render network-element type icons on device nodes.** For every device node in the graph,
+    read `objectType` from the `NodeDto` returned by the Topology query API and render the
+    node with the corresponding bundled icon. The supported `objectType` set for Core IP is:
+    Node (Router), LineCard, Port, Interface, FiberSpan, IPLink, IGPAdjacency, LSP,
+    VPNService, SRLG. An `objectType` value not in this set falls back to a generic bundled
+    icon; no device node is ever rendered without an icon. All icon assets are bundled
+    offline within the application build — no CDN or external URL is used.
+
+14. **Provide zoom and pan controls on both the geo map and the device graph.** The geo map
+    (MapLibre GL) and the device graph (Cytoscape.js) each expose explicit zoom controls: zoom
+    in, zoom out, fit-to-viewport (fit all current graph/map content), and reset to default
+    zoom/pan. The operator can pan freely on both canvases. Zoom controls are keyboard-
+    accessible. All zoom-control state is local to the view (not persisted).
+
+15. **List and present discovered patterns with full XAI.** Fetch discovered patterns from the
     Pattern Manager read API. For each pattern, surface the sequence, support/confidence/lift,
     RCA, timing stats, codebook overlap, and supporting instance count in a form that lets the
     operator understand the evidence behind the pattern before acting on it.
 
-11. **Accept approve/reject decisions and post to the Pattern Manager.** Capture the operator's
+16. **Accept approve/reject decisions and post to the Pattern Manager.** Capture the operator's
     approve or reject decision and post a lightweight approval-intent request to the Pattern
     Manager API. Reflect the resulting lifecycle state back in the UI.
 
-12. **List active/approved patterns.** Fetch and display patterns whose lifecycle state is
+17. **List active/approved patterns.** Fetch and display patterns whose lifecycle state is
     `approved` from the Pattern Manager read API, with their details.
 
-13. **Read and edit Knowledge Service model parameters.** Fetch current ML config params
+18. **Read and edit Knowledge Service model parameters.** Fetch current ML config params
     (DBSCAN params, session-window gap, min-support, etc.) from the Knowledge Service API and
     present them for editing. Submit validated edits to the Knowledge Service API and confirm
     persistence to the operator.
 
-14. **Display live correlation stats and incidents.** Fetch live incidents (root-cause alarm +
+19. **Display live correlation stats and incidents.** Fetch live incidents (root-cause alarm +
     child alarms), alarm-reduction ratio, and pattern-match stats from the Correlation Engine
     incident/stats API. Present them as the platform's effectiveness dashboard. The Correlation
     Engine provides incident groupings and raw counts only; it does not provide per-alarm
     lifecycle state or a live accuracy score.
 
-15. **Display live alarm lifecycle from the Alarm Manager.** Within the correlation stats
+20. **Display live alarm lifecycle from the Alarm Manager.** Within the correlation stats
     module, fetch the list of live alarms and their lifecycle state (open / in-progress /
     correlated / cleared / reverted-open) from the Alarm Manager alarm-lifecycle query API.
     Present each alarm's state, root-cause/child membership, and incident association.
 
-16. **Provide config-switchable backend integration.** All outbound API calls are resolved from
+21. **Provide config-switchable backend integration.** All outbound API calls are resolved from
     Angular environment configuration. Each integration point is independently switchable
     between a mock (generated from the collaborator's published OpenAPI spec) for unit/component
     tests and the real service for integration — with no code changes between modes.
@@ -316,7 +401,7 @@ service APIs directly.
 
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
-| P1 — Topology onboarding | Topology & trails visualization: operators view the onboarded topology organized by Site, toggle device-level layers, inspect device/connection attributes, and explore trail clusters as they are built; the landing dashboard orients to topology KPIs available at this phase | Active | Reads: Topology Service site query API (list sites, objects-at-site with attributes); Trail Builder `listTrails` / `getTrail` / `getTrailsForObject` API. Writes: — |
+| P1 — Topology onboarding | Topology & trails visualization: operators view the onboarded topology organized by Site, toggle device-level layers, expand device nodes to explore neighbours across sites, inspect site-boundary groupings and network-element type icons, select trails to highlight their full member span and see detail (igpArea, srlgGroup), zoom/pan both map and graph, inspect device/connection attributes; the landing dashboard orients to topology KPIs available at this phase | Active | Reads: Topology Service site query API (`GET /topology/sites`); objects-at-site (`GET /topology/sites/{siteId}/objects`); neighbours query (`GET /topology/nodes/{managedObjectId}/neighbors`, with optional `crossDomain=true`); Trail Builder `listTrails(snapshotId)` / `getTrail(trailId)` / `getTrailsForObject(managedObjectId)` API. Writes: — |
 | P2 — Pattern learning | Pattern review/approve (XAI-driven approve/reject), config edits (Knowledge params), and correlation/learning stats including noise-filter run-stats: operators review discovered patterns, tune ML parameters, and observe noise-filtering effectiveness; the dashboard shows active patterns and learning-phase KPIs | Active | Reads: Pattern Manager pattern read API (discovered + active/approved patterns); Noise Filter run-stats read API (storm-reduction stats). Writes: Pattern Manager approval-intent API (approve/reject); Knowledge Service model-params edit API |
 | P3 — Real-time correlation | Full platform: live incidents, correlation stats (effectiveness dashboard), per-alarm lifecycle view including in-progress/reverted-open states, real-time streaming view, incident-detail drill-downs, and dashboard with live KPIs — operators monitor running correlation and understand correlation groups | Active | Reads: Correlation Engine `GET /incidents` + `GET /incidents/{id}` + `GET /stats`; Alarm Manager `GET /alarms` + `GET /alarms/{alarmId}`; Pattern Manager active-patterns API. Writes: — |
 
@@ -332,15 +417,23 @@ service APIs directly.
   OpenAPI document is published.)
 - **APIs consumed (integration points — each config-switchable mock/real, built against the
   producer's published OpenAPI; no hard-coded backend URLs):**
-  - **Topology Service — site query API and graph/geometry API:** list all `Site` objects with
-    geo attributes (`GET /topology/sites`); retrieve nodes and edges located at a given site
-    (objects-at-site query, backed by `LOCATED_AT` relations); node/edge responses include an
-    `attributes` map (well-known keys: `vendor`, `model`, `equipmentType`, `role`, `capacity`
-    for nodes; `linkType`, `capacity`, `protectionRole` for edges). Also: list objects by type,
-    retrieve neighbours, resolve `managedObjectId` → object + layer. Used by the topology &
-    trails module (P1). The exact endpoint paths, response shapes, and pagination are
-    design-stage on the Topology Service side (see Open question 1); the web-ui builds its
-    typed client and mock against the Topology Service's published OpenAPI 3.1 spec.
+  - **Topology Service — site query API, objects-at-site API, neighbours query API, and
+    traversal API:** list all `Site` objects with geo attributes (`GET /topology/sites`);
+    retrieve nodes and edges located at a given site (objects-at-site query
+    `GET /topology/sites/{siteId}/objects`, backed by `LOCATED_AT` relations); retrieve the
+    direct neighbours of a device node (`GET /topology/nodes/{managedObjectId}/neighbors`,
+    with optional `relation[]` filter, optional `domain`, optional `snapshotId`, and optional
+    `crossDomain=true`), returning a `NeighborsDto` whose `neighbors[]` each carry a `NodeDto`
+    (including `objectType`) and the connecting `EdgeDto`; retrieve a bounded traversal closure
+    (`GET /topology/traversal`, returning `TraversalDto` with `reached[]` nodes and `edges[]`).
+    Node responses include `objectType` and an `attributes` map (well-known keys: `vendor`,
+    `model`, `equipmentType`, `role`, `capacity`); edge responses include `relation` and
+    `attributes` (well-known keys: `linkType`, `capacity`, `protectionRole`). Used by the
+    topology & trails module — site listing and device graph (P1), neighbour expansion (P1),
+    site-boundary attribution (P1), type-icon rendering (P1). The exact endpoint paths,
+    response shapes, and pagination are confirmed against the Topology Service's published
+    OpenAPI 3.1 spec (already published: `services/topology/openapi.json`); the web-ui builds
+    its typed client and mock against that spec. (See Open question 1 for any shape gaps.)
   - **Trail Builder — trail-viz API:** `listTrails(snapshotId)`, `getTrail(trailId)`,
     `getTrailsForObject(managedObjectId)`. Used by the topology & trails module to overlay
     clusters and highlight per-device trail membership (P1, P2 passive reference).
@@ -381,7 +474,7 @@ service APIs directly.
     (P2). Built against the Noise Filter's published OpenAPI 3.1. Exact endpoint path,
     query-parameter names, and pagination are design-stage on the Noise Filter side (see Open
     question 7).
-- **Integration points (mock vs. real):** each of the nine integration points above is
+- **Integration points (mock vs. real):** each of the ten integration points above is
   independently configured via Angular environments (base URL per service + mock/real toggle).
   Unit/component tests use mocks or stubs generated from the collaborator's published OpenAPI
   3.1 spec (no live dependency). Integration tests point at the real service on the Docker
@@ -404,7 +497,10 @@ service APIs directly.
   in application source. Environment files are populated from Docker Compose environment
   variables at build or serve time. The **streaming-view refresh interval** is an Angular
   environment/config value (e.g. `STREAMING_REFRESH_INTERVAL_MS`; default 3000 ms); it is
-  operator-adjustable in the UI at runtime.
+  operator-adjustable in the UI at runtime. The **topology node cap** (maximum number of
+  device nodes in the rendered graph before expansion is refused) is an Angular environment/
+  config value (e.g. `TOPOLOGY_NODE_CAP`; no hard-coded threshold in source); the designer
+  chooses a sensible default at design time.
 - **Deep-linkable routes:** all entity-specific views (incident-detail, topology-site,
   pattern-detail) carry the entity ID in the Angular route URL. Deep links are shareable and
   survive browser refresh. Routes include at minimum: `/` or `/dashboard` (landing),
@@ -445,8 +541,13 @@ service APIs directly.
   (Cytoscape.js) must remain responsive for topologies up to the maximum configured size. The
   streaming view's delta-render must not re-render the full list on each poll — only changed
   items are updated.
-- **Licenses:** all runtime dependencies must carry permissive licenses (MIT, Apache-2.0, BSD,
-  PostgreSQL). No GPL, AGPL, BSL, or source-available components.
+- **Licenses and offline requirement:** all runtime dependencies must carry permissive licenses
+  (MIT, Apache-2.0, BSD, PostgreSQL). No GPL, AGPL, BSL, or source-available components. The
+  application is **offline-only**: every asset — including the geo basemap tiles, network-
+  element type icons, and any graph/map rendering library — must be **bundled within the
+  application build** and must not fetch from any CDN or external URL at runtime. This mirrors
+  the existing basemap-offline constraint and extends it to type icons and any new visual
+  assets introduced by the topology enhancements.
 - **Test frameworks (do not substitute):** unit/component tests use **Vitest + Angular TestBed**
   (jsdom, mock backends). E2E tests use **Playwright** (real browser, against the integration
   stack). Playwright is E2E only — never the unit-test runner.
@@ -694,23 +795,23 @@ service APIs directly.
 
 ### Cross-cutting
 
-50. Given the application is built with mock environment configuration, all nine integration
-    points (Topology site query + objects-at-site + graph/geometry, Trail Builder, Pattern
-    Manager read, Pattern Manager approval-intent, Knowledge, Correlation Engine, Alarm Manager,
-    Noise Filter) resolve to mock/stub handlers and no real HTTP call is made. (Vitest/TestBed —
-    environment-switch test per integration point)
+50. Given the application is built with mock environment configuration, all ten integration
+    points (Topology site query + objects-at-site + neighbours + traversal, Trail Builder,
+    Pattern Manager read, Pattern Manager approval-intent, Knowledge, Correlation Engine, Alarm
+    Manager, Noise Filter) resolve to mock/stub handlers and no real HTTP call is made.
+    (Vitest/TestBed — environment-switch test per integration point)
 
-51. Given the application is built with integration environment configuration, all nine
+51. Given the application is built with integration environment configuration, all ten
     integration point base URLs are resolved from environment variables with no URL literal in
     application source. (Build-time check: no hard-coded http://localhost or service hostname
     appears in non-environment source files)
 
 52. Given the main interactive views (landing dashboard, streaming view, geo-site topology,
-    site-level device graph, pattern list, config form, stats dashboard, alarm-lifecycle view,
-    incident-detail page, noise-stats view), keyboard navigation cycles through all interactive
-    elements without a mouse, and all graph/map canvas elements carry an ARIA label.
-    (Vitest/TestBed accessibility test using axe-core or equivalent; at least one criterion
-    per view)
+    site-level device graph including zoom controls and expand actions, trail-detail panel,
+    pattern list, config form, stats dashboard, alarm-lifecycle view, incident-detail page,
+    noise-stats view), keyboard navigation cycles through all interactive elements without a
+    mouse, and all graph/map canvas elements carry an ARIA label. (Vitest/TestBed
+    accessibility test using axe-core or equivalent; at least one criterion per view)
 
 53. Given any single backend integration point returns a 5xx error, the affected module
     displays a structured error message identifying the service and does not crash other
@@ -722,6 +823,148 @@ service APIs directly.
     reflects the returned edited pattern. The edit action is offered only for `draft` patterns.
     (Vitest/TestBed — mock Pattern Manager pattern-edit API)
 
+### Explorable topology — neighbour expansion (P1)
+
+55. Given a device node is rendered in the site-level device graph, the operator triggers
+    expand on that node; the application calls
+    `GET /topology/nodes/{managedObjectId}/neighbors` with that node's `managedObjectId`;
+    each `NodeDto` in the returned `NeighborsDto.neighbors` that is not already in the graph
+    is added as a new node, and each corresponding `EdgeDto` connecting existing or newly
+    added nodes is added as a new edge. (Vitest/TestBed — mock neighbours API returning a
+    fixture with two neighbours; verify both nodes and the connecting edges appear in the
+    rendered graph)
+
+56. Given a device node is expanded and all of its neighbours are already present in the
+    graph, re-triggering the expand action on that node does not add any duplicate nodes or
+    edges; the rendered node count remains unchanged. (Vitest/TestBed — mock neighbours
+    response returning the same `managedObjectId` values as nodes already in the graph;
+    verify node count before and after re-expand)
+
+57. Given the current rendered graph contains a number of nodes equal to the configured node
+    cap (`TOPOLOGY_NODE_CAP`), attempting to expand a device whose neighbours would add at
+    least one new node causes the expansion to be rejected; no new nodes are added to the
+    graph and a visible error or feedback message is displayed to the operator.
+    (Vitest/TestBed — mock neighbours API returning one unseen node; set node count fixture
+    to cap value; verify node count unchanged and feedback message present)
+
+58. Given the `crossDomain` opt-in is active (e.g. a UI toggle for cross-domain expand),
+    expanding a device calls `GET /topology/nodes/{managedObjectId}/neighbors` with query
+    parameter `crossDomain=true`; when the opt-in is inactive the parameter is omitted (or
+    `false`). (Vitest/TestBed — mock neighbours API; verify `crossDomain` query param value
+    in the captured request under each opt-in state)
+
+59. Given the Playwright E2E suite runs against the integration stack with the synthetic Core
+    IP topology loaded, the operator expands a device node and at least one neighbour node
+    with its connecting edge appears in the rendered graph without a page reload.
+    (Playwright E2E)
+
+### Explorable topology — site boundaries (P1)
+
+60. Given a device graph rendered from the objects-at-site response for a single site, every
+    rendered device node is enclosed within a visual boundary group labelled with that site's
+    name. (Vitest/TestBed — mock objects-at-site fixture returning nodes all attributed to
+    one `siteId`; verify a single site-boundary group element exists with the site name label)
+
+61. Given a device graph that contains devices from two distinct sites (e.g. after a
+    cross-site neighbour expansion), the rendered graph shows exactly two distinct site-
+    boundary groups each labelled with its respective site name; no device is ungrouped.
+    (Vitest/TestBed — mock returning nodes with two different `siteId` values; verify two
+    site-boundary group elements)
+
+62. Given the Playwright E2E suite triggers a cross-site neighbour expansion against the
+    integration stack and the expanded subgraph contains devices from a second site, the
+    rendered graph shows at least two distinct, labelled site-boundary groups.
+    (Playwright E2E)
+
+### Trail navigation and explode (P1)
+
+63. Given a trail is selected (e.g. the operator clicks a trail overlay or a trail list
+    entry), the application calls `GET /trails/{trailId}` on the Trail Builder API; every
+    `managedObjectId` in the returned `TrailDetail.members` that is present in the rendered
+    graph receives a distinct visual highlight that is absent from non-member nodes.
+    (Vitest/TestBed — mock `GET /trails/{trailId}` returning a `TrailDetail` with three
+    members; render a graph containing all three plus at least one non-member; verify
+    highlight applied to all three and not to the non-member)
+
+64. Given a selected trail whose `TrailDetail.members` includes a device belonging to a site
+    not currently rendered in the graph, the application fetches and adds that site's device
+    subgraph so the member device becomes visible; after the fetch the device is present in
+    the rendered graph and receives the trail-member highlight. (Vitest/TestBed — mock
+    `GET /trails/{trailId}` with a member whose `managedObjectId` is absent from the current
+    graph; mock the objects-at-site response for the member's site; verify the member node
+    appears and is highlighted)
+
+65. Given a trail is selected, the trail-detail panel is rendered and displays `trailId`,
+    `igpArea` (or a null/absent indicator if `null`), `srlgGroup` (or a null/absent
+    indicator if `null`), and the list of `members` each showing its `managedObjectId`.
+    (Vitest/TestBed — mock `TrailDetail` fixture with both `igpArea` and `srlgGroup`
+    populated; verify each field is rendered in the panel)
+
+66. Given a trail-detail panel is rendered, activating (clicking/pressing Enter on) a member
+    `managedObjectId` in the members list selects that device node in the device graph (e.g.
+    the node receives the selected-device visual state). (Vitest/TestBed — panel member
+    interaction test; verify the graph's selected-node state changes to the activated member)
+
+67. Given a trail is selected and the operator activates the clear-trail-selection action,
+    the trail-member highlights are removed from all nodes; nodes and edges that were added
+    to the graph to show the trail span remain in the graph (they are not removed on clear).
+    (Vitest/TestBed — verify zero nodes carry the trail-highlight class after clear; verify
+    node count is not reduced to pre-explode count)
+
+68. Given a device is selected and then a trail is also selected, both states are active
+    simultaneously: the device's trail-membership highlights (from `getTrailsForObject`)
+    remain visible alongside the trail-selection highlights from `getTrail`. (Vitest/TestBed
+    — mock both `getTrailsForObject` and `getTrail`; verify both sets of highlights are
+    present when both selections are active)
+
+69. Given the Playwright E2E suite selects a trail from the trail list in the topology view
+    against the integration stack, all member devices visible in the graph receive a trail-
+    highlight and the trail-detail panel renders `trailId`, `igpArea`, and `srlgGroup`.
+    (Playwright E2E)
+
+### Network-element type icons (P1)
+
+70. Given a device node rendered in the site-level graph whose `NodeDto.objectType` is one of
+    the Core IP types (`Node`, `LineCard`, `Port`, `Interface`, `FiberSpan`, `IPLink`,
+    `IGPAdjacency`, `LSP`, `VPNService`, `SRLG`), the rendered node carries the icon
+    corresponding to that `objectType`. (Vitest/TestBed — render a fixture node for each
+    objectType; verify the correct icon class or `data-icon` attribute for each)
+
+71. Given a device node whose `NodeDto.objectType` is a value not in the known Core IP set
+    (e.g. `"UnknownFutureThing"`), the node is rendered with the generic fallback icon and
+    is not hidden or unrendered. (Vitest/TestBed — render a fixture node with an unrecognised
+    `objectType`; verify the node element exists in the DOM and carries the generic icon
+    indicator)
+
+72. Given the application is served from an offline environment with no internet access, all
+    device-type icon assets are loaded from the application bundle (no network request to an
+    external domain for any icon). (Vitest/TestBed — intercept network requests during
+    component render; verify zero requests to external hostnames for icon assets)
+
+### Zoom and pan controls (P1)
+
+73. Given the device graph is rendered and the operator activates the zoom-in control, the
+    graph's zoom level increases; activating zoom-out decreases it; activating fit-to-viewport
+    sets the zoom so all current nodes are visible; activating reset returns zoom and pan to
+    the initial default. (Vitest/TestBed — Cytoscape.js mock or spy; verify
+    `zoom()`/`fit()`/`reset()` or equivalent method is called in response to each control
+    interaction)
+
+74. Given the geo map is rendered and the operator activates the map zoom-in control, the
+    map's zoom level increases; activating zoom-out decreases it; activating fit-to-viewport
+    adjusts the map bounds to contain all site markers; activating reset returns zoom and
+    centre to the initial default. (Vitest/TestBed — MapLibre GL mock or spy; verify the
+    appropriate zoom/fit method is called for each control)
+
+75. Given the zoom controls on the device graph, each control (zoom in, zoom out, fit,
+    reset) is reachable and activatable via keyboard alone (Tab focus + Enter/Space). No
+    mouse interaction is required. (Vitest/TestBed — axe-core ARIA test + keyboard-navigation
+    component test verifying focusability and activation of each button)
+
+76. Given the Playwright E2E suite navigates to the site-level device graph and activates the
+    zoom-in control, the rendered graph's visual zoom level is demonstrably increased (e.g.
+    the graph viewport scale is larger). (Playwright E2E)
+
 ## Open questions
 
 The items below are **design-stage integration dependencies** — inherent to contract-first
@@ -731,24 +974,34 @@ approved. These are tracked dependencies, not spec blockers. Mock clients are ge
 design time once the producer publishes their OpenAPI 3.1.
 
 1. **[DESIGN-STAGE] Topology Service site query API and objects-at-site API shape** (see also
-   issue #60 for the graph/geometry API).
-   The web-ui builds its typed client and mock fixture for the Topology Service site-level
-   integration points — `GET /topology/sites` (list sites with geo attributes) and the
-   objects-at-site query (nodes/edges at a site, with `attributes` map) — against the Topology
-   Service's published OpenAPI. The exact endpoint paths, response envelope, geo-coordinate
-   field names, `attributes` map key set, and pagination are determined when the Topology
-   Service spec and design are authored. The Topology Service designer should confirm that:
-   (a) the site listing endpoint returns each site's geo attributes (name, latitude, longitude,
-   region); (b) the objects-at-site endpoint returns node/edge `attributes` alongside
-   `managedObjectId`; (c) the existing graph/geometry API (issue #60) is extended or
-   supplemented to support site-scoped queries. If coordinates are absent from the Site node
-   response, a fallback layout strategy (force-directed or fixed) must be defined.
+   issue #60 for the graph/geometry API). The Topology Service's published OpenAPI
+   (`services/topology/openapi.json`) is now available and confirms: `GET /topology/sites`
+   (returning `SiteListDto` with `SiteDto` items carrying `siteId`, `name`, `latitude`,
+   `longitude`, `region`); `GET /topology/sites/{siteId}/objects` (returning `SiteObjectsDto`
+   with node and edge arrays); `GET /topology/nodes/{managedObjectId}/neighbors` (returning
+   `NeighborsDto`); `GET /topology/traversal` (returning `TraversalDto`). The web-ui builds
+   its typed client and mock against this published OpenAPI.
+   **Remaining design-stage item:** the `NodeDto` schema does not carry an explicit `siteId`
+   field — `SiteObjectsDto` returns nodes for a given site, so `siteId` is known from the
+   fetch context. For nodes added by neighbour expansion, the site association must be
+   inferred from the expansion context (the starting node's `siteId`) or retrieved by a
+   follow-up objects-at-site query. The designer must specify how `siteId` is propagated to
+   neighbour-expanded nodes so site-boundary grouping remains correct. **If a new field or
+   endpoint is required to carry `siteId` on expanded nodes, that is a contract change
+   requiring architecture.md update and human approval — it must not be silently added.**
+   (See also Open question 11 below.)
 
-2. **[DESIGN-STAGE] Trail Builder trail-viz API shape** (issue #61).
-   The web-ui builds its typed client and mock for `listTrails(snapshotId)`, `getTrail(trailId)`,
-   and `getTrailsForObject(managedObjectId)` against the Trail Builder's published OpenAPI.
-   Pagination, field names, and trail geometry/member format are determined when the Trail
-   Builder spec and design are authored.
+2. **[DESIGN-STAGE] Trail Builder trail-viz API shape** (issue #61). The Trail Builder's
+   published OpenAPI (`services/trail-builder/openapi.json`) is now available and confirms:
+   `GET /trails` (`listTrails`, requiring `snapshotId` + `domain`); `GET /trails/{trailId}`
+   (`getTrail`, returning `TrailDetail` with `trailId`, `domain`, `snapshotId`, `members[]`
+   of `TrailMember` (`managedObjectId`, `objectType`), `memberCount`, `igpArea`?, `srlgGroup`?);
+   `GET /trails/by-object` (`getTrailsForObject`, returning `TrailsForObjectResponse` with
+   `trailIds[]`). The web-ui builds its typed client and mock against this published OpenAPI.
+   No shape gaps remain for the trail-navigation/explode feature. (The `domain` parameter
+   required by `listTrails` and `getTrailsForObject` is a design-stage wiring concern — the
+   designer must specify how the active domain is resolved in the UI, e.g. from a config
+   value or from the loaded snapshot.)
 
 3. **[DESIGN-STAGE] Pattern Manager read API and approval-intent API shapes** (issue #62).
    The web-ui builds its typed clients for pattern listing (with XAI fields, lifecycle state,
@@ -821,3 +1074,28 @@ design time once the producer publishes their OpenAPI 3.1.
     default, the designer may adjust the env-default value in `environment.ts`; this is not a
     contract change. If adjusting the default requires changes to Alarm Manager or Correlation
     Engine query-rate handling, that is a contract gap requiring human resolution.
+
+11. **[HUMAN DECISION REQUIRED] Site attribution for neighbour-expanded nodes.**
+    The Topology Service `NodeDto` schema (published `services/topology/openapi.json`) does not
+    carry a `siteId` field directly. Nodes fetched by `GET /topology/sites/{siteId}/objects`
+    are attributed to their site by fetch context. Nodes fetched by the neighbours query
+    (`GET /topology/nodes/{managedObjectId}/neighbors`) may belong to a different site — but
+    `NeighborsDto` and `NodeDto` carry no `siteId`. The site-boundary grouping AC (AC 61)
+    requires that nodes added by expansion are attributed to their correct site. Three
+    resolution options exist: (a) rely on a follow-up `GET /topology/nodes/{id}` or
+    objects-at-site call to determine the site of each expanded node — no contract change;
+    (b) add `siteId` to `NodeDto` in the Topology Service — a contract change to
+    `architecture.md` + `services/topology/openapi.json` requiring human approval; (c) the
+    designer specifies an alternative attribution strategy using the existing API surface (e.g.
+    inferring from the `SiteObjectsDto` cache). **This spec does not resolve the choice — it
+    is a human decision.** The designer must not silently add a new field; if option (b) is
+    chosen a contract-change PR must be opened before the design proceeds.
+
+12. **[DESIGN-STAGE] Node-cap default value and expansion UX.**
+    The spec requires a configurable `TOPOLOGY_NODE_CAP` and specifies that expansion is
+    rejected when the cap would be exceeded, with operator-visible feedback. The default cap
+    value and the exact UX for the feedback (toast, inline message, disabled expand button
+    with tooltip, etc.) are design-stage decisions. The designer chooses a default that
+    balances usability and browser rendering performance for the expected synthetic topology
+    size; this is not a contract change. If the integration tests reveal performance issues at
+    the chosen default, the designer adjusts the env default without a spec change.
