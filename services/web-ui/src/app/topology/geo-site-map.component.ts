@@ -66,12 +66,26 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       <span class="status-item status-total" data-testid="status-total">{{ statusCounts().total }} sites</span>
     </div>
 
-    <div
-      #mapEl
-      class="geo-map"
-      role="application"
-      aria-label="Geographic map of network sites over a UK and Europe basemap. Each site is selectable below."
-    ></div>
+    <div class="map-wrap">
+      <div
+        #mapEl
+        class="geo-map"
+        role="application"
+        aria-label="Geographic map of network sites over a UK and Europe basemap. Each site is selectable below."
+      ></div>
+
+      <!-- Explicit zoom / fit / reset controls (operator-driven, keyboard-reachable). MapLibre's
+           NavigationControl provides zoom-in/out too; these mirror the device-graph controls and add
+           fit-to-sites + reset-to-default so both canvases offer the same affordances (AC 74/75). -->
+      <div class="map-controls" role="group" aria-label="Map zoom controls">
+        <button type="button" data-testid="map-zoom-in" aria-label="Zoom in" (click)="mapZoomIn()">+</button>
+        <button type="button" data-testid="map-zoom-out" aria-label="Zoom out" (click)="mapZoomOut()">−</button>
+        <button type="button" data-testid="map-zoom-fit" aria-label="Fit to all sites" (click)="mapFit()">Fit</button>
+        <button type="button" data-testid="map-zoom-reset" aria-label="Reset map to default view" (click)="mapReset()">
+          Reset
+        </button>
+      </div>
+    </div>
 
     @if (store.sitesLoading()) {
       <p aria-busy="true">Loading sites…</p>
@@ -136,14 +150,46 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       .dot-monitored {
         background: var(--ok);
       }
+      .map-wrap {
+        position: relative;
+        margin-bottom: 1rem;
+      }
       .geo-map {
         height: 360px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: #0b1220;
-        margin-bottom: 1rem;
         position: relative;
         overflow: hidden;
+      }
+      .map-controls {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        z-index: 2;
+      }
+      .map-controls button {
+        width: 2rem;
+        height: 2rem;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text);
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.9rem;
+        line-height: 1;
+      }
+      .map-controls button[data-testid='map-zoom-fit'],
+      .map-controls button[data-testid='map-zoom-reset'] {
+        width: auto;
+        padding: 0 0.4rem;
+        font-size: 0.7rem;
+      }
+      .map-controls button:hover {
+        border-color: var(--accent);
       }
       .site-markers {
         list-style: none;
@@ -358,6 +404,34 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     } catch {
       return false;
     }
+  }
+
+  // ── Map zoom / fit / reset controls ───────────────────────────────────────────────────────────
+  /** Zoom the map in one step (no-op until the real map exists, e.g. in jsdom unit tests). */
+  mapZoomIn(): void {
+    this.map?.zoomIn();
+  }
+  /** Zoom the map out one step. */
+  mapZoomOut(): void {
+    this.map?.zoomOut();
+  }
+  /** Fit the viewport to the extent of all current sites (the same bounds used on first load). */
+  mapFit(): void {
+    this.map?.fitBounds(this.siteExtent(), { padding: 40, animate: false });
+  }
+  /** Reset zoom + centre to the initial default (re-fit to the site extent / UK-EU fallback). */
+  mapReset(): void {
+    this.map?.fitBounds(this.siteExtent(), { padding: 40, animate: false });
+  }
+
+  /**
+   * TEST-ONLY hook: inject a stubbed MapLibre map so the zoom/fit/reset handlers (AC 74) can be
+   * exercised under jsdom where the real WebGL map is never constructed. Production code never calls
+   * this — the real map is built in ngAfterViewInit. Kept narrow so the approved render path is
+   * unchanged.
+   */
+  setMapForTest(map: MlMap): void {
+    this.map = map;
   }
 
   select(siteId: string): void {

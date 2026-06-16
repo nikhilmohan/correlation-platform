@@ -1092,6 +1092,16 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     return this.cy ? Math.round(this.cy.zoom() * 1000) / 1000 : 1;
   }
 
+  /**
+   * TEST-ONLY hook: inject a stubbed Cytoscape core so the zoom/fit/reset handlers (AC 73) can be
+   * exercised under jsdom where the real Cytoscape canvas is never constructed (no WebGL). Production
+   * code never calls this — the real `cy` is built in ngAfterViewInit. Kept narrow and explicit so
+   * the approved render path is unchanged.
+   */
+  setCyForTest(cy: CyCore): void {
+    this.cy = cy;
+  }
+
   // ── Site colour ordering ─────────────────────────────────────────────────────────────────────
   /** Assign / reuse a stable index for each site id so colours don't shuffle as the graph grows. */
   private assignSiteOrder(siteIds: readonly string[]): Map<string, number> {
