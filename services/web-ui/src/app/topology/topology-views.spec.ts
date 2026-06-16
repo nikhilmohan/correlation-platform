@@ -1,10 +1,11 @@
 import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { testProviders, flush } from '../../test-utils';
 import { GeoSiteMapComponent } from './geo-site-map.component';
 import { SiteGraphComponent } from './site-graph.component';
 import { TopologyStore } from './topology.store';
+import { NavigationService } from '../core/navigation.service';
 
 /**
  * Real-UI render tests for the two graphical topology views (AC 26-33, AC 52). In jsdom there is
@@ -64,6 +65,36 @@ describe('GeoSiteMapComponent — real-UI render (AC 26, AC 52)', () => {
     const fixture = await mountGeo();
     expect(fixture.componentInstance.mapInitAttempted).toBe(true);
   });
+
+  it('siteStatusFor() is the P3 hook — every P1 site (no severity in SiteDto) is "monitored"', async () => {
+    const fixture = await mountGeo();
+    const store = TestBed.inject(TopologyStore);
+    expect(store.sites().length).toBeGreaterThanOrEqual(1);
+    for (const site of store.sites()) {
+      expect(fixture.componentInstance.siteStatusFor(site)).toBe('monitored');
+    }
+  });
+
+  it('statusCounts() — Monitored == site count, Fault/Warning == 0, total == site count', async () => {
+    const fixture = await mountGeo();
+    const store = TestBed.inject(TopologyStore);
+    const counts = fixture.componentInstance.statusCounts();
+    expect(counts.monitored).toBe(store.sites().length);
+    expect(counts.fault).toBe(0);
+    expect(counts.warning).toBe(0);
+    expect(counts.total).toBe(store.sites().length);
+  });
+
+  it('status bar renders the status WORD (not colour-only) in each item — WCAG 1.4.1', async () => {
+    const fixture = await mountGeo();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="status-fault"]')?.textContent).toMatch(/Fault:\s*0/);
+    expect(el.querySelector('[data-testid="status-warning"]')?.textContent).toMatch(/Warning:\s*0/);
+    expect(el.querySelector('[data-testid="status-monitored"]')?.textContent).toMatch(/Monitored:\s*\d+/);
+    // Each accessible site marker's aria-label carries the status word (not colour-only).
+    const marker = el.querySelector('[data-testid="site-marker"]');
+    expect(marker?.getAttribute('aria-label')).toMatch(/Status: Monitored/);
+  });
 });
 
 describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => {
@@ -100,6 +131,30 @@ describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => 
   it('the guarded Cytoscape real-render path executes (cyInitAttempted)', async () => {
     const fixture = await mountSiteGraph();
     expect(fixture.componentInstance.cyInitAttempted).toBe(true);
+  });
+
+  it('renders a geo→topology breadcrumb that navigates back via NavigationService', async () => {
+    const fixture = await mountSiteGraph('Site:LON');
+    const el: HTMLElement = fixture.nativeElement;
+    const crumb = el.querySelector('[data-testid="breadcrumb-topology"]') as HTMLButtonElement | null;
+    expect(crumb).not.toBeNull();
+    expect(crumb?.textContent).toMatch(/Topology/);
+    expect(el.querySelector('.crumb-current')?.textContent).toMatch(/Site: Site:LON/);
+
+    const nav = TestBed.inject(NavigationService);
+    const spy = vi.spyOn(nav, 'toTopology').mockResolvedValue(true);
+    crumb?.click();
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders a layer legend with the five toggleable layers as text (not colour-only)', async () => {
+    const fixture = await mountSiteGraph();
+    const legend = fixture.nativeElement.querySelector('.layer-legend') as HTMLElement | null;
+    expect(legend).not.toBeNull();
+    const text = legend?.textContent ?? '';
+    for (const layer of ['fiber', 'IP', 'IGP', 'LSP', 'service']) {
+      expect(text).toContain(layer);
+    }
   });
 
   // ── #253 load/render lifecycle — the device graph reliably reaches a rendered state, no race ──
