@@ -229,9 +229,9 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("VPNService:v1", "VPNService", "core-ip"),
         ],
         "edges": [
-            {"source": "FiberSpan:f1", "target": "IPLink:l1", "relation": "RIDES_ON"},
-            {"source": "IPLink:l1", "target": "LSP:s1", "relation": "TRAVERSES"},
-            {"source": "LSP:s1", "target": "VPNService:v1", "relation": "SERVES"},
+            {"from": "FiberSpan:f1", "to": "IPLink:l1", "relation": "RIDES_ON"},
+            {"from": "IPLink:l1", "to": "LSP:s1", "relation": "TRAVERSES"},
+            {"from": "LSP:s1", "to": "VPNService:v1", "relation": "SERVES"},
         ],
     },
     # Interface cascade: i1 TERMINATES l1, i1 ADJACENCY_OVER a1, l1 TRAVERSES s1, s1 SERVES v1
@@ -243,10 +243,10 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("VPNService:v1", "VPNService", "core-ip"),
         ],
         "edges": [
-            {"source": "Interface:i1", "target": "IPLink:l1", "relation": "TERMINATES"},
-            {"source": "Interface:i1", "target": "IGPAdjacency:a1", "relation": "ADJACENCY_OVER"},
-            {"source": "IPLink:l1", "target": "LSP:s1", "relation": "TRAVERSES"},
-            {"source": "LSP:s1", "target": "VPNService:v1", "relation": "SERVES"},
+            {"from": "Interface:i1", "to": "IPLink:l1", "relation": "TERMINATES"},
+            {"from": "Interface:i1", "to": "IGPAdjacency:a1", "relation": "ADJACENCY_OVER"},
+            {"from": "IPLink:l1", "to": "LSP:s1", "relation": "TRAVERSES"},
+            {"from": "LSP:s1", "to": "VPNService:v1", "relation": "SERVES"},
         ],
     },
     # Port fault: p1 HOSTS i1, then i1's interface cascade (TERMINATES l1)
@@ -256,8 +256,8 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("IPLink:l1", "IPLink", "core-ip"),
         ],
         "edges": [
-            {"source": "Port:p1", "target": "Interface:i1", "relation": "HOSTS"},
-            {"source": "Interface:i1", "target": "IPLink:l1", "relation": "TERMINATES"},
+            {"from": "Port:p1", "to": "Interface:i1", "relation": "HOSTS"},
+            {"from": "Interface:i1", "to": "IPLink:l1", "relation": "TERMINATES"},
         ],
     },
     # Line-card fault: c1 HOSTED_ON p1 and p2 (two ports), each HOSTS an interface
@@ -269,10 +269,10 @@ CORE_IP_CLOSURES: dict[str, dict] = {
             _node("Interface:i2", "Interface", "core-ip"),
         ],
         "edges": [
-            {"source": "LineCard:c1", "target": "Port:p1", "relation": "HOSTED_ON"},
-            {"source": "LineCard:c1", "target": "Port:p2", "relation": "HOSTED_ON"},
-            {"source": "Port:p1", "target": "Interface:i1", "relation": "HOSTS"},
-            {"source": "Port:p2", "target": "Interface:i2", "relation": "HOSTS"},
+            {"from": "LineCard:c1", "to": "Port:p1", "relation": "HOSTED_ON"},
+            {"from": "LineCard:c1", "to": "Port:p2", "relation": "HOSTED_ON"},
+            {"from": "Port:p1", "to": "Interface:i1", "relation": "HOSTS"},
+            {"from": "Port:p2", "to": "Interface:i2", "relation": "HOSTS"},
         ],
     },
 }
@@ -283,7 +283,7 @@ TRANSPORT_NODES: dict[str, list[dict]] = {
 TRANSPORT_CLOSURES: dict[str, dict] = {
     "OpticalAmp:o1": {
         "reached": [_node("OpticalChannel:ch1", "OpticalChannel", "transport")],
-        "edges": [{"source": "OpticalAmp:o1", "target": "OpticalChannel:ch1", "relation": "FEEDS"}],
+        "edges": [{"from": "OpticalAmp:o1", "to": "OpticalChannel:ch1", "relation": "FEEDS"}],
     },
 }
 

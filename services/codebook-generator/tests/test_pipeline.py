@@ -207,9 +207,7 @@ def test_vocabulary_violation_routes_trigger_to_dlq(
                             "domain": "core-ip",
                         }
                     ],
-                    "edges": [
-                        {"source": "FiberSpan:f1", "target": "IPLink:l1", "relation": "RIDES_ON"}
-                    ],
+                    "edges": [{"from": "FiberSpan:f1", "to": "IPLink:l1", "relation": "RIDES_ON"}],
                 },
             )
         if path == "/trails/by-object":
