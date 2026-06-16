@@ -1,0 +1,80 @@
+# Topology Service — config from env only (no hard-coded URLs, credentials, or thresholds).
+# All ${ENV:default} bindings; the NebulaGraph + PostgreSQL configs are internal-only and never
+# forwarded to callers.
+server:
+  port: ${TOPOLOGY_PORT:8080}
+
+spring:
+  application:
+    name: topology
+  datasource:
+    url: ${TOPOLOGY_POSTGRES_JDBC_URL:jdbc:postgresql://localhost:5432/correlation}
+    username: ${TOPOLOGY_POSTGRES_USERNAME:correlation}
+    password: ${TOPOLOGY_POSTGRES_PASSWORD:correlation}
+  flyway:
+    enabled: true
+    # The migrations create + target the topology_meta schema only.
+    schemas: topology_meta
+    default-schema: topology_meta
+    create-schemas: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+topology:
+  kafka:
+    bootstrap-servers: ${TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    topic: topology.changed
+    dlq-topic: topology.changed.dlq
+  nebula:
+    hosts: ${TOPOLOGY_NEBULA_HOSTS:localhost:9669}
+    space: ${TOPOLOGY_NEBULA_SPACE:topology}
+    username: ${TOPOLOGY_NEBULA_USERNAME:root}
+    password: ${TOPOLOGY_NEBULA_PASSWORD:nebula}
+    pool-max: ${TOPOLOGY_NEBULA_POOL_MAX:20}
+    pool-min: ${TOPOLOGY_NEBULA_POOL_MIN:2}
+    storaged-host: ${TOPOLOGY_NEBULA_STORAGED_HOST:nebula-storaged:9779}
+    bootstrap-on-startup: ${TOPOLOGY_NEBULA_BOOTSTRAP:true}
+    # Startup-Robustness Standard S1/S2/S5: poll the true-readiness predicates (storaged ONLINE,
+    # space USE-able) on this interval, each bounded by an env-configurable deadline.
+    poll-interval-ms: ${TOPOLOGY_NEBULA_POLL_INTERVAL_MS:1000}
+    storaged-online-deadline-ms: ${TOPOLOGY_NEBULA_STORAGED_ONLINE_DEADLINE_MS:60000}
+    space-usable-deadline-ms: ${TOPOLOGY_NEBULA_SPACE_USABLE_DEADLINE_MS:60000}
+    retry-backoff-ms: ${TOPOLOGY_NEBULA_RETRY_BACKOFF_MS:5000}
+  startup:
+    # Overall self-healing startup deadline (S2/S3): retries stop after this; readiness stays DOWN.
+    deadline-ms: ${TOPOLOGY_STARTUP_DEADLINE_MS:180000}
+  ingest:
+    max-file-bytes: ${TOPOLOGY_INGEST_MAX_FILE_BYTES:10485760}
+  traversal:
+    max-depth: ${TOPOLOGY_TRAVERSAL_MAX_DEPTH:32}
+  snapshot:
+    retention: ${TOPOLOGY_SNAPSHOT_RETENTION:2}
+  knowledge:
+    # REQUIRED — no default; startup fails fast if TOPOLOGY_KNOWLEDGE_BASE_URL is unset.
+    base-url: ${TOPOLOGY_KNOWLEDGE_BASE_URL}
+    mode: ${TOPOLOGY_KNOWLEDGE_MODE:real}
+    vocab-path: ${TOPOLOGY_KNOWLEDGE_VOCAB_PATH:/domains/{domain}/vocabulary}
+    vocab-ttl-seconds: ${TOPOLOGY_KNOWLEDGE_VOCAB_TTL_SECONDS:300}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  metrics:
+    tags:
+      service: topology
+
+springdoc:
+  api-docs:
+    path: /openapi.json
+    # Emit OpenAPI 3.1 (spec requirement); springdoc defaults to 3.0.1 otherwise.
+    version: openapi_3_1
+  swagger-ui:
+    path: /swagger-ui.html

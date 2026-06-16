@@ -1,0 +1,759 @@
+{
+  "openapi" : "3.1.0",
+  "info" : {
+    "title" : "OpenAPI definition",
+    "version" : "v0"
+  },
+  "servers" : [ {
+    "url" : "http://localhost:64443",
+    "description" : "Generated server url"
+  } ],
+  "paths" : {
+    "/topology/snapshots" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "List available snapshots (at least current + previous per domain).",
+        "operationId" : "listSnapshots",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SnapshotListDto"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post" : {
+        "tags" : [ "ingestion-controller" ],
+        "summary" : "Upload a topology snapshot file (synchronous lift; mints snapshotId).",
+        "operationId" : "ingest",
+        "parameters" : [ {
+          "name" : "changeType",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "X-Trace-Id",
+          "in" : "header",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "type" : "string"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "422" : {
+            "description" : "Schema- or semantic-invalid file.",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502" : {
+            "description" : "Domain vocabulary unavailable.",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413" : {
+            "description" : "Body exceeds the max snapshot size.",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "200" : {
+            "description" : "Lifted + persisted; event emitted.",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SnapshotIngestResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/traversal" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "Bounded traversal over one or more edge types up to maxDepth.",
+        "operationId" : "traverse",
+        "parameters" : [ {
+          "name" : "start",
+          "in" : "query",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "relation",
+          "in" : "query",
+          "required" : true,
+          "schema" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          }
+        }, {
+          "name" : "maxDepth",
+          "in" : "query",
+          "required" : true,
+          "schema" : {
+            "maximum" : 32,
+            "minimum" : 1,
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }, {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "snapshotId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "crossDomain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "boolean",
+            "default" : false
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/TraversalDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/snapshots/current" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "Return the current snapshot summary.",
+        "operationId" : "currentSnapshot",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SnapshotSummaryDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/sites" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "List sites with flat geo fields (P1-G7).",
+        "operationId" : "listSites",
+        "parameters" : [ {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "snapshotId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SiteListDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/sites/{siteId}/objects" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "List the nodes AND edges at a site for the device graph (P1-G8).",
+        "operationId" : "objectsAtSite",
+        "parameters" : [ {
+          "name" : "siteId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "snapshotId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/SiteObjectsDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/nodes" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "List nodes, optionally filtered by objectType.",
+        "operationId" : "listNodes",
+        "parameters" : [ {
+          "name" : "objectType",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "snapshotId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/NodeListDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/nodes/{managedObjectId}" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "Resolve a node by managedObjectId (layer == objectType).",
+        "operationId" : "getNode",
+        "parameters" : [ {
+          "name" : "managedObjectId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "snapshotId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/NodeDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/nodes/{managedObjectId}/neighbors" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "Direct neighbors of a node (optionally filtered by relation).",
+        "operationId" : "neighbors",
+        "parameters" : [ {
+          "name" : "managedObjectId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "relation",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          }
+        }, {
+          "name" : "domain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "snapshotId",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "crossDomain",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "boolean",
+            "default" : false
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/NeighborsDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/topology/edges/{edgeId}" : {
+      "get" : {
+        "tags" : [ "query-controller" ],
+        "summary" : "Get an edge by its opaque round-trippable edgeId.",
+        "operationId" : "getEdge",
+        "parameters" : [ {
+          "name" : "edgeId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "application/json" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/EdgeDto"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components" : {
+    "schemas" : {
+      "ApiError" : {
+        "properties" : {
+          "status" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "error" : {
+            "type" : "string"
+          },
+          "message" : {
+            "type" : "string"
+          },
+          "violations" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/Violation"
+            }
+          },
+          "traceId" : {
+            "type" : "string"
+          }
+        }
+      },
+      "Violation" : {
+        "properties" : {
+          "path" : {
+            "type" : "string"
+          },
+          "rule" : {
+            "type" : "string"
+          },
+          "detail" : {
+            "type" : "string"
+          }
+        }
+      },
+      "SnapshotIngestResponse" : {
+        "properties" : {
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "string"
+          },
+          "nodeCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "edgeCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "changeType" : {
+            "type" : "string"
+          }
+        }
+      },
+      "NodeDto" : {
+        "properties" : {
+          "managedObjectId" : {
+            "type" : "string"
+          },
+          "objectType" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "name" : {
+            "type" : "string"
+          },
+          "attributes" : {
+            "type" : "object",
+            "additionalProperties" : { }
+          }
+        }
+      },
+      "TraversalDto" : {
+        "properties" : {
+          "start" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "relations" : {
+            "type" : "array",
+            "items" : {
+              "type" : "string"
+            }
+          },
+          "maxDepth" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "crossDomain" : {
+            "type" : "boolean"
+          },
+          "reached" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/NodeDto"
+            }
+          },
+          "edges" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/EdgeDto"
+            }
+          }
+        }
+      },
+      "SnapshotListDto" : {
+        "properties" : {
+          "snapshots" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SnapshotSummaryDto"
+            }
+          }
+        }
+      },
+      "SnapshotSummaryDto" : {
+        "properties" : {
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "changeType" : {
+            "type" : "string"
+          },
+          "status" : {
+            "type" : "string"
+          },
+          "nodeCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "edgeCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "ingestedAt" : {
+            "type" : "string"
+          }
+        }
+      },
+      "SiteDto" : {
+        "properties" : {
+          "siteId" : {
+            "type" : "string"
+          },
+          "name" : {
+            "type" : "string"
+          },
+          "latitude" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "longitude" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "region" : {
+            "type" : "string"
+          }
+        }
+      },
+      "SiteListDto" : {
+        "properties" : {
+          "domain" : {
+            "type" : "string"
+          },
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "count" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "sites" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SiteDto"
+            }
+          }
+        }
+      },
+      "EdgeDto" : {
+        "properties" : {
+          "edgeId" : {
+            "type" : "string"
+          },
+          "from" : {
+            "type" : "string"
+          },
+          "to" : {
+            "type" : "string"
+          },
+          "relation" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "attributes" : {
+            "type" : "object",
+            "additionalProperties" : { }
+          },
+          "snapshotId" : {
+            "type" : "string"
+          }
+        }
+      },
+      "SiteObjectsDto" : {
+        "properties" : {
+          "siteId" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "nodeCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "edgeCount" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "nodes" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/NodeDto"
+            }
+          },
+          "edges" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/EdgeDto"
+            }
+          }
+        }
+      },
+      "NodeListDto" : {
+        "properties" : {
+          "domain" : {
+            "type" : "string"
+          },
+          "objectType" : {
+            "type" : "string"
+          },
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "count" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "nodes" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/NodeDto"
+            }
+          }
+        }
+      },
+      "Neighbor" : {
+        "properties" : {
+          "node" : {
+            "$ref" : "#/components/schemas/NodeDto"
+          },
+          "via" : {
+            "$ref" : "#/components/schemas/EdgeDto"
+          }
+        }
+      },
+      "NeighborsDto" : {
+        "properties" : {
+          "managedObjectId" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "neighbors" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/Neighbor"
+            }
+          }
+        }
+      }
+    }
+  }
+}

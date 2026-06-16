@@ -1,0 +1,12 @@
+{
+  "domain": "core-ip",
+  "objectTypes": [
+    "Node", "LineCard", "Port", "Interface", "IPLink", "IGPAdjacency",
+    "LSP", "VPNService", "FiberSpan", "SRLG", "Site"
+  ],
+  "relations": [
+    "HOSTED_ON", "HOSTS", "TERMINATES", "RIDES_ON", "ADJACENCY_OVER",
+    "TRAVERSES", "SERVES", "MEMBER_OF", "LOCATED_AT"
+  ],
+  "version": "core-ip-v1"
+}
