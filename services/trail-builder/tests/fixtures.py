@@ -479,6 +479,59 @@ def simulator_coreip_slice(
         s.add_edge(GraphEdge(iplinks[j], srlg, "MEMBER_OF"))
         s.add_edge(GraphEdge(iplinks[j + 1], srlg, "MEMBER_OF"))
 
+    # ------------------------------------------------------------------ #240
+    # Intra-area ACCESS mesh — the shape that exposes the #240 RESIDUAL.
+    #
+    # The real Core-IP topology has many *single-area* access/intra-POP links
+    # (both ends in the SAME area), and some area-less connectors that ride BOTH a
+    # single-area access link AND a genuine cross-area backbone link (an IGP
+    # adjacency / shared transport anchored at one POP that also conducts a
+    # backbone span). Pre-fix, ``_connector_areas`` relayed a *shared anchored*
+    # connector's full accumulated set, so that connector's foreign (backbone)
+    # area back-propagated into the genuinely single-area access link — leaking it
+    # into a foreign area's trail. The pure-consecutive chain above did NOT
+    # reproduce this because role-scatter makes almost every consecutive IPLink
+    # genuinely inter-area (no single-area link to leak). This access mesh adds the
+    # missing single-area connectors plus the shared anchored bridge.
+    #
+    # For each area we pick its same-area member nodes and:
+    #   * add a single-area ACCESS IPLink (+ FiberSpan/IGPAdjacency/LSP riding it)
+    #     between the first two same-area nodes — both ends in that one area;
+    #   * add ONE shared IGPAdjacency anchored to that access link's interface that
+    #     ALSO rides a genuine cross-area backbone IPLink — the back-propagation
+    #     conduit. The access link must stay single-area; pre-fix it leaks.
+    area_to_nodes: dict[str, list[str]] = {}
+    for moid, area in nodes:
+        area_to_nodes.setdefault(area, []).append(moid)
+    cross_links = sorted(genuine_inter_area_iplinks(s))
+    for area_idx, area in enumerate(sorted(area_to_nodes)):
+        members = area_to_nodes[area]
+        if len(members) < 2:
+            continue
+        na, nb = members[0].split(":", 1)[1], members[1].split(":", 1)[1]
+        if_a, if_b = _first_iface(members[0]), _first_iface(members[1])
+        access = f"IPLink:ACC-{na}_{nb}"  # single-area access link (both ends in `area`)
+        _add(access, "IPLink")
+        s.add_edge(GraphEdge(if_a, access, "TERMINATES"))
+        s.add_edge(GraphEdge(if_b, access, "TERMINATES"))
+        afiber = f"FiberSpan:F-ACC-{na}_{nb}"
+        _add(afiber, "FiberSpan")
+        s.add_edge(GraphEdge(afiber, access, "RIDES_ON"))
+        alsp = f"LSP:ACC-{na}-{nb}-1"
+        _add(alsp, "LSP")
+        s.add_edge(GraphEdge(access, alsp, "TRAVERSES"))
+        # Shared anchored IGP adjacency: anchored to the access link's area-bearing
+        # interface AND riding a genuine cross-area backbone link. Its accumulated
+        # set spans `area` + the backbone's foreign area; pre-fix it relays that
+        # foreign area back into the single-area `access` link (the leak).
+        if cross_links:
+            backbone = cross_links[area_idx % len(cross_links)]
+            shared_adj = f"IGPAdjacency:ACC-SHARED-{area}"
+            _add(shared_adj, "IGPAdjacency")
+            s.add_edge(GraphEdge(if_a, shared_adj, "ADJACENCY_OVER"))  # anchored to `area`
+            s.add_edge(GraphEdge(access, shared_adj, "ADJACENCY_OVER"))
+            s.add_edge(GraphEdge(backbone, shared_adj, "ADJACENCY_OVER"))
+
     return s
 
 

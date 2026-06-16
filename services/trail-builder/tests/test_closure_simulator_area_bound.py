@@ -105,6 +105,29 @@ def test_sim_fixture_models_role_based_scattered_backbone() -> None:
         len(genuine) >= 5
     ), f"expected several genuine inter-area backbone links, got {len(genuine)}"
 
+    # (d) GENUINELY SINGLE-AREA access connectors exist AND each sits beside a
+    #     SHARED anchored connector that also rides a cross-area backbone link —
+    #     the exact #240-residual leak path (a single-area connector whose foreign
+    #     area is back-propagated through a shared anchored conductor). Without this
+    #     shape the connector-leak test passes vacuously: the pure consecutive chain
+    #     makes nearly every IPLink genuinely inter-area, so there is no single-area
+    #     connector to leak (which is precisely why the residual shipped).
+    conn = genuine_connector_areas(s)
+    single_area_access = {mo for mo, areas in conn.items() if "ACC-" in mo and len(areas) == 1}
+    assert (
+        len(single_area_access) >= 3
+    ), f"fixture must contain genuinely single-area access connectors, got {single_area_access}"
+    # A shared anchored IGPAdjacency that rides BOTH an access link and a cross-area
+    # backbone link (its genuine area set therefore spans >1 area) — the conductor.
+    shared_bridges = {
+        mo
+        for mo, areas in conn.items()
+        if mo.startswith("IGPAdjacency:ACC-SHARED-") and len(areas) > 1
+    }
+    assert (
+        shared_bridges
+    ), "fixture must contain a shared anchored cross-area conductor beside the access mesh"
+
 
 def test_sim_no_null_area_or_whole_network_trail() -> None:
     """#240 defect (1): NO trail has ``igp_area=None`` and none is whole-network.
@@ -270,6 +293,50 @@ def test_sim_genuine_inter_area_link_rides_both_its_areas() -> None:
         assert (
             term_areas <= seen
         ), f"{link} genuinely spans {sorted(term_areas)} but only appears in {sorted(seen)}"
+
+
+def test_sim_single_area_access_connector_not_back_propagated() -> None:
+    """#240 RESIDUAL: a genuinely SINGLE-area connector must NOT inherit a foreign
+
+    area conducted through a shared anchored neighbour.
+
+    The leak path: a shared IGPAdjacency anchored to an area-``X`` interface ALSO
+    rides a genuine cross-area backbone IPLink, so it legitimately conducts ``{X,
+    Y}``. Pre-fix, ``_connector_areas`` relayed that conductor's FULL accumulated
+    ``{X, Y}`` set back into the single-area (area-``X``) access IPLink it also
+    rides — so the access link appeared in area ``Y``'s trail (a foreign area it
+    never terminates). Post-fix only the conductor's DIRECT anchor areas relay one
+    hop, so the single-area access connector stays in exactly its one area while the
+    conductor still rides both areas it genuinely conducts.
+
+    Pre-fix (the broadened relay) this FAILS — the ``ACC`` connectors carry a
+    foreign area; post-fix each rides exactly its single genuine area.
+    """
+    s = simulator_coreip_slice(node_count=20, area_count=3)
+    trails = TrailClosure().compute(s, SIM_POLICY)
+    appears = _connector_trail_areas(trails, s)
+    genuine = genuine_connector_areas(s)
+
+    # Single-area access connectors: appear in EXACTLY their one genuine area.
+    single_access = {mo for mo, areas in genuine.items() if "ACC-" in mo and len(areas) == 1}
+    assert len(single_access) >= 3, f"fixture lost its single-area access mesh: {single_access}"
+    for mo in single_access:
+        seen = {a for a in appears.get(mo, set()) if a is not None}
+        assert seen == genuine[mo], (
+            f"single-area access connector {mo} (genuine {sorted(genuine[mo])}) "
+            f"appeared in {sorted(seen)} — foreign-area back-propagation (#240 residual)"
+        )
+
+    # The shared anchored conductor still rides BOTH areas it genuinely conducts
+    # (the fix is not over-pruning the genuine cross-area conductor).
+    conductors = {mo for mo in genuine if mo.startswith("IGPAdjacency:ACC-SHARED-")}
+    assert conductors, "fixture must contain the shared cross-area conductor"
+    for mo in conductors:
+        seen = {a for a in appears.get(mo, set()) if a is not None}
+        assert genuine[mo] <= seen, (
+            f"shared conductor {mo} genuinely conducts {sorted(genuine[mo])} "
+            f"but only appears in {sorted(seen)} — over-pruned"
+        )
 
 
 @pytest.mark.parametrize("node_count", [10, 20, 30])
