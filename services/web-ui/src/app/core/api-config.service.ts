@@ -28,6 +28,11 @@ export class ApiConfigService {
     return this.env.streamingRefreshIntervalMs;
   }
 
+  /** Configurable cap on the accumulating explorer graph (ACs 55-57); default 250. */
+  get topologyNodeCap(): number {
+    return this.env.topologyNodeCap;
+  }
+
   get rcaLabelsEnabled(): boolean {
     return this.env.rcaLabelsEnabled;
   }

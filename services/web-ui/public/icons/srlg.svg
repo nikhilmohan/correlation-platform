@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Shared risk link group">
+  <path d="M12 4l8 14H4L12 4z" fill="#0b1220" stroke="#f59e0b" stroke-width="1.6" stroke-linejoin="round"/>
+  <path d="M12 9v4" stroke="#f59e0b" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="12" cy="15.6" r="1" fill="#f59e0b"/>
+</svg>

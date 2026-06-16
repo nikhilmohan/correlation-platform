@@ -121,6 +121,28 @@ describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => 
     expect(clusters.length).toBe(store.trails().length);
   });
 
+  // ── Explorer affordances: per-node EXPAND buttons + clickable trail BUTTONS ───────────────────
+  it('renders an explicit +expand button for every accessible graph-node (operator-driven expand)', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    const expandBtns = fixture.nativeElement.querySelectorAll('[data-testid="expand-node"]');
+    expect(expandBtns.length).toBe(store.derivedNodes().length);
+    expect(store.derivedNodes().length).toBeGreaterThanOrEqual(1);
+    // They are real <button>s (keyboard-reachable), not list items.
+    expect((expandBtns[0] as HTMLElement).tagName).toBe('BUTTON');
+  });
+
+  it('trail-cluster items are BUTTONS that drive selectTrail (clickable to explode the trail)', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    const clusters = fixture.nativeElement.querySelectorAll('[data-testid="trail-cluster"]');
+    expect(clusters.length).toBeGreaterThanOrEqual(1);
+    expect((clusters[0] as HTMLElement).tagName).toBe('BUTTON');
+    const spy = vi.spyOn(store, 'selectTrail');
+    (clusters[0] as HTMLButtonElement).click();
+    expect(spy).toHaveBeenCalledWith(store.trails()[0].trailId);
+  });
+
   it('AC 52 — the graph canvas is role="application" with a truthy ARIA label', async () => {
     const fixture = await mountSiteGraph();
     const canvas = fixture.nativeElement.querySelector('.cy-canvas');
@@ -162,9 +184,9 @@ describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => 
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
 
-    // Post-load truth: loading cleared and objects populated from the store signal.
+    // Post-load truth: loading cleared and the graph populated from the store signal.
     expect(store.graphLoading()).toBe(false);
-    expect(store.objects()).not.toBeNull();
+    expect(store.hasGraph()).toBe(true);
 
     // The "Loading site graph…" placeholder is removed once loading clears (no permanent Loading state).
     expect(fixture.nativeElement.querySelector('[data-testid="graph-loading"]')).toBeNull();

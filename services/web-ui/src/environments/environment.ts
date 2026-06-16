@@ -19,6 +19,7 @@ interface RuntimeEnvOverlay {
   SIMULATOR_LABELS_API_BASE_URL?: string;
   CODEBOOK_API_BASE_URL?: string;
   STREAMING_REFRESH_INTERVAL_MS?: string;
+  TOPOLOGY_NODE_CAP?: string;
   RCA_LABELS_ENABLED?: string;
   DOMAIN?: string;
   SNAPSHOT_ID?: string;
@@ -52,6 +53,7 @@ export const environment: AppEnvironment = {
   streamingRefreshIntervalMs: o.STREAMING_REFRESH_INTERVAL_MS
     ? Number(o.STREAMING_REFRESH_INTERVAL_MS)
     : 3000,
+  topologyNodeCap: o.TOPOLOGY_NODE_CAP ? Number(o.TOPOLOGY_NODE_CAP) : 250,
   rcaLabelsEnabled: o.RCA_LABELS_ENABLED === 'true',
   domain: o.DOMAIN ?? 'core-ip',
   snapshotId: o.SNAPSHOT_ID ?? 'current',
