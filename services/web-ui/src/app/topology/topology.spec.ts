@@ -1,9 +1,9 @@
 import { TestBed } from '@angular/core/testing';
 import { describe, expect, it } from 'vitest';
-import { Subject, throwError } from 'rxjs';
-import { TopologyStore } from './topology.store';
+import { Subject, of, throwError } from 'rxjs';
+import { TopologyStore, NODE_CAP } from './topology.store';
 import { TopologyClient } from '../api/topology.client';
-import { SiteObjectsDto } from '../api/models';
+import { NeighborsDto, NodeDto, SiteObjectsDto } from '../api/models';
 import { layerForEdge, layerForObjectType, layerForRelation, TOGGLEABLE_LAYERS } from './layer-mapper';
 import { testProviders, flush } from '../../test-utils';
 
@@ -38,11 +38,17 @@ describe('Topology & trails module (P1)', () => {
 
   it('AC 27 — selecting a site loads objects-at-site (nodes AND edges) for that siteId', async () => {
     const s = store();
+    s.loadSites();
+    await flush();
     s.selectSite('Site:LON');
     await flush();
     expect(s.selectedSiteId()).toBe('Site:LON');
-    expect(s.objects()?.nodes.length).toBe(6);
-    expect(s.objects()?.edges.length).toBe(5);
+    expect(s.derivedNodes().length).toBe(6);
+    // 5 typed topology edges + 6 LOCATED_AT placement edges (device→Site) for the compound boxes.
+    expect(s.derivedEdges().length).toBe(11);
+    expect(s.hasGraph()).toBe(true);
+    // nodeSiteMap is populated at root from the LOCATED_AT edges (single site box).
+    expect(s.distinctSiteIds()).toEqual(['Site:LON']);
   });
 
   it('AC 28 — layer is derived from objectType; toggling hides matching edges; all-off shows only nodes', async () => {
@@ -164,16 +170,16 @@ describe('Topology & trails module (P1)', () => {
     const s = TestBed.inject(TopologyStore);
 
     s.selectSite('Site:LON');
-    // In flight: loading is TRUE and objects are cleared — the @if keeps the graph on "Loading…".
+    // In flight: loading is TRUE and the graph is cleared — the @if keeps the graph on "Loading…".
     expect(s.graphLoading()).toBe(true);
-    expect(s.objects()).toBeNull();
+    expect(s.hasGraph()).toBe(false);
 
-    // Response resolves → loading clears deterministically and objects() populates the render.
+    // Response resolves → loading clears deterministically and the graph populates the render.
     subject.next(objectsFor('Site:LON', 'Router:r1'));
     subject.complete();
     await flush();
     expect(s.graphLoading()).toBe(false);
-    expect(s.objects()?.nodes.length).toBe(1);
+    expect(s.derivedNodes().length).toBe(1);
   });
 
   it('graphLoading clears to false even when objects-at-site ERRORS (graph never stays stuck on Loading…)', async () => {
@@ -189,7 +195,7 @@ describe('Topology & trails module (P1)', () => {
     await flush();
     // Error path: catchError emits null, the subscribe callback still runs → loading cleared.
     expect(s.graphLoading()).toBe(false);
-    expect(s.objects()).toBeNull();
+    expect(s.hasGraph()).toBe(false);
   });
 
   it('a stale objects-at-site response for a superseded site does not clobber the current load', async () => {
@@ -213,11 +219,126 @@ describe('Topology & trails module (P1)', () => {
     first.next(objectsFor('Site:A', 'A:1'));
     await flush();
     expect(s.graphLoading()).toBe(true); // still loading B, the stale A response was dropped
-    expect(s.objects()).toBeNull();
+    expect(s.hasGraph()).toBe(false);
 
     second.next(objectsFor('Site:B', 'B:1'));
     await flush();
     expect(s.graphLoading()).toBe(false);
-    expect(s.objects()?.nodes[0].managedObjectId).toBe('B:1');
+    expect(s.derivedNodes()[0].managedObjectId).toBe('B:1');
+  });
+});
+
+describe('Topology EXPLORER — accumulating graph, expand, cross-site trail explode (new behaviour)', () => {
+  it('expandNode merges a node\'s neighbours into the accumulating graph (grows, dedupes overlap)', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const before = s.derivedNodes().length;
+    expect(before).toBe(6);
+
+    s.expandNode('Router:lon-r1'); // pulls Router:fra-r1 (+ Site:FRA container, filtered out)
+    await flush();
+    const after = s.derivedNodes().length;
+    // FAILS on the old single-objects store (no expandNode / no neighbour fan-out): the graph grew.
+    expect(after).toBeGreaterThan(before);
+    expect(s.derivedNodes().map((n) => n.managedObjectId)).toContain('Router:fra-r1');
+    expect(s.expandedNodeIds().has('Router:lon-r1')).toBe(true);
+
+    // Expanding the SAME node again must not duplicate (dedupe by id) — count stays stable.
+    const afterFirst = s.derivedNodes().length;
+    s.expandNode('Router:lon-r1');
+    await flush();
+    expect(s.derivedNodes().length).toBe(afterFirst);
+  });
+
+  it('nodeSiteMap derives device→site from LOCATED_AT; distinct-site count goes 1→2 after cross-site expand', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    // At root: every LON device maps to Site:LON (single box) via the LOCATED_AT placement edges.
+    expect(s.distinctSiteIds()).toEqual(['Site:LON']);
+    expect(s.nodeSiteMap().get('Router:lon-r1')).toBe('Site:LON');
+
+    s.expandNode('Router:lon-r1'); // crosses into Site:FRA (Router:fra-r1 LOCATED_AT Site:FRA)
+    await flush();
+    // FAILS on the old static single-site store: the second site box appears.
+    expect(s.distinctSiteIds().sort()).toEqual(['Site:FRA', 'Site:LON']);
+    expect(s.nodeSiteMap().get('Router:fra-r1')).toBe('Site:FRA');
+  });
+
+  it('selectTrail highlights the FULL member set (not the hollow 1) and explodes cross-site members into the graph', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    // FRA member is NOT in the rooted LON graph yet.
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+
+    s.selectTrail('TR-7'); // members span LON + FRA (memberCount 4)
+    await flush();
+
+    // The full member set lights up — FAILS on the old hollow highlight (only the selected node).
+    expect(s.trailMemberIds().size).toBe(4);
+    expect(s.trailMemberIds().size).toBeGreaterThan(1);
+    expect(s.selectedTrailId()).toBe('TR-7');
+    expect(s.selectedTrailDetail()?.memberCount).toBe(4);
+
+    // EXPLODE: the cross-site member was pulled into the accumulating graph.
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+    expect(s.derivedNodes().map((n) => n.managedObjectId)).toContain('Router:fra-r1');
+
+    // clearTrail drops the selection (keeps exploded nodes).
+    s.clearTrail();
+    expect(s.selectedTrailId()).toBeNull();
+    expect(s.trailMemberIds().size).toBe(0);
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+  });
+
+  it('NODE_CAP is ALL-OR-NOTHING: an overflowing expansion is rejected wholesale (nothing added)', async () => {
+    // Stub a TopologyClient whose neighbours return MORE than NODE_CAP fresh nodes in one merge.
+    const many: NeighborsDto = {
+      managedObjectId: 'seed',
+      domain: 'core-ip',
+      neighbors: Array.from({ length: NODE_CAP + 50 }, (_, i) => ({
+        node: { managedObjectId: `n-${i}`, objectType: 'Router', domain: 'core-ip', snapshotId: 'current', attributes: {} } as NodeDto,
+        via: { edgeId: `ne-${i}`, from: 'seed', to: `n-${i}`, relation: 'ADJACENCY_OVER', domain: 'core-ip', snapshotId: 'current', attributes: {} },
+      })),
+    };
+    const seed: SiteObjectsDto = objectsFor('Site:LON', 'seed');
+    TestBed.configureTestingModule({
+      providers: [
+        ...testProviders(),
+        {
+          provide: TopologyClient,
+          useValue: {
+            listSites: () => of({ domain: 'core-ip', snapshotId: 'current', count: 0, sites: [] }),
+            objectsAtSite: () => of(seed),
+            neighbors: () => of(many),
+          },
+        },
+      ],
+    });
+    const s = TestBed.inject(TopologyStore);
+    s.selectSite('Site:LON');
+    await flush();
+    const before = s.nodeMap().size; // just the seed
+    s.expandNode('seed');
+    await flush();
+
+    expect(s.capReached()).toBe(true);
+    // ALL-OR-NOTHING (AC 57): the whole overflowing expansion is rejected — NOTHING was added, so the
+    // size is UNCHANGED (this FAILS on the old per-node partial-add, which would fill up to the cap).
+    expect(s.nodeMap().size).toBe(before);
+    // The node is not marked expanded because the expansion never applied.
+    expect(s.expandedNodeIds().has('seed')).toBe(false);
+    // A further expand no-ops once capped.
+    s.expandNode('seed');
+    await flush();
+    expect(s.nodeMap().size).toBe(before);
   });
 });

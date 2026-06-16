@@ -29,6 +29,13 @@ export interface AppEnvironment {
   readonly serviceBaseUrls: ServiceBaseUrls;
   /** Default streaming poll interval in ms (operator-adjustable at runtime). */
   readonly streamingRefreshIntervalMs: number;
+  /**
+   * Hard cap on the number of distinct device nodes the accumulating explorer graph will hold
+   * (ACs 55-57). Once an expansion's NEW deduped nodes would push the total over this, the WHOLE
+   * expansion is rejected (all-or-nothing — no partial add) and `capReached` flips true. Default
+   * 250; overridable per deployment via `TOPOLOGY_NODE_CAP` (env.js / Compose). Not a contract change.
+   */
+  readonly topologyNodeCap: number;
   /** Gates the demo/eval Simulator-labels RCA join; off in production. */
   readonly rcaLabelsEnabled: boolean;
   /** Domain scope for topology/trail/knowledge queries (Core IP MVP). */
