@@ -16,6 +16,7 @@ import {
 } from '@angular/core';
 import { TopologyStore } from './topology.store';
 import { ErrorBannerService } from '../core/error-banner.service';
+import { NavigationService } from '../core/navigation.service';
 import { AttributeDetailPanelComponent } from './attribute-detail-panel.component';
 import { LayerToggleComponent } from './layer-toggle.component';
 
@@ -44,6 +45,19 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [AttributeDetailPanelComponent, LayerToggleComponent],
   template: `
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <button
+        type="button"
+        class="crumb-link"
+        data-testid="breadcrumb-topology"
+        (click)="toTopology()"
+      >
+        ‹ Topology &amp; trails
+      </button>
+      <span class="crumb-sep" aria-hidden="true">/</span>
+      <span class="crumb-current" aria-current="page">Site: {{ siteId() }}</span>
+    </nav>
+
     <h1>Site graph — {{ siteId() }}</h1>
     @if (errors.forService('Topology Service'); as err) {
       <div class="error-banner" role="alert">{{ err.message }}</div>
@@ -66,8 +80,18 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
           [attr.data-cy-edge-count]="bridgeEdgeCount()"
           [attr.data-cy-trail-count]="bridgeTrailCount()"
           [attr.data-cy-highlight-count]="highlightCount()"
+          [attr.data-cy-layout-done]="layoutDone()"
+          [attr.data-cy-node-spread]="nodeSpread()"
           aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
         ></div>
+
+        <ul class="layer-legend" aria-label="Graph layer legend">
+          @for (item of LAYER_LEGEND; track item.layer) {
+            <li>
+              <span class="dot" [style.background]="item.color" aria-hidden="true"></span>{{ item.layer }}
+            </li>
+          }
+        </ul>
 
         @if (store.graphLoading()) {
           <p data-testid="graph-loading" aria-busy="true">Loading site graph…</p>
@@ -141,6 +165,30 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
   `,
   styles: [
     `
+      .breadcrumb {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.9rem;
+      }
+      .crumb-link {
+        background: none;
+        border: none;
+        color: var(--accent);
+        cursor: pointer;
+        padding: 0;
+        font: inherit;
+      }
+      .crumb-link:hover {
+        text-decoration: underline;
+      }
+      .crumb-sep {
+        color: var(--text-muted);
+      }
+      .crumb-current {
+        color: var(--text-muted);
+      }
       .layout {
         display: grid;
         grid-template-columns: 2fr 1fr;
@@ -154,6 +202,27 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
         margin-bottom: 0.8rem;
         position: relative;
         overflow: hidden;
+      }
+      .layer-legend {
+        list-style: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        padding: 0;
+        margin: 0 0 0.8rem;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+      }
+      .layer-legend li {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+      .layer-legend .dot {
+        display: inline-block;
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: 50%;
       }
       .obj-list {
         list-style: none;
@@ -208,6 +277,7 @@ import type { Core as CyCore, ElementDefinition } from 'cytoscape';
 export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly store = inject(TopologyStore);
   readonly errors = inject(ErrorBannerService);
+  private readonly nav = inject(NavigationService);
   private readonly zone = inject(NgZone);
 
   /** Route param binding (withComponentInputBinding). */
@@ -218,10 +288,36 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   /** Proves the guarded Cytoscape init path ran (asserted by the unit test even in jsdom). */
   cyInitAttempted = false;
 
+  /** Layer → colour map shared by the Cytoscape node styling and the on-screen legend. */
+  static readonly LAYER_COLORS: Record<string, string> = {
+    fiber: '#f59e0b',
+    IP: '#60a5fa',
+    IGP: '#a78bfa',
+    LSP: '#34d399',
+    service: '#f472b6',
+    other: '#94a3b8',
+  };
+  readonly LAYER_LEGEND = Object.entries(SiteGraphComponent.LAYER_COLORS).map(([layer, color]) => ({ layer, color }));
+
   private cytoscape: typeof cytoscape | null = null;
   private cy: CyCore | null = null;
   private readonly cyReady = signal(false);
-  private graphEffect: EffectRef;
+  private structureEffect!: EffectRef;
+  private decorationEffect!: EffectRef;
+  private resizeObserver: ResizeObserver | null = null;
+
+  /** True once the deterministic layout has settled at least once (bridged to data-cy-layout-done). */
+  readonly layoutDone = signal(false);
+  /** Max(bbox width, bbox height) of all laid-out nodes — ~0 when collapsed to a blob. */
+  readonly nodeSpread = signal(0);
+
+  /** Identity key for the STRUCTURE of the graph (node + edge id sets). A change to this key means
+   *  the graph must be rebuilt and re-laid-out; selection/highlight changes must NOT touch it. */
+  private readonly structureKey = computed(() => {
+    const nodeIds = this.store.derivedNodes().map((n) => n.managedObjectId);
+    const edgeIds = this.store.visibleEdges().map((e) => e.edgeId);
+    return `${nodeIds.join(',')}|${edgeIds.join(',')}`;
+  });
 
   /**
    * Deterministic test/render bridge — bound onto the .cy-canvas via [attr.data-cy-*] in the
@@ -241,19 +337,34 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly highlightCount = signal(0);
 
   constructor() {
-    // Mirror the store into the Cytoscape graph whenever any driving signal changes, once cy
-    // is built. Created in the injection context (constructor); gated on cyReady so it no-ops
-    // until the real graph exists, then runs reactively.
-    this.graphEffect = effect(() => {
+    // EFFECT SPLIT (avoids the cose-on-every-change blob):
+    //
+    // STRUCTURE effect — rebuild the graph elements and run the deterministic layout ONLY when the
+    // node/edge id-set key changes (a genuinely different graph). Created in the injection context;
+    // gated on cyReady so it no-ops until the sized graph exists.
+    this.structureEffect = effect(() => {
+      const key = this.structureKey(); // tracked: rebuild only when the id-sets change
+      void key;
       const nodes = this.store.derivedNodes();
       const edges = this.store.visibleEdges();
+      if (!this.cyReady() || !this.cy) {
+        return;
+      }
+      this.rebuildAndLayout(nodes, edges);
+      // Re-apply decoration after a structural rebuild (the rebuild dropped all classes).
+      this.applyDecoration(this.store.trails(), this.store.highlightedTrailIds(), this.store.selectedObjectId());
+    });
+
+    // DECORATION effect — selection / trail highlight only toggle classes on the existing graph;
+    // NO layout is run, so the node positions stay put (no blob, no re-shuffle on click).
+    this.decorationEffect = effect(() => {
       const trails = this.store.trails();
       const highlighted = this.store.highlightedTrailIds();
       const selectedId = this.store.selectedObjectId();
       if (!this.cyReady() || !this.cy) {
         return;
       }
-      this.renderGraph(nodes, edges, trails, highlighted, selectedId);
+      this.applyDecoration(trails, highlighted, selectedId);
     });
   }
 
@@ -264,24 +375,55 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
+  /** Breadcrumb: back to the geo-site map (topology entry view). */
+  toTopology(): void {
+    this.nav.toTopology();
+  }
+
   async ngAfterViewInit(): Promise<void> {
     this.cyInitAttempted = true;
-    if (!this.cyEl) {
+    const el = this.cyEl?.nativeElement;
+    if (!el) {
       return;
     }
     try {
       const cy = (await import('cytoscape')).default;
       this.cytoscape = cy;
+      const colors = SiteGraphComponent.LAYER_COLORS;
       this.cy = cy({
-        container: this.cyEl.nativeElement,
+        container: el,
         elements: [],
-        layout: { name: 'cose' },
+        // No layout here — the structure effect runs the deterministic layout once the canvas is sized.
         style: [
-          { selector: 'node', style: { 'background-color': '#60a5fa', label: 'data(label)', color: '#f1f5f9', 'font-size': 9 } },
-          { selector: 'edge', style: { 'line-color': '#475569', width: 2 } },
-          { selector: 'node.highlighted', style: { 'background-color': '#22d3ee', 'border-width': 3, 'border-color': '#22d3ee' } },
+          {
+            selector: 'node',
+            style: {
+              // Node fill by derived logical layer (operator colour-coding).
+              'background-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
+              label: 'data(label)',
+              color: '#f1f5f9',
+              'font-size': 9,
+              'text-outline-width': 2,
+              'text-outline-color': '#0b1220',
+              'text-valign': 'bottom',
+              'text-margin-y': 2,
+              width: 22,
+              height: 22,
+            },
+          },
+          {
+            selector: 'edge',
+            style: {
+              // Edge colour by derived layer (falls back to a neutral wire).
+              'line-color': (e) => colors[e.data('layer') as string] ?? '#475569',
+              'curve-style': 'bezier',
+              width: 2,
+              opacity: 0.7,
+            },
+          },
+          { selector: 'node.highlighted', style: { 'border-width': 3, 'border-color': '#22d3ee' } },
           { selector: 'node.selected', style: { 'border-width': 4, 'border-color': '#60a5fa' } },
-          { selector: 'edge.trail-member', style: { 'line-color': '#22d3ee', width: 4 } },
+          { selector: 'edge.trail-member', style: { 'line-color': '#22d3ee', width: 4, opacity: 1 } },
         ],
       });
 
@@ -294,19 +436,48 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         this.zone.run(() => this.store.selectEdge(id));
       });
 
-      this.zone.run(() => this.cyReady.set(true));
+      // Reflect a settled deterministic layout onto the canvas bridge so Playwright can wait for it.
+      this.cy.on('layoutstop', () =>
+        this.zone.run(() => {
+          this.layoutDone.set(true);
+          this.publishSpread();
+        }),
+      );
+
+      // SIZE GUARD: do NOT flip cyReady (which triggers the structure effect's first layout) until
+      // the canvas has a real, non-zero box — laying out into a 0x0 container collapses every node
+      // onto the origin (the blob). A ResizeObserver flips ready on the first non-zero size, then on
+      // later resizes calls cy.resize() and re-runs the layout so the graph stays fitted.
+      this.resizeObserver = new ResizeObserver(() => {
+        if (!this.cy) {
+          return;
+        }
+        if (el.clientWidth > 0 && el.clientHeight > 0) {
+          if (!this.cyReady()) {
+            this.zone.run(() => this.cyReady.set(true));
+          } else {
+            this.cy.resize();
+            this.relayout();
+          }
+        }
+      });
+      this.resizeObserver.observe(el);
+
+      // If the element is already sized at init (common once attached), flip ready immediately.
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        this.zone.run(() => this.cyReady.set(true));
+      }
     } catch {
       // jsdom / no-canvas environment: keep the accessible lists as the rendering surface. The
       // cyInitAttempted flag above proves the guarded path executed.
     }
   }
 
-  private renderGraph(
+  /** STRUCTURE: rebuild the graph elements from the current node/edge sets and run a deterministic
+   *  layout. Called only when the structure key changes (or after the first size-guarded ready). */
+  private rebuildAndLayout(
     nodes: ReturnType<TopologyStore['derivedNodes']>,
     edges: ReturnType<TopologyStore['visibleEdges']>,
-    trails: ReturnType<TopologyStore['trails']>,
-    highlighted: ReadonlySet<string>,
-    selectedId: string | null,
   ): void {
     const cy = this.cy;
     if (!cy) {
@@ -315,19 +486,48 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     const nodeIds = new Set(nodes.map((n) => n.managedObjectId));
 
     const elements: ElementDefinition[] = [
-      ...nodes.map((n) => ({ data: { id: n.managedObjectId, label: n.name ?? n.managedObjectId, layer: n.derivedLayer } })),
+      ...nodes.map((n) => ({
+        data: { id: n.managedObjectId, label: n.name ?? n.managedObjectId, layer: n.derivedLayer },
+      })),
       // visibleEdges() is already layer-filtered by the store (AC 28) — do NOT re-filter here.
       // Only drop edges whose endpoints are not in the current node set (defensive — keeps cytoscape valid).
       ...edges
         .filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to))
-        .map((e) => ({ data: { id: e.edgeId, source: e.from, target: e.to, relation: e.relation } })),
+        .map((e) => ({
+          data: { id: e.edgeId, source: e.from, target: e.to, relation: e.relation, layer: e.derivedLayer },
+        })),
     ];
 
     cy.elements().remove();
     cy.add(elements);
+    this.relayout();
+  }
 
-    // Highlight (AC 31/32, on-select): nodes/edges that belong to a highlighted trail, plus the
-    // selected node. Membership is resolved via the trail members of the highlighted trail set.
+  /** Size the canvas, run the deterministic breadthfirst layout, then fit with padding. No `cose`
+   *  (which collapses to a blob in a freshly-sized container); breadthfirst is built-in (no dep). */
+  private relayout(): void {
+    const cy = this.cy;
+    if (!cy || cy.nodes().length === 0) {
+      this.publishSpread();
+      return;
+    }
+    cy.resize();
+    cy.layout({ name: 'breadthfirst', animate: false, spacingFactor: 1.2, padding: 20 }).run();
+    cy.fit(undefined, 20);
+    this.publishSpread();
+  }
+
+  /** DECORATION: toggle selected/highlighted/trail-member classes only — NEVER runs a layout, so
+   *  node positions stay put when the operator clicks around (no blob/re-shuffle on select). */
+  private applyDecoration(
+    trails: ReturnType<TopologyStore['trails']>,
+    highlighted: ReadonlySet<string>,
+    selectedId: string | null,
+  ): void {
+    const cy = this.cy;
+    if (!cy) {
+      return;
+    }
     cy.elements().removeClass('highlighted selected trail-member');
     const highlightMemberIds = this.trailMemberObjectIds(trails, highlighted);
     let highlightCount = 0;
@@ -349,14 +549,19 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         highlightCount++;
       }
     });
-
-    cy.layout({ name: 'cose' }).run();
-
-    // The node/edge/trail counts are reflected onto the canvas via [attr.data-cy-*] template
-    // bindings (from the same store signals this graph mirrors), so they need no imperative write
-    // here. The highlight count is only known after painting, so publish it to its signal — which
-    // the template binds onto data-cy-highlight-count.
     this.highlightCount.set(highlightCount);
+  }
+
+  /** Publish the laid-out node spread (max bbox dimension) onto its signal — bridged to the canvas
+   *  via [attr.data-cy-node-spread]. ~0 when nodes are collapsed onto each other (a blob). */
+  private publishSpread(): void {
+    const cy = this.cy;
+    if (!cy || cy.nodes().length === 0) {
+      this.nodeSpread.set(0);
+      return;
+    }
+    const bb = cy.nodes().boundingBox();
+    this.nodeSpread.set(Math.round(Math.max(bb.w, bb.h)));
   }
 
   /** managedObjectIds that are members of any trail in the highlighted set. */
@@ -388,7 +593,10 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.graphEffect.destroy();
+    this.structureEffect.destroy();
+    this.decorationEffect.destroy();
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
     this.cy?.destroy();
     this.cy = null;
   }

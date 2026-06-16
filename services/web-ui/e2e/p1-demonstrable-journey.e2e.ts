@@ -70,6 +70,37 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await expect(mapMarkers.first()).toBeVisible();
     expect(await mapMarkers.count()).toBe(count);
 
+    // BASEMAP: the map renders a REAL UK/EU basemap from the committed offline geo/europe.json
+    // asset — the style finishes loading AND the `countries` GeoJSON source has rendered features
+    // (country outlines). A blank/empty-style map (the old inline background-only style) returns 0
+    // features here, so this assertion FAILS on the pre-change map and passes only with geography.
+    await page.waitForFunction(
+      () => {
+        const m = (window as unknown as { __geoMap?: { isStyleLoaded?: () => boolean } }).__geoMap;
+        return !!m && typeof m.isStyleLoaded === 'function' && m.isStyleLoaded();
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const countryFeatureCount = await page.evaluate(() => {
+      const m = (window as unknown as {
+        __geoMap?: { querySourceFeatures: (s: string) => unknown[] };
+      }).__geoMap;
+      return m ? m.querySourceFeatures('countries').length : 0;
+    });
+    expect(countryFeatureCount).toBeGreaterThan(0);
+
+    // PINS DISTINCT: each site pin sits at its own geographic position — the number of distinct
+    // rounded marker-centre coordinates equals the marker count (pins are NOT stacked at one point).
+    const pinCenters = await mapMarkers.evaluateAll((els) => {
+      const centers = els.map((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        return `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`;
+      });
+      return Array.from(new Set(centers));
+    });
+    expect(pinCenters.length).toBe(count);
+
     if (MODE === 'real') {
       // P1-1: the p1-demo profile seeds 10 grounded sites; allow headroom for inter-site link
       // pseudo-sites the Topology graph may surface, but require AT LEAST the seeded 10.
@@ -145,6 +176,15 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
       .poll(async () => Number(await cyEl.getAttribute('data-cy-node-count')))
       .toBe(await nodes.count());
 
+    // NODE SPREAD (no blob): the deterministic layout settles (data-cy-layout-done='true') and the
+    // laid-out nodes occupy a real area — the max bounding-box dimension is well above zero. The old
+    // cose-into-a-0x0-container path collapsed every node onto the origin (spread ~0), so this
+    // assertion FAILS on the blob and passes only with a properly laid-out graph.
+    await expect(cyEl).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+    await expect
+      .poll(async () => Number(await cyEl.getAttribute('data-cy-node-spread')))
+      .toBeGreaterThan(40);
+
     // Selecting a device shows its attributes in the detail panel (spec AC 29). The panel always
     // surfaces the managedObjectId of the selected node — a real attribute read back from Topology.
     await nodes.first().click();
@@ -201,6 +241,9 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
       await expect(page.getByText(/No trails for this snapshot/i)).toBeVisible();
     }
 
+    // Wait for the deterministic layout to settle so the overlay capture shows the PAINTED graph
+    // (this test reaches the site graph via the accessible list; the canvas paints asynchronously).
+    await expect(cyEl).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
     await shot(page, testInfo, 'ac-33-3-trails-overlay');
   });
 
@@ -310,5 +353,54 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     // Sanity: the catalogue anchors module stays in lock-step with the seed (referenced so a drift
     // in the seeded set is caught at type-check time, not silently).
     expect(P1_DEMO_SEEDED_SITES.length).toBe(P1_DEMO_SITE_COUNT);
+  });
+
+  /**
+   * ── Operator status bar ──────────────────────────────────────────────────────────────────────
+   * The geo view shows a Fault/Warning/Monitored status bar summarising the fleet. SiteDto carries
+   * no severity in P1 (the P3 hook), so every site is 'Monitored': the Monitored count equals the
+   * map-marker count and Fault/Warning are 0. This proves the status bar is wired to the real site
+   * data, not a static placeholder.
+   */
+  test('status bar summarises the fleet — Monitored == markers, Fault/Warning == 0', async ({
+    page,
+  }, testInfo) => {
+    await page.goto('/topology');
+    await expect(page.getByRole('heading', { name: /Topology .* sites/i })).toBeVisible();
+
+    const mapMarkers = page.locator('.maplibregl-marker');
+    await expect(mapMarkers.first()).toBeVisible();
+    const markerCount = await mapMarkers.count();
+
+    const numFrom = async (testid: string): Promise<number> => {
+      const text = (await page.getByTestId(testid).textContent()) ?? '';
+      return Number((text.match(/\d+/) ?? ['0'])[0]);
+    };
+
+    expect(await numFrom('status-monitored')).toBe(markerCount);
+    expect(await numFrom('status-fault')).toBe(0);
+    expect(await numFrom('status-warning')).toBe(0);
+    expect(await numFrom('status-total')).toBe(markerCount);
+
+    await shot(page, testInfo, 'status-bar');
+  });
+
+  /**
+   * ── geo → site → topology breadcrumb ─────────────────────────────────────────────────────────
+   * Drilling into a site exposes a breadcrumb back to the topology entry view. Clicking it returns
+   * to /topology and re-renders the geo heading — the geo→site→topology navigation loop is wired.
+   */
+  test('site-graph breadcrumb navigates back to the geo topology view', async ({ page }) => {
+    await page.goto('/topology');
+    const markers = page.locator('.maplibregl-marker');
+    const anchor =
+      MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
+    await expect(anchor).toBeVisible();
+    await anchor.click();
+    await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
+
+    await page.getByTestId('breadcrumb-topology').click();
+    await expect(page).toHaveURL(/\/topology$/);
+    await expect(page.getByRole('heading', { name: /Topology .* sites/i })).toBeVisible();
   });
 });
