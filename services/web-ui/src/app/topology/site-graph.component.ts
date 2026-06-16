@@ -860,13 +860,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     cy.elements().remove();
     cy.add([...parentDefs, ...leafDefs, ...edgeDefs]);
 
-    // When the SITE SCOPE grows (a new site box) we run a FULL relayout (no locking) so the
-    // compound-aware cose can place all boxes legibly and we re-fit to show the new box. For a
-    // same-scope expand we lock already-placed nodes so only the NEW nodes are positioned and the
-    // operator's view is preserved.
+    // For the MULTI-SITE preset layout every position is recomputed deterministically, so locking is
+    // neither needed nor wanted (the preset is authoritative + stable). For a SINGLE-SITE same-scope
+    // expand we lock already-placed nodes so only the NEW nodes are positioned and the operator's
+    // view is preserved. (Scope-grow always re-lays-out + re-fits to reveal the new box.)
     const scopeGrew = distinctSites.length > this.lastFittedSiteCount;
+    const multiSite = distinctSites.length > 1;
     const locked: NodeSingular[] = [];
-    if (!scopeGrew) {
+    if (!scopeGrew && !multiSite) {
       cy.nodes('[!isSiteParent]').forEach((n) => {
         const p = prevPos.get(n.id());
         if (p) {
@@ -883,9 +884,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  /** Run the size-appropriate deterministic layout. breadthfirst for a single site box; cose
-   *  (compound-aware, deterministic) once ≥2 site boxes appear. animate:false so layoutstop fires
-   *  and the layout-done bridge stays reliable. Fit only on the first layout (firstFitDone gate). */
+  /** Run the size-appropriate deterministic layout. A single site uses breadthfirst (circle-packed,
+   *  fans devices across the canvas). With ≥2 site boxes the built-in compound cose is unreliable
+   *  (it collapses few-node compound graphs into a vertical strip), so we use a DETERMINISTIC PRESET:
+   *  site boxes are placed left-to-right and each box's devices are arranged in an internal grid, so
+   *  two sites always read as two clearly-separated clusters that fill the canvas. animate:false so
+   *  layoutstop fires and the layout-done bridge stays reliable. Fit on first layout / scope-grow. */
   private runLayout(siteCount: number): void {
     const cy = this.cy;
     if (!cy || cy.nodes('[!isSiteParent]').length === 0) {
@@ -896,21 +900,10 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     const layout =
       siteCount > 1
         ? cy.layout({
-            // Compound-aware, DETERMINISTIC cose. Higher repulsion + componentSpacing spread the
-            // distinct site boxes well apart (so two sites read as two clearly-separated clusters,
-            // not one blob); the larger nesting factor keeps each box's devices loosely packed
-            // inside its boundary so the canvas fills rather than bunching at the top.
-            name: 'cose',
+            name: 'preset',
+            positions: this.computeMultiSitePositions(),
+            fit: false,
             animate: false,
-            randomize: false,
-            componentSpacing: 220,
-            nodeRepulsion: () => 28000,
-            idealEdgeLength: () => 110,
-            nestingFactor: 1.4,
-            gravity: 0.25,
-            numIter: 1500,
-            padding: 40,
-            nodeDimensionsIncludeLabels: true,
           } as unknown as LayoutOptions)
         : cy.layout({
             // Single site: breadthfirst, but circle-packed and well-spaced so devices fan out across
@@ -934,6 +927,62 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       this.lastFittedSiteCount = siteCount;
     }
     this.publishSpread();
+  }
+
+  /**
+   * Deterministic preset positions for the MULTI-SITE case: each distinct site box is a column in a
+   * left-to-right row (well-separated, so the boxes never overlap), and the devices inside each box
+   * are arranged in an internal grid. Fully deterministic (no force simulation), so the same graph
+   * always lays out identically and two sites always render as two distinct clusters that fill the
+   * canvas — fixes the cose "vertical strip / blob" failure.
+   */
+  private computeMultiSitePositions(): Record<string, { x: number; y: number }> {
+    const cy = this.cy;
+    const positions: Record<string, { x: number; y: number }> = {};
+    if (!cy) {
+      return positions;
+    }
+    const siteMap = this.store.nodeSiteMap();
+    const sites = this.store.distinctSiteIds();
+    // Devices grouped by their site; devices with no known site go in a trailing "unsited" column.
+    const bySite = new Map<string, string[]>();
+    for (const id of sites) {
+      bySite.set(id, []);
+    }
+    const unsited: string[] = [];
+    cy.nodes('[!isSiteParent]').forEach((n) => {
+      const site = siteMap.get(n.id());
+      if (site && bySite.has(site)) {
+        bySite.get(site)!.push(n.id());
+      } else {
+        unsited.push(n.id());
+      }
+    });
+
+    const NODE_GAP = 90; // spacing between devices within a site box
+    const COL_GAP = 130; // horizontal gap between site columns
+    const columns: Array<{ ids: string[] }> = [];
+    for (const id of sites) {
+      columns.push({ ids: bySite.get(id) ?? [] });
+    }
+    if (unsited.length) {
+      columns.push({ ids: unsited });
+    }
+
+    let cursorX = 0;
+    for (const col of columns) {
+      const count = Math.max(col.ids.length, 1);
+      // A near-square internal grid per site box.
+      const gridCols = Math.max(1, Math.ceil(Math.sqrt(count)));
+      const colWidth = gridCols * NODE_GAP;
+      col.ids.forEach((id, i) => {
+        const gx = i % gridCols;
+        const gy = Math.floor(i / gridCols);
+        positions[id] = { x: cursorX + gx * NODE_GAP, y: gy * NODE_GAP };
+      });
+      cursorX += colWidth + COL_GAP;
+    }
+    return positions;
   }
 
   /** DECORATION: toggle selected/highlighted/trail-member classes only — NEVER runs a layout. The
