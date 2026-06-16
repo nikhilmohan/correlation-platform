@@ -90,6 +90,82 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     await shot(page, testInfo, 'topology-trail-exploded');
   });
 
+  test('device nodes carry their network-element TYPE ICON (data-icon per type; generic for unknown)', async ({
+    page,
+  }) => {
+    // MOCK: root at Madrid (distinct subgraph carrying Node/Port/IPLink/IGPAdjacency/VPNService +
+    // an UnknownFutureThing). REAL: the rooted site's own typed devices.
+    if (MODE === 'real') {
+      const cy = await rootAtSite(page);
+      void cy;
+      const nodes = page.getByTestId('graph-node');
+      await expect(nodes.first()).toBeVisible();
+      // Every rendered node carries a resolved data-icon (never icon-less); at least one real type key.
+      const count = await nodes.count();
+      let nonGeneric = 0;
+      for (let i = 0; i < count; i++) {
+        const icon = await nodes.nth(i).getAttribute('data-icon');
+        expect(icon).toBeTruthy();
+        if (icon && icon !== 'generic') nonGeneric++;
+      }
+      expect(nonGeneric).toBeGreaterThan(0);
+      return;
+    }
+
+    await page.goto('/topology');
+    const markers = page.getByTestId('site-marker');
+    await expect(markers.first()).toBeVisible();
+    // Madrid marker (3rd site) — distinct device set + the unknown type.
+    await markers.filter({ hasText: /Madrid/i }).first().click();
+    await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
+    const cy = page.locator('.cy-canvas');
+    await expect(cy).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+
+    // data-icon per type (AC 70): the router/port/ip-link/igp-adjacency/vpn-service icons all appear.
+    for (const [type, key] of [
+      ['Node', 'router'],
+      ['Port', 'port'],
+      ['IPLink', 'ip-link'],
+      ['IGPAdjacency', 'igp-adjacency'],
+      ['VPNService', 'vpn-service'],
+      ['SRLG', 'srlg'],
+    ] as const) {
+      const row = page.locator(`[data-testid="graph-node"][data-object-type="${type}"]`);
+      await expect(row.first()).toHaveAttribute('data-icon', key);
+    }
+    // Generic fallback for the unknown type (AC 71) — the node still renders, never hidden.
+    const unknown = page.locator('[data-testid="graph-node"][data-object-type="UnknownFutureThing"]');
+    await expect(unknown.first()).toBeVisible();
+    await expect(unknown.first()).toHaveAttribute('data-icon', 'generic');
+
+    // The canvas reflects the distinct icon-key count (router/port/ip-link/igp-adjacency/vpn-service/srlg + generic).
+    await expect.poll(async () => Number(await cy.getAttribute('data-cy-icon-types'))).toBeGreaterThanOrEqual(6);
+  });
+
+  test('two DIFFERENT sites render DIFFERENT node sets (distinct fixtures, no clones)', async ({
+    page,
+  }) => {
+    if (MODE === 'real') test.skip();
+    // London first.
+    await page.goto('/topology');
+    await expect(page.getByTestId('site-marker').first()).toBeVisible();
+    await page.getByTestId('site-marker').filter({ hasText: /London/i }).first().click();
+    await expect(page.locator('.cy-canvas')).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+    const lonIds = (await page.getByTestId('graph-node').allInnerTexts()).sort();
+
+    // Back to the map, then Madrid.
+    await page.getByTestId('breadcrumb-topology').click();
+    await expect(page.getByTestId('site-marker').first()).toBeVisible();
+    await page.getByTestId('site-marker').filter({ hasText: /Madrid/i }).first().click();
+    await expect(page.locator('.cy-canvas')).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+    const madIds = (await page.getByTestId('graph-node').allInnerTexts()).sort();
+
+    // The two sites must NOT render the same device set (FAILS on the old London-clone fallback).
+    expect(lonIds).not.toEqual(madIds);
+    expect(lonIds.length).toBeGreaterThan(0);
+    expect(madIds.length).toBeGreaterThan(0);
+  });
+
   test('rooting a site shows ONE labelled site box, then zoom + increases the zoom level', async ({
     page,
   }, testInfo) => {

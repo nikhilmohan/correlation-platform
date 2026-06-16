@@ -299,7 +299,7 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
   });
 
-  it('NODE_CAP bounds the accumulating graph: capReached flips and size never exceeds the cap', async () => {
+  it('NODE_CAP is ALL-OR-NOTHING: an overflowing expansion is rejected wholesale (nothing added)', async () => {
     // Stub a TopologyClient whose neighbours return MORE than NODE_CAP fresh nodes in one merge.
     const many: NeighborsDto = {
       managedObjectId: 'seed',
@@ -326,16 +326,19 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     const s = TestBed.inject(TopologyStore);
     s.selectSite('Site:LON');
     await flush();
+    const before = s.nodeMap().size; // just the seed
     s.expandNode('seed');
     await flush();
 
     expect(s.capReached()).toBe(true);
-    // Size is bounded at the cap (nodeMap counts the seed + capped fresh nodes, never above NODE_CAP).
-    expect(s.nodeMap().size).toBeLessThanOrEqual(NODE_CAP);
+    // ALL-OR-NOTHING (AC 57): the whole overflowing expansion is rejected — NOTHING was added, so the
+    // size is UNCHANGED (this FAILS on the old per-node partial-add, which would fill up to the cap).
+    expect(s.nodeMap().size).toBe(before);
+    // The node is not marked expanded because the expansion never applied.
+    expect(s.expandedNodeIds().has('seed')).toBe(false);
     // A further expand no-ops once capped.
-    const sizeAtCap = s.nodeMap().size;
     s.expandNode('seed');
     await flush();
-    expect(s.nodeMap().size).toBe(sizeAtCap);
+    expect(s.nodeMap().size).toBe(before);
   });
 });
