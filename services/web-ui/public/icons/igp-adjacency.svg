@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="IGP adjacency">
+  <circle cx="6" cy="7" r="2.4" fill="#a78bfa"/>
+  <circle cx="18" cy="17" r="2.4" fill="#a78bfa"/>
+  <path d="M8 8.5l8 7" stroke="#f1f5f9" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M14 6h4v4" fill="none" stroke="#a78bfa" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
