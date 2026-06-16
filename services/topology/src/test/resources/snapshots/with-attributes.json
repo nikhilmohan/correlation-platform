@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Node:PE1", "objectType": "Node", "name": "PE1",
+      "attributes": { "vendor": "acme", "model": "X9", "equipmentType": "router",
+                      "role": "PE", "capacity": "400G" } },
+    { "managedObjectId": "IPLink:PE1-PE2-1", "objectType": "IPLink", "name": "link1",
+      "attributes": { "linkType": "backbone", "capacity": "100G", "protectionRole": "primary" } }
+  ],
+  "edges": [
+    { "from": "Node:PE1", "to": "IPLink:PE1-PE2-1", "relation": "SERVES",
+      "attributes": { "linkType": "internal" } }
+  ]
+}

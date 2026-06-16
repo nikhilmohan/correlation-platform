@@ -1,0 +1,190 @@
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+:root {
+  /* WCAG AA contrast-checked palette (all text >= 4.5:1 on its background). */
+  --bg: #0f172a;
+  --surface: #1e293b;
+  --surface-2: #334155;
+  --border: #475569;
+  --text: #f1f5f9;
+  --text-muted: #cbd5e1;
+  --accent: #60a5fa;
+  --accent-strong: #2563eb;
+  --ok: #4ade80;
+  --warn: #fbbf24;
+  --error: #f87171;
+  --new: #22d3ee;
+  --changed: #fbbf24;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a {
+  color: var(--accent);
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.btn {
+  background: var(--accent-strong);
+  color: #fff;
+  border: 1px solid var(--accent-strong);
+  border-radius: 6px;
+  padding: 0.4rem 0.85rem;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+
+.error-banner {
+  background: #3f1d1d;
+  border: 1px solid var(--error);
+  color: #fecaca;
+  border-radius: 8px;
+  padding: 0.6rem 0.9rem;
+  margin: 0.5rem 0;
+}
+
+.empty-state {
+  color: var(--text-muted);
+  padding: 1rem;
+  font-style: italic;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.badge-new {
+  background: var(--new);
+  color: #06303a;
+}
+
+.badge-changed {
+  background: var(--changed);
+  color: #3a2c06;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.row-new {
+  animation: flashNew 1.5s ease-out;
+}
+
+.row-changed {
+  animation: flashChanged 1.5s ease-out;
+}
+
+@keyframes flashNew {
+  from {
+    background: var(--new);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@keyframes flashChanged {
+  from {
+    background: var(--changed);
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-new,
+  .row-changed {
+    animation: none;
+  }
+}
+
+/* MapLibre geo-site marker — a real map marker that is also a keyboard-focusable button,
+   readable on the dark inline basemap. */
+.maplibre-site-marker {
+  background: var(--accent-strong);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
+.maplibre-site-marker:hover,
+.maplibre-site-marker:focus-visible {
+  background: var(--accent);
+  color: #06303a;
+}

@@ -1,0 +1,13 @@
+# Keep the build context small and reproducible: the build stage runs `npm ci` from
+# package-lock.json, so the host's node_modules/dist/test artifacts must not leak in.
+node_modules
+dist
+.angular
+coverage
+junit.xml
+*.log
+.git
+.gitignore
+tests/**/.cache
+playwright-report
+test-results

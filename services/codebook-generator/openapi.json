@@ -1,0 +1,730 @@
+{
+  "components": {
+    "schemas": {
+      "CodebookListResponse": {
+        "description": "Codebook listing keyed by the filter param used.",
+        "properties": {
+          "codebooks": {
+            "items": {
+              "$ref": "#/components/schemas/CodebookMeta"
+            },
+            "title": "Codebooks",
+            "type": "array"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "snapshotId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshotid"
+          }
+        },
+        "title": "CodebookListResponse",
+        "type": "object"
+      },
+      "CodebookMeta": {
+        "description": "Codebook metadata response.",
+        "properties": {
+          "active": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active"
+          },
+          "codebookId": {
+            "title": "Codebookid",
+            "type": "string"
+          },
+          "compiledAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compiledat"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "knowledgeVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Knowledgeversion"
+          },
+          "scenarioCount": {
+            "title": "Scenariocount",
+            "type": "integer"
+          },
+          "snapshotId": {
+            "title": "Snapshotid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "codebookId",
+          "snapshotId",
+          "domain",
+          "scenarioCount"
+        ],
+        "title": "CodebookMeta",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "Structured error body.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "error": {
+            "title": "Error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "detail"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "PredictedSymptom": {
+        "description": "One symptom in a scenario signature: an alarm-type token on an object.",
+        "properties": {
+          "alarmType": {
+            "title": "Alarmtype",
+            "type": "string"
+          },
+          "managedObjectId": {
+            "title": "Managedobjectid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alarmType",
+          "managedObjectId"
+        ],
+        "title": "PredictedSymptom",
+        "type": "object"
+      },
+      "ScenarioListResponse": {
+        "description": "Native scenarios listing for a codebook.",
+        "properties": {
+          "codebookId": {
+            "title": "Codebookid",
+            "type": "string"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "scenarios": {
+            "items": {
+              "$ref": "#/components/schemas/ScenarioOut"
+            },
+            "title": "Scenarios",
+            "type": "array"
+          }
+        },
+        "required": [
+          "codebookId",
+          "domain"
+        ],
+        "title": "ScenarioListResponse",
+        "type": "object"
+      },
+      "ScenarioOut": {
+        "description": "A scenario in the native scenarios view.",
+        "properties": {
+          "faultOriginObjectId": {
+            "title": "Faultoriginobjectid",
+            "type": "string"
+          },
+          "faultOriginType": {
+            "title": "Faultorigintype",
+            "type": "string"
+          },
+          "predictedSymptoms": {
+            "items": {
+              "$ref": "#/components/schemas/PredictedSymptom"
+            },
+            "title": "Predictedsymptoms",
+            "type": "array"
+          },
+          "scenarioId": {
+            "title": "Scenarioid",
+            "type": "string"
+          },
+          "trailIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Trailids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scenarioId",
+          "faultOriginObjectId",
+          "faultOriginType"
+        ],
+        "title": "ScenarioOut",
+        "type": "object"
+      },
+      "TrailScenarioSignature": {
+        "description": "Frozen Correlation-Engine signature shape.",
+        "properties": {
+          "expectedSymptoms": {
+            "items": {
+              "$ref": "#/components/schemas/PredictedSymptom"
+            },
+            "title": "Expectedsymptoms",
+            "type": "array"
+          },
+          "rootCauseAlarmType": {
+            "title": "Rootcausealarmtype",
+            "type": "string"
+          },
+          "scenarioId": {
+            "title": "Scenarioid",
+            "type": "string"
+          },
+          "trailId": {
+            "title": "Trailid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trailId",
+          "scenarioId",
+          "rootCauseAlarmType"
+        ],
+        "title": "TrailScenarioSignature",
+        "type": "object"
+      },
+      "TrailSignaturesResponse": {
+        "description": "CE-oriented per-trail signatures projection for a codebook.",
+        "properties": {
+          "codebookId": {
+            "title": "Codebookid",
+            "type": "string"
+          },
+          "domain": {
+            "title": "Domain",
+            "type": "string"
+          },
+          "trailSignatures": {
+            "items": {
+              "$ref": "#/components/schemas/TrailScenarioSignature"
+            },
+            "title": "Trailsignatures",
+            "type": "array"
+          }
+        },
+        "required": [
+          "codebookId",
+          "domain"
+        ],
+        "title": "TrailSignaturesResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Read API for compiled forward-propagation codebooks (domain-scoped).",
+    "title": "Codebook Generator API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/codebooks": {
+      "get": {
+        "operationId": "list_codebooks_codebooks_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "snapshotId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Snapshotid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "domain",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Domain"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodebookListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Codebooks"
+      }
+    },
+    "/codebooks/active": {
+      "get": {
+        "operationId": "get_active_codebooks_active_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "domain",
+            "required": true,
+            "schema": {
+              "title": "Domain",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "snapshotId",
+            "required": true,
+            "schema": {
+              "title": "Snapshotid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodebookMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Active"
+      }
+    },
+    "/codebooks/{codebookId}": {
+      "get": {
+        "operationId": "get_codebook_codebooks__codebookId__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "codebookId",
+            "required": true,
+            "schema": {
+              "title": "Codebookid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodebookMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Codebook"
+      }
+    },
+    "/codebooks/{codebookId}/scenarios": {
+      "get": {
+        "operationId": "get_scenarios_codebooks__codebookId__scenarios_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "codebookId",
+            "required": true,
+            "schema": {
+              "title": "Codebookid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "faultOriginType",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Faultorigintype"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Scenarios"
+      }
+    },
+    "/codebooks/{codebookId}/scenarios/{scenarioId}": {
+      "get": {
+        "operationId": "get_scenario_codebooks__codebookId__scenarios__scenarioId__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "codebookId",
+            "required": true,
+            "schema": {
+              "title": "Codebookid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "scenarioId",
+            "required": true,
+            "schema": {
+              "title": "Scenarioid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScenarioOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Scenario"
+      }
+    },
+    "/codebooks/{codebookId}/trail-signatures": {
+      "get": {
+        "operationId": "get_trail_signatures_codebooks__codebookId__trail_signatures_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "codebookId",
+            "required": true,
+            "schema": {
+              "title": "Codebookid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "trailId",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trailid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrailSignaturesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Trail Signatures"
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics"
+      }
+    }
+  }
+}

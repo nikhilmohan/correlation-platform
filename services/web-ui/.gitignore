@@ -1,0 +1,9 @@
+# Playwright E2E artefacts (the suite source lives in e2e/; these are generated outputs).
+e2e/.artifacts/
+e2e/.report/
+# Per-test AC 33.x screenshots — uploaded as CI artifacts, never committed as binaries.
+e2e/__screenshots__/
+test-results/
+playwright-report/
+reports/e2e/
+.last-run.json

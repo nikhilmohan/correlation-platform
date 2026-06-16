@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "domain": "core-ip",
+  "nodes": [
+    { "managedObjectId": "Node:PE1", "objectType": "Node" }
+  ],
+  "edges": [
+    { "from": "Node:PE1", "to": "Node:GHOST", "relation": "HOSTED_ON" }
+  ]
+}
