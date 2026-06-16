@@ -1667,6 +1667,391 @@ independently.
 | RCA accuracy resolution (FIX F-UI2) | "evaluated offline" placeholder vs. eval-mode server field only vs. client-side label join only vs. priority of both with N/A gating | **Priority of both with explicit N/A gating** — prefer CE eval-mode `stats.rcaAccuracy` when wired, else compute client-side from `GET /incidents` `rootCauseAlarmType` joined to Simulator `/labels`, else N/A in production. Both server and demo paths make the strongest power metric VISIBLE without fabricating it or owning ground truth at runtime; the CE design explicitly offers these two interchangeable ways. |
 | Auto-correlation vs. alarm-reduction (FIX F-UI2) | Reuse reduction ratio vs. add a distinct auto-correlation% KPI | **Distinct auto-correlation% KPI** = `correlatedAlarmCount / totalAlarmsProcessed` — the CE froze `correlatedAlarmCount` precisely because the correlated fraction (the ~60% target) is a different quantity from alarm-reduction (alarms/incidents) and must not be conflated. Two separate cards. |
 
+# Explorable topology & network-element type icons (ACs 55-76)
+
+> **Design unit added by `spec/web-ui-topology-explore` (PR #278, merged into `web-ui`).** This
+> section is a self-contained, buildable design for the **new** acceptance criteria **55-76** and
+> spec **Tasks 10-14** (Topology & trails module — neighbour expansion, site boundaries, trail
+> navigation/explode, type icons, zoom/pan). It **extends** the existing topology & trails module
+> (`## UI wireframes → Existing — Topology & trails`, `## API contracts → Topology Service`,
+> `## Integration points`) and the in-progress explorer build
+> `build/web-ui-explorable-topology @ 65f1b0c` — the dev **extends those files, does not rewrite
+> them**. All other design sections above (dashboard, streaming, incident-detail, config, stats,
+> chatter, etc.) are unchanged.
+>
+> **Numbering note.** The earlier design.md text refers to AC 55-58 as the chatter/RCA fixes
+> (F-UI1/F-UI2). The merged spec on `web-ui` **renumbered**: AC 55-76 are now the explorable-topology
+> ACs documented here; the chatter/RCA ACs are covered by their own tests under the existing
+> `## Test plan` and are retained. The AC 55-76 test map below is the authoritative mapping for this
+> design unit.
+
+## Contract confirmation (NO contract change)
+
+**All APIs consumed by ACs 55-76 already exist and are published — no new topic, payload, field, or
+OpenAPI surface is introduced.** Verified against the checked-in producer specs:
+
+- `GET /topology/sites` → `SiteListDto{sites:[SiteDto{siteId,name,latitude,longitude,region}]}` — published `services/topology/openapi.json`.
+- `GET /topology/sites/{siteId}/objects` → `SiteObjectsDto{nodes:[NodeDto],edges:[EdgeDto]}` — published.
+- `GET /topology/nodes/{managedObjectId}/neighbors` (`relation[]?`, `domain?`, `snapshotId?`, `crossDomain?`) → `NeighborsDto{managedObjectId,domain,neighbors:[{node:NodeDto,via:EdgeDto}]}` — published.
+- `GET /topology/traversal` (`start`, `relation[]?`, `maxDepth≤32`, `crossDomain?`, `domain?`, `snapshotId?`) → `TraversalDto{reached:[NodeDto],edges:[EdgeDto]}` — published.
+- `GET /topology/nodes/{managedObjectId}` → `NodeDto` — published (used only as an optional fallback; not required by the chosen site-attribution strategy).
+- Trail Builder `GET /trails` (`listTrails`), `GET /trails/{trailId}` (`getTrail` → `TrailDetail`), `GET /trails/by-object` (`getTrailsForObject`) — published `services/trail-builder/openapi.json`.
+
+**OQ-11 (site attribution for expanded nodes) — RESOLVED to option (c): infer site client-side from
+`LOCATED_AT` edges. `NodeDto` is NOT changed; `architecture.md` and `services/topology/openapi.json`
+are NOT touched.** Load-bearing fact that makes this work without a contract change: the Topology
+`neighbors` query returns **every direct edge of the node** when no `relation` filter is passed
+(`GraphReadService.neighbors` → `repository.neighbors(id, relations=∅, …)`), and a device's
+`LOCATED_AT` edge to its `Site` is one of those direct edges — so expanding a device pulls in its
+**Site node + the `LOCATED_AT` edge**, which is exactly what the `nodeSiteMap` derivation keys off.
+The icon set is bundled inline SVG under `public/icons/` (offline, permissive, no CDN). **No item
+in this design unit requires a contract change; nothing is designed around a missing contract.**
+
+## Stack delta (this unit)
+
+No new runtime dependency. Reuses the build's already-vendored, permissive libraries:
+**Cytoscape.js (MIT)** for the device graph (compound parent nodes, `background-image` node icons),
+**MapLibre GL JS (BSD-3-Clause)** for the geo map (`NavigationControl` zoom/pan), Angular 20
+standalone + signals, `@angular/cdk/a11y` for focus/keyboard, **Vitest + Angular TestBed** (unit/
+component) and **Playwright** (real-chromium E2E). Icon assets are **bundled inline SVG** authored in-
+repo (or a permissive icon pack, license recorded) — see "Icon asset design".
+
+## Task breakdown (spec Tasks 10-14 → realized by)
+
+| Spec task | Realized by (modules / flow) |
+|---|---|
+| **10. Expand a device node to pull neighbours (additive, dedupe, cap, crossDomain)** | `TopologyStore.expandNode(id,{relation?,crossDomain?})` → `TopologyClient.neighbors(id,opts)` → `mergeGraph(nodes,edges)` (additive, dedupe by id, all-or-nothing `NODE_CAP` pre-check). Explicit **+expand button** in the detail panel and per-node row (`data-testid="expand-node"`); cross-domain via a UI toggle bound to `expandNode(id,{crossDomain:true})`. `expandedNodeIds` tracks expanded nodes. (AC 55-58) |
+| **11. Render site-boundary groupings** | `TopologyStore.nodeSiteMap` (computed from `LOCATED_AT` edges) + `distinctSiteIds`; `SiteGraphComponent` renders one **Cytoscape compound parent box per distinct site** (`data isSiteParent`, per-site border colour, name label) and parents each device node into its site box; site legend lists each site. (AC 60-62) |
+| **12. Trail navigation + explode cross-site spans** | `TopologyStore.selectTrail(trailId)` → `TrailBuilderClient.getTrail` → `trailMemberIds` (full set) + **explode** (fetch missing members' subgraphs via `neighbors` → `mergeGraph`); `selectedTrailDetail` drives the **trail-detail panel** (`trailId`, `igpArea`, `srlgGroup`, interactive `members` → `selectNode`); `clearTrail()` removes highlight, keeps nodes; `getTrailsForObject` device-membership highlight preserved alongside. Trail-cluster list items are **buttons → `selectTrail`**. (AC 63-69) |
+| **13. Network-element type icons** | New `objectType → icon` map (`type-icon-mapper.ts`) + bundled inline SVGs under `public/icons/`; `SiteGraphComponent` styles leaf nodes with `background-image` resolved via `document.baseURI` + a generic fallback; a `data-icon`/`background-image` bridge attribute makes the icon testable; type-icon legend. (AC 70-72) |
+| **14. Zoom/pan on both canvases** | `SiteGraphComponent` zoom controls (`+`/`−`/Fit/Reset, keyboard-reachable, `data-cy-zoom` bridge) over the Cytoscape API; `GeoSiteMapComponent` MapLibre `NavigationControl` + explicit fit/reset controls (`fitBounds(siteExtent)` / reset to default centre+zoom). All state local, not persisted. (AC 73-76) |
+
+Every spec task 10-14 is realized above and traced to its ACs; no task is dropped or re-scoped.
+
+## Phase applicability (design view — this unit)
+
+This unit is entirely within the **P1 — Topology onboarding** role of web-ui (the spec's P1 row).
+P2/P3 are unchanged by this unit.
+
+| Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
+|---|---|---|---|
+| P1 — Topology onboarding | Active | `TopologyStore` (expand/selectTrail/nodeSiteMap/cap), `SiteGraphComponent` (compound site boxes, type icons, zoom), `GeoSiteMapComponent` (map zoom), `TopologyClient.neighbors`/`traversal`, `TrailBuilderClient.getTrail`/`getTrailsForObject` | Reads: Topology `sites`/objects-at-site/`neighbors`/`traversal`; Trail Builder `getTrail`/`getTrailsForObject`. Writes: — |
+| P2 — Pattern learning | Passive | Topology & trails view remains browsable for reference; no work driven by this unit | Reads (on demand): same Topology/Trail APIs. Writes: — |
+| P3 — Real-time correlation | Passive | Same — operators may explore topology; no new I/O in this unit | Reads (on demand): same. Writes: — |
+
+## Module breakdown (this unit — extends existing files)
+
+```mermaid
+flowchart TB
+  subgraph view["Topology and trails view (P1)"]
+    geo["GeoSiteMapComponent<br/>(MapLibre, NavigationControl, fit/reset)"]
+    graph["SiteGraphComponent<br/>(Cytoscape: compound site boxes,<br/>type-icon node backgrounds, zoom controls)"]
+    panel["AttributeDetailPanelComponent<br/>(+ per-node expand button, crossDomain toggle)"]
+    trailpanel["Trail-detail panel<br/>(members to selectNode, igpArea, srlgGroup, clear)"]
+  end
+  store["TopologyStore (signals)<br/>nodeMap, edgeMap, nodeSiteMap,<br/>expandNode, selectTrail, mergeGraph, NODE_CAP"]
+  iconmap["type-icon-mapper.ts<br/>(objectType to icon url, generic fallback)"]
+  layer["layer-mapper.ts (existing)"]
+  topoClient["TopologyClient<br/>(neighbors, traversal, objectsAtSite)"]
+  trailClient["TrailBuilderClient<br/>(getTrail, getTrailsForObject, listTrails)"]
+  assets["public/icons/*.svg (bundled, offline)"]
+
+  geo --> store
+  graph --> store
+  panel --> store
+  trailpanel --> store
+  graph --> iconmap
+  graph --> layer
+  iconmap --> assets
+  store --> topoClient
+  store --> trailClient
+```
+
+- **`TopologyStore` (extend `topology.store.ts`).** Already the accumulating-graph store
+  (`nodeMap`/`edgeMap` signals; `hasGraph`; `derivedNodes`/`derivedEdges`/`visibleEdges` computed;
+  `nodeSiteMap` from `LOCATED_AT`; `siteName`; `mergeGraph` additive+dedupe+`NODE_CAP`+`capReached`;
+  `selectSite`, `expandNode`, `selectTrail`, `clearTrail`, `collapseToRoot`). **This unit's required
+  edits:** (a) read `NODE_CAP` from env config (`TOPOLOGY_NODE_CAP`, default **250** — see
+  "Node-cap default") instead of a module constant; (b) make `mergeGraph`/`expandNode` enforce
+  **all-or-nothing** at the cap (AC 57 — no partial add); (c) add an optional `expandTraversal`
+  action over `TopologyClient.traversal` for multi-hop pull. Names `derivedNodes`/`derivedEdges`/
+  `visibleEdges`/`nodeSiteMap` are kept.
+- **`SiteGraphComponent` (extend `site-graph.component.ts`).** Already does compound site boxes,
+  structure/decoration effect split, breadthfirst→cose layout, zoom controls, and the `data-cy-*`
+  bridge. **This unit's required edits:** (a) add `background-image` (type icon via
+  `type-icon-mapper`) to the leaf-node Cytoscape style while **keeping the layer-colour fill**; (b)
+  add a **type-icon legend**; (c) add an icon test bridge (`data-cy-icon-types` count + per-row
+  `data-icon`) for AC 70/71; (d) ensure the per-node **+expand** button and a **crossDomain toggle**
+  are present (the toggle binds `expandNode(id,{crossDomain:true})`).
+- **`GeoSiteMapComponent` (extend `geo-site-map.component.ts`).** Already adds MapLibre
+  `NavigationControl` and `fitBounds(siteExtent)`. **This unit's required edits:** add explicit
+  keyboard-reachable **fit** and **reset** controls (reset → default centre+zoom captured at init)
+  and a `data-testid`/`data-cy-map-zoom` bridge for AC 74/76.
+- **`type-icon-mapper.ts` (NEW, `src/app/topology/`).** Pure `objectType → icon url` map with a
+  generic fallback (mirrors `layer-mapper.ts`'s pure-function shape).
+- **`public/icons/*.svg` (NEW assets) + `public/icons/README.md` (license note).** Bundled inline
+  SVG, one per objectType + a generic fallback; no CDN.
+
+## Data model (client-side view-models — no owned store)
+
+N/A — no owned datastore (web-ui owns no DB; see the top-level `## Data model / DB schema`). The
+client-side state for this unit is the accumulating graph in `TopologyStore`:
+
+```mermaid
+classDiagram
+  class TopologyStore {
+    +Signal~Map~ nodeMap
+    +Signal~Map~ edgeMap
+    +Computed hasGraph
+    +Signal capReached
+    +Computed derivedNodes
+    +Computed derivedEdges
+    +Computed visibleEdges
+    +Computed nodeSiteMap
+    +Computed distinctSiteIds
+    +Signal selectedTrailDetail
+    +Signal trailMemberIds
+    +expandNode(id, opts)
+    +selectTrail(trailId)
+    +clearTrail()
+    +collapseToRoot()
+    +mergeGraph(nodes, edges)
+    +siteName(siteId) string
+  }
+  class NodeDto {
+    +string managedObjectId
+    +string objectType
+    +string domain
+    +string snapshotId
+    +string name
+    +AttributeMap attributes
+  }
+  class EdgeDto {
+    +string edgeId
+    +string from
+    +string to
+    +string relation
+    +string domain
+    +string snapshotId
+    +AttributeMap attributes
+  }
+  class SiteDto {
+    +string siteId
+    +string name
+    +number latitude
+    +number longitude
+    +string region
+  }
+  TopologyStore "1" o-- "many" NodeDto : nodeMap values
+  TopologyStore "1" o-- "many" EdgeDto : edgeMap values
+  TopologyStore "1" o-- "many" SiteDto : sites
+```
+
+**`nodeSiteMap` derivation (the OQ-11 resolution).** A `computed` over `edgeMap`:
+for each edge with `relation === 'LOCATED_AT'`, the **site endpoint** is whichever of `from`/`to` is
+a known `siteId` (`siteId ∈ sites()`), and the **other endpoint is the device** — so
+`map.set(deviceId, siteId)`. Because expanding a device returns its `LOCATED_AT` edge to its `Site`
+(direct-edge fact above) and the `Site` node, a **cross-site** expanded device gains a `nodeSiteMap`
+entry to its real site → its site box renders (AC 61). Devices whose `LOCATED_AT` edge has not (yet)
+been pulled have no entry; they render in the **rooting site's** box by fetch context (the
+objects-at-site response for the rooted site already carried `LOCATED_AT` edges for its own devices,
+so AC 60 holds for the single-site case). Site nodes themselves are excluded from `derivedNodes`
+(they are boundary containers, not devices).
+
+## Key flows (Mermaid)
+
+### Flow A — Expand a device node (AC 55-58)
+
+```mermaid
+sequenceDiagram
+  actor Op as Operator
+  participant SG as SiteGraphComponent
+  participant ST as TopologyStore
+  participant TC as TopologyClient
+  participant TP as Topology Service
+  Op->>SG: click +expand on node N (crossDomain toggle state)
+  SG->>ST: expandNode(N, {crossDomain})
+  alt capReached
+    ST-->>SG: no-op, capReached already true
+    SG-->>Op: cap-reached message, expand disabled
+  else under cap
+    ST->>TC: neighbors(N, {crossDomain})
+    TC->>TP: GET /topology/nodes/N/neighbors?crossDomain=true_or_omitted
+    TP-->>TC: NeighborsDto {neighbors:[{node, via}]}
+    TC-->>ST: NeighborsDto
+    ST->>ST: mergeGraph(nodes, edges) all-or-nothing cap check, dedupe by id
+    alt adding would exceed cap
+      ST->>ST: reject, set capReached=true, add nothing
+      ST-->>Op: visible cap message, node count unchanged
+    else fits
+      ST->>ST: additive merge, expandedNodeIds add N, LOCATED_AT edges feed nodeSiteMap
+      ST-->>SG: structureKey changes then one relayout, icons + site boxes update
+    end
+  end
+```
+
+### Flow B — Select a trail and explode a cross-site span (AC 63-69)
+
+```mermaid
+sequenceDiagram
+  actor Op as Operator
+  participant SG as SiteGraphComponent
+  participant ST as TopologyStore
+  participant TB as TrailBuilderClient
+  participant TS as Trail Builder
+  participant TC as TopologyClient
+  Op->>SG: click trail-cluster button T
+  SG->>ST: selectTrail(T)
+  ST->>TB: getTrail(T)
+  TB->>TS: GET /trails/T
+  TS-->>TB: TrailDetail {members, igpArea, srlgGroup}
+  TB-->>ST: TrailDetail
+  ST->>ST: trailMemberIds = all member ids, selectedTrailDetail = detail
+  Note over ST: decoration effect highlights every present member, not just one
+  alt some members absent from graph (cross-site)
+    ST->>TC: neighbors(missingMember) for each missing
+    TC-->>ST: NeighborsDto per missing member
+    ST->>ST: mergeGraph(member nodes + neighbours) once, new site box appears
+  end
+  ST-->>SG: trail-detail panel renders trailId, igpArea, srlgGroup, members
+  Op->>SG: click a member id in the panel
+  SG->>ST: selectNode(member)
+  ST-->>SG: node gets selected state
+  Op->>SG: click Clear trail
+  SG->>ST: clearTrail()
+  ST-->>SG: highlights removed, nodes and edges remain in graph
+```
+
+## Algorithm logical flow — `mergeGraph` all-or-nothing cap (AC 56, 57)
+
+The existing `mergeGraph` adds nodes up to the cap and drops the rest (partial add). **AC 57 requires
+all-or-nothing**: if an expansion's *new* nodes would push the total over `TOPOLOGY_NODE_CAP`, reject
+the whole expansion, add nothing, and surface a visible message. The refined logic:
+
+```mermaid
+flowchart TD
+  A["expandNode(id, opts)"] --> B{capReached?}
+  B -- yes --> Z["no-op (button already disabled, message shown)"]
+  B -- no --> C["neighbors(id, opts) returns nodes, edges"]
+  C --> D["newNodes = nodes whose id not in nodeMap (dedupe)"]
+  D --> E{"nodeMap.size + newNodes.length greater than CAP?"}
+  E -- yes --> F["reject: add NOTHING, set capReached=true, expose visible message"]
+  E -- no --> G["additive merge newNodes + new edges (dedupe by edgeId)"]
+  G --> H["expandedNodeIds.add(id); single nodeMap/edgeMap write then one relayout"]
+```
+
+- **Inputs:** `neighbors` response, current `nodeMap.size`, `TOPOLOGY_NODE_CAP` (env).
+- **Dedupe:** new nodes by `managedObjectId`, new edges by `edgeId`; re-expanding a fully-present
+  node yields zero new nodes/edges → count unchanged (AC 56).
+- **All-or-nothing:** the count check is on the **deduped new** set; on overflow, **no partial add**
+  (AC 57) — distinct from the current per-node cap loop, which must be replaced by this pre-check.
+- **Edges-only merge still allowed at cap:** an expansion that adds **only edges** between
+  already-present nodes (zero new nodes) is permitted even at the cap.
+
+## Icon asset design (AC 70-72)
+
+- **`objectType → icon file` map** (in `type-icon-mapper.ts`; generic fallback for any unknown type):
+
+  | `objectType` | icon file (`public/icons/`) |
+  |---|---|
+  | `Node` (Router) | `router.svg` |
+  | `LineCard` | `linecard.svg` |
+  | `Port` | `port.svg` |
+  | `Interface` | `interface.svg` |
+  | `FiberSpan` | `fiber-span.svg` |
+  | `IPLink` | `ip-link.svg` |
+  | `IGPAdjacency` | `igp-adjacency.svg` |
+  | `LSP` | `lsp.svg` |
+  | `VPNService` | `vpn-service.svg` |
+  | `SRLG` | `srlg.svg` |
+  | *(anything else)* | `generic.svg` (fallback — AC 71; no node is ever icon-less) |
+
+- **Where they live:** `services/web-ui/public/icons/*.svg` — copied verbatim into the build output
+  by the Angular `public/` asset pipeline; served from the app origin. **No CDN, no external URL**
+  (AC 72).
+- **How Cytoscape references them:** the leaf-node style sets
+  `'background-image': (n) => iconUrlFor(n.data('objectType'))`, `'background-fit':'contain'`,
+  `'background-opacity':1` over the existing **layer-colour fill** (fill stays as the node
+  `background-color`; the icon sits on top). `iconUrlFor` builds an **absolute same-origin URL** via
+  `new URL('icons/router.svg', document.baseURI).href` so it resolves correctly under the app's
+  served base path and never points off-origin.
+- **Offline guarantee (AC 72):** all icons are bundle assets; `iconUrlFor` only ever produces
+  same-origin URLs (asserted by the test intercepting requests → zero external-hostname requests).
+- **Testability bridge:** each accessible node row carries `data-icon="<objectType-key>"` (the
+  resolved icon key, `generic` for fallback), and the canvas carries `data-cy-icon-types` (count of
+  distinct icon keys rendered). AC 70 asserts the correct `data-icon` per type; AC 71 asserts a
+  fallback `data-icon="generic"` for an unknown type.
+- **License note (`public/icons/README.md`):** records the icon source and its **permissive license**
+  (MIT / Apache-2.0 / CC0 / CC-BY with attribution). If the icons are authored in-repo, the README
+  states they are original and MIT-licensed with the project. Permissive-only per the golden rules.
+
+## Node-cap default (OQ-12)
+
+`TOPOLOGY_NODE_CAP` default = **250** (carried in `environment.model.ts` + `environment.ts`;
+overridable per deployment via `env.js`/Compose env). Rationale: large enough to hold a multi-site
+exploded trail and several expansions of the synthetic Core IP topology, small enough to keep
+Cytoscape layout/redraw responsive in-browser; documented and adjustable (not a contract change).
+The existing build hard-codes `NODE_CAP = 250` — this unit moves it to env config (same default).
+
+## Test data (mock fixtures — AC-enabling, this unit)
+
+New/extended fixtures in `mock-fixtures.ts` (MSW unit handlers) and the Playwright contract-mocks,
+called out so the dev builds them up front:
+
+- **Per-site DISTINCT graphs** — each site's objects-at-site response is a **different** subgraph
+  (no London-clone): distinct device ids and topology per site so multi-site assertions are real.
+- **`LOCATED_AT` edges** in every objects-at-site response (device → its Site) so `nodeSiteMap` and
+  the single-site boundary box (AC 60) work from the rooted fetch.
+- **A `neighbors` handler that crosses sites** — expanding a designated border device returns a
+  neighbour **in a second site**, *including that neighbour's `LOCATED_AT` edge to the second Site
+  and the second `Site` node*, so cross-site boundary grouping (AC 61) and trail explode (AC 64) are
+  exercised end-to-end through `nodeSiteMap`.
+- **A `traversal` handler** returning `{reached, edges}` for the optional `expandTraversal` path.
+- **A `TRAIL_DETAIL` spanning sites** — `getTrail` returns members across **two** sites, at least one
+  member absent from the initially-rooted graph (drives AC 64 explode), with `igpArea` and
+  `srlgGroup` populated (AC 65/69).
+- **Fixtures covering ALL 10 objectTypes** — a site (or expansion) whose nodes include one of each
+  `Node, LineCard, Port, Interface, FiberSpan, IPLink, IGPAdjacency, LSP, VPNService, SRLG` **plus**
+  one unknown type (e.g. `UnknownFutureThing`) so AC 70 (icon per type) and AC 71 (generic fallback)
+  are both testable.
+- **A cap fixture** — a graph pre-seeded to `TOPOLOGY_NODE_CAP` and a `neighbors` response with one
+  unseen node (AC 57), and a `neighbors` response echoing already-present ids (AC 56).
+
+## Error handling (this unit)
+
+- **`neighbors`/`getTrail` 5xx or network error:** caught (`catchError`) → no graph mutation; the
+  Topology/Trail-Builder error banner (`ErrorBannerService`, AC 53) names the service; other modules
+  unaffected; the operator can retry. No partial/garbage merge.
+- **Cap exceeded (AC 57):** not an error — a **defined rejection**: nothing added, `capReached=true`,
+  a visible `role="status"` cap message, expand buttons disabled. Reset/collapse re-enables.
+- **`crossDomain` off:** the `crossDomain` query param is **omitted (or false)**; on (AC 58) it is
+  `true`. The client strips `undefined` params so "off" sends no param.
+- **Stale objects-at-site response:** the existing `pendingObjectsSiteId` guard drops a superseded
+  site response (no clobber).
+- **Trail member absent + objects-at-site/neighbors fails during explode:** the member is still added
+  as a synthesized node from its `TrailMember` (so it is present + highlightable) even if its
+  neighbours can't be fetched — the trail highlight degrades gracefully rather than dropping the
+  member.
+- **Unknown `objectType` (AC 71):** never an error — falls back to `generic.svg`; the node always
+  renders.
+- **`maxDepth > 32` on traversal:** clamped client-side to 32 (server limit) before the call.
+
+## Design alternatives (this unit)
+
+| Consideration | Alternatives considered | Chosen + rationale |
+|---|---|---|
+| **Site attribution for expanded nodes (OQ-11)** | (a) follow-up `GET /topology/nodes/{id}` per expanded node; (b) add `siteId` to `NodeDto` (**contract change**); (c) infer client-side from `LOCATED_AT` edges already in the graph | **(c) infer from `LOCATED_AT`** — LOCKED. The `neighbors` response already carries the device's `LOCATED_AT` edge + its `Site` node (no relation filter), so `nodeSiteMap` derives the site with **no extra call and no contract change**. (a) adds N round-trips per expand and a partial-render window; (b) is a contract change the spec forbids absent human approval. |
+| **Icon delivery** | bundled inline SVG under `public/icons/` vs. an icon-font vs. a CDN sprite | **Bundled inline SVG** — LOCKED. Offline (AC 72), permissive, per-type, crisp at any zoom; CDN violates offline + adds an external dependency; an icon font is awkward as a Cytoscape `background-image` and worse for per-type theming. |
+| **Icon rendering in Cytoscape** | `background-image` over the layer-colour fill vs. replacing the fill with the icon vs. an HTML overlay layer | **`background-image` over the fill** — keeps the operator's layer colour-coding (AC 28 semantics) AND shows the type icon; an HTML overlay desyncs from Cytoscape pan/zoom. |
+| **Cap enforcement (AC 57)** | per-node cap loop (current build: partial add) vs. all-or-nothing pre-check on the deduped new set | **All-or-nothing pre-check** — AC 57 mandates "no partial add". The current build's loop adds up to the cap then stops, which would partially add; this unit replaces it with a pre-check. |
+| **`NODE_CAP` source** | module constant (current build) vs. env config `TOPOLOGY_NODE_CAP` | **Env config** — the spec requires a *configurable* cap; default 250 retained. |
+| **Expand interaction** | double-click on canvas node vs. explicit +expand button (detail panel + per-node row) | **Explicit button** — LOCKED. Discoverable, keyboard-accessible (AC 75 spirit), unambiguous vs. select; double-click is undiscoverable and clashes with select. |
+| **Trail explode missing-member fetch** | synthesize member node only vs. synthesize + fetch its neighbours (edges) | **Synthesize + fetch neighbours** — the member must not just appear but **connect** to the path; fetching its neighbours brings the connecting edges (and its `LOCATED_AT` → its site box). Degrades to synthesize-only if the fetch fails. |
+| **Site boundary rendering** | Cytoscape **compound parent nodes** (labelled boxes) vs. a `bounding-box`/hull overlay vs. background convex-hull plugin | **Compound parent nodes** — first-class in Cytoscape, layout-aware (cose nests children), gives a labelled, per-site-coloured box for free; hull overlays desync on relayout. |
+| **Multi-site layout** | keep breadthfirst vs. switch to deterministic `cose` when ≥2 site boxes | **Deterministic `cose` (`animate:false, randomize:false`) for ≥2 sites**, breadthfirst for one — `cose` is compound-aware so boxes don't overlap; deterministic settings keep `layoutstop`/the test bridge reliable. |
+| **Re-fit on expand** | always `fit()` after each merge vs. `firstFit` gate + re-fit only on new site box | **`firstFit` gate + re-fit only when a new site box appears** — preserves the operator's manual zoom/pan on same-site expands (AC: zoom state local, not reset), while still surfacing a newly-arrived cross-site box. |
+| **Map zoom controls** | rely on MapLibre `NavigationControl` only vs. add explicit fit/reset controls | **`NavigationControl` + explicit fit/reset** — `NavigationControl` gives zoom-in/out + keyboard; fit (`fitBounds(siteExtent)`) and reset-to-default (AC 74) need explicit controls. |
+
 ## Test plan
 
 ### Acceptance criterion to test (unit/contract)
@@ -1741,7 +2126,43 @@ All 58 acceptance criteria map 1:1 to a named test (49 Vitest/TestBed + 9 Playwr
 AC 5, 13, 17, 20, 25, 33, 39, 43, 46, 49 are E2E — note AC 51 is a build-time grep check run
 under the unit harness). The new-view AC groups are covered: dashboard (AC 1-5, **+57-58** for the
 new KPIs), streaming (AC 6-13), incident-detail (AC 14-17), noise-stats (AC 18-20), cross-nav/deep-link
-(AC 21-25), and the **chatter-management page (AC 55-56, FIX F-UI1)**.
+(AC 21-25), and the **chatter-management page (FIX F-UI1)**.
+
+### Acceptance criterion to test — Explorable topology & type icons (AC 55-76, this design unit)
+
+**Authoritative mapping for ACs 55-76.** Vitest/TestBed unit/component tests use MSW mocks (from the
+producers' frozen `openapi.json`) and a Cytoscape/MapLibre spy or jsdom-guarded init; Playwright
+tests run **real chromium** against the integration stack. The method per row matches the AC's stated
+method. New/extended spec files live under `services/web-ui/src/app/topology/` (Vitest) and
+`services/web-ui/e2e/topology-explore.e2e.ts` (Playwright).
+
+| # | Acceptance criterion (abridged) | Test | Asserts |
+|---|---|---|---|
+| 55 | Expand calls `neighbors(id)`; unseen nodes + connecting edges added | `expand-node.spec.ts` (TestBed) | `expandNode(N)` calls `TopologyClient.neighbors` with `N`'s id; both fixture neighbour nodes appear in `derivedNodes` and their `via` edges in `derivedEdges`/`visibleEdges` |
+| 56 | Re-expand with all neighbours present adds no duplicates | `expand-dedupe.spec.ts` (TestBed) | mock returns ids already in `nodeMap`; `nodeMap.size`/`edgeMap.size` unchanged before vs. after re-expand |
+| 57 | At `TOPOLOGY_NODE_CAP`, expansion adding a new node is rejected all-or-nothing + visible message | `expand-cap.spec.ts` (TestBed) | graph pre-seeded to cap; `neighbors` returns one unseen node; node count unchanged, **nothing** added, `capReached()===true`, cap `role="status"` message present |
+| 58 | `crossDomain` opt-in → `crossDomain=true` param; off → omitted/false | `expand-crossdomain.spec.ts` (TestBed) | captured request query: `crossDomain=true` when toggle on; param absent (or false) when off |
+| 59 | E2E: expand a node, a neighbour + edge appears without reload | `topology-explore.e2e.ts` → `expand neighbour` (Playwright) | against real stack: `data-cy-node-count` increases and a connecting edge appears after clicking +expand; no page reload (SPA) |
+| 60 | Single-site graph: every node in one labelled site-boundary box | `site-boundary-single.spec.ts` (TestBed) | objects-at-site fixture all one `siteId` (with `LOCATED_AT` edges); exactly one site-parent box, labelled with the site name; no ungrouped device |
+| 61 | Two-site graph: exactly two labelled boundary boxes, no device ungrouped | `site-boundary-cross.spec.ts` (TestBed) | after a cross-site expand fixture (neighbour + its `LOCATED_AT` + 2nd `Site`), `distinctSiteIds().length===2`; two site-parent boxes each labelled; every device parented |
+| 62 | E2E: cross-site expansion shows ≥2 labelled boundary groups | `topology-explore.e2e.ts` → `cross-site boundaries` (Playwright) | real stack: trigger cross-site expand; `data-cy-site-count` ≥ 2 and two labelled boxes render |
+| 63 | Trail select calls `getTrail`; present members highlighted, non-members not | `trail-select-highlight.spec.ts` (TestBed) | `getTrail` returns 3 members; graph has all 3 + 1 non-member; all 3 get the trail-member highlight class, the non-member does not |
+| 64 | Trail member in an unloaded site → that subgraph fetched + member highlighted | `trail-explode.spec.ts` (TestBed) | `getTrail` member absent from graph; mock its `neighbors`/objects-at-site; member node appears in `derivedNodes` and carries the trail-member highlight |
+| 65 | Trail-detail panel shows `trailId`, `igpArea`, `srlgGroup`, members | `trail-detail-panel.spec.ts` (TestBed) | `TrailDetail` with both fields populated → each rendered in the panel; each member shows its `managedObjectId`; null shows an absent indicator |
+| 66 | Activating a member id in the panel selects that node in the graph | `trail-member-activate.spec.ts` (TestBed) | click/Enter on a member → `selectedObjectId()` equals that member; node gets selected state |
+| 67 | Clear-trail removes highlights but keeps exploded nodes/edges | `trail-clear.spec.ts` (TestBed) | after explode then `clearTrail()`: zero nodes carry the trail-highlight class; `nodeMap.size` not reduced to pre-explode count |
+| 68 | Device-select + trail-select highlights coexist | `trail-device-coexist.spec.ts` (TestBed) | mock `getTrailsForObject` + `getTrail`; with both active, both highlight sets present simultaneously |
+| 69 | E2E: select a trail → members highlighted + panel shows id/area/SRLG | `topology-explore.e2e.ts` → `trail navigation` (Playwright) | real stack: pick a trail from the list; visible members get `data-cy-highlight-count` > 0; panel renders `trailId`, `igpArea`, `srlgGroup` |
+| 70 | Each Core IP `objectType` renders its corresponding icon | `type-icon.spec.ts` (TestBed) | render a node per objectType; each row's `data-icon` equals the expected icon key (router/linecard/.../srlg); `data-cy-icon-types` counts all 10 |
+| 71 | Unknown `objectType` → generic fallback icon, node still rendered | `type-icon-fallback.spec.ts` (TestBed) | node with `objectType="UnknownFutureThing"` → exists in DOM with `data-icon="generic"`; not hidden |
+| 72 | Offline: all icon assets loaded from bundle, no external request | `icon-offline.spec.ts` (TestBed) | intercept requests during render; zero requests to any external hostname for icons; `iconUrlFor` URLs are same-origin (`document.baseURI`) |
+| 73 | Graph zoom in/out/fit/reset call the Cytoscape methods | `graph-zoom.spec.ts` (TestBed, cy spy) | zoom-in → `cy.zoom()` increases; zoom-out → decreases; Fit → `cy.fit()`; Reset → `collapseToRoot()` + re-fit (firstFit reset) |
+| 74 | Map zoom in/out/fit/reset call the MapLibre methods | `map-zoom.spec.ts` (TestBed, map spy) | zoom-in → map `zoomIn`/`setZoom` up; zoom-out down; Fit → `fitBounds(siteExtent)`; Reset → default centre+zoom restored |
+| 75 | Graph zoom controls reachable + activatable by keyboard alone | `graph-zoom-a11y.spec.ts` (TestBed, axe + keyboard) | each of zoom-in/out/fit/reset is focusable (Tab) and activatable (Enter/Space), has an `aria-label`; no axe violations on the controls group |
+| 76 | E2E: activating graph zoom-in demonstrably increases the visual zoom | `topology-explore.e2e.ts` → `graph zoom in` (Playwright) | real stack: read `data-cy-zoom` before/after clicking zoom-in → strictly larger |
+
+All 22 ACs (55-76) map 1:1 to a named test: **18 Vitest/TestBed** (55-58, 60-61, 63-68, 70-75) +
+**4 Playwright E2E** (59, 62, 69, 76) — matching each AC's stated method.
 
 ### E2E scenarios (from this design unit's point of view — Playwright)
 
@@ -1762,6 +2183,12 @@ new KPIs), streaming (AC 6-13), incident-detail (AC 14-17), noise-stats (AC 18-2
 | 13 (empty path) | No discovered patterns | Pattern Manager returns empty draft list | Pattern review shows an explicit empty state, not an error |
 | 14 (F-UI1) | Chatter promote round-trip | Open `/chatter` against the real stack (NF observed-chatter populated from a P2 replay), select a source, promote a candidate signature | Enrichment `listChatter` returns the promoted `(managedObjectId, eventType)` on re-read; the row shows `promoted`; closing the loop (Enrichment now suppresses that chatter on the live path) |
 | 15 (F-UI2) | Dashboard RCA accuracy + auto-correlation shown | Replay a labeled scenario in the eval/demo profile, open `/dashboard` | RCA-accuracy card shows a numeric value (eval-mode `stats.rcaAccuracy` or the `/labels` client-side join), not "evaluated offline"; auto-correlation card shows `correlatedAlarmCount/totalAlarmsProcessed` near the ~60% target |
+| 16 (AC 59) | Explore by expanding a device | Real Topology stack; root a site, click +expand on a device | A neighbour node + connecting edge appears (`data-cy-node-count` up); no page reload |
+| 17 (AC 62) | Cross-site expansion shows two site boxes | Real stack; expand a border device whose neighbour is in another site | `data-cy-site-count` ≥ 2; two distinct labelled site-boundary boxes render |
+| 18 (AC 69) | Trail navigation + detail | Real Trail Builder; select a trail from the trail list in the topology view | Visible members highlighted (`data-cy-highlight-count` > 0); trail-detail panel shows `trailId`, `igpArea`, `srlgGroup` |
+| 19 (AC 76) | Graph zoom-in increases visual zoom | Real stack; on the site graph, click zoom-in | `data-cy-zoom` strictly increases after the control activation |
+| 20 (failure path, AC 53/57) | Expand at cap / Topology 5xx | Drive the graph to `TOPOLOGY_NODE_CAP` then expand; separately make `neighbors` return 5xx | At cap: visible cap message, node count unchanged, nothing partially added. On 5xx: Topology-named error banner, graph unchanged, other modules unaffected, retry works |
+| 21 (offline path, AC 72) | Icons load offline | Serve with no external network; render the site graph | All device-type icons render from the bundle; no request to any external hostname for an icon asset |
 
 ## Config & observability
 
@@ -1776,6 +2203,10 @@ new KPIs), streaming (AC 6-13), incident-detail (AC 14-17), noise-stats (AC 18-2
   value is its default. The 3 s default is the spec default (open question #10) and may be
   adjusted in `environment.ts` if the integration stack reveals a better value — not a contract
   change.
+- **Explorable-topology config (ACs 55-76):** `TOPOLOGY_NODE_CAP` (default **250**, in
+  `environment.model.ts` + `environment.ts`, overridable via `env.js`/Compose) bounds the
+  accumulating explorer graph; `crossDomain` expand is a per-view UI toggle (not env). Bundled
+  type icons are static `public/icons/*.svg` assets (offline, no env). None are contract changes.
 - **Observability:** served app root `/` returns HTTP 200 for liveness (nginx). Client-side
   **structured JSON logging** (configurable level from env) for API errors, navigation events,
   and poll failures. **No `/metrics`** endpoint — a static SPA has no BFF; per spec this is
