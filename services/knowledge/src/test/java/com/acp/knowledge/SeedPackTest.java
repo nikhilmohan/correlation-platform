@@ -41,13 +41,15 @@ class SeedPackTest extends AbstractKnowledgeIT {
     }
 
     @Test
-    void alarmTypeVocabulary_has29GroundedTokens() throws Exception {
+    void alarmTypeVocabulary_has30GroundedTokens() throws Exception {
+        // 29 original grounded tokens + NodeDown (the Node leaf-origin token, #262 tail).
         mockMvc.perform(get("/domains/core-ip/alarm-type-vocabulary/"
                         + CrudVersioningOriginalTypesTest.enc("core-ip/alarmTypeVocabulary/default")))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.payload.alarmTypes", hasSize(29)))
+                .andExpect(jsonPath("$.payload.alarmTypes", hasSize(30)))
                 .andExpect(jsonPath("$.payload.alarmTypes", hasItem("InterfaceDown")))
-                .andExpect(jsonPath("$.payload.alarmTypes", hasItem("FiberCut")));
+                .andExpect(jsonPath("$.payload.alarmTypes", hasItem("FiberCut")))
+                .andExpect(jsonPath("$.payload.alarmTypes", hasItem("NodeDown")));
     }
 
     @Test
