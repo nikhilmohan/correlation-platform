@@ -150,6 +150,125 @@ class SeedTemplateConsistencyTest {
                 "fiber-cut cascade must reach ReachabilityLoss(VPNService); reachable=" + new TreeSet<>(reachable));
     }
 
+    /**
+     * BACKWARD invariant (#262 tail anti-regression). The forward guard above proves no template
+     * trigger is an orphan; it does NOT catch the symmetric defect that let IPLink and Node slip
+     * through: a faultOriginType whose origin token matches no template trigger, so the origin can
+     * never start a cascade and its scenarios collapse to a single (root-only) symptom.
+     *
+     * <p>For EVERY {@code faultOriginType}, its {@code originAlarmType} must equal the
+     * {@code trigger.alarmType} of at least one {@code propagationTemplate} whose
+     * {@code trigger.objectType} equals that origin's {@code objectType} (so the origin can cascade)
+     * — UNLESS the origin object type is in the small, explicitly-declared LEAF set below, where a
+     * terminal (no-downstream-cascade) origin is the intended modeling.
+     *
+     * <p>On the pre-fix seed this FAILS: IPLink emits {@code IPLinkDown} (templates trigger on
+     * {@code IPLink/LinkDown}) and Node emits {@code LOS} (no template triggers on {@code Node/*}),
+     * neither of which is a declared leaf. After aligning IPLink's origin token to {@code LinkDown}
+     * and declaring Node a {@code NodeDown} leaf, it PASSES.
+     */
+    private static final Set<String> LEAF_ORIGIN_OBJECT_TYPES = Set.of(
+            // Node: node-level failure (power loss / reboot) is a documented leaf origin in the MVP —
+            // no downstream cascade chain is authored for it (a Node->hosted-LineCard/Port cascade
+            // would be a deliberate modeling decision, escalated to the human, not authored here).
+            "Node");
+
+    @Test
+    void everyFaultOriginTokenTriggersSomeTemplateOnItsObjectType_orIsADeclaredLeaf() {
+        Set<String> nonCascadingOrigins = new TreeSet<>();
+        int originCount = 0;
+
+        for (JsonNode rec : records) {
+            if (!"faultOriginType".equals(rec.path("recordType").asText())) {
+                continue;
+            }
+            originCount++;
+            JsonNode payload = rec.path("payload");
+            String objectType = payload.path("objectType").asText();
+            String originToken = payload.path("originAlarmType").asText();
+            String recordId = rec.path("recordId").asText();
+            assertFalse(objectType.isEmpty(), "faultOriginType " + recordId + " has no objectType");
+            assertFalse(originToken.isEmpty(),
+                    "faultOriginType " + recordId + " has no originAlarmType");
+
+            if (LEAF_ORIGIN_OBJECT_TYPES.contains(objectType)) {
+                // Declared leaf: it is intentionally terminal and need not match any template trigger.
+                continue;
+            }
+            if (!someTemplateTriggersOn(objectType, originToken)) {
+                nonCascadingOrigins.add(
+                        objectType + "(" + originToken + ") in " + recordId);
+            }
+        }
+
+        assertTrue(originCount > 0, "seed must declare fault-origin types");
+        assertTrue(nonCascadingOrigins.isEmpty(),
+                "every faultOriginType.originAlarmType must equal the trigger.alarmType of at least one "
+                        + "propagationTemplate whose trigger.objectType == the origin's objectType (so the "
+                        + "origin can cascade), unless the origin objectType is a declared leaf "
+                        + LEAF_ORIGIN_OBJECT_TYPES + "; non-cascading origins (origin token matches no "
+                        + "template trigger on its object type) found: " + nonCascadingOrigins);
+    }
+
+    @Test
+    void iplinkOriginEmitsCanonicalLinkDownAndCascadesToVpnService() {
+        // #262 tail: IPLink as an ORIGIN must emit LinkDown (the canonical IPLink-down token the
+        // TRAVERSES/MEMBER_OF templates trigger on), not the dead-end IPLinkDown, so the IPLink-origin
+        // cascade (LinkDown -> LSPDown -> ReachabilityLoss) fires just like the FiberSpan-reached case.
+        assertEquals("LinkDown", originTokenFor("IPLink"),
+                "IPLink faultOriginType must emit the canonical LinkDown token so the IPLink origin cascades");
+        assertTrue(someTemplateTriggersOn("IPLink", "LinkDown"),
+                "a propagationTemplate must trigger on IPLink/LinkDown so the IPLink origin can cascade");
+
+        Set<String> reachable = new HashSet<>();
+        reachable.add(originTokenFor("IPLink")); // LinkDown
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (JsonNode rec : records) {
+                if (!"propagationTemplate".equals(rec.path("recordType").asText())) {
+                    continue;
+                }
+                JsonNode p = rec.path("payload");
+                if (reachable.contains(p.path("trigger").path("alarmType").asText())
+                        && reachable.add(p.path("effect").path("alarmType").asText())) {
+                    grew = true;
+                }
+            }
+        }
+        assertTrue(reachable.contains("LSPDown"),
+                "IPLink origin must cascade to LSPDown(LSP); reachable=" + new TreeSet<>(reachable));
+        assertTrue(reachable.contains("ReachabilityLoss"),
+                "IPLink origin must cascade to ReachabilityLoss(VPNService); reachable="
+                        + new TreeSet<>(reachable));
+    }
+
+    @Test
+    void nodeOriginIsADeclaredNodeDownLeaf() {
+        // #262 tail: Node is a documented leaf origin — it emits NodeDown and has no downstream
+        // cascade template (a Node->hosted-equipment cascade would be a separate modeling decision).
+        assertEquals("NodeDown", originTokenFor("Node"),
+                "Node faultOriginType must emit NodeDown (leaf origin token), not the optical LOS token");
+        assertTrue(LEAF_ORIGIN_OBJECT_TYPES.contains("Node"),
+                "Node must be declared a leaf origin in the backward-invariant guard");
+        assertFalse(someTemplateTriggersOn("Node", "NodeDown"),
+                "Node is a leaf: no template should trigger on it (else it would not be a leaf)");
+    }
+
+    private static boolean someTemplateTriggersOn(String objectType, String alarmType) {
+        for (JsonNode rec : records) {
+            if (!"propagationTemplate".equals(rec.path("recordType").asText())) {
+                continue;
+            }
+            JsonNode trigger = rec.path("payload").path("trigger");
+            if (objectType.equals(trigger.path("objectType").asText())
+                    && alarmType.equals(trigger.path("alarmType").asText())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static JsonNode templateById(String recordId) {
         for (JsonNode rec : records) {
             if ("propagationTemplate".equals(rec.path("recordType").asText())
