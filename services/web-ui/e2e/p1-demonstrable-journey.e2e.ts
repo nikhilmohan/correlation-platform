@@ -37,6 +37,19 @@ import { shot } from './support/screenshots';
  * ────────────────────────────────────────────────────────────────────────────────────────────────
  */
 test.describe('P1 demonstrable journey — topology → trails → codebook, visualized [AC 33]', () => {
+  /** UX redesign: the Devices/Connections lists are collapsed by default behind the "List view"
+   *  disclosure (the canvas is the primary interface). Journey steps that assert against the
+   *  accessible list rows open it first. The rows stay in the DOM either way; opening makes them
+   *  visible so toBeVisible()/clicks resolve. Idempotent. */
+  async function openListView(page: import('@playwright/test').Page) {
+    const toggle = page.getByTestId('list-view-toggle');
+    await expect(toggle).toBeVisible();
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
+      await toggle.click();
+    }
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  }
+
   /**
    * ── AC 33.1 — sites render on the geo map ────────────────────────────────────────────────────
    * solution-goals: P1-1 (~10 grounded geo sites), P1-6 (web-ui P1 surface live).
@@ -156,6 +169,8 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
     await expect(page).toHaveURL(/\/topology\/.+/);
 
+    // UX redesign: disclose the (default-collapsed) accessible Devices/Connections lists.
+    await openListView(page);
     const nodes = page.getByTestId('graph-node');
     const edges = page.getByTestId('graph-edge');
     await expect(nodes.first()).toBeVisible();
@@ -273,6 +288,8 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     // the device/connection lists render. We assert the POST-RENDER truth, not the race window.
     await expect(cyEl).toHaveAttribute('data-cy-loading', 'false');
     await expect(page.getByTestId('graph-loading')).toHaveCount(0);
+    // UX redesign: disclose the accessible Devices/Connections lists before asserting against rows.
+    await openListView(page);
     await expect(page.getByTestId('graph-node').first()).toBeVisible();
 
     const startEdges = await page.getByTestId('graph-edge').count();
@@ -333,6 +350,8 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     // Both graphical surfaces are role="application" with an ARIA label (spec AC 52).
     await expect(page.getByRole('application', { name: /Device-level topology graph/i })).toBeVisible();
 
+    // UX redesign: disclose the accessible Devices list before selecting a device from it.
+    await openListView(page);
     const nodes = page.getByTestId('graph-node');
     await expect(nodes.first()).toBeVisible();
     await nodes.first().click();

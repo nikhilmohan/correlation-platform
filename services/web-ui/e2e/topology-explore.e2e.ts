@@ -31,6 +31,18 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     return cy;
   }
 
+  /** UX redesign: the Devices/Connections lists are collapsed by default behind the "List view"
+   *  disclosure. Tests that assert against the accessible list rows open it first (the rows stay in
+   *  the DOM either way; opening makes them visible so toBeVisible()/clicks resolve). Idempotent. */
+  async function openListView(page: import('@playwright/test').Page) {
+    const toggle = page.getByTestId('list-view-toggle');
+    await expect(toggle).toBeVisible();
+    if ((await toggle.getAttribute('aria-expanded')) !== 'true') {
+      await toggle.click();
+    }
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  }
+
   test('expanding a node pulls its neighbours into the accumulating graph (node count grows)', async ({
     page,
   }) => {
@@ -98,6 +110,7 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     if (MODE === 'real') {
       const cy = await rootAtSite(page);
       void cy;
+      await openListView(page);
       const nodes = page.getByTestId('graph-node');
       await expect(nodes.first()).toBeVisible();
       // Every rendered node carries a resolved data-icon (never icon-less); at least one real type key.
@@ -120,6 +133,7 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
     const cy = page.locator('.cy-canvas');
     await expect(cy).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+    await openListView(page);
 
     // data-icon per type (AC 70): the router/port/ip-link/igp-adjacency/vpn-service icons all appear.
     for (const [type, key] of [
@@ -151,6 +165,7 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     await expect(page.getByTestId('site-marker').first()).toBeVisible();
     await page.getByTestId('site-marker').filter({ hasText: /London/i }).first().click();
     await expect(page.locator('.cy-canvas')).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+    await openListView(page);
     const lonIds = (await page.getByTestId('graph-node').allInnerTexts()).sort();
 
     // Back to the map, then Madrid.
@@ -158,12 +173,59 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     await expect(page.getByTestId('site-marker').first()).toBeVisible();
     await page.getByTestId('site-marker').filter({ hasText: /Madrid/i }).first().click();
     await expect(page.locator('.cy-canvas')).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
+    await openListView(page);
     const madIds = (await page.getByTestId('graph-node').allInnerTexts()).sort();
 
     // The two sites must NOT render the same device set (FAILS on the old London-clone fallback).
     expect(lonIds).not.toEqual(madIds);
     expect(lonIds.length).toBeGreaterThan(0);
     expect(madIds.length).toBeGreaterThan(0);
+  });
+
+  test('UX redesign: always-visible on-canvas "+" affordances render per device node + track the canvas', async ({
+    page,
+  }) => {
+    const cy = await rootAtSite(page);
+    const nodeCount = Number(await cy.getAttribute('data-cy-node-count'));
+    expect(nodeCount).toBeGreaterThanOrEqual(1);
+
+    // The on-canvas "+" overlay buttons render (one per rendered device node) and are VISIBLE on the
+    // canvas without opening any list — the canvas IS the interface. (data-testid="expand-node".)
+    const plus = page.locator('.cy-expand-layer [data-testid="expand-node"]');
+    await expect.poll(async () => plus.count()).toBe(nodeCount);
+    await expect(plus.first()).toBeVisible();
+    // They carry the accessible "Expand neighbours of <name>" label the assistive tech + e2e use.
+    await expect(plus.first()).toHaveAttribute('aria-label', /^Expand neighbours of /);
+
+    // They track the node on zoom: capture a "+" position, zoom in, expect it to move.
+    const before = await plus.first().boundingBox();
+    await page.getByTestId('zoom-in').click();
+    await expect
+      .poll(async () => {
+        const now = await plus.first().boundingBox();
+        return now && before ? Math.abs(now.x - before.x) + Math.abs(now.y - before.y) : 0;
+      })
+      .toBeGreaterThan(0);
+  });
+
+  test('UX redesign: Devices/Connections lists are collapsed by default behind the "List view" disclosure', async ({
+    page,
+  }) => {
+    await rootAtSite(page);
+    const toggle = page.getByTestId('list-view-toggle');
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // Collapsed: the device rows are present in the DOM (a11y + test bridge) but NOT visible.
+    await expect(page.getByTestId('graph-node').first()).toBeHidden();
+
+    // Disclose → rows become visible; collapse → hidden again, but never removed from the DOM.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.getByTestId('graph-node').first()).toBeVisible();
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByTestId('graph-node').first()).toBeHidden();
+    expect(await page.getByTestId('graph-node').count()).toBeGreaterThanOrEqual(1);
   });
 
   test('rooting a site shows ONE labelled site box, then zoom + increases the zoom level', async ({
