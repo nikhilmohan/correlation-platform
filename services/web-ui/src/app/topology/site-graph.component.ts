@@ -98,6 +98,29 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
             aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
           ></div>
 
+          <!-- ALWAYS-VISIBLE on-canvas EXPAND affordance per device node (UX redesign — the canvas
+               IS the interface). Each "+" is an HTML overlay button positioned at the node's RENDERED
+               position and re-positioned on every pan/zoom/layout so it tracks the node. It carries
+               data-testid="expand-node" + the "Expand neighbours of <name>" aria-label so the existing
+               e2e + a11y selectors still resolve, and is cap-disabled. In jsdom (no real cy render)
+               overlayMarkers() is empty; the accessible List-view row control is the test/SR equivalent. -->
+          <div class="cy-expand-layer" aria-hidden="false">
+            @for (m of overlayMarkers(); track m.id) {
+              <button
+                type="button"
+                class="cy-expand"
+                data-testid="expand-node"
+                [style.left.px]="m.x"
+                [style.top.px]="m.y"
+                [disabled]="store.capReached()"
+                [attr.aria-label]="'Expand neighbours of ' + m.name"
+                (click)="store.expandNode(m.id)"
+              >
+                +
+              </button>
+            }
+          </div>
+
           <!-- Zoom / fit / reset controls overlaid on the canvas (operator-driven, keyboard-reachable). -->
           <div class="cy-controls" role="group" aria-label="Graph zoom controls">
             <button type="button" data-testid="zoom-in" aria-label="Zoom in" (click)="zoomIn()">+</button>
@@ -139,69 +162,94 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         @if (store.graphLoading()) {
           <p data-testid="graph-loading" aria-busy="true">Loading site graph…</p>
         } @else if (store.hasGraph()) {
-          <h2>Devices</h2>
-          <ul class="obj-list" aria-label="Devices in this site">
-            @for (node of store.derivedNodes(); track node.managedObjectId) {
-              <li class="obj-row">
-                <button
-                  type="button"
-                  class="obj"
-                  data-testid="graph-node"
-                  [attr.data-icon]="iconKeyFor(node.objectType)"
-                  [attr.data-object-type]="node.objectType"
-                  [class.selected]="store.selectedObjectId() === node.managedObjectId"
-                  [class.trail-member]="isTrailMemberNode(node.managedObjectId)"
-                  (click)="store.selectNode(node.managedObjectId)"
-                  [attr.aria-pressed]="store.selectedObjectId() === node.managedObjectId"
-                >
-                  <img
-                    class="node-icon"
-                    [src]="iconUrlFor(node.objectType)"
-                    alt=""
-                    aria-hidden="true"
-                    width="16"
-                    height="16"
-                  />
-                  {{ node.name ?? node.managedObjectId }}
-                  <span class="layer-tag">{{ node.derivedLayer }}</span>
-                  @if (siteFor(node.managedObjectId); as sn) {
-                    <span class="site-tag" data-testid="node-site-tag">site: {{ sn }}</span>
-                  }
-                </button>
-                <button
-                  type="button"
-                  class="expand-btn"
-                  data-testid="expand-node"
-                  [disabled]="store.capReached()"
-                  [attr.aria-label]="'Expand neighbours of ' + (node.name ?? node.managedObjectId)"
-                  (click)="store.expandNode(node.managedObjectId)"
-                >
-                  +expand
-                </button>
-              </li>
-            }
-          </ul>
+          <!-- LIST VIEW (UX redesign): the Devices/Connections lists are COLLAPSED BY DEFAULT behind a
+               keyboard-operable disclosure. The canvas is the primary interface; the lists are the
+               WCAG non-visual equivalent of the <canvas> (AC 52) + the deterministic test source of
+               truth + data-cy bridge, so they are CSS-HIDDEN (never *ngIf-removed) when collapsed —
+               axe still finds them, screen-readers can disclose them, and Vitest/Playwright still
+               resolve the per-row controls and data-* attributes regardless of visual state. -->
+          <button
+            type="button"
+            class="list-view-toggle"
+            data-testid="list-view-toggle"
+            [attr.aria-expanded]="listViewOpen()"
+            aria-controls="site-list-view"
+            (click)="toggleListView()"
+          >
+            <span class="disclosure" aria-hidden="true">{{ listViewOpen() ? '▾' : '▸' }}</span>
+            List view (devices &amp; connections)
+          </button>
 
-          <h2>Connections</h2>
-          <ul class="obj-list" aria-label="Connections in this site">
-            @for (edge of store.visibleEdges(); track edge.edgeId) {
-              <li>
-                <button
-                  type="button"
-                  class="obj"
-                  data-testid="graph-edge"
-                  [attr.data-relation]="edge.relation"
-                  [attr.data-layer]="edge.derivedLayer"
-                  [class.selected]="store.selectedEdgeId() === edge.edgeId"
-                  (click)="store.selectEdge(edge.edgeId)"
-                  [attr.aria-pressed]="store.selectedEdgeId() === edge.edgeId"
-                >
-                  {{ edge.from }} → {{ edge.to }}
-                  <span class="layer-tag">{{ edge.relation }}</span>
-                </button>
-              </li>
-            }
-          </ul>
+          <div id="site-list-view" class="list-view" [hidden]="!listViewOpen()">
+            <h2>Devices</h2>
+            <ul class="obj-list" aria-label="Devices in this site">
+              @for (node of store.derivedNodes(); track node.managedObjectId) {
+                <li class="obj-row">
+                  <button
+                    type="button"
+                    class="obj"
+                    data-testid="graph-node"
+                    [attr.data-icon]="iconKeyFor(node.objectType)"
+                    [attr.data-object-type]="node.objectType"
+                    [class.selected]="store.selectedObjectId() === node.managedObjectId"
+                    [class.trail-member]="isTrailMemberNode(node.managedObjectId)"
+                    (click)="store.selectNode(node.managedObjectId)"
+                    [attr.aria-pressed]="store.selectedObjectId() === node.managedObjectId"
+                  >
+                    <img
+                      class="node-icon"
+                      [src]="iconUrlFor(node.objectType)"
+                      alt=""
+                      aria-hidden="true"
+                      width="16"
+                      height="16"
+                    />
+                    {{ node.name ?? node.managedObjectId }}
+                    <span class="layer-tag">{{ node.derivedLayer }}</span>
+                    @if (siteFor(node.managedObjectId); as sn) {
+                      <span class="site-tag" data-testid="node-site-tag">site: {{ sn }}</span>
+                    }
+                  </button>
+                  <!-- Accessible/test equivalent of the on-canvas "+" — keyboard-reachable per row.
+                       Carries the SAME data-testid + aria-label so the existing unit tests (which run
+                       in jsdom where the canvas overlay is empty) and screen-reader users both reach
+                       the SAME expandNode() behaviour. In a real browser the canvas "+" appears FIRST
+                       in DOM order, so e2e .first() resolves the visible on-canvas control. -->
+                  <button
+                    type="button"
+                    class="expand-btn"
+                    data-testid="expand-node"
+                    [disabled]="store.capReached()"
+                    [attr.aria-label]="'Expand neighbours of ' + (node.name ?? node.managedObjectId)"
+                    (click)="store.expandNode(node.managedObjectId)"
+                  >
+                    +expand
+                  </button>
+                </li>
+              }
+            </ul>
+
+            <h2>Connections</h2>
+            <ul class="obj-list" aria-label="Connections in this site">
+              @for (edge of store.visibleEdges(); track edge.edgeId) {
+                <li>
+                  <button
+                    type="button"
+                    class="obj"
+                    data-testid="graph-edge"
+                    [attr.data-relation]="edge.relation"
+                    [attr.data-layer]="edge.derivedLayer"
+                    [class.selected]="store.selectedEdgeId() === edge.edgeId"
+                    (click)="store.selectEdge(edge.edgeId)"
+                    [attr.aria-pressed]="store.selectedEdgeId() === edge.edgeId"
+                  >
+                    {{ edge.from }} → {{ edge.to }}
+                    <span class="layer-tag">{{ edge.relation }}</span>
+                  </button>
+                </li>
+              }
+            </ul>
+          </div>
 
           <h2>Trail clusters</h2>
           @if (store.trails().length) {
@@ -307,14 +355,74 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         position: relative;
       }
       .cy-canvas {
-        height: 480px;
-        min-height: 420px;
+        height: 640px;
+        min-height: 640px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: #0b1220;
         margin-bottom: 0.8rem;
         position: relative;
         overflow: hidden;
+      }
+      /* On-canvas "+" expand affordances — an overlay above the canvas; each button is absolutely
+         positioned at its node's rendered position and re-positioned on pan/zoom/layout so it tracks
+         the node. pointer-events:none on the layer so panning the canvas still works; re-enabled on
+         the buttons themselves. */
+      .cy-expand-layer {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 3;
+      }
+      .cy-expand {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        width: 1.25rem;
+        height: 1.25rem;
+        padding: 0;
+        line-height: 1;
+        font-size: 0.95rem;
+        font-weight: 700;
+        border: 1px solid var(--accent);
+        border-radius: 50%;
+        background: var(--surface);
+        color: var(--accent);
+        cursor: pointer;
+        pointer-events: auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 0 0 2px #0b1220;
+      }
+      .cy-expand:hover:not(:disabled) {
+        background: var(--accent);
+        color: #0b1220;
+      }
+      .cy-expand:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      .list-view-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.35rem 0.7rem;
+        cursor: pointer;
+        font: inherit;
+        margin-bottom: 0.6rem;
+      }
+      .list-view-toggle:hover {
+        border-color: var(--accent);
+      }
+      .list-view-toggle .disclosure {
+        color: var(--accent);
+      }
+      .list-view[hidden] {
+        display: none;
       }
       .cy-controls {
         position: absolute;
@@ -586,6 +694,18 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   private decorationEffect!: EffectRef;
   private resizeObserver: ResizeObserver | null = null;
 
+  /** Disclosure state of the "List view" (Devices/Connections) region — collapsed by default so the
+   *  canvas is the primary interface. The lists stay in the DOM (CSS `[hidden]`) for a11y + tests. */
+  readonly listViewOpen = signal(false);
+  toggleListView(): void {
+    this.listViewOpen.update((v) => !v);
+  }
+
+  /** On-canvas "+" expand affordances: one per device node, positioned at the node's RENDERED
+   *  position (canvas pixels) so each "+" tracks its node on pan/zoom/layout. Empty under jsdom
+   *  (no real Cytoscape render) — there the accessible list-row control is the equivalent. */
+  readonly overlayMarkers = signal<ReadonlyArray<{ id: string; name: string; x: number; y: number }>>([]);
+
   /** True once the deterministic layout has settled at least once (bridged to data-cy-layout-done). */
   readonly layoutDone = signal(false);
   /** Max(bbox width, bbox height) of all laid-out nodes — ~0 when collapsed to a blob. */
@@ -733,17 +853,17 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
               'background-height': '80%',
               'background-color': '#0b1220',
               'border-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
-              'border-width': 3,
+              'border-width': 4,
               shape: 'round-rectangle',
               label: 'data(label)',
               color: '#f1f5f9',
-              'font-size': 9,
+              'font-size': 13,
               'text-outline-width': 2,
               'text-outline-color': '#0b1220',
               'text-valign': 'bottom',
-              'text-margin-y': 2,
-              width: 30,
-              height: 30,
+              'text-margin-y': 4,
+              width: 52,
+              height: 52,
             },
           },
           {
@@ -769,14 +889,22 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         const id = evt.target.id();
         this.zone.run(() => this.store.selectEdge(id));
       });
-      // Keep the zoom bridge live as the operator pans/zooms by mouse/trackpad.
-      this.cy.on('zoom', () => this.zone.run(() => this.zoomLevel.set(this.roundZoom())));
+      // Keep the zoom bridge live as the operator pans/zooms by mouse/trackpad, and re-position the
+      // on-canvas "+" affordances so they track their nodes through pan/zoom/render.
+      this.cy.on('zoom', () =>
+        this.zone.run(() => {
+          this.zoomLevel.set(this.roundZoom());
+          this.refreshOverlayMarkers();
+        }),
+      );
+      this.cy.on('pan render', () => this.zone.run(() => this.refreshOverlayMarkers()));
 
       this.cy.on('layoutstop', () =>
         this.zone.run(() => {
           this.layoutDone.set(true);
           this.publishSpread();
           this.zoomLevel.set(this.roundZoom());
+          this.refreshOverlayMarkers();
         }),
       );
 
@@ -911,8 +1039,8 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             name: 'breadthfirst',
             animate: false,
             circle: true,
-            spacingFactor: 1.6,
-            padding: 40,
+            spacingFactor: 2.4,
+            padding: 60,
             nodeDimensionsIncludeLabels: true,
             avoidOverlap: true,
           } as unknown as LayoutOptions);
@@ -922,11 +1050,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // expands do NOT re-fit, preserving the operator's manual zoom/pan. Pad generously so the laid-out
     // graph fills the canvas centred rather than hugging the top edge.
     if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
-      cy.fit(undefined, 40);
+      cy.fit(undefined, 60);
       this.firstFitDone = true;
       this.lastFittedSiteCount = siteCount;
     }
     this.publishSpread();
+    this.refreshOverlayMarkers();
   }
 
   /**
@@ -959,8 +1088,8 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     });
 
-    const NODE_GAP = 90; // spacing between devices within a site box
-    const COL_GAP = 130; // horizontal gap between site columns
+    const NODE_GAP = 130; // spacing between devices within a site box (bigger nodes → wider spread)
+    const COL_GAP = 200; // horizontal gap between site columns
     const columns: Array<{ ids: string[] }> = [];
     for (const id of sites) {
       columns.push({ ids: bySite.get(id) ?? [] });
@@ -1018,6 +1147,42 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     this.highlightCount.set(highlightCount);
   }
 
+  /**
+   * Recompute the on-canvas "+" overlay positions from each leaf node's RENDERED position (canvas
+   * pixel coordinates relative to the container), so every "+" tracks its node as the operator pans
+   * and zooms. Called on layoutstop / pan / zoom / render. A small upward+rightward offset places the
+   * "+" at the node's top-right corner, scaled with the node so it stays attached at any zoom.
+   */
+  private refreshOverlayMarkers(): void {
+    const cy = this.cy;
+    // Guard: no cy, or a narrow test stub without the graph API (graph-zoom.spec injects a zoom/fit
+    // -only stub). The overlay only renders against a real Cytoscape core; otherwise stay empty.
+    if (!cy || typeof cy.nodes !== 'function') {
+      this.overlayMarkers.set([]);
+      return;
+    }
+    const leaves = cy.nodes('[!isSiteParent]');
+    if (leaves.length === 0) {
+      this.overlayMarkers.set([]);
+      return;
+    }
+    const zoom = cy.zoom();
+    const markers: Array<{ id: string; name: string; x: number; y: number }> = [];
+    leaves.forEach((n) => {
+      const rp = n.renderedPosition();
+      // Offset to the node's top-right corner; the rendered half-width scales with zoom.
+      const halfW = (n.width() / 2) * zoom;
+      const halfH = (n.height() / 2) * zoom;
+      markers.push({
+        id: n.id(),
+        name: (n.data('label') as string) ?? n.id(),
+        x: rp.x + halfW * 0.7,
+        y: rp.y - halfH * 0.7,
+      });
+    });
+    this.overlayMarkers.set(markers);
+  }
+
   /** Publish the laid-out leaf-node spread (max bbox dimension) — ~0 when collapsed to a blob. */
   private publishSpread(): void {
     const cy = this.cy;
@@ -1072,14 +1237,16 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     const ext = cy.extent();
     cy.zoom({ level: cy.zoom() * factor, position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 } });
     this.zoomLevel.set(this.roundZoom());
+    this.refreshOverlayMarkers();
   }
   fit(): void {
     const cy = this.cy;
     if (!cy) {
       return;
     }
-    cy.fit(undefined, 40);
+    cy.fit(undefined, 60);
     this.zoomLevel.set(this.roundZoom());
+    this.refreshOverlayMarkers();
   }
   reset(): void {
     // Reset re-roots the graph at the site (discards expansions) and re-fits on the next layout.

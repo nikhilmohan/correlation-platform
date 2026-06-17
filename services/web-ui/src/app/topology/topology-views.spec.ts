@@ -121,8 +121,12 @@ describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => 
     expect(clusters.length).toBe(store.trails().length);
   });
 
-  // ── Explorer affordances: per-node EXPAND buttons + clickable trail BUTTONS ───────────────────
-  it('renders an explicit +expand button for every accessible graph-node (operator-driven expand)', async () => {
+  // ── Explorer affordances: per-node EXPAND controls + clickable trail BUTTONS ──────────────────
+  // UX redesign: the PRIMARY expand control is an always-visible on-canvas "+" overlay (empty under
+  // jsdom — no real Cytoscape render). The accessible List-view row control is the keyboard/SR + test
+  // equivalent and carries the same data-testid="expand-node" + aria-label, so this count assertion
+  // (which runs in jsdom) still resolves exactly one reachable expand control per device node.
+  it('renders a keyboard-reachable expand-node control for every accessible graph-node (data-testid="expand-node")', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     const expandBtns = fixture.nativeElement.querySelectorAll('[data-testid="expand-node"]');
@@ -130,6 +134,76 @@ describe('SiteGraphComponent — real-UI render (AC 27/28/31/32, AC 52)', () => 
     expect(store.derivedNodes().length).toBeGreaterThanOrEqual(1);
     // They are real <button>s (keyboard-reachable), not list items.
     expect((expandBtns[0] as HTMLElement).tagName).toBe('BUTTON');
+    // Each carries the "Expand neighbours of <name>" aria-label the e2e + screen-readers rely on.
+    expect((expandBtns[0] as HTMLElement).getAttribute('aria-label')).toMatch(/^Expand neighbours of /);
+    // Activating it drives the store expandNode action.
+    const spy = vi.spyOn(store, 'expandNode');
+    (expandBtns[0] as HTMLButtonElement).click();
+    expect(spy).toHaveBeenCalledWith(store.derivedNodes()[0].managedObjectId);
+  });
+
+  it('the expand-node controls are cap-disabled when the store reports capReached (no expansion past the cap)', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    // Before the cap: enabled.
+    let btn = fixture.nativeElement.querySelector('[data-testid="expand-node"]') as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    // Force the cap signal; the control must disable.
+    store.capReached.set(true);
+    fixture.detectChanges();
+    btn = fixture.nativeElement.querySelector('[data-testid="expand-node"]') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  // ── UX redesign: Devices/Connections lists behind a default-collapsed "List view" disclosure ──
+  it('the List-view toggle is a keyboard-operable disclosure (aria-expanded/aria-controls), collapsed by default', async () => {
+    const fixture = await mountSiteGraph();
+    const toggle = fixture.nativeElement.querySelector('[data-testid="list-view-toggle"]') as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.tagName).toBe('BUTTON');
+    // Collapsed by default — the canvas is the primary interface.
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const controls = toggle.getAttribute('aria-controls');
+    expect(controls).toBeTruthy();
+    // The controlled region exists in the DOM and is hidden while collapsed.
+    const region = fixture.nativeElement.querySelector(`#${controls}`) as HTMLElement;
+    expect(region).not.toBeNull();
+    expect(region.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('the accessible Devices/Connections list stays IN THE DOM when collapsed (CSS-hidden, not *ngIf-removed) — a11y + test bridge', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    // Default-collapsed, yet the per-row controls + data-cy bridge are still queryable (the redesign
+    // requires CSS-collapse, never structural removal, so SR + Vitest/Playwright still resolve them).
+    const toggle = fixture.nativeElement.querySelector('[data-testid="list-view-toggle"]') as HTMLButtonElement;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="graph-node"]').length).toBe(store.derivedNodes().length);
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="graph-edge"]').length).toBe(store.visibleEdges().length);
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="expand-node"]').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('clicking the List-view toggle reveals/hides the lists (aria-expanded flips, region hidden flips) — lists never removed', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    const toggle = fixture.nativeElement.querySelector('[data-testid="list-view-toggle"]') as HTMLButtonElement;
+    const controls = toggle.getAttribute('aria-controls')!;
+    const region = () => fixture.nativeElement.querySelector(`#${controls}`) as HTMLElement;
+
+    // Open.
+    toggle.click();
+    fixture.detectChanges();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(region().hasAttribute('hidden')).toBe(false);
+    // Rows still present (and now visible).
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="graph-node"]').length).toBe(store.derivedNodes().length);
+
+    // Close again — rows REMAIN in the DOM (not removed), region hidden again.
+    toggle.click();
+    fixture.detectChanges();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(region().hasAttribute('hidden')).toBe(true);
+    expect(fixture.nativeElement.querySelectorAll('[data-testid="graph-node"]').length).toBe(store.derivedNodes().length);
   });
 
   it('trail-cluster items are BUTTONS that drive selectTrail (clickable to explode the trail)', async () => {
