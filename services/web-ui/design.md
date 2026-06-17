@@ -1447,6 +1447,16 @@ two tables are ARIA data tables, and `LiveAnnouncer` announces promote/remove ou
 
 ### Existing — Topology & trails (`/topology`, `/topology/:siteId`)
 
+> **Site-graph UX redesign (operator feedback on the live demo — refines the rendering/interaction
+> of ACs 55-76; NO behaviour or contract change).** The **canvas is the interface**: the expand
+> control lives **on the canvas** (a small, always-visible "+" affordance on/near each device node),
+> nodes/labels are **bigger** with a layout spread to fill a **taller** canvas, and the
+> Devices/Connections lists are **hidden by default** behind a collapsible **"List view" toggle**.
+> Detail-on-click and the detail panel are unchanged. The accessible device/edge list (AC 52) and
+> the `data-cy-*` test bridge are **preserved inside the toggle's expandable region** (rendered in
+> the DOM, reachable by screen readers and tests; just not shown by default). See
+> "Site-graph UX redesign (canvas-centric)" under the explorable-topology design unit.
+
 ```
 +-------------------------------------------------------------+
 | [Dashboard][Streaming][topology][patterns][config][stats]   |
@@ -1456,22 +1466,35 @@ two tables are ARIA data tables, and `LiveAnnouncer` announces promote/remove ou
 |   (markers, one per Site; click to expand)                  |
 +-------------------------------------------------------------+
   (after selecting a site, transitions to /topology/:siteId)
-+----------------------------------+--------------------------+
-| Site graph (Cytoscape)           | Detail panel             |
-|   o--o  o   trail cluster overlay | managedObjectId: ...     |
-|   |    \                          | vendor: Acme             |
-|   o     o                         | model: R8000             |
-| Layers: [x]fiber [x]IP [ ]IGP     | equipmentType: router    |
-|         [ ]LSP [ ]service         | slotCount: 16 (generic)  |
-| (selected device highlights its   | --- trails ---           |
-|  member trails distinctly)        | trail-A, trail-C         |
-+----------------------------------+--------------------------+
++--------------------------------------+----------------------+
+| Site graph (Cytoscape) — TALLER,     | Detail panel         |
+|   bigger nodes + labels, spread       | managedObjectId: ... |
+|                                       | vendor: Acme         |
+|   (LON-RTR-1)(+)  (LON-LC-3)(+)       | model: R8000         |
+|       \           /                   | equipmentType: router|
+|        (LON-PORT-7)(+)                | slotCount: 16 (gen.) |
+|   each device node carries an         | --- trails ---       |
+|   always-visible (+) expand           | trail-A, trail-C     |
+|   affordance; click (+) -> expandNode | (NO expand button    |
+|   [type-icon legend]                  |  here)               |
+| Layers:[x]fiber[x]IP[ ]IGP[ ]LSP[ ]svc| zoom: [+][-][Fit][R] |
+|  crossDomain:[ ]                      |                      |
++--------------------------------------+----------------------+
+| > List view  (collapsed by default — click to expand)       |
+|   v Devices (accessible list + data-cy bridge)              |
+|       LON-RTR-1  router   site:London                       |
+|       LON-LC-3   linecard site:London                       |
+|   v Connections (accessible edge list + data-cy bridge)     |
+|       LON-RTR-1 -- IP_LINK -- LON-PORT-7                     |
++-------------------------------------------------------------+
 | (deep link in: /topology?trailId=<id> activates that trail) |
 +-------------------------------------------------------------+
 ```
 Reads: Topology `listSites` (`SiteListDto.sites`), `objectsAtSite` (`SiteObjectsDto.nodes` +
 `.edges`); layer derived from each node's `objectType`. Trail Builder `listTrails`,
-`getTrailsForObject` (`GET /trails/by-object` → `trailIds[]`).
+`getTrailsForObject` (`GET /trails/by-object` → `trailIds[]`). The per-node "+" affordance binds
+`expandNode(managedObjectId)`; the (collapsed-by-default) "List view" region carries the
+accessible Devices/Connections lists + the `data-cy-*` bridge (AC 52, test source of truth).
 
 ### Existing — Pattern review & XAI (`/patterns`)
 
@@ -1720,10 +1743,10 @@ repo (or a permissive icon pack, license recorded) — see "Icon asset design".
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| **10. Expand a device node to pull neighbours (additive, dedupe, cap, crossDomain)** | `TopologyStore.expandNode(id,{relation?,crossDomain?})` → `TopologyClient.neighbors(id,opts)` → `mergeGraph(nodes,edges)` (additive, dedupe by id, all-or-nothing `NODE_CAP` pre-check). Explicit **+expand button** in the detail panel and per-node row (`data-testid="expand-node"`); cross-domain via a UI toggle bound to `expandNode(id,{crossDomain:true})`. `expandedNodeIds` tracks expanded nodes. (AC 55-58) |
+| **10. Expand a device node to pull neighbours (additive, dedupe, cap, crossDomain)** | `TopologyStore.expandNode(id,{relation?,crossDomain?})` → `TopologyClient.neighbors(id,opts)` → `mergeGraph(nodes,edges)` (additive, dedupe by id, all-or-nothing `NODE_CAP` pre-check). **UX redesign:** the primary expand control is an **always-visible on-canvas "+" affordance on/near each device node** (`data-testid="expand-node"`), click → `expandNode(managedObjectId)`; the detail panel has **NO** expand button. The accessible Devices list (inside the collapsed-by-default "List view" toggle) keeps a keyboard-reachable expand control per row as the **non-visual equivalent** (a11y + test bridge), not the primary control. Cross-domain via a UI toggle bound to `expandNode(id,{crossDomain:true})`. `expandedNodeIds` tracks expanded nodes. (AC 55-58; relocates the control per UX feedback — same behaviour) |
 | **11. Render site-boundary groupings** | `TopologyStore.nodeSiteMap` (computed from `LOCATED_AT` edges) + `distinctSiteIds`; `SiteGraphComponent` renders one **Cytoscape compound parent box per distinct site** (`data isSiteParent`, per-site border colour, name label) and parents each device node into its site box; site legend lists each site. (AC 60-62) |
 | **12. Trail navigation + explode cross-site spans** | `TopologyStore.selectTrail(trailId)` → `TrailBuilderClient.getTrail` → `trailMemberIds` (full set) + **explode** (fetch missing members' subgraphs via `neighbors` → `mergeGraph`); `selectedTrailDetail` drives the **trail-detail panel** (`trailId`, `igpArea`, `srlgGroup`, interactive `members` → `selectNode`); `clearTrail()` removes highlight, keeps nodes; `getTrailsForObject` device-membership highlight preserved alongside. Trail-cluster list items are **buttons → `selectTrail`**. (AC 63-69) |
-| **13. Network-element type icons** | New `objectType → icon` map (`type-icon-mapper.ts`) + bundled inline SVGs under `public/icons/`; `SiteGraphComponent` styles leaf nodes with `background-image` resolved via `document.baseURI` + a generic fallback; a `data-icon`/`background-image` bridge attribute makes the icon testable; type-icon legend. (AC 70-72) |
+| **13. Network-element type icons** | New `objectType → icon` map (`type-icon-mapper.ts`) + bundled inline SVGs under `public/icons/`; `SiteGraphComponent` styles leaf nodes with `background-image` resolved via `document.baseURI` + a generic fallback; a `data-icon`/`background-image` bridge attribute makes the icon testable; type-icon legend. **UX redesign:** node glyphs + labels are rendered **larger** (icons legible at default zoom) — a sizing/layout refinement under AC 70-72, same icon mapping. (AC 70-72) |
 | **14. Zoom/pan on both canvases** | `SiteGraphComponent` zoom controls (`+`/`−`/Fit/Reset, keyboard-reachable, `data-cy-zoom` bridge) over the Cytoscape API; `GeoSiteMapComponent` MapLibre `NavigationControl` + explicit fit/reset controls (`fitBounds(siteExtent)` / reset to default centre+zoom). All state local, not persisted. (AC 73-76) |
 
 Every spec task 10-14 is realized above and traced to its ACs; no task is dropped or re-scoped.
@@ -1745,9 +1768,10 @@ P2/P3 are unchanged by this unit.
 flowchart TB
   subgraph view["Topology and trails view (P1)"]
     geo["GeoSiteMapComponent<br/>(MapLibre, NavigationControl, fit/reset)"]
-    graph["SiteGraphComponent<br/>(Cytoscape: compound site boxes,<br/>type-icon node backgrounds, zoom controls)"]
-    panel["AttributeDetailPanelComponent<br/>(+ per-node expand button, crossDomain toggle)"]
+    sg["SiteGraphComponent<br/>(Cytoscape: compound site boxes, bigger nodes/labels,<br/>on-canvas (+) expand affordance per node,<br/>type-icon node backgrounds, zoom controls)"]
+    panel["AttributeDetailPanelComponent<br/>(detail-on-click; crossDomain toggle; NO expand button)"]
     trailpanel["Trail-detail panel<br/>(members to selectNode, igpArea, srlgGroup, clear)"]
+    listview["List view toggle (collapsed default)<br/>(accessible Devices and Connections lists, data-cy bridge)"]
   end
   store["TopologyStore (signals)<br/>nodeMap, edgeMap, nodeSiteMap,<br/>expandNode, selectTrail, mergeGraph, NODE_CAP"]
   iconmap["type-icon-mapper.ts<br/>(objectType to icon url, generic fallback)"]
@@ -1757,11 +1781,12 @@ flowchart TB
   assets["public/icons/*.svg (bundled, offline)"]
 
   geo --> store
-  graph --> store
+  sg --> store
   panel --> store
   trailpanel --> store
-  graph --> iconmap
-  graph --> layer
+  listview --> store
+  sg --> iconmap
+  sg --> layer
   iconmap --> assets
   store --> topoClient
   store --> trailClient
@@ -1781,8 +1806,31 @@ flowchart TB
   bridge. **This unit's required edits:** (a) add `background-image` (type icon via
   `type-icon-mapper`) to the leaf-node Cytoscape style while **keeping the layer-colour fill**; (b)
   add a **type-icon legend**; (c) add an icon test bridge (`data-cy-icon-types` count + per-row
-  `data-icon`) for AC 70/71; (d) ensure the per-node **+expand** button and a **crossDomain toggle**
-  are present (the toggle binds `expandNode(id,{crossDomain:true})`).
+  `data-icon`) for AC 70/71; (d) a **crossDomain toggle** (binds `expandNode(id,{crossDomain:true})`).
+  **UX redesign (rendering/interaction refinement of ACs 55-59, 70-72 — no behaviour change):**
+  (e) **on-canvas expand affordance** — render an **always-visible small "+" affordance on/near each
+  device leaf node** (a Cytoscape `tap` target: a small "+" child glyph/overlay node, or a
+  hit-tested corner of the node, with `data-testid="expand-node"`); `tap` → `expandNode(node.data('managedObjectId'))`.
+  This is now the **primary** expand control — the per-node row button in the (hidden) device list
+  remains only as the accessible/test equivalent (see List view toggle). (f) **Bigger nodes +
+  labels** — increase leaf-node `width`/`height` (~1.6× the current glyph) and `font-size`/label so
+  device names and type icons are legible at the default zoom; the "+" affordance scales with the
+  node. (g) **Layout spread to fill the canvas** — widen `cose` node-repulsion / ideal-edge-length
+  (and `breadthfirst` spacing for the single-site case) so nodes spread across the larger canvas
+  rather than clustering centre; deterministic `cose` settings (`animate:false, randomize:false`)
+  are kept so the test bridge stays reliable. (h) **Moderate canvas-height bump** — increase the
+  graph container height (CSS, e.g. min-height ~640px from the current ~480px) while keeping the
+  **detail panel beside it** (the existing two-column layout / proportions — NOT a full-page graph).
+- **List view toggle (extend `site-graph.component.ts` template + a new collapsible region).** **UX
+  redesign:** the prominent Devices/Connections lists are **collapsed by default** behind a
+  `cdkAccordion`/`<details>`-style **"List view" toggle** (a keyboard-operable disclosure button,
+  `aria-expanded`, `aria-controls`). The lists themselves are **unchanged in markup** — they remain
+  the WCAG non-visual equivalent of the `<canvas>` (AC 52) and the deterministic unit-test source of
+  truth + `data-cy-*` bridge. They are **always present in the DOM** (rendered, not `*ngIf`-removed —
+  use CSS `hidden`/collapse, never structural removal) so screen readers can reach the accessible
+  list and Vitest/Playwright assertions still resolve the `data-cy-*`/per-row controls whether or not
+  the region is visually expanded. The toggle defaults collapsed; visual operators see the canvas, a11y
+  + tests see the list.
 - **`GeoSiteMapComponent` (extend `geo-site-map.component.ts`).** Already adds MapLibre
   `NavigationControl` and `fitBounds(siteExtent)`. **This unit's required edits:** add explicit
   keyboard-reachable **fit** and **reset** controls (reset → default centre+zoom captured at init)
@@ -1791,6 +1839,47 @@ flowchart TB
   generic fallback (mirrors `layer-mapper.ts`'s pure-function shape).
 - **`public/icons/*.svg` (NEW assets) + `public/icons/README.md` (license note).** Bundled inline
   SVG, one per objectType + a generic fallback; no CDN.
+
+## Site-graph UX redesign (canvas-centric — presentation refinement of ACs 55-76)
+
+Operator feedback on the live demo: make the **canvas the interface**. This is a
+**rendering/interaction refinement of already-approved ACs** — it changes nothing in the store, the
+APIs, the AC meaning, or any contract; no new topic/payload/field/endpoint. Confirmed decisions:
+
+1. **Expand control on the canvas (refines AC 55-59).** A small, **always-visible "+" affordance on
+   /near each device node**; clicking it calls `expandNode(managedObjectId)` — the same store action,
+   same `neighbors` call, same additive/dedupe/cap/crossDomain behaviour the ACs already specify. The
+   expand button is **removed as the primary control from the device-list rows** (those rows are now
+   hidden by default) and the **detail panel does NOT get an expand button**. The accessible
+   device-list row keeps a keyboard-reachable expand control purely as the **non-visual / test
+   equivalent** (below). Net: the same `expandNode(id)` is reachable from the canvas affordance (visual
+   operators) and from the accessible list row (screen-reader/keyboard + the `expand-node` test bridge).
+2. **Bigger nodes + better real-estate use (refines AC 70-72 sizing).** Larger node glyphs/labels
+   (icons legible at default zoom) and a layout spread (wider repulsion / ideal-edge-length / spacing)
+   to fill the canvas; a **moderate canvas-height bump** (e.g. ~480px → ~640px min-height) keeping the
+   **detail panel beside the graph** — the existing two-column proportions, **not** a full-page graph.
+3. **Devices/Connections lists behind a "List view" toggle (preserves AC 52 + the test bridge).** The
+   lists are **dropped from the default view** (collapsed) but kept in the DOM behind a keyboard-operable
+   "List view" disclosure (`aria-expanded`/`aria-controls`). Because they are **CSS-hidden, never
+   structurally removed**:
+   - **AC 52 a11y still holds** — the `<canvas>` is opaque to screen readers, so the accessible
+     Devices/Connections list (the canvas's non-visual equivalent) remains reachable in the DOM and
+     is announced/focusable; the disclosure pattern is itself WCAG-conformant. The site-graph still
+     exposes the canvas `aria-label` + the data-table equivalent that `a11y.spec.ts` (axe) checks.
+   - **The deterministic test source of truth + `data-cy-*` bridge still works** — Vitest/TestBed and
+     Playwright assertions resolve the same `data-cy-*` attributes and per-row controls regardless of
+     the toggle's visual state (the redesign requires CSS-collapse, not `*ngIf`-removal, exactly so
+     the existing AC→test assertions keep passing unchanged).
+4. **Detail-on-click unchanged (AC 60-65, 70-72 attribute display).** Clicking a node or edge still
+   populates the `AttributeDetailPanelComponent` with its attributes — existing behaviour, kept.
+
+**ACs touched (presentation only) and traceability:** **AC 55-59** (expand) — control relocated to an
+on-canvas affordance + accessible list-row equivalent; behaviour and the `expandNode`/`neighbors`
+contract are unchanged. **AC 52** (a11y) — the device/edge list is now behind a default-collapsed
+toggle but stays in the DOM and reachable. **AC 70-72** (icons/sizing) — bigger node glyphs/labels +
+layout spread. **No new AC is required**, and **the AC→test map is unchanged**: every test asserts the
+same behaviour — the expand test drives the on-canvas affordance (and the accessible list-row control
+under the toggle), the a11y test still finds the list, and the icon/zoom/boundary tests are unaffected.
 
 ## Data model (client-side view-models — no owned store)
 
@@ -1869,8 +1958,8 @@ sequenceDiagram
   participant ST as TopologyStore
   participant TC as TopologyClient
   participant TP as Topology Service
-  Op->>SG: click +expand on node N (crossDomain toggle state)
-  SG->>ST: expandNode(N, {crossDomain})
+  Op->>SG: click on-canvas (+) affordance on node N (crossDomain toggle state)
+  SG->>ST: expandNode(N managedObjectId, {crossDomain})
   alt capReached
     ST-->>SG: no-op, capReached already true
     SG-->>Op: cap-reached message, expand disabled
@@ -2045,7 +2134,9 @@ called out so the dev builds them up front:
 | **Icon rendering in Cytoscape** | `background-image` over the layer-colour fill vs. replacing the fill with the icon vs. an HTML overlay layer | **`background-image` over the fill** — keeps the operator's layer colour-coding (AC 28 semantics) AND shows the type icon; an HTML overlay desyncs from Cytoscape pan/zoom. |
 | **Cap enforcement (AC 57)** | per-node cap loop (current build: partial add) vs. all-or-nothing pre-check on the deduped new set | **All-or-nothing pre-check** — AC 57 mandates "no partial add". The current build's loop adds up to the cap then stops, which would partially add; this unit replaces it with a pre-check. |
 | **`NODE_CAP` source** | module constant (current build) vs. env config `TOPOLOGY_NODE_CAP` | **Env config** — the spec requires a *configurable* cap; default 250 retained. |
-| **Expand interaction** | double-click on canvas node vs. explicit +expand button (detail panel + per-node row) | **Explicit button** — LOCKED. Discoverable, keyboard-accessible (AC 75 spirit), unambiguous vs. select; double-click is undiscoverable and clashes with select. |
+| **Expand control placement (UX redesign)** | (a) +expand button in the detail panel + per-node list row (prior build); (b) double-click the canvas node; (c) an **always-visible on-canvas "+" affordance per node** + keep an accessible list-row control | **(c) on-canvas "+" affordance** (primary) + accessible list-row equivalent — LOCKED by operator feedback. The canvas should BE the interface, so the control belongs on the node; the detail panel loses its expand button and the device-list rows are hidden by default. Double-click is undiscoverable and clashes with select. The list-row control is retained behind the List-view toggle as the keyboard/screen-reader + test equivalent. Same `expandNode(id)` behaviour — presentation refinement of AC 55-59, no contract change. |
+| **Devices/Connections lists (UX redesign)** | (a) always-shown lists below the canvas (prior build); (b) drop them entirely; (c) move them behind a default-collapsed "List view" toggle, kept in the DOM | **(c) collapsible toggle, kept in DOM** — LOCKED. (b) would break AC 52 (the `<canvas>` has no non-visual equivalent) and remove the deterministic test source of truth + `data-cy-*` bridge. (c) declutters the default view for operators while preserving a11y and the existing AC→test assertions (CSS-collapse, never `*ngIf`-removal). |
+| **Node sizing + canvas height (UX redesign)** | keep current small nodes / ~480px height vs. bigger node glyphs/labels + layout spread + moderate height bump | **Bigger nodes + spread + ~640px height** — operator feedback: better real-estate use and legible type icons (AC 70-72). Moderate height keeps the detail panel beside the graph (existing proportions, not a full-page graph). Rendering refinement, no behaviour change. |
 | **Trail explode missing-member fetch** | synthesize member node only vs. synthesize + fetch its neighbours (edges) | **Synthesize + fetch neighbours** — the member must not just appear but **connect** to the path; fetching its neighbours brings the connecting edges (and its `LOCATED_AT` → its site box). Degrades to synthesize-only if the fetch fails. |
 | **Site boundary rendering** | Cytoscape **compound parent nodes** (labelled boxes) vs. a `bounding-box`/hull overlay vs. background convex-hull plugin | **Compound parent nodes** — first-class in Cytoscape, layout-aware (cose nests children), gives a labelled, per-site-coloured box for free; hull overlays desync on relayout. |
 | **Multi-site layout** | keep breadthfirst vs. switch to deterministic `cose` when ≥2 site boxes | **Deterministic `cose` (`animate:false, randomize:false`) for ≥2 sites**, breadthfirst for one — `cose` is compound-aware so boxes don't overlap; deterministic settings keep `layoutstop`/the test bridge reliable. |
@@ -2114,7 +2205,7 @@ plus the four added by FIX F-UI1/F-UI2 (AC 55-58).
 | 49 | E2E fiber-cut: correlated alarm with incident association | `alarm-lifecycle.e2e.ts` (Playwright) | integration stack: correlated alarm with non-empty incidentId from Alarm Manager |
 | 50 | Mock config: all integration points resolve to mocks, no real HTTP; MSW handlers serve the frozen shapes | `env-mock-switch.spec.ts` | each client (the prior 9 + `EnrichmentChatterClient` + `SimulatorLabelsClient`) hits MSW handlers (from the producers' frozen `openapi.json`; Enrichment chatter mock against the expected/flagged shape until its `openapi.json` lands); responses match the frozen envelopes/DTOs; no outbound real request |
 | 51 | Integration config: all base URLs from env, no URL literal in source | `no-hardcoded-url.spec.ts` (build-time grep) | no localhost/service-hostname URL in non-environment source (incl. `ENRICHMENT_CHATTER_API_BASE_URL`, `SIMULATOR_LABELS_API_BASE_URL`) |
-| 52 | Keyboard nav cycles all controls; canvases ARIA-labelled (11 views) | `a11y.spec.ts` (axe-core per view) | dashboard/streaming/topology/site-graph/patterns/config/stats/alarm-lifecycle/incident-detail/noise-stats/**chatter**: keyboard reachable; canvas + data-table ARIA labels; no axe violations |
+| 52 | Keyboard nav cycles all controls; canvases ARIA-labelled (11 views) | `a11y.spec.ts` (axe-core per view) | dashboard/streaming/topology/site-graph/patterns/config/stats/alarm-lifecycle/incident-detail/noise-stats/**chatter**: keyboard reachable; canvas + data-table ARIA labels; no axe violations. **Site-graph (UX redesign):** the accessible Devices/Connections data-table is the `<canvas>`'s non-visual equivalent — it lives behind the default-collapsed "List view" disclosure but is **kept in the DOM** (CSS-hidden, not removed), so axe still finds it and the disclosure (`aria-expanded`/`aria-controls`) is keyboard-operable. |
 | 53 | Any backend 5xx: module shows service-named error, others unaffected | `error-boundary.spec.ts` (per integration point) | 5xx then error banner naming the service; other modules still render |
 | 54 | Edit draft pattern: mark optional, PATCH sent, edit reflected; draft-only | `pattern-edit.spec.ts` | `PATCH /patterns/{id}` body the frozen `PatternEdit { sequenceFlags:[{index, optional}], reviewer, notes? }`; returned `PatternView` reflects the `optional` per `index`; edit action absent for non-draft |
 | 55 | (F-UI1) Chatter page reads NF observed-chatter ranked + marks promoted vs candidate | `chatter-load.spec.ts` | `listObservedChatter` returns `ObservedChatterPage` ranked by `occurrenceCount`; rows render `(managedObjectId or src-level, alarmType, eventType, occurrenceCount)`; each row marked `promoted`/`candidate` by `(managedObjectId, eventType)` match against `listChatter` for the selected source; null-MO source-level signature handled |
@@ -2138,11 +2229,11 @@ method. New/extended spec files live under `services/web-ui/src/app/topology/` (
 
 | # | Acceptance criterion (abridged) | Test | Asserts |
 |---|---|---|---|
-| 55 | Expand calls `neighbors(id)`; unseen nodes + connecting edges added | `expand-node.spec.ts` (TestBed) | `expandNode(N)` calls `TopologyClient.neighbors` with `N`'s id; both fixture neighbour nodes appear in `derivedNodes` and their `via` edges in `derivedEdges`/`visibleEdges` |
+| 55 | Expand calls `neighbors(id)`; unseen nodes + connecting edges added | `expand-node.spec.ts` (TestBed) | activating the **on-canvas "+" affordance** (`data-testid="expand-node"`) for node `N` — and equivalently the accessible List-view row control — calls `TopologyClient.neighbors` with `N`'s id; both fixture neighbour nodes appear in `derivedNodes` and their `via` edges in `derivedEdges`/`visibleEdges`. (UX redesign relocates the control; assertion/behaviour unchanged.) |
 | 56 | Re-expand with all neighbours present adds no duplicates | `expand-dedupe.spec.ts` (TestBed) | mock returns ids already in `nodeMap`; `nodeMap.size`/`edgeMap.size` unchanged before vs. after re-expand |
 | 57 | At `TOPOLOGY_NODE_CAP`, expansion adding a new node is rejected all-or-nothing + visible message | `expand-cap.spec.ts` (TestBed) | graph pre-seeded to cap; `neighbors` returns one unseen node; node count unchanged, **nothing** added, `capReached()===true`, cap `role="status"` message present |
 | 58 | `crossDomain` opt-in → `crossDomain=true` param; off → omitted/false | `expand-crossdomain.spec.ts` (TestBed) | captured request query: `crossDomain=true` when toggle on; param absent (or false) when off |
-| 59 | E2E: expand a node, a neighbour + edge appears without reload | `topology-explore.e2e.ts` → `expand neighbour` (Playwright) | against real stack: `data-cy-node-count` increases and a connecting edge appears after clicking +expand; no page reload (SPA) |
+| 59 | E2E: expand a node, a neighbour + edge appears without reload | `topology-explore.e2e.ts` → `expand neighbour` (Playwright) | against real stack: `data-cy-node-count` increases and a connecting edge appears after clicking the **on-canvas "+" affordance** (`data-testid="expand-node"`); no page reload (SPA). (UX redesign: control is on the canvas; assertion unchanged.) |
 | 60 | Single-site graph: every node in one labelled site-boundary box | `site-boundary-single.spec.ts` (TestBed) | objects-at-site fixture all one `siteId` (with `LOCATED_AT` edges); exactly one site-parent box, labelled with the site name; no ungrouped device |
 | 61 | Two-site graph: exactly two labelled boundary boxes, no device ungrouped | `site-boundary-cross.spec.ts` (TestBed) | after a cross-site expand fixture (neighbour + its `LOCATED_AT` + 2nd `Site`), `distinctSiteIds().length===2`; two site-parent boxes each labelled; every device parented |
 | 62 | E2E: cross-site expansion shows ≥2 labelled boundary groups | `topology-explore.e2e.ts` → `cross-site boundaries` (Playwright) | real stack: trigger cross-site expand; `data-cy-site-count` ≥ 2 and two labelled boxes render |
@@ -2183,7 +2274,7 @@ All 22 ACs (55-76) map 1:1 to a named test: **18 Vitest/TestBed** (55-58, 60-61,
 | 13 (empty path) | No discovered patterns | Pattern Manager returns empty draft list | Pattern review shows an explicit empty state, not an error |
 | 14 (F-UI1) | Chatter promote round-trip | Open `/chatter` against the real stack (NF observed-chatter populated from a P2 replay), select a source, promote a candidate signature | Enrichment `listChatter` returns the promoted `(managedObjectId, eventType)` on re-read; the row shows `promoted`; closing the loop (Enrichment now suppresses that chatter on the live path) |
 | 15 (F-UI2) | Dashboard RCA accuracy + auto-correlation shown | Replay a labeled scenario in the eval/demo profile, open `/dashboard` | RCA-accuracy card shows a numeric value (eval-mode `stats.rcaAccuracy` or the `/labels` client-side join), not "evaluated offline"; auto-correlation card shows `correlatedAlarmCount/totalAlarmsProcessed` near the ~60% target |
-| 16 (AC 59) | Explore by expanding a device | Real Topology stack; root a site, click +expand on a device | A neighbour node + connecting edge appears (`data-cy-node-count` up); no page reload |
+| 16 (AC 59) | Explore by expanding a device | Real Topology stack; root a site, click the **on-canvas "+" affordance** on a device | A neighbour node + connecting edge appears (`data-cy-node-count` up); no page reload. (UX redesign: control on the canvas; Devices/Connections lists confirmed reachable via the "List view" toggle.) |
 | 17 (AC 62) | Cross-site expansion shows two site boxes | Real stack; expand a border device whose neighbour is in another site | `data-cy-site-count` ≥ 2; two distinct labelled site-boundary boxes render |
 | 18 (AC 69) | Trail navigation + detail | Real Trail Builder; select a trail from the trail list in the topology view | Visible members highlighted (`data-cy-highlight-count` > 0); trail-detail panel shows `trailId`, `igpArea`, `srlgGroup` |
 | 19 (AC 76) | Graph zoom-in increases visual zoom | Real stack; on the site graph, click zoom-in | `data-cy-zoom` strictly increases after the control activation |
