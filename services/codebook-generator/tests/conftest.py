@@ -101,9 +101,13 @@ def fake_producer() -> FakeProducer:
 # Domain-parameterized collaborator data (frozen producer shapes)            #
 # --------------------------------------------------------------------------- #
 # Core IP fault-origin types with their self-emitted origin alarm tokens.
+# Tokens mirror the live Knowledge core-ip seed taxonomy
+# (services/knowledge/src/main/resources/seed/core-ip.json): a FiberSpan fault-origin emits
+# `FiberCut` (NOT `FiberFault`) and a LineCard emits `LineCardFault` (#262 — the prior
+# synthetic `FiberFault`/`CardFault` tokens silently masked the live seed mismatch).
 CORE_IP_FAULT_ORIGINS = [
-    {"objectType": "FiberSpan", "originAlarmType": "FiberFault"},
-    {"objectType": "LineCard", "originAlarmType": "CardFault"},
+    {"objectType": "FiberSpan", "originAlarmType": "FiberCut"},
+    {"objectType": "LineCard", "originAlarmType": "LineCardFault"},
     {"objectType": "Port", "originAlarmType": "LOS"},
     {"objectType": "Interface", "originAlarmType": "InterfaceDown"},
     {"objectType": "Node", "originAlarmType": "NodeDown"},
@@ -111,10 +115,13 @@ CORE_IP_FAULT_ORIGINS = [
 
 # Core IP propagation templates — per-edge-type cascade rules (alarmType-vocabulary tokens).
 CORE_IP_TEMPLATES = [
-    # Fiber cut: FiberSpan -RIDES_ON-> IPLink
+    # Fiber cut: FiberSpan -RIDES_ON-> IPLink. Triggers on `FiberCut` — the FiberSpan
+    # fault-origin's own emitted token — so the cascade actually fires (#262). The live seed
+    # had a `FiberFault` trigger that never matched the `FiberCut` origin and collapsed the
+    # fiber-cut scenario to a root-only symptom; this fixture reflects the corrected taxonomy.
     {
         "edgeType": "RIDES_ON",
-        "trigger": {"objectType": "FiberSpan", "alarmType": "FiberFault"},
+        "trigger": {"objectType": "FiberSpan", "alarmType": "FiberCut"},
         "effect": {"objectType": "IPLink", "alarmType": "LinkDown"},
     },
     # Interface fault: Interface -TERMINATES-> IPLink
@@ -147,10 +154,11 @@ CORE_IP_TEMPLATES = [
         "trigger": {"objectType": "Port", "alarmType": "LOS"},
         "effect": {"objectType": "Interface", "alarmType": "InterfaceDown"},
     },
-    # Line-card fault: LineCard -HOSTED_ON-> Port
+    # Line-card fault: LineCard -HOSTED_ON-> Port. Triggers on `LineCardFault` (the live seed's
+    # LineCard origin token), not the prior synthetic `CardFault` (#262 taxonomy alignment).
     {
         "edgeType": "HOSTED_ON",
-        "trigger": {"objectType": "LineCard", "alarmType": "CardFault"},
+        "trigger": {"objectType": "LineCard", "alarmType": "LineCardFault"},
         "effect": {"objectType": "Port", "alarmType": "PortDown"},
     },
     # Port (when reached via HOSTED_ON, state PortDown) -HOSTS-> Interface
@@ -161,9 +169,14 @@ CORE_IP_TEMPLATES = [
     },
 ]
 
+# alarmType-vocabulary tokens — mirrors the live core-ip seed taxonomy: the fiber-cut origin
+# token is `FiberCut` and the line-card origin token is `LineCardFault` (#262). `FiberFault`
+# is retained as a valid vocabulary member (it exists in the live seed) but is no longer the
+# FiberSpan origin/trigger token.
 CORE_IP_VOCABULARY = [
+    "FiberCut",
     "FiberFault",
-    "CardFault",
+    "LineCardFault",
     "LOS",
     "PortDown",
     "InterfaceDown",
