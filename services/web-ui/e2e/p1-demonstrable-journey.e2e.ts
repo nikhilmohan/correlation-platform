@@ -103,23 +103,53 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     });
     expect(countryFeatureCount).toBeGreaterThan(0);
 
-    // CLUSTERING SOURCE: the `sites` GeoJSON source holds one (unclustered) leaf feature per site —
-    // the underlying data behind the clusters. getClusterLeaves/querySourceFeatures returns the leaf
-    // features (un-aggregated); their count equals the accessible-list site count.
-    const siteLeafCount = await page.evaluate(() => {
+    // CLUSTERING SOURCE: the sites render through MapLibre's NATIVE GeoJSON clustering — a single
+    // `sites` source with `cluster:true` feeding a cluster-circle layer + an unclustered-site layer
+    // (NOT per-site DOM `.maplibregl-marker` pins, which previously overlapped + intercepted clicks).
+    // We assert the clustering source is present and clustered, and that the map renders SOME `sites`
+    // features (clusters and/or unclustered leaves, depending on zoom) — the data behind the badges.
+    // Wait until the clustering source has loaded its tiles so the rendered-feature query is stable
+    // (querySourceFeatures is tile-dependent — assert after the source reports loaded).
+    await page.waitForFunction(
+      () => {
+        const m = (window as unknown as {
+          __geoMap?: {
+            getSource: (s: string) => unknown;
+            isSourceLoaded?: (s: string) => boolean;
+          };
+        }).__geoMap;
+        return !!m && !!m.getSource('sites') && (!m.isSourceLoaded || m.isSourceLoaded('sites'));
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const clustering = await page.evaluate(() => {
       const m = (window as unknown as {
         __geoMap?: {
-          querySourceFeatures: (s: string, o?: unknown) => Array<{ properties?: Record<string, unknown> }>;
+          getSource: (s: string) => unknown;
+          getLayer: (l: string) => unknown;
+          queryRenderedFeatures: (o?: unknown) => unknown[];
         };
       }).__geoMap;
       if (!m) {
-        return 0;
+        return { present: false, clusterLayer: false, siteLayer: false, rendered: 0 };
       }
-      const feats = m.querySourceFeatures('sites');
-      // Count only LEAF site features (no point_count) — clusters are aggregates of these.
-      return feats.filter((f) => f.properties && !('point_count' in f.properties)).length;
+      // Rendered features across BOTH the cluster and unclustered-site layers (depending on zoom one
+      // or the other is painted) — proves the clustering layers are actually drawing the sites.
+      const rendered = m.queryRenderedFeatures({ layers: ['site-clusters', 'site-unclustered'] });
+      return {
+        present: !!m.getSource('sites'),
+        clusterLayer: !!m.getLayer('site-clusters'),
+        siteLayer: !!m.getLayer('site-unclustered'),
+        rendered: rendered.length,
+      };
     });
-    expect(siteLeafCount).toBe(count);
+    expect(clustering.present).toBe(true);
+    expect(clustering.clusterLayer).toBe(true);
+    expect(clustering.siteLayer).toBe(true);
+    expect(clustering.rendered).toBeGreaterThan(0);
+    // No DOM marker pins remain (clustering replaced them) — the #276 overlap source is gone.
+    expect(await page.locator('.maplibregl-marker').count()).toBe(0);
 
     if (MODE === 'real') {
       // P1-1: the p1-demo profile seeds 10 grounded sites; allow headroom for inter-site link
