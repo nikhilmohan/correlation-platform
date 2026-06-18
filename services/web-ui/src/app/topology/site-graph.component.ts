@@ -374,32 +374,44 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         pointer-events: none;
         z-index: 3;
       }
+      /* ITEM 1: a SMALL, SUBTLE corner badge — sized RELATIVE to the (now bigger) node icon so it
+         reads as a secondary affordance and does not compete with the type-icon glyph. Smaller box,
+         lower-profile colour (muted border/translucent fill at rest), reduced opacity until hover/
+         focus. Still a real focusable <button>: keyboard-reachable, visible, and clickable, and it
+         keeps its data-testid/aria-label/click→expandNode/cap-disabled behaviour unchanged. */
       .cy-expand {
         position: absolute;
         transform: translate(-50%, -50%);
-        width: 1.25rem;
-        height: 1.25rem;
+        width: 0.85rem;
+        height: 0.85rem;
         padding: 0;
         line-height: 1;
-        font-size: 0.95rem;
-        font-weight: 700;
-        border: 1px solid var(--accent);
+        font-size: 0.62rem;
+        font-weight: 600;
+        border: 1px solid var(--border);
         border-radius: 50%;
-        background: var(--surface);
-        color: var(--accent);
+        background: rgba(11, 18, 32, 0.85);
+        color: var(--text-muted);
         cursor: pointer;
         pointer-events: auto;
+        opacity: 0.7;
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 0 0 2px #0b1220;
+        box-shadow: 0 0 0 1px #0b1220;
+        transition:
+          opacity 0.1s ease,
+          color 0.1s ease,
+          border-color 0.1s ease;
       }
-      .cy-expand:hover:not(:disabled) {
-        background: var(--accent);
-        color: #0b1220;
+      .cy-expand:hover:not(:disabled),
+      .cy-expand:focus-visible:not(:disabled) {
+        opacity: 1;
+        border-color: var(--accent);
+        color: var(--accent);
       }
       .cy-expand:disabled {
-        opacity: 0.4;
+        opacity: 0.3;
         cursor: not-allowed;
       }
       .list-view-toggle {
@@ -849,8 +861,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
               'background-fit': 'contain',
               'background-clip': 'none',
               'background-opacity': 1,
-              'background-width': '80%',
-              'background-height': '80%',
+              // ITEM 2: larger glyph share of the (bigger) node so the type icon reads clearly.
+              'background-width': '88%',
+              'background-height': '88%',
               'background-color': '#0b1220',
               'border-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
               'border-width': 4,
@@ -862,8 +875,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
               'text-outline-color': '#0b1220',
               'text-valign': 'bottom',
               'text-margin-y': 4,
-              width: 52,
-              height: 52,
+              // ITEM 2: bumped node box (52 → 76) so the type-icon glyph is large and legible. The
+              // multi-site preset spacing + breadthfirst spacingFactor below are tuned to match so
+              // bigger nodes don't overlap (data-cy-node-spread stays > 40, deterministic).
+              width: 76,
+              height: 76,
             },
           },
           {
@@ -1039,8 +1055,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             name: 'breadthfirst',
             animate: false,
             circle: true,
-            spacingFactor: 2.4,
-            padding: 60,
+            // Wider spread to accommodate the bigger (76px) nodes without overlap.
+            spacingFactor: 2.9,
+            padding: 70,
             nodeDimensionsIncludeLabels: true,
             avoidOverlap: true,
           } as unknown as LayoutOptions);
@@ -1088,8 +1105,8 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     });
 
-    const NODE_GAP = 130; // spacing between devices within a site box (bigger nodes → wider spread)
-    const COL_GAP = 200; // horizontal gap between site columns
+    const NODE_GAP = 170; // spacing between devices within a site box (bigger 76px nodes → wider spread)
+    const COL_GAP = 240; // horizontal gap between site columns
     const columns: Array<{ ids: string[] }> = [];
     for (const id of sites) {
       columns.push({ ids: bySite.get(id) ?? [] });

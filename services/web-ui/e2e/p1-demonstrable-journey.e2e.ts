@@ -76,17 +76,17 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     const count = await markers.count();
     expect(count).toBeGreaterThanOrEqual(1);
 
-    // REAL UI: the MapLibre GL canvas paints, and one real map marker is drawn per accessible
-    // site-marker (the effect over store.sites() builds maplibregl.Marker[] one-to-one).
+    // REAL UI: the MapLibre GL canvas paints with NATIVE GeoJSON CLUSTERING (#276). The per-site DOM
+    // `.maplibregl-marker` pins (which overlapped + intercepted clicks on the dense UK/EU set) are
+    // gone — sites are now a clustering GeoJSON source whose features collapse into count badges at
+    // the default continental zoom and split into individual pins on zoom-in. We assert the source
+    // carries one feature per site (drill-in is driven via the accessible list, which is robust to
+    // pin overlap and reaches every site at any zoom).
     await expect(page.locator('.maplibregl-canvas')).toBeVisible();
-    const mapMarkers = page.locator('.maplibregl-marker');
-    await expect(mapMarkers.first()).toBeVisible();
-    expect(await mapMarkers.count()).toBe(count);
 
-    // BASEMAP: the map renders a REAL UK/EU basemap from the committed offline geo/europe.json
-    // asset — the style finishes loading AND the `countries` GeoJSON source has rendered features
-    // (country outlines). A blank/empty-style map (the old inline background-only style) returns 0
-    // features here, so this assertion FAILS on the pre-change map and passes only with geography.
+    // The style finishes loading AND both the `countries` basemap source and the `sites` clustering
+    // source have rendered features. A blank/empty-style map returns 0 here, so this FAILS on a
+    // non-rendering map and passes only with real geography + clustered sites.
     await page.waitForFunction(
       () => {
         const m = (window as unknown as { __geoMap?: { isStyleLoaded?: () => boolean } }).__geoMap;
@@ -103,16 +103,53 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     });
     expect(countryFeatureCount).toBeGreaterThan(0);
 
-    // PINS DISTINCT: each site pin sits at its own geographic position — the number of distinct
-    // rounded marker-centre coordinates equals the marker count (pins are NOT stacked at one point).
-    const pinCenters = await mapMarkers.evaluateAll((els) => {
-      const centers = els.map((el) => {
-        const r = (el as HTMLElement).getBoundingClientRect();
-        return `${Math.round(r.x + r.width / 2)},${Math.round(r.y + r.height / 2)}`;
-      });
-      return Array.from(new Set(centers));
+    // CLUSTERING SOURCE: the sites render through MapLibre's NATIVE GeoJSON clustering — a single
+    // `sites` source with `cluster:true` feeding a cluster-circle layer + an unclustered-site layer
+    // (NOT per-site DOM `.maplibregl-marker` pins, which previously overlapped + intercepted clicks).
+    // We assert the clustering source is present and clustered, and that the map renders SOME `sites`
+    // features (clusters and/or unclustered leaves, depending on zoom) — the data behind the badges.
+    // Wait until the clustering source has loaded its tiles so the rendered-feature query is stable
+    // (querySourceFeatures is tile-dependent — assert after the source reports loaded).
+    await page.waitForFunction(
+      () => {
+        const m = (window as unknown as {
+          __geoMap?: {
+            getSource: (s: string) => unknown;
+            isSourceLoaded?: (s: string) => boolean;
+          };
+        }).__geoMap;
+        return !!m && !!m.getSource('sites') && (!m.isSourceLoaded || m.isSourceLoaded('sites'));
+      },
+      undefined,
+      { timeout: 15_000 },
+    );
+    const clustering = await page.evaluate(() => {
+      const m = (window as unknown as {
+        __geoMap?: {
+          getSource: (s: string) => unknown;
+          getLayer: (l: string) => unknown;
+          queryRenderedFeatures: (o?: unknown) => unknown[];
+        };
+      }).__geoMap;
+      if (!m) {
+        return { present: false, clusterLayer: false, siteLayer: false, rendered: 0 };
+      }
+      // Rendered features across BOTH the cluster and unclustered-site layers (depending on zoom one
+      // or the other is painted) — proves the clustering layers are actually drawing the sites.
+      const rendered = m.queryRenderedFeatures({ layers: ['site-clusters', 'site-unclustered'] });
+      return {
+        present: !!m.getSource('sites'),
+        clusterLayer: !!m.getLayer('site-clusters'),
+        siteLayer: !!m.getLayer('site-unclustered'),
+        rendered: rendered.length,
+      };
     });
-    expect(pinCenters.length).toBe(count);
+    expect(clustering.present).toBe(true);
+    expect(clustering.clusterLayer).toBe(true);
+    expect(clustering.siteLayer).toBe(true);
+    expect(clustering.rendered).toBeGreaterThan(0);
+    // No DOM marker pins remain (clustering replaced them) — the #276 overlap source is gone.
+    expect(await page.locator('.maplibregl-marker').count()).toBe(0);
 
     if (MODE === 'real') {
       // P1-1: the p1-demo profile seeds 10 grounded sites; allow headroom for inter-site link
@@ -153,15 +190,16 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   }, testInfo) => {
     await page.goto('/topology');
 
-    // Drill in by clicking a REAL MapLibre map marker (not the accessible list) — proving the
-    // rendered map is interactive. REAL: the named LON-01 marker; MOCK: the first map marker
-    // (the interceptor returns the same SiteObjectsDto for any siteId).
+    // Drill in via the ACCESSIBLE site list (#276 — native clustering hides individual canvas pins
+    // at the default zoom, and the dense set was the source of the overlapping-pin click intercept;
+    // the accessible list is the robust drill-in surface that reaches every site at any zoom). The
+    // MapLibre canvas still paints (asserted in 33.1). REAL: the named LON-01 entry; MOCK: the first.
     await expect(page.locator('.maplibregl-canvas')).toBeVisible();
-    const mapMarkers = page.locator('.maplibregl-marker');
+    const siteEntries = page.getByTestId('site-marker');
     const anchor =
       MODE === 'real'
-        ? mapMarkers.filter({ hasText: DRILL_ANCHOR.name }).first()
-        : mapMarkers.first();
+        ? siteEntries.filter({ hasText: DRILL_ANCHOR.name }).first()
+        : siteEntries.first();
     await expect(anchor).toBeVisible();
     await anchor.click();
 
@@ -272,7 +310,9 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     page,
   }, testInfo) => {
     await page.goto('/topology');
-    const markers = page.locator('.maplibregl-marker');
+    // Drill in via the accessible site list (#276 — clustering hides individual canvas pins at the
+    // default zoom; the list is the robust drill-in surface).
+    const markers = page.getByTestId('site-marker');
     const anchor =
       MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
     await expect(anchor).toBeVisible();
@@ -340,7 +380,8 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
    */
   test('AC 33 — selecting a trail-member device highlights its trails [P1-4]', async ({ page }) => {
     await page.goto('/topology');
-    const markers = page.locator('.maplibregl-marker');
+    // Drill in via the accessible site list (#276 — robust to clustering / pin overlap).
+    const markers = page.getByTestId('site-marker');
     const anchor =
       MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
     await expect(anchor).toBeVisible();
@@ -387,9 +428,11 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await page.goto('/topology');
     await expect(page.getByRole('heading', { name: /Topology .* sites/i })).toBeVisible();
 
-    const mapMarkers = page.locator('.maplibregl-marker');
-    await expect(mapMarkers.first()).toBeVisible();
-    const markerCount = await mapMarkers.count();
+    // #276 — site count comes from the accessible site list (one entry per site, robust to
+    // clustering); the status-bar counts are derived from the same store.sites() signal.
+    const siteEntries = page.getByTestId('site-marker');
+    await expect(siteEntries.first()).toBeVisible();
+    const markerCount = await siteEntries.count();
 
     const numFrom = async (testid: string): Promise<number> => {
       const text = (await page.getByTestId(testid).textContent()) ?? '';
@@ -411,7 +454,8 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
    */
   test('site-graph breadcrumb navigates back to the geo topology view', async ({ page }) => {
     await page.goto('/topology');
-    const markers = page.locator('.maplibregl-marker');
+    // Drill in via the accessible site list (#276 — robust to clustering / pin overlap).
+    const markers = page.getByTestId('site-marker');
     const anchor =
       MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
     await expect(anchor).toBeVisible();
