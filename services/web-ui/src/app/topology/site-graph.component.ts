@@ -1406,17 +1406,45 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // graph fills the canvas centred rather than hugging the top edge.
     if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
       cy.fit(undefined, 70);
-      // CHANGE 3: cy.fit() shrinks a SMALL site (a couple of device stacks) to a tiny, hard-to-read
-      // scale. Apply a readability FLOOR: if the fitted zoom is below READABLE_ZOOM_FLOOR, zoom back
-      // up to the floor (centred on the graph) so the device boxes render at the legible size the
-      // operator expects. Larger graphs already fit ABOVE the floor, so they keep cy.fit's scale and
-      // never overflow. Guarded by the cy.zoom API (the real core / a stub that provides it).
+      // CHANGE 3 (refined #294): cy.fit() shrinks a SMALL site (a couple of device stacks) to a tiny,
+      // hard-to-read scale, so we apply a readability FLOOR — but ONLY when raising to the floor still
+      // keeps the whole graph inside the viewport. For a TALL single-site tree (e.g. WAW-01:
+      // Router→LineCard→Port→Interface→IPLink in two stacks) cy.fit already maximises to the canvas
+      // HEIGHT; forcing the zoom up to the floor would push the graph past the top/bottom edges and
+      // scroll the ROUTERS (the most important nodes, where the external-link cue lives) off-screen on
+      // first view. So: compute whether the graph's rendered box at the floor zoom would overflow the
+      // padded viewport on EITHER axis. If it would, keep cy.fit's natural scale (whole tree visible).
+      // Only short/small graphs with spare room are bumped to the floor. Re-centre after any change so
+      // the top of the tree is never cropped. Guarded by the cy.zoom API (real core / a stub with it).
       if (typeof cy.zoom === 'function' && cy.zoom() < SiteGraphComponent.READABLE_ZOOM_FLOOR) {
-        const ext = cy.extent();
-        cy.zoom({
-          level: SiteGraphComponent.READABLE_ZOOM_FLOOR,
-          position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
-        });
+        const floorZoom = SiteGraphComponent.READABLE_ZOOM_FLOOR;
+        // Model-space extent of all elements (zoom-independent): width/height of the laid-out graph.
+        const bb = cy.elements().boundingBox();
+        const graphW = bb.w;
+        const graphH = bb.h;
+        // Padded viewport budget (same 70px pad cy.fit used, on each side → 140 total per axis).
+        const FIT_PAD = 70;
+        const viewW = typeof cy.width === 'function' ? cy.width() : 0;
+        const viewH = typeof cy.height === 'function' ? cy.height() : 0;
+        const budgetW = Math.max(0, viewW - 2 * FIT_PAD);
+        const budgetH = Math.max(0, viewH - 2 * FIT_PAD);
+        // If we can't measure the viewport (e.g. a stub without width/height), be conservative and
+        // raise to the floor (preserves the small-site readability behaviour from #291).
+        const canMeasure = budgetW > 0 && budgetH > 0;
+        const wouldOverflow = canMeasure && (graphW * floorZoom > budgetW || graphH * floorZoom > budgetH);
+        if (!wouldOverflow) {
+          const ext = cy.extent();
+          cy.zoom({
+            level: floorZoom,
+            position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
+          });
+        }
+      }
+      // Always re-centre so the TOP of the graph (site box / routers) stays in view regardless of the
+      // zoom path taken above — cy.fit centres, but an explicit re-centre keeps the top visible if the
+      // tree is taller than the viewport (it then sits centred, top edge reachable, not cropped above).
+      if (typeof cy.center === 'function') {
+        cy.center();
       }
       this.firstFitDone = true;
       this.lastFittedSiteCount = siteCount;
