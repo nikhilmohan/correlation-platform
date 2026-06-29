@@ -365,8 +365,12 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
     return {
+      // MapLibre paint properties require LITERAL colour strings (hex/rgb/rgba/hsl) — it does NOT
+      // accept CSS color-mix(); passing one aborts the entire style load and the map renders blank.
+      // The land sits over the opaque sea backdrop, so the 90% "lift" is applied via a separate
+      // `fill-opacity` paint property (see `land` layer) rather than baked into the colour.
       sea: canvasBg,
-      land: `color-mix(in srgb, ${surface} 90%, transparent)`,
+      land: surface,
       border,
       coast: accent,
       clusterStroke: accent,
@@ -406,7 +410,7 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
         // Sea backdrop.
         { id: 'sea', type: 'background', paint: { 'background-color': p.sea } },
         // Land fill.
-        { id: 'land', type: 'fill', source: 'countries', paint: { 'fill-color': p.land } },
+        { id: 'land', type: 'fill', source: 'countries', paint: { 'fill-color': p.land, 'fill-opacity': 0.9 } },
         // Country borders.
         { id: 'borders', type: 'line', source: 'countries', paint: { 'line-color': p.border, 'line-width': 1 } },
         // Coastline accent (the outer ring of land features reads as coast against the sea).
