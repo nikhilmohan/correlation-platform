@@ -133,9 +133,15 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
 
     const overlay = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
     expect(overlay).not.toBeNull();
-    // BUG 2: the trail-ref chip lives in the top trail-selector control row, beside the dropdown.
-    expect(overlay.closest('[data-testid="trail-selector"]')).not.toBeNull();
+    // BUG 2 / #304 regression fix: the trail-ref chip lives in the top control row, beside the
+    // dropdown TOGGLE BUTTON. data-testid="trail-selector" is now the toggle BUTTON itself (so a
+    // test/user click opens the menu), not the wrapper — the chip is a SIBLING of it inside the
+    // shared .trail-control-row (data-testid="trail-control-row"), NOT a descendant of the button.
+    expect(overlay.closest('[data-testid="trail-control-row"]')).not.toBeNull();
     expect(overlay.closest('.trail-control-row')).not.toBeNull();
+    const selector = fixture.nativeElement.querySelector('[data-testid="trail-selector"]') as HTMLElement;
+    expect(selector.tagName).toBe('BUTTON');
+    expect(overlay.contains(selector)).toBe(false);
   });
 
   it('the explode button lives on-canvas (inside .cy-wrap) and calls toggleFullPath', async () => {

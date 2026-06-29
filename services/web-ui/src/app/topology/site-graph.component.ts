@@ -152,15 +152,16 @@ import type {
                menu (preserved for Vitest/Playwright + a11y) and stay in the DOM even while collapsed
                ([hidden]), so the existing per-trail assertions still resolve. -->
           @if (store.hasGraph()) {
-            <div class="cy-trail-selector" data-testid="trail-selector">
+            <div class="cy-trail-selector">
               <!-- TOP control row: the trail dropdown PLUS — when a trail is selected — the SELECTED-TRAIL
                    REFERENCE and the "Show full path" TOGGLE right beside it, so the reference + explode
                    control are at the TOP next to the dropdown (BUG 2). data-testid trail-detail /
                    explode-trail / clear-trail all live here now. -->
-              <div class="trail-control-row">
+              <div class="trail-control-row" data-testid="trail-control-row">
                 <button
                   type="button"
                   class="trail-toggle"
+                  data-testid="trail-selector"
                   [attr.aria-expanded]="trailMenuOpen()"
                   aria-haspopup="listbox"
                   aria-controls="trail-menu"
