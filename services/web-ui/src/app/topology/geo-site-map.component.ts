@@ -17,6 +17,7 @@ import { ActivatedRoute } from '@angular/router';
 import { TopologyStore } from './topology.store';
 import { NavigationService } from '../core/navigation.service';
 import { ErrorBannerService } from '../core/error-banner.service';
+import { ThemeService } from '../core/theme.service';
 import { SiteDto } from '../api/models';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the (large) MapLibre
@@ -176,7 +177,7 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         height: 360px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: #0b1220;
+        background: var(--canvas-bg);
         position: relative;
         overflow: hidden;
       }
@@ -253,6 +254,7 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly nav = inject(NavigationService);
   private readonly route = inject(ActivatedRoute);
   readonly errors = inject(ErrorBannerService);
+  private readonly theme = inject(ThemeService);
   private readonly zone = inject(NgZone);
 
   @ViewChild('mapEl') private mapEl?: ElementRef<HTMLDivElement>;
@@ -263,6 +265,7 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   private map: MlMap | null = null;
   private readonly mapReady = signal(false);
   private siteEffect: EffectRef;
+  private themeEffect: EffectRef;
 
   /** GeoJSON source id holding the site points (native MapLibre clustering source). */
   private static readonly SITES_SOURCE = 'sites';
@@ -306,6 +309,73 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       }
       this.updateSitesSource(sites);
     });
+
+    // THEME effect — when the theme flips, re-paint the imperatively-built basemap + cluster/pin
+    // STROKE colours (CSS-var flips don't reach the WebGL paint properties). Status pin FILLS and
+    // the cluster FILL stay identical in both themes (per product decision). No-ops until the real
+    // map + style are ready (jsdom / pre-load).
+    this.themeEffect = effect(() => {
+      this.theme.theme(); // track
+      if (this.map && this.mapReady()) {
+        this.applyMapTheme();
+      }
+    });
+  }
+
+  /** Read a CSS custom property off the document root (theme-driven palette value). */
+  private cssVar(name: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  /**
+   * Re-paint the basemap (sea/land/borders/coast) and the cluster/pin STROKE colours from the live
+   * CSS palette so the map matches the active theme. Cluster FILL + status pin FILLS are deliberately
+   * left untouched (identical in both themes). No-ops when the map or its layers are not present.
+   */
+  private applyMapTheme(): void {
+    const map = this.map;
+    if (!map) {
+      return;
+    }
+    const paint = this.basemapPaint();
+    const setPaint = (layer: string, prop: string, value: unknown): void => {
+      if (map.getLayer(layer)) {
+        map.setPaintProperty(layer, prop, value as never);
+      }
+    };
+    setPaint('sea', 'background-color', paint.sea);
+    setPaint('land', 'fill-color', paint.land);
+    setPaint('borders', 'line-color', paint.border);
+    setPaint('coast', 'line-color', paint.coast);
+    setPaint('site-clusters', 'circle-stroke-color', paint.clusterStroke);
+    setPaint('site-unclustered', 'circle-stroke-color', paint.canvasBg);
+  }
+
+  /** Theme-dependent basemap + stroke colours read from the CSS palette (with dark fallbacks). */
+  private basemapPaint(): {
+    sea: string;
+    land: string;
+    border: string;
+    coast: string;
+    clusterStroke: string;
+    canvasBg: string;
+  } {
+    const canvasBg = this.cssVar('--canvas-bg') || '#0b1220';
+    const surface = this.cssVar('--surface') || '#1e293b';
+    const border = this.cssVar('--border') || '#475569';
+    const accent = this.cssVar('--accent') || '#60a5fa';
+    return {
+      // MapLibre paint properties require LITERAL colour strings (hex/rgb/rgba/hsl) — it does NOT
+      // accept CSS color-mix(); passing one aborts the entire style load and the map renders blank.
+      // The land sits over the opaque sea backdrop, so the 90% "lift" is applied via a separate
+      // `fill-opacity` paint property (see `land` layer) rather than baked into the colour.
+      sea: canvasBg,
+      land: surface,
+      border,
+      coast: accent,
+      clusterStroke: accent,
+      canvasBg,
+    };
   }
 
   ngOnInit(): void {
@@ -330,6 +400,7 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     // NOTE: do NOT include `glyphs`/`sprite` keys at all (not even as undefined) — MapLibre's
     // style validator rejects `undefined` for them ("string expected, undefined found") and the
     // style never finishes loading. Omitting the keys keeps the basemap fully offline.
+    const p = this.basemapPaint();
     const style: StyleSpecification = {
       version: 8,
       sources: {
@@ -337,13 +408,13 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       },
       layers: [
         // Sea backdrop.
-        { id: 'sea', type: 'background', paint: { 'background-color': '#0b1220' } },
+        { id: 'sea', type: 'background', paint: { 'background-color': p.sea } },
         // Land fill.
-        { id: 'land', type: 'fill', source: 'countries', paint: { 'fill-color': 'rgba(30,41,59,0.9)' } },
+        { id: 'land', type: 'fill', source: 'countries', paint: { 'fill-color': p.land, 'fill-opacity': 0.9 } },
         // Country borders.
-        { id: 'borders', type: 'line', source: 'countries', paint: { 'line-color': '#475569', 'line-width': 1 } },
+        { id: 'borders', type: 'line', source: 'countries', paint: { 'line-color': p.border, 'line-width': 1 } },
         // Coastline accent (the outer ring of land features reads as coast against the sea).
-        { id: 'coast', type: 'line', source: 'countries', paint: { 'line-color': '#60a5fa', 'line-width': 0.5, 'line-opacity': 0.6 } },
+        { id: 'coast', type: 'line', source: 'countries', paint: { 'line-color': p.coast, 'line-width': 0.5, 'line-opacity': 0.6 } },
       ],
     };
 
@@ -397,6 +468,7 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
     const src = GeoSiteMapComponent.SITES_SOURCE;
+    const paint = this.basemapPaint();
 
     map.addSource(src, {
       type: 'geojson',
@@ -413,9 +485,10 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       source: src,
       filter: ['has', 'point_count'],
       paint: {
+        // Cluster FILL identical in both themes (per decision); STROKE follows the theme accent.
         'circle-color': '#1d4ed8',
         'circle-opacity': 0.85,
-        'circle-stroke-color': '#93c5fd',
+        'circle-stroke-color': paint.clusterStroke,
         'circle-stroke-width': 1.5,
         'circle-radius': ['step', ['get', 'point_count'], 16, 5, 20, 10, 26],
       },
@@ -428,9 +501,10 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       source: src,
       filter: ['!', ['has', 'point_count']],
       paint: {
+        // Status pin FILL identical in both themes (per decision); STROKE = canvas backdrop colour.
         'circle-color': ['get', 'statusColor'],
         'circle-radius': 7,
-        'circle-stroke-color': '#0b1220',
+        'circle-stroke-color': paint.canvasBg,
         'circle-stroke-width': 2,
       },
     });
@@ -659,6 +733,7 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.siteEffect.destroy();
+    this.themeEffect.destroy();
     this.map?.remove();
     this.map = null;
   }
