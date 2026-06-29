@@ -270,7 +270,10 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     expect(s.nodeSiteMap().get('Router:fra-r1')).toBe('Site:FRA');
   });
 
-  it('selectTrail highlights the FULL member set (not the hollow 1) and explodes cross-site members into the graph', async () => {
+  // CHANGE 2b/2c: selectTrail is now HIGHLIGHT-ONLY (it sets the full member set for the in-site
+  // highlight but does NOT pull off-site members in / does NOT relayout). The cross-site EXPLODE is
+  // an explicit, separate action (explodeTrail) the operator opts into.
+  it('selectTrail highlights the FULL member set (not the hollow 1) but does NOT explode cross-site members', async () => {
     const s = store();
     s.loadSites();
     await flush();
@@ -288,15 +291,51 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     expect(s.selectedTrailId()).toBe('TR-7');
     expect(s.selectedTrailDetail()?.memberCount).toBe(4);
 
-    // EXPLODE: the cross-site member was pulled into the accumulating graph.
+    // HIGHLIGHT-ONLY: the off-site member is NOT pulled in by a plain select (no auto-explode).
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+    expect(s.derivedNodes().map((n) => n.managedObjectId)).not.toContain('Router:fra-r1');
+  });
+
+  it('explodeTrail pulls the selected trail\'s missing (cross-site) members + neighbours into the graph', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+
+    s.selectTrail('TR-7'); // highlight-only — FRA member still absent
+    await flush();
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+
+    // EXPLODE: the cross-site member is now pulled into the accumulating graph (+ its neighbours).
+    s.explodeTrail();
+    await flush();
     expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
     expect(s.derivedNodes().map((n) => n.managedObjectId)).toContain('Router:fra-r1');
+
+    // A second explode is a no-op once every member is present (no duplication / no growth).
+    const after = s.nodeMap().size;
+    s.explodeTrail();
+    await flush();
+    expect(s.nodeMap().size).toBe(after);
 
     // clearTrail drops the selection (keeps exploded nodes).
     s.clearTrail();
     expect(s.selectedTrailId()).toBeNull();
     expect(s.trailMemberIds().size).toBe(0);
     expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+  });
+
+  it('explodeTrail with no trail selected is a no-op', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const before = s.nodeMap().size;
+    s.explodeTrail();
+    await flush();
+    expect(s.nodeMap().size).toBe(before);
   });
 
   it('NODE_CAP is ALL-OR-NOTHING: an overflowing expansion is rejected wholesale (nothing added)', async () => {

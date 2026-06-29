@@ -70,7 +70,51 @@ export class TopologyStore {
   /** Ids of nodes the operator has already expanded (so the +expand affordance can reflect state). */
   readonly expandedNodeIds = signal<ReadonlySet<string>>(new Set());
 
-  readonly trails = signal<TrailSummary[]>([]);
+  /**
+   * CHANGE 1: in-site device ids that have at least one OFF-SITE neighbour (a hidden external link).
+   * Computed once per site load (a neighbours probe per seeded in-site device); drives the amber
+   * "extends externally" (↗) node cue. A node whose external neighbours have all been pulled into the
+   * graph (so nothing external remains hidden) is dropped from this set, so the cue disappears once a
+   * device is fully revealed. Detection approach (a): probe each seeded node's neighbours and flag it
+   * if any neighbour is not in the in-site node set — the site /objects edges only reference in-site
+   * objects, so dangling cross-site edges are not inferable from them (they live in the neighbours
+   * endpoint). Probe cost: one /neighbors call per seeded in-site device, fired once at site load.
+   */
+  readonly externalLinkNodeIds = signal<ReadonlySet<string>>(new Set());
+
+  /** The siteId for which externalLinkNodeIds was computed; stale probe responses are dropped. */
+  private pendingExternalSiteId: string | null = null;
+  /** Per-node OFF-SITE neighbour ids discovered by the probe (used to drop the cue once revealed). */
+  private externalNeighboursByNode = new Map<string, Set<string>>();
+
+  /** All trails in the snapshot (from listTrails) — the full set used to resolve site membership. */
+  readonly allTrails = signal<TrailSummary[]>([]);
+
+  /**
+   * CHANGE 2a: the set of trailIds the CURRENT SITE participates in (union of getTrailsForObject
+   * across the site's seeded device ids). `null` while not yet computed (then `trails` falls back to
+   * the full set so the count is never momentarily empty); a concrete Set once the per-site probe
+   * resolves. Cached per site (recomputed only on selectSite).
+   */
+  readonly siteTrailIds = signal<ReadonlySet<string> | null>(null);
+
+  /**
+   * CHANGE 2a: trails SCOPED TO THE CURRENT SITE — only those whose id is in siteTrailIds. This is
+   * what the dropdown lists and the "Trails (N)" count + data-cy-trail-count bridge reflect. Until the
+   * site probe resolves (siteTrailIds === null) it falls back to the full snapshot list.
+   */
+  readonly trails = computed<TrailSummary[]>(() => {
+    const scope = this.siteTrailIds();
+    const all = this.allTrails();
+    if (scope === null) {
+      return all;
+    }
+    return all.filter((t) => scope.has(t.trailId));
+  });
+
+  /** The siteId for which siteTrailIds was computed; stale probe responses are dropped. */
+  private pendingSiteTrailsSiteId: string | null = null;
+
   /** Trails the SELECTED DEVICE belongs to (AC 32) — device-select list highlight. */
   readonly highlightedTrailIds = signal<ReadonlySet<string>>(new Set());
   readonly activeTrailId = signal<string | null>(null);
@@ -183,6 +227,11 @@ export class TopologyStore {
     this.expandedNodeIds.set(new Set());
     this.capReached.set(false);
     this.highlightedTrailIds.set(new Set());
+    this.externalLinkNodeIds.set(new Set());
+    this.externalNeighboursByNode = new Map();
+    this.pendingExternalSiteId = siteId;
+    this.siteTrailIds.set(null);
+    this.pendingSiteTrailsSiteId = siteId;
     this.clearTrail();
     this.pendingObjectsSiteId = siteId;
     this.topo
@@ -195,9 +244,76 @@ export class TopologyStore {
         if (res) {
           this.mergeGraph(res.nodes, res.edges);
         }
+        // Clear loading FIRST (the graph is rendered from the merged objects); the external-link +
+        // site-trail probes are async enrichments that must never block or fail the load.
         this.graphLoading.set(false);
+        if (res) {
+          this.probeExternalLinks(siteId, res.nodes);
+          this.computeSiteTrails(siteId, res.nodes);
+        }
       });
     this.loadTrails();
+  }
+
+  /**
+   * CHANGE 1: probe each seeded in-site device's neighbours and flag the ones with ≥1 OFF-SITE
+   * neighbour (a hidden external link). Sites are identified by their known siteId set, so a
+   * neighbour that is itself a site CONTAINER is ignored; a neighbour device already in the in-site
+   * set is in-site. One /neighbors call per seeded device, fired once at site load. The flagged ids
+   * drive the amber ↗ cue; recomputeExternalCues() later drops a node once its external neighbours
+   * are all present (fully revealed).
+   */
+  private probeExternalLinks(siteId: string, seeded: readonly NodeDto[]): void {
+    // Defensive: a narrow test stub may omit neighbors(); the cue is an enrichment, never required.
+    if (typeof this.topo.neighbors !== 'function' || seeded.length === 0) {
+      return;
+    }
+    const inSite = new Set(seeded.map((n) => n.managedObjectId));
+    const siteIds = new Set(this.sites().map((s) => s.siteId));
+    forkJoin(
+      seeded.map((n) =>
+        this.topo.neighbors(n.managedObjectId).pipe(catchError(() => of(null))),
+      ),
+    ).subscribe((results) => {
+      if (this.pendingExternalSiteId !== siteId) {
+        return; // a newer selectSite superseded this probe — ignore the stale response.
+      }
+      const byNode = new Map<string, Set<string>>();
+      results.forEach((r, i) => {
+        if (!r) {
+          return;
+        }
+        const nodeId = seeded[i].managedObjectId;
+        const external = new Set<string>();
+        for (const entry of r.neighbors) {
+          const nid = entry.node.managedObjectId;
+          // A site-container neighbour is structural placement, not an external link; skip it. A
+          // neighbour outside the in-site device set is an off-site link.
+          if (siteIds.has(nid) || inSite.has(nid)) {
+            continue;
+          }
+          external.add(nid);
+        }
+        if (external.size > 0) {
+          byNode.set(nodeId, external);
+        }
+      });
+      this.externalNeighboursByNode = byNode;
+      this.recomputeExternalCues();
+    });
+  }
+
+  /** Recompute the amber-cue set: a node keeps the cue while ANY of its off-site neighbours is still
+   *  hidden (not yet in the accumulating graph). Fully-revealed nodes drop the cue. */
+  private recomputeExternalCues(): void {
+    const present = this.nodeMap();
+    const next = new Set<string>();
+    for (const [nodeId, external] of this.externalNeighboursByNode) {
+      if ([...external].some((id) => !present.has(id))) {
+        next.add(nodeId);
+      }
+    }
+    this.externalLinkNodeIds.set(next);
   }
 
   /** Re-root the graph at the current site, discarding all expansions (the "Reset" affordance). */
@@ -233,6 +349,9 @@ export class TopologyStore {
           const next = new Set(this.expandedNodeIds());
           next.add(managedObjectId);
           this.expandedNodeIds.set(next);
+          // CHANGE 1: revealing neighbours may have pulled in a node's off-site links — drop the cue
+          // from any node whose external neighbours are now all present.
+          this.recomputeExternalCues();
         }
       });
   }
@@ -241,7 +360,41 @@ export class TopologyStore {
     this.trailBuilder
       .listTrails()
       .pipe(catchError(() => of({ snapshotId: '', domain: '', count: 0, trails: [] })))
-      .subscribe((res) => this.trails.set(res.trails));
+      .subscribe((res) => this.allTrails.set(res.trails));
+  }
+
+  /**
+   * CHANGE 2a: determine the trail set the current site participates in. Uses the cheapest correct
+   * path — getTrailsForObject (a by-object lookup that returns the touching trailIds) across the
+   * site's seeded device ids, unioned. Cost: one /trails/by-object call per seeded device, fired once
+   * at site load. Cached in siteTrailIds (the dropdown + count read the derived `trails`). A stale
+   * response for a superseded site is dropped.
+   */
+  private computeSiteTrails(siteId: string, seeded: readonly NodeDto[]): void {
+    // Defensive: a narrow test stub may omit getTrailsForObject; leave siteTrailIds null (the derived
+    // `trails` then falls back to the full snapshot list) rather than crash the load.
+    if (typeof this.trailBuilder.getTrailsForObject !== 'function' || seeded.length === 0) {
+      return;
+    }
+    forkJoin(
+      seeded.map((n) =>
+        this.trailBuilder.getTrailsForObject(n.managedObjectId).pipe(catchError(() => of(null))),
+      ),
+    ).subscribe((results) => {
+      if (this.pendingSiteTrailsSiteId !== siteId) {
+        return; // a newer selectSite superseded this probe — ignore the stale response.
+      }
+      const ids = new Set<string>();
+      for (const r of results) {
+        if (!r || !Array.isArray(r.trailIds)) {
+          continue;
+        }
+        for (const id of r.trailIds) {
+          ids.add(id);
+        }
+      }
+      this.siteTrailIds.set(ids);
+    });
   }
 
   toggleLayer(layer: LogicalLayer): void {
@@ -294,9 +447,11 @@ export class TopologyStore {
   }
 
   /**
-   * SELECT + EXPLODE a trail: highlight its full member path and pull any members not yet in the
-   * graph (with their connecting edges) so the — possibly cross-site — path actually renders. The
-   * member set is sourced from getTrail (the TrailSummary list carries no members).
+   * CHANGE 2b: SELECT a trail — HIGHLIGHT ONLY. Sets selectedTrailDetail + trailMemberIds (the full
+   * member set) so the IN-SITE portion of the trail lights up (cyan, via applyDecoration). It does
+   * NOT pull any off-site members in and does NOT relayout/zoom: the operator first sees the trail's
+   * in-site presence, then opts into the full cross-site path via explodeTrail(). The member set is
+   * sourced from getTrail (the TrailSummary list carries no members).
    */
   selectTrail(trailId: string): void {
     this.selectedTrailId.set(trailId);
@@ -312,40 +467,53 @@ export class TopologyStore {
         this.selectedTrailDetail.set(detail);
         const memberIds = detail.members.map((m) => m.managedObjectId);
         this.trailMemberIds.set(new Set(memberIds));
-        // EXPLODE: pull every member not already present into the graph so the — possibly cross-site
-        // — path actually renders. Each missing member is synthesized as a node from its TrailMember
-        // (so the member itself is guaranteed present) AND its neighbours are fetched so its
-        // connecting edges (and the link to the rest of the path) come in. forkJoin the union so the
-        // merge runs once (one structureKey change → one relayout).
-        const present = this.nodeMap();
-        const missing = detail.members.filter((m) => !present.has(m.managedObjectId));
-        if (missing.length === 0) {
-          return;
-        }
-        const memberNodes: NodeDto[] = missing.map((m) => ({
-          managedObjectId: m.managedObjectId,
-          objectType: m.objectType,
-          domain: detail.domain,
-          snapshotId: detail.snapshotId,
-          attributes: {},
-        }));
-        forkJoin(
-          missing.map((m) => this.topo.neighbors(m.managedObjectId).pipe(catchError(() => of(null)))),
-        ).subscribe((results) => {
-          const nodes: NodeDto[] = [...memberNodes];
-          const edges: EdgeDto[] = [];
-          for (const r of results) {
-            if (!r) {
-              continue;
-            }
-            for (const n of r.neighbors) {
-              nodes.push(n.node);
-              edges.push(n.via);
-            }
-          }
-          this.mergeGraph(nodes, edges);
-        });
+        // NO explosion here — highlight-only (CHANGE 2b). Explode is explicit (explodeTrail).
       });
+  }
+
+  /**
+   * CHANGE 2c: EXPLODE the selected trail — pull every member not already in the graph (with its
+   * connecting edges) so the — possibly cross-site — full path actually renders + highlights. Uses
+   * the currently-selected trail's detail (set by selectTrail). Each missing member is synthesized as
+   * a node from its TrailMember (so the member itself is guaranteed present) AND its neighbours are
+   * fetched so its connecting edges (and the link to the rest of the path) come in. forkJoin the
+   * union so the merge runs once (one structureKey change → one relayout). No-op if no trail is
+   * selected or every member is already present.
+   */
+  explodeTrail(): void {
+    const detail = this.selectedTrailDetail();
+    if (!detail) {
+      return;
+    }
+    const present = this.nodeMap();
+    const missing = detail.members.filter((m) => !present.has(m.managedObjectId));
+    if (missing.length === 0) {
+      return;
+    }
+    const memberNodes: NodeDto[] = missing.map((m) => ({
+      managedObjectId: m.managedObjectId,
+      objectType: m.objectType,
+      domain: detail.domain,
+      snapshotId: detail.snapshotId,
+      attributes: {},
+    }));
+    forkJoin(
+      missing.map((m) => this.topo.neighbors(m.managedObjectId).pipe(catchError(() => of(null)))),
+    ).subscribe((results) => {
+      const nodes: NodeDto[] = [...memberNodes];
+      const edges: EdgeDto[] = [];
+      for (const r of results) {
+        if (!r) {
+          continue;
+        }
+        for (const n of r.neighbors) {
+          nodes.push(n.node);
+          edges.push(n.via);
+        }
+      }
+      this.mergeGraph(nodes, edges);
+      this.recomputeExternalCues();
+    });
   }
 
   /** Clear the explicit trail exploration (keeps the exploded nodes in the graph). */
