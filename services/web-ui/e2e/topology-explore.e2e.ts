@@ -48,39 +48,49 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
   }
 
   /**
-   * Mode-portable expand driver. Rooting a site (canvas-centric redesign) preloads the site's
-   * in-site objects, so the FIRST on-canvas "+" node's neighbours may already be present and clicking
-   * it grows nothing (a real finding: only an out-of-graph-neighbour node grows the count). So we
-   * click the on-canvas "+" (data-testid="expand-node") controls IN ORDER until data-cy-node-count
-   * strictly grows — bounded by the number of controls. Picks the expand target from the RENDERED DOM
-   * (no literal node id), so it works in BOTH mock and real. Returns the before/after node counts.
-   * Throws if no control grows the graph (which would be a genuine product regression, not a flake).
+   * Mode-portable expand driver. #294 gated the on-canvas expand cue: the amber ↗ badge (inside
+   * .cy-expand-layer, data-testid="expand-node") now renders ONLY on nodes that have hidden OFF-SITE
+   * links (store.externalLinkNodeIds). The rooted site preloads its in-site objects, so an in-site
+   * node's neighbours are already present and would grow nothing — but the gated cues are EXACTLY the
+   * growable nodes (their off-site neighbours are by definition not yet in the graph). So clicking any
+   * rendered .cy-expand-layer cue pulls in external neighbours and grows the count.
+   *
+   * The cues are populated after an async external-link probe, so we POLL for ≥1 cue first. A fully
+   * internal site (no off-site links) renders ZERO cues — there is nothing to grow; the caller passes
+   * `skipIfNone` so the test skips cleanly rather than failing. We still click cues IN ORDER until the
+   * count strictly grows (a cue could, in principle, already have its neighbours revealed). The expand
+   * target is picked from the RENDERED DOM (no literal node id), so it works in BOTH mock and real.
+   * Returns the before/after node counts, or null when there are no cues (skip path).
    */
   async function expandUntilGraphGrows(
     page: import('@playwright/test').Page,
     cy: import('@playwright/test').Locator,
-  ): Promise<{ before: number; after: number }> {
+  ): Promise<{ before: number; after: number } | null> {
     const before = Number(await cy.getAttribute('data-cy-node-count'));
     const controls = page.locator('.cy-expand-layer [data-testid="expand-node"]');
+    // The off-site cues arrive after an async neighbour probe — wait for them to settle. Zero cues is
+    // a legitimate state (a fully in-site site): return null so the caller can skip cleanly.
+    try {
+      await expect.poll(async () => controls.count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+    } catch {
+      return null;
+    }
     const total = await controls.count();
-    expect(total).toBeGreaterThanOrEqual(1);
     for (let i = 0; i < total; i++) {
-      // Re-resolve the control each iteration: a successful expand relayouts and re-renders the "+"
-      // overlay, invalidating earlier handles. Some clicks add only already-present neighbours
-      // (no growth) — that's expected; keep going until one strictly grows the graph.
+      // Re-resolve the control each iteration: a successful expand relayouts and re-renders the cue
+      // overlay, invalidating earlier handles. The gated cues are the growable nodes, so the first
+      // visible cue should grow the graph; keep going (bounded) in case one is already revealed.
       const control = page.locator('.cy-expand-layer [data-testid="expand-node"]').nth(i);
       if (!(await control.isVisible().catch(() => false))) {
         continue;
       }
       await control.click();
-      // Short per-control budget: a node whose neighbours are already present grows nothing and we
-      // must move on quickly (the rooted site preloads in-site objects, so most "+" don't grow); a
-      // real out-of-graph neighbour relayouts fast. Keeps the bounded loop well under the test timeout
-      // even under multi-worker load against the live stack.
+      // An off-site cue pulls in external neighbours and relayouts fast; give a short per-control
+      // budget so the bounded loop stays well under the test timeout even under multi-worker load.
       let grew = false;
       try {
         await expect
-          .poll(async () => Number(await cy.getAttribute('data-cy-node-count')), { timeout: 2_000 })
+          .poll(async () => Number(await cy.getAttribute('data-cy-node-count')), { timeout: 4_000 })
           .toBeGreaterThan(before);
         grew = true;
       } catch {
@@ -92,7 +102,7 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
       }
     }
     throw new Error(
-      `No expand-node control grew the graph (started at ${before} nodes, tried ${total} controls)`,
+      `No off-site expand cue grew the graph (started at ${before} nodes, tried ${total} cues)`,
     );
   }
 
@@ -106,9 +116,15 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     test.setTimeout(90_000);
     const cy = await rootAtSite(page);
 
-    // Mode-portable: pick the expand target from the RENDERED on-canvas "+" controls (not a literal
-    // mock id like lon-r1), clicking in order until the graph strictly grows. Holds in mock AND real.
-    const { before, after } = await expandUntilGraphGrows(page, cy);
+    // Mode-portable: drive expansion from the RENDERED on-canvas off-site cues (#294-gated; the
+    // growable nodes), clicking until the graph strictly grows. Holds in mock AND real. A fully
+    // in-site site renders zero cues (nothing to grow) → skip cleanly.
+    const grown = await expandUntilGraphGrows(page, cy);
+    if (!grown) {
+      test.skip(true, 'Rooted site has no off-site links — no expand cue to grow the graph.');
+      return;
+    }
+    const { before, after } = grown;
 
     // FAILS on the old static graph (no expand): the node count strictly increases.
     expect(after).toBeGreaterThan(before);
@@ -127,8 +143,15 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     await expect.poll(async () => Number(await cy.getAttribute('data-cy-site-count')))
       .toBe(1); // single site box at root
 
-    // Mode-portable: drive expansion generically from the rendered "+" controls (no literal node id).
-    const { before, after } = await expandUntilGraphGrows(page, cy);
+    // Mode-portable: drive expansion from the rendered off-site cues (#294-gated growable nodes).
+    // Clicking an off-site cue pulls in cross-site neighbours, which can surface a 2nd site box.
+    // A fully in-site site renders zero cues → skip cleanly.
+    const grown = await expandUntilGraphGrows(page, cy);
+    if (!grown) {
+      test.skip(true, 'Rooted site has no off-site links — no cross-site cue to surface a 2nd site.');
+      return;
+    }
+    const { before, after } = grown;
     expect(after).toBeGreaterThan(before);
     await expect.poll(async () => Number(await cy.getAttribute('data-cy-node-spread'))).toBeGreaterThan(40);
 
@@ -287,27 +310,42 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     expect(madIds.length).toBeGreaterThan(0);
   });
 
-  test('UX redesign: always-visible on-canvas "+" affordances render per device node + track the canvas', async ({
+  test('UX redesign: on-canvas external-link cue (amber ↗) renders ONLY on off-site nodes + tracks the canvas', async ({
     page,
   }) => {
+    // #294 gated the on-canvas expand cue: the amber ↗ badge (data-testid="expand-node" inside
+    // .cy-expand-layer) now renders ONLY on nodes that have hidden OFF-SITE links
+    // (store.externalLinkNodeIds) — leaf / in-site-only nodes get NO cue. The per-device "+expand"
+    // fallback (also data-testid="expand-node") lives in the CSS-hidden List view, NOT in
+    // .cy-expand-layer, so the .cy-expand-layer scoping below resolves exactly the gated canvas cues.
     const cy = await rootAtSite(page);
     const nodeCount = Number(await cy.getAttribute('data-cy-node-count'));
     expect(nodeCount).toBeGreaterThanOrEqual(1);
 
-    // The on-canvas "+" overlay buttons render (one per rendered device node) and are VISIBLE on the
-    // canvas without opening any list — the canvas IS the interface. (data-testid="expand-node".)
-    const plus = page.locator('.cy-expand-layer [data-testid="expand-node"]');
-    await expect.poll(async () => plus.count()).toBe(nodeCount);
-    await expect(plus.first()).toBeVisible();
-    // They carry the accessible "Expand neighbours of <name>" label the assistive tech + e2e use.
-    await expect(plus.first()).toHaveAttribute('aria-label', /^Expand neighbours of /);
+    // The off-site cues are populated after an async external-link probe completes — poll for ≥1.
+    const cue = page.locator('.cy-expand-layer [data-testid="expand-node"]');
+    await expect.poll(async () => cue.count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
 
-    // They track the node on zoom: capture a "+" position, zoom in, expect it to move.
-    const before = await plus.first().boundingBox();
+    // Gated, not one-per-node: at least one cue, at most one-per-device (a normal rooted site like
+    // London has a handful of off-site routers, far fewer than its total device count).
+    const cueCount = await cue.count();
+    expect(cueCount).toBeGreaterThanOrEqual(1);
+    expect(cueCount).toBeLessThanOrEqual(nodeCount);
+
+    // Every rendered cue is VISIBLE on the canvas (the canvas IS the interface — no list needed).
+    for (let i = 0; i < cueCount; i++) {
+      await expect(cue.nth(i)).toBeVisible();
+    }
+    // They carry the accessible off-site label the assistive tech + e2e use ("Show external links
+    // for <name>"). (The per-node list-row fallback uses "Expand neighbours of <name>" instead.)
+    await expect(cue.first()).toHaveAttribute('aria-label', /^Show external links for /);
+
+    // They track the node on zoom: capture a cue position, zoom in, expect it to move.
+    const before = await cue.first().boundingBox();
     await page.getByTestId('zoom-in').click();
     await expect
       .poll(async () => {
-        const now = await plus.first().boundingBox();
+        const now = await cue.first().boundingBox();
         return now && before ? Math.abs(now.x - before.x) + Math.abs(now.y - before.y) : 0;
       })
       .toBeGreaterThan(0);
