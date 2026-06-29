@@ -27,6 +27,10 @@
   --graph-bg: #0f172a;
   /* A larger, AMBER outward-arrow "extends externally" node cue (CHANGE 1) — works in both themes. */
   --expand-cue: #f59e0b;
+  /* HOT MAGENTA trail highlight (topology-v3 CHANGE 3) — deliberately distinct from the layer
+     accents (blue/violet/amber/green/pink) so a selected trail's path is unmistakable. Reads on
+     both the dark and the light graph canvas. */
+  --trail-hl: #ec4899;
   --error-bg: #3f1d1d;
   --error-text: #fecaca;
   --badge-new-text: #06303a;
@@ -50,6 +54,7 @@
   /* Light: the graph canvas blends with the white page surface (no grey block). */
   --graph-bg: #ffffff;
   --expand-cue: #b45309; /* darker amber for AA contrast on the white light-theme canvas */
+  --trail-hl: #db2777; /* slightly deeper magenta for AA contrast on the white light-theme canvas */
   --error-bg: #fee2e2;
   --error-text: #991b1b;
   --badge-new-text: #06303a;

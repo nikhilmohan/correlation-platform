@@ -231,37 +231,146 @@ import type {
             </button>
             <app-attribute-detail-panel />
           </div>
-        </div>
 
-        <div class="legends">
-          <ul class="layer-legend" aria-label="Graph layer legend">
-            @for (item of LAYER_LEGEND; track item.layer) {
-              <li>
-                <span class="dot" [style.background]="item.color" aria-hidden="true"></span>{{ item.layer }}
-              </li>
-            }
-          </ul>
-          @if (siteLegend().length) {
-            <ul class="site-legend" aria-label="Site boundary legend" data-testid="site-legend">
-              @for (s of siteLegend(); track s.siteId) {
-                <li data-testid="site-legend-item">
-                  <span class="swatch" [style.border-color]="s.color" aria-hidden="true"></span>{{ s.name }}
-                </li>
-              }
-            </ul>
+          <!-- CHANGE 6 (v3): SELECTED-TRAIL DETAIL as a floating ON-CANVAS OVERLAY (bottom-left), not a
+               section below the graph. Lists the trail's member devices (each clickable → selectNode,
+               which opens the right detail drawer) + igpArea/SRLG meta + member count. Collapsible and
+               dismissable so it never blocks the graph. The explode + clear controls live in its header
+               (CHANGE 5: on-canvas). Member rows keep data-testid="trail-member"; the panel keeps
+               data-testid="trail-detail" and explode keeps data-testid="explode-trail". -->
+          @if (store.selectedTrailDetail(); as td) {
+            <section
+              class="trail-overlay"
+              data-testid="trail-detail"
+              aria-label="Selected trail detail"
+              [class.collapsed]="trailOverlayCollapsed()"
+            >
+              <header class="trail-overlay-head">
+                <span class="trail-overlay-title">
+                  <span class="trail-dot" aria-hidden="true"></span>
+                  Trail {{ td.trailId }}
+                </span>
+                <button
+                  type="button"
+                  class="trail-overlay-collapse"
+                  [attr.aria-expanded]="!trailOverlayCollapsed()"
+                  aria-controls="trail-overlay-body"
+                  [attr.aria-label]="trailOverlayCollapsed() ? 'Expand trail detail' : 'Collapse trail detail'"
+                  (click)="toggleTrailOverlay()"
+                >
+                  <span aria-hidden="true">{{ trailOverlayCollapsed() ? '▸' : '▾' }}</span>
+                </button>
+                <button
+                  type="button"
+                  class="trail-overlay-close"
+                  data-testid="clear-trail"
+                  aria-label="Clear selected trail"
+                  (click)="store.clearTrail()"
+                >
+                  ✕
+                </button>
+              </header>
+
+              <div id="trail-overlay-body" class="trail-overlay-body" [hidden]="trailOverlayCollapsed()">
+                <p class="muted">
+                  {{ td.memberCount }} members
+                  @if (td.igpArea) {
+                    · IGP area {{ td.igpArea }}
+                  }
+                  @if (td.srlgGroup) {
+                    · SRLG {{ td.srlgGroup }}
+                  }
+                </p>
+
+                <!-- CHANGE 5 (v3): on-canvas EXPLODE — pulls the trail's missing (possibly cross-site)
+                     members + their neighbours in so the full path renders. Keeps data-testid. -->
+                <button
+                  type="button"
+                  class="explode-trail"
+                  data-testid="explode-trail"
+                  aria-label="Show full trail path across sites"
+                  (click)="store.explodeTrail()"
+                >
+                  <span aria-hidden="true">⤢</span> Show full trail path
+                </button>
+
+                <ul class="trail-members" aria-label="Trail members">
+                  @for (m of td.members; track m.managedObjectId) {
+                    <li>
+                      <button
+                        type="button"
+                        class="obj"
+                        data-testid="trail-member"
+                        (click)="store.selectNode(m.managedObjectId)"
+                      >
+                        {{ m.managedObjectId }}
+                        <span class="layer-tag">{{ m.objectType }}</span>
+                      </button>
+                    </li>
+                  }
+                </ul>
+              </div>
+            </section>
           }
-          <ul class="icon-legend" aria-label="Network element type icon legend" data-testid="icon-legend">
-            @for (item of ICON_LEGEND; track item.key) {
-              <li data-testid="icon-legend-item" [attr.data-icon]="item.key">
-                <img class="icon-glyph" [src]="iconUrlForKey(item.key)" alt="" aria-hidden="true" width="16" height="16" />
-                {{ item.label }}
-              </li>
-            }
-          </ul>
-          <!-- CHANGE 1: self-explanatory hint for the amber ↗ cue. -->
-          <p class="cue-hint" data-testid="external-link-hint">
-            <span class="cue-glyph" aria-hidden="true">↗</span> extends to other sites — click to reveal external links
-          </p>
+
+          <!-- CHANGE 7 (v3): on-canvas COLLAPSIBLE LEGEND panel (bottom-right). A "Legend" disclosure
+               chip expands to show the layer-colour, site-boundary + type-icon legends and the amber-cue
+               hint, so the operator can decode the canvas from the canvas itself. Collapsed by default
+               so it doesn't dominate. Keeps site-legend(-item) + icon-legend(-item) testids. -->
+          <div class="legend-panel" data-testid="legend-panel" [class.open]="legendOpen()">
+            <button
+              type="button"
+              class="legend-toggle"
+              data-testid="legend-toggle"
+              [attr.aria-expanded]="legendOpen()"
+              aria-controls="legend-body"
+              (click)="toggleLegend()"
+            >
+              <span class="disclosure" aria-hidden="true">{{ legendOpen() ? '▾' : '▸' }}</span>
+              Legend
+            </button>
+
+            <div id="legend-body" class="legend-body" [hidden]="!legendOpen()">
+              <h3 class="legend-h">Layers</h3>
+              <ul class="layer-legend" aria-label="Graph layer legend">
+                @for (item of LAYER_LEGEND; track item.layer) {
+                  <li>
+                    <span class="dot" [style.background]="item.color" aria-hidden="true"></span>{{ item.layer }}
+                  </li>
+                }
+              </ul>
+              @if (siteLegend().length) {
+                <h3 class="legend-h">Sites</h3>
+                <ul class="site-legend" aria-label="Site boundary legend" data-testid="site-legend">
+                  @for (s of siteLegend(); track s.siteId) {
+                    <li data-testid="site-legend-item">
+                      <span class="swatch" [style.border-color]="s.color" aria-hidden="true"></span>{{ s.name }}
+                    </li>
+                  }
+                </ul>
+              }
+              <h3 class="legend-h">Element types</h3>
+              <ul class="icon-legend" aria-label="Network element type icon legend" data-testid="icon-legend">
+                @for (item of ICON_LEGEND; track item.key) {
+                  <li data-testid="icon-legend-item" [attr.data-icon]="item.key">
+                    <img
+                      class="icon-glyph"
+                      [src]="iconUrlForKey(item.key)"
+                      alt=""
+                      aria-hidden="true"
+                      width="16"
+                      height="16"
+                    />
+                    {{ item.label }}
+                  </li>
+                }
+              </ul>
+              <p class="cue-hint" data-testid="external-link-hint">
+                <span class="cue-glyph" aria-hidden="true">↗</span> extends to other sites — click to reveal external
+                links
+              </p>
+            </div>
+          </div>
         </div>
 
         @if (store.graphLoading()) {
@@ -356,56 +465,8 @@ import type {
             </ul>
           </div>
 
-          <!-- Selected-trail detail: full member path (each a button → select that device), area/SRLG.
-               Lives below the graph; the trail itself is now selected from the floating on-canvas
-               Trails selector (CHANGE 2). -->
-
-          @if (store.selectedTrailDetail(); as td) {
-            <section class="trail-detail" data-testid="trail-detail" aria-label="Selected trail detail">
-              <h2>Trail {{ td.trailId }}</h2>
-              <p class="muted">
-                {{ td.memberCount }} members
-                @if (td.igpArea) {
-                  · IGP area {{ td.igpArea }}
-                }
-                @if (td.srlgGroup) {
-                  · SRLG {{ td.srlgGroup }}
-                }
-              </p>
-              <ul class="trail-members" aria-label="Trail members">
-                @for (m of td.members; track m.managedObjectId) {
-                  <li>
-                    <button
-                      type="button"
-                      class="obj"
-                      data-testid="trail-member"
-                      (click)="store.selectNode(m.managedObjectId)"
-                    >
-                      {{ m.managedObjectId }}
-                      <span class="layer-tag">{{ m.objectType }}</span>
-                    </button>
-                  </li>
-                }
-              </ul>
-              <!-- CHANGE 2c: explicit EXPLODE — pulls the trail's missing (possibly cross-site)
-                   members + their neighbours into the graph so the full path renders. Plain SELECT is
-                   highlight-only (in-site portion); this opts into the cross-site explosion. -->
-              <div class="trail-detail-actions">
-                <button
-                  type="button"
-                  class="explode-trail"
-                  data-testid="explode-trail"
-                  aria-label="Show full trail path across sites"
-                  (click)="store.explodeTrail()"
-                >
-                  Show full path across sites
-                </button>
-                <button type="button" class="clear-trail" data-testid="clear-trail" (click)="store.clearTrail()">
-                  Clear trail
-                </button>
-              </div>
-            </section>
-          }
+          <!-- CHANGE 5/6 (v3): the selected-trail detail + explode + clear controls now live as an
+               ON-CANVAS overlay inside .cy-wrap (above), not below the graph. -->
         } @else {
           <p class="empty-state">No objects at this site.</p>
         }
@@ -584,12 +645,6 @@ import type {
       .cy-controls button:hover {
         border-color: var(--accent);
       }
-      .legends {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 1.5rem;
-        margin-bottom: 0.8rem;
-      }
       .layer-legend,
       .site-legend {
         list-style: none;
@@ -693,7 +748,7 @@ import type {
         outline: 2px solid var(--accent);
       }
       .obj.trail-member {
-        border-color: var(--new);
+        border-color: var(--trail-hl);
       }
       .layer-tag {
         color: var(--text-muted);
@@ -838,49 +893,151 @@ import type {
           border-left: none;
         }
       }
-      .trail-detail {
-        margin-top: 1rem;
-        padding: 0.6rem;
-        border: 1px solid var(--border);
+      /* CHANGE 6 (v3): on-canvas selected-trail overlay (bottom-left, semi-transparent themed surface). */
+      .trail-overlay {
+        position: absolute;
+        left: 8px;
+        bottom: 8px;
+        z-index: 5;
+        width: min(280px, 60%);
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        border: 1px solid var(--trail-hl);
         border-radius: 8px;
-        background: var(--surface);
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(2px);
+        overflow: hidden;
+      }
+      .trail-overlay-head {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.4rem 0.5rem;
+        border-bottom: 1px solid var(--border);
+      }
+      .trail-overlay.collapsed .trail-overlay-head {
+        border-bottom: none;
+      }
+      .trail-overlay-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-weight: 600;
+        font-size: 0.85rem;
+        flex: 1;
+      }
+      .trail-dot {
+        width: 0.7rem;
+        height: 0.7rem;
+        border-radius: 50%;
+        background: var(--trail-hl);
+      }
+      .trail-overlay-collapse,
+      .trail-overlay-close {
+        width: 1.6rem;
+        height: 1.6rem;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 6px;
+        cursor: pointer;
+        line-height: 1;
+        font-size: 0.8rem;
+      }
+      .trail-overlay-collapse:hover,
+      .trail-overlay-collapse:focus-visible,
+      .trail-overlay-close:hover,
+      .trail-overlay-close:focus-visible {
+        border-color: var(--accent);
+      }
+      .trail-overlay-body {
+        padding: 0.5rem;
+        max-height: 40vh;
+        overflow-y: auto;
+      }
+      .trail-overlay-body[hidden] {
+        display: none;
       }
       .trail-members {
         list-style: none;
         padding: 0;
-        margin: 0.4rem 0;
+        margin: 0.4rem 0 0;
         display: flex;
         flex-wrap: wrap;
         gap: 0.4rem;
       }
-      .trail-detail-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.5rem;
-        margin-top: 0.5rem;
-      }
       .explode-trail {
-        background: var(--accent);
-        color: var(--on-accent);
-        border: 1px solid var(--accent);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        background: var(--trail-hl);
+        color: #ffffff;
+        border: 1px solid var(--trail-hl);
         border-radius: 6px;
         padding: 0.3rem 0.7rem;
         cursor: pointer;
         font: inherit;
         font-weight: 600;
+        margin-top: 0.3rem;
       }
       .explode-trail:hover,
       .explode-trail:focus-visible {
-        background: var(--accent-strong);
-        border-color: var(--accent-strong);
+        filter: brightness(1.08);
       }
-      .clear-trail {
-        background: var(--surface-2);
-        color: var(--text);
+      /* CHANGE 7 (v3): on-canvas collapsible Legend panel, pinned bottom-RIGHT. */
+      .legend-panel {
+        position: absolute;
+        right: 8px;
+        bottom: 8px;
+        z-index: 5;
+        max-width: min(300px, 70%);
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
         border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 0.3rem 0.6rem;
+        border-radius: 8px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(2px);
+        overflow: hidden;
+      }
+      .legend-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        width: 100%;
+        background: var(--surface);
+        color: var(--text);
+        border: none;
+        border-radius: 8px;
+        padding: 0.35rem 0.7rem;
         cursor: pointer;
+        font: inherit;
+        font-size: 0.82rem;
+      }
+      .legend-toggle:hover,
+      .legend-toggle:focus-visible {
+        color: var(--accent);
+      }
+      .legend-toggle .disclosure {
+        color: var(--accent);
+      }
+      .legend-body {
+        padding: 0.2rem 0.7rem 0.6rem;
+        max-height: 46vh;
+        overflow-y: auto;
+      }
+      .legend-body[hidden] {
+        display: none;
+      }
+      .legend-h {
+        margin: 0.5rem 0 0.3rem;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--text-muted);
+      }
+      .legend-body .layer-legend,
+      .legend-body .site-legend,
+      .legend-body .icon-legend {
+        flex-direction: column;
+        gap: 0.3rem;
       }
       .muted {
         color: var(--text-muted);
@@ -981,6 +1138,19 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     if (this.detailOpen()) {
       this.closeDetail();
     }
+  }
+
+  /** CHANGE 6 (v3): collapse state of the on-canvas selected-trail detail overlay (bottom-left). */
+  readonly trailOverlayCollapsed = signal(false);
+  toggleTrailOverlay(): void {
+    this.trailOverlayCollapsed.update((v) => !v);
+  }
+
+  /** CHANGE 7 (v3): disclosure state of the on-canvas Legend panel (bottom-right). Collapsed by
+   *  default so it doesn't dominate the canvas. */
+  readonly legendOpen = signal(false);
+  toggleLegend(): void {
+    this.legendOpen.update((v) => !v);
   }
 
   /** Open/closed state of the floating on-canvas trail SELECTOR dropdown (CHANGE 2). */
@@ -1122,7 +1292,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     const text = this.cssVar('--text') || '#f1f5f9';
     const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
-    const highlight = this.cssVar('--new') || '#22d3ee';
+    // CHANGE 3 (v3): trail highlight is HOT MAGENTA (--trail-hl), distinct from the layer accents and
+    // bolder than the old cyan. Read from the theme palette so it re-themes on a theme flip.
+    const trailHl = this.cssVar('--trail-hl') || '#ec4899';
     return [
       {
         selector: 'node[?isSiteParent]',
@@ -1189,9 +1361,20 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           opacity: 0.7,
         },
       },
-      { selector: 'node.highlighted', style: { 'border-width': 3, 'border-color': highlight } },
+      // CHANGE 3 (v3): magenta trail highlight — bolder border + a subtle magenta glow on member
+      // nodes, and thicker (5px) full-opacity magenta member edges, so the trail path is unmistakable.
+      {
+        selector: 'node.highlighted',
+        style: {
+          'border-width': 5,
+          'border-color': trailHl,
+          'overlay-color': trailHl,
+          'overlay-opacity': 0.16,
+          'overlay-padding': 6,
+        },
+      },
       { selector: 'node.selected', style: { 'border-width': 4, 'border-color': accent } },
-      { selector: 'edge.trail-member', style: { 'line-color': highlight, width: 4, opacity: 1 } },
+      { selector: 'edge.trail-member', style: { 'line-color': trailHl, width: 5, opacity: 1 } },
     ];
   }
 
@@ -1394,8 +1577,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             animate: false,
             circle: false,
             directed: true,
-            spacingFactor: 2.1,
-            padding: 70,
+            // CHANGE 4 (v3): shorter edges — was 2.1; tightened so the single-site tree is compact and
+            // an exploded trail path stays within the canvas at the readable zoom. avoidOverlap below
+            // still guarantees the 100px nodes don't collide (data-cy-node-spread stays > 40).
+            spacingFactor: 1.4,
+            padding: 50,
             nodeDimensionsIncludeLabels: true,
             avoidOverlap: true,
           } as unknown as LayoutOptions);
@@ -1405,44 +1591,25 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // expands do NOT re-fit, preserving the operator's manual zoom/pan. Pad generously so the laid-out
     // graph fills the canvas centred rather than hugging the top edge.
     if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
-      cy.fit(undefined, 70);
-      // CHANGE 3 (refined #294): cy.fit() shrinks a SMALL site (a couple of device stacks) to a tiny,
-      // hard-to-read scale, so we apply a readability FLOOR — but ONLY when raising to the floor still
-      // keeps the whole graph inside the viewport. For a TALL single-site tree (e.g. WAW-01:
-      // Router→LineCard→Port→Interface→IPLink in two stacks) cy.fit already maximises to the canvas
-      // HEIGHT; forcing the zoom up to the floor would push the graph past the top/bottom edges and
-      // scroll the ROUTERS (the most important nodes, where the external-link cue lives) off-screen on
-      // first view. So: compute whether the graph's rendered box at the floor zoom would overflow the
-      // padded viewport on EITHER axis. If it would, keep cy.fit's natural scale (whole tree visible).
-      // Only short/small graphs with spare room are bumped to the floor. Re-centre after any change so
-      // the top of the tree is never cropped. Guarded by the cy.zoom API (real core / a stub with it).
+      cy.fit(undefined, 50);
+      // CHANGE 2 (v3): PIN the READABLE zoom as the default first view. cy.fit() shrinks a small/tall
+      // site to a tiny, hard-to-read scale; with the shorter links (CHANGE 4) the whole site now fits
+      // at the readable level anyway. The operator explicitly chose the bigger readable zoom over
+      // fit-everything and said "no need to zoom out, user can drag". So: if cy.fit settled BELOW the
+      // readability floor, always raise the zoom to the floor (devices large, like the screenshot) —
+      // we no longer suppress this when the graph is taller than the viewport; we keep the readable
+      // zoom and let the operator DRAG to follow a tall tree / exploded path. Then re-centre so the
+      // top of the tree (site box / routers, where the external-link cue lives) stays reachable.
+      // Guarded by the cy.zoom API (real core / a stub with it).
       if (typeof cy.zoom === 'function' && cy.zoom() < SiteGraphComponent.READABLE_ZOOM_FLOOR) {
         const floorZoom = SiteGraphComponent.READABLE_ZOOM_FLOOR;
-        // Model-space extent of all elements (zoom-independent): width/height of the laid-out graph.
-        const bb = cy.elements().boundingBox();
-        const graphW = bb.w;
-        const graphH = bb.h;
-        // Padded viewport budget (same 70px pad cy.fit used, on each side → 140 total per axis).
-        const FIT_PAD = 70;
-        const viewW = typeof cy.width === 'function' ? cy.width() : 0;
-        const viewH = typeof cy.height === 'function' ? cy.height() : 0;
-        const budgetW = Math.max(0, viewW - 2 * FIT_PAD);
-        const budgetH = Math.max(0, viewH - 2 * FIT_PAD);
-        // If we can't measure the viewport (e.g. a stub without width/height), be conservative and
-        // raise to the floor (preserves the small-site readability behaviour from #291).
-        const canMeasure = budgetW > 0 && budgetH > 0;
-        const wouldOverflow = canMeasure && (graphW * floorZoom > budgetW || graphH * floorZoom > budgetH);
-        if (!wouldOverflow) {
-          const ext = cy.extent();
-          cy.zoom({
-            level: floorZoom,
-            position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
-          });
-        }
+        const ext = cy.extent();
+        cy.zoom({
+          level: floorZoom,
+          position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
+        });
       }
-      // Always re-centre so the TOP of the graph (site box / routers) stays in view regardless of the
-      // zoom path taken above — cy.fit centres, but an explicit re-centre keeps the top visible if the
-      // tree is taller than the viewport (it then sits centred, top edge reachable, not cropped above).
+      // Re-centre so the graph sits centred (top edge reachable by drag) regardless of the zoom path.
       if (typeof cy.center === 'function') {
         cy.center();
       }
@@ -1483,8 +1650,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     });
 
-    const NODE_GAP = 220; // spacing between devices within a site box (bigger 100px nodes → wider spread)
-    const COL_GAP = 310; // horizontal gap between site columns
+    // CHANGE 4 (v3): shorter links — tightened from 220/310 so devices sit close, edges stay short, and
+    // an exploded cross-site path stays within the canvas at the readable zoom. Still wide enough that
+    // the 100px nodes + wrapped labels don't collide (data-cy-node-spread stays > 40).
+    const NODE_GAP = 150; // spacing between devices within a site box
+    const COL_GAP = 210; // horizontal gap between site columns
     const columns: Array<{ ids: string[] }> = [];
     for (const id of sites) {
       columns.push({ ids: bySite.get(id) ?? [] });
