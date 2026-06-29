@@ -29,9 +29,15 @@ describe('CHANGE 2 — floating trail selector', () => {
   it('renders a keyboard-accessible trail-selector toggle (aria-expanded, aria-haspopup) collapsed by default', async () => {
     const fixture = await mountSiteGraph();
     const el: HTMLElement = fixture.nativeElement;
-    const toggle = el.querySelector('[data-testid="trail-selector"] .trail-toggle') as HTMLButtonElement;
+    // #304 REGRESSION GUARD: data-testid="trail-selector" must be the toggle BUTTON itself, so a
+    // test/operator click (getByTestId('trail-selector').click()) actually opens the menu. The
+    // earlier additive-layout work mistakenly put the testid on the OUTER wrapper div, which has no
+    // click handler — clicking it did nothing and the menu never opened (2 E2E flows broke).
+    const toggle = el.querySelector('[data-testid="trail-selector"]') as HTMLButtonElement;
     expect(toggle).not.toBeNull();
     expect(toggle.tagName).toBe('BUTTON');
+    expect(toggle.classList.contains('trail-toggle')).toBe(true);
+    expect(toggle.getAttribute('aria-controls')).toBe('trail-menu');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(toggle.getAttribute('aria-haspopup')).toBe('listbox');
     // The menu (a listbox) exists in the DOM and is hidden while collapsed.
@@ -39,6 +45,26 @@ describe('CHANGE 2 — floating trail selector', () => {
     expect(menu).not.toBeNull();
     expect(menu.getAttribute('role')).toBe('listbox');
     expect(menu.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('#304 GUARD: clicking the trail-selector element opens the menu (testid is on the clickable button)', async () => {
+    const fixture = await mountSiteGraph();
+    const el: HTMLElement = fixture.nativeElement;
+    // Resolve EXACTLY as Playwright does: getByTestId('trail-selector') → click().
+    const selector = el.querySelector('[data-testid="trail-selector"]') as HTMLButtonElement;
+    expect(selector.tagName).toBe('BUTTON');
+    expect(selector.getAttribute('aria-expanded')).toBe('false');
+    const menu = () => el.querySelector('[data-testid="trail-menu"]') as HTMLElement;
+    expect(menu().hasAttribute('hidden')).toBe(true);
+
+    selector.click();
+    fixture.detectChanges();
+
+    // The very same click must flip aria-expanded and reveal the listbox so trail-cluster options
+    // become visible/clickable — this is the user + E2E contract that #304 broke.
+    expect(selector.getAttribute('aria-expanded')).toBe('true');
+    expect(menu().hasAttribute('hidden')).toBe(false);
+    expect(el.querySelectorAll('[data-testid="trail-cluster"]').length).toBeGreaterThanOrEqual(1);
   });
 
   it('the trail-cluster buttons stay in the DOM (inside the menu) even while the menu is collapsed', async () => {
