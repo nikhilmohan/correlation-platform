@@ -130,6 +130,22 @@ export class TopologyStore {
    *  against a slower prior request clobbering the current site / clearing loading wrongly). */
   private pendingObjectsSiteId: string | null = null;
 
+  /**
+   * RESETTABLE FULL-PATH (operator feedback): a snapshot of the PURE in-site base graph, taken
+   * right after objectsAtSite seeds the graph (before ANY explode or node-expand). selectTrail
+   * (switching/re-selecting a trail) and clearTrail RESTORE the graph to this base so exploded
+   * full-path nodes (and expand reveals) do NOT persist across trails — selecting a different
+   * trail or clearing returns to the original in-site view. Copies of the seeded node/edge maps
+   * are kept (simplest + robust); the base node id set drives quick "is this a base node" checks.
+   */
+  private baseNodeMap: ReadonlyMap<string, NodeDto> = new Map();
+  private baseEdgeMap: ReadonlyMap<string, EdgeDto> = new Map();
+  private baseNodeIds: ReadonlySet<string> = new Set();
+
+  /** True while the currently-selected trail has been EXPLODED to its full (cross-site) path. Drives
+   *  the explode-button pressed/label state; reset whenever the graph is restored to the base. */
+  readonly explodeActive = signal<boolean>(false);
+
   readonly derivedNodes = computed<DerivedNode[]>(() => {
     // A node whose id is a known siteId is a boundary CONTAINER, not a device — it renders as a
     // compound box (from nodeSiteMap), never as a leaf node, so exclude it from the device set.
@@ -220,6 +236,13 @@ export class TopologyStore {
   selectSite(siteId: string): void {
     this.selectedSiteId.set(siteId);
     this.graphLoading.set(true);
+    // Invalidate the prior site's base snapshot BEFORE the pre-seed clearTrail() below, so its
+    // restore no-ops (selectSite owns the reset here); the new base is snapshotted once the new
+    // site's objects seed in.
+    this.baseNodeMap = new Map();
+    this.baseEdgeMap = new Map();
+    this.baseNodeIds = new Set();
+    this.explodeActive.set(false);
     this.nodeMap.set(new Map());
     this.edgeMap.set(new Map());
     this.selectedObjectId.set(null);
@@ -243,6 +266,12 @@ export class TopologyStore {
         }
         if (res) {
           this.mergeGraph(res.nodes, res.edges);
+          // SNAPSHOT the pure in-site base graph (before any explode/expand) so trail-change and
+          // clearTrail can restore to it (resettable full-path). Copies are taken so later mutation
+          // of nodeMap/edgeMap can never alias the base.
+          this.baseNodeMap = new Map(this.nodeMap());
+          this.baseEdgeMap = new Map(this.edgeMap());
+          this.baseNodeIds = new Set(this.baseNodeMap.keys());
         }
         // Clear loading FIRST (the graph is rendered from the merged objects); the external-link +
         // site-trail probes are async enrichments that must never block or fail the load.
@@ -314,6 +343,25 @@ export class TopologyStore {
       }
     }
     this.externalLinkNodeIds.set(next);
+  }
+
+  /**
+   * RESETTABLE FULL-PATH: restore the accumulating graph to the pure in-site BASE snapshot taken at
+   * site load — tearing down any trail explosion AND node-expand reveals so the view returns to the
+   * original in-site graph. Resets the expanded set + explode flag and recomputes the amber external
+   * cues against the restored base (so the always-on cues reappear on the base nodes). No-op before a
+   * base snapshot exists (e.g. selectSite's pre-seed clearTrail call) — selectSite owns the reset then.
+   */
+  private restoreBaseGraph(): void {
+    if (this.baseNodeIds.size === 0) {
+      return;
+    }
+    this.nodeMap.set(new Map(this.baseNodeMap));
+    this.edgeMap.set(new Map(this.baseEdgeMap));
+    this.expandedNodeIds.set(new Set());
+    this.capReached.set(false);
+    this.explodeActive.set(false);
+    this.recomputeExternalCues();
   }
 
   /** Re-root the graph at the current site, discarding all expansions (the "Reset" affordance). */
@@ -454,6 +502,11 @@ export class TopologyStore {
    * sourced from getTrail (the TrailSummary list carries no members).
    */
   selectTrail(trailId: string): void {
+    // RESETTABLE FULL-PATH: switching to (or re-selecting) a trail FIRST tears down any prior
+    // explosion/expand, restoring the pure in-site base graph — so the new trail starts from the
+    // clean in-site view and a previously-exploded trail's cross-site nodes do NOT persist. The
+    // new trail is then highlight-only until the operator explicitly explodes it.
+    this.restoreBaseGraph();
     this.selectedTrailId.set(trailId);
     this.selectedObjectId.set(null);
     this.selectedEdgeId.set(null);
@@ -512,15 +565,23 @@ export class TopologyStore {
         }
       }
       this.mergeGraph(nodes, edges);
+      // Mark the active trail as exploded (resettable full-path); restoring the base resets this.
+      this.explodeActive.set(true);
       this.recomputeExternalCues();
     });
   }
 
-  /** Clear the explicit trail exploration (keeps the exploded nodes in the graph). */
+  /**
+   * Clear the explicit trail exploration AND restore the pure in-site base graph (resettable
+   * full-path). Any exploded cross-site full-path nodes (and node-expand reveals) are torn down so
+   * the no-trail default view is exactly the original in-site graph, with the amber external cues
+   * recomputed against the restored base. The highlight selection is cleared.
+   */
   clearTrail(): void {
     this.selectedTrailId.set(null);
     this.selectedTrailDetail.set(null);
     this.trailMemberIds.set(new Set());
+    this.restoreBaseGraph();
   }
 
   activateTrail(trailId: string): void {
