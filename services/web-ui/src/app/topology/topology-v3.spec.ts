@@ -47,23 +47,73 @@ describe('topology-v3 CHANGE 3 — magenta trail highlight + no zoom on select',
     const fit = vi.fn();
     const center = vi.fn();
     const zoom = vi.fn(() => 1);
-    const emptyColl = { removeClass: vi.fn(), addClass: vi.fn(), forEach: vi.fn(), nonempty: () => false };
+    // A relayout would call cy.layout() (then fit). The viewport drift on select was a structure-effect
+    // re-run (derivedNodes/visibleEdges re-emit a new array ref with an identical id-set) calling
+    // rebuildAndLayout → runLayout → cy.layout → cy.fit. Spy layout/add/remove so we prove NONE fire.
+    const runFn = vi.fn();
+    const layout = vi.fn(() => ({ run: runFn }));
+    const add = vi.fn();
+    // A single fake leaf node so runLayout() does NOT early-return on an empty graph and would really
+    // reach cy.layout()/cy.fit() if a relayout were (wrongly) triggered on select.
+    const fakeNode = {
+      id: () => 'n1',
+      position: (p?: unknown) => (p ? undefined : { x: 0, y: 0 }),
+      lock: vi.fn(),
+      unlock: vi.fn(),
+      data: () => 'n1',
+      width: () => 100,
+      height: () => 100,
+      renderedPosition: () => ({ x: 0, y: 0 }),
+      addClass: vi.fn(),
+    };
+    const nodeColl = {
+      removeClass: vi.fn(),
+      addClass: vi.fn(),
+      forEach: (cb: (n: typeof fakeNode) => void) => cb(fakeNode),
+      nonempty: () => true,
+      length: 1,
+      boundingBox: () => ({ w: 100, h: 100 }),
+    };
+    const edgeColl = { removeClass: vi.fn(), addClass: vi.fn(), forEach: vi.fn(), nonempty: () => false, length: 0 };
+    const removeFn = vi.fn(() => edgeColl);
     const stub = {
       fit,
       center,
       zoom,
-      elements: () => emptyColl,
-      nodes: () => emptyColl,
-      edges: () => emptyColl,
-      getElementById: () => emptyColl,
+      layout,
+      add,
+      resize: vi.fn(),
+      extent: () => ({ x1: 0, x2: 0, y1: 0, y2: 0 }),
+      elements: () => ({ ...edgeColl, remove: removeFn }),
+      nodes: () => nodeColl,
+      edges: () => edgeColl,
+      getElementById: () => edgeColl,
       destroy: vi.fn(),
     };
     component.setCyForTest(stub as never);
+    // Flip the readiness gate so the structure/decoration effects run against the stub (in jsdom the
+    // real ResizeObserver-driven readiness never fires). Let the FIRST structure pass build + lay out.
+    component.setCyReadyForTest(true);
+    await flush();
+    fixture.detectChanges();
+    await flush();
+
+    // Now selecting a trail re-emits derivedNodes/visibleEdges (new array refs, identical id-set). The
+    // value-gated structure effect must NOT rebuild/relayout/fit — it re-decorates only. Reset the
+    // spies so we measure ONLY what the select triggers.
+    layout.mockClear();
+    add.mockClear();
+    fit.mockClear();
+    center.mockClear();
+    zoom.mockClear();
 
     store.selectTrail('TR-7');
     await flush();
     fixture.detectChanges();
 
+    // No relayout (the value-gated structure effect re-decorates only) → no fit/center/layout.
+    expect(layout).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
     expect(fit).not.toHaveBeenCalled();
     expect(center).not.toHaveBeenCalled();
     // zoom may be READ for the bridge but never SET (no positional arg).

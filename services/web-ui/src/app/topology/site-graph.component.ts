@@ -1200,6 +1200,16 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   /** Stable ordering of site ids → index, so a site keeps the same colour as the graph grows. */
   private siteOrder = new Map<string, number>();
 
+  /** The structureKey VALUE at the last rebuild. The structure effect re-runs whenever any tracked
+   *  computed (derivedNodes / visibleEdges) emits a NEW array reference — which Angular does on every
+   *  recompute even when the resulting id-sets are byte-for-byte identical. Without a value-gate that
+   *  re-runs rebuildAndLayout → runLayout → cy.fit(), which moves the viewport (zoom/pan) on a pure
+   *  SELECT (selecting a trail re-emits derivedNodes/visibleEdges with no real structure change). We
+   *  remember the last key and rebuild+layout ONLY when the key's VALUE actually changed; otherwise we
+   *  re-decorate only (idempotent), so a select never touches zoom/pan. Starts undefined so the very
+   *  first ready graph always builds. */
+  private lastStructureKey: string | undefined = undefined;
+
   /** Identity key for the STRUCTURE of the graph (node + edge id sets + site parenting). A change
    *  to this key means the graph must be rebuilt and re-laid-out; selection/highlight must NOT. */
   private readonly structureKey = computed(() => {
@@ -1239,12 +1249,22 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // node/edge/parenting id-set key changes (a genuinely different graph).
     this.structureEffect = effect(() => {
       const key = this.structureKey(); // tracked: rebuild only when the id-sets change
-      void key;
       const nodes = this.store.derivedNodes();
       const edges = this.store.visibleEdges();
       if (!this.cyReady() || !this.cy) {
         return;
       }
+      // VALUE-GATE: this effect also re-runs when derivedNodes()/visibleEdges() merely re-emit a new
+      // array reference with an identical id-set (Angular notifies on every recompute). Rebuilding +
+      // re-laying-out in that case would call cy.fit() and move the viewport on a pure SELECT — which
+      // the operator explicitly forbids ("no zoom/pan on trail select"). So only rebuild + relayout
+      // when the structure key's VALUE actually changed; otherwise re-decorate only (idempotent, no
+      // layout, no fit, zero viewport change).
+      if (key === this.lastStructureKey) {
+        this.applyDecoration();
+        return;
+      }
+      this.lastStructureKey = key;
       this.rebuildAndLayout(nodes, edges);
       this.applyDecoration();
     });
@@ -1815,8 +1835,10 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   }
   reset(): void {
     // Reset re-roots the graph at the site (discards expansions) and re-fits on the next layout.
+    // Force the next structure pass to rebuild+fit even if collapseToRoot yields a key seen before.
     this.firstFitDone = false;
     this.lastFittedSiteCount = 0;
+    this.lastStructureKey = undefined;
     this.store.collapseToRoot();
   }
 
@@ -1832,6 +1854,16 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
    */
   setCyForTest(cy: CyCore): void {
     this.cy = cy;
+  }
+
+  /**
+   * TEST-ONLY hook: flip the private `cyReady` gate so the structure/decoration effects actually run
+   * against a stubbed core under jsdom (where the real ResizeObserver-driven readiness never fires).
+   * Lets the value-gate regression test (selecting a trail must NOT rebuild/relayout/fit) exercise the
+   * real effect body. Production never calls this — readiness is set from the ResizeObserver.
+   */
+  setCyReadyForTest(ready: boolean): void {
+    this.cyReady.set(ready);
   }
 
   // ── Site colour ordering ─────────────────────────────────────────────────────────────────────
