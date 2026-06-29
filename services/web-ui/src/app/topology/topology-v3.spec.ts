@@ -137,7 +137,7 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     expect(overlay.closest('.cy-wrap')).not.toBeNull();
   });
 
-  it('the explode button lives on-canvas (inside .cy-wrap) and calls explodeTrail', async () => {
+  it('the explode button lives on-canvas (inside .cy-wrap) and calls toggleFullPath', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     store.selectTrail('TR-7');
@@ -147,7 +147,7 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     const explode = fixture.nativeElement.querySelector('[data-testid="explode-trail"]') as HTMLButtonElement;
     expect(explode).not.toBeNull();
     expect(explode.closest('.cy-wrap')).not.toBeNull();
-    const spy = vi.spyOn(store, 'explodeTrail');
+    const spy = vi.spyOn(store, 'toggleFullPath');
     explode.click();
     expect(spy).toHaveBeenCalledTimes(1);
   });
@@ -177,15 +177,15 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     const explode = () =>
       fixture.nativeElement.querySelector('[data-testid="explode-trail"]') as HTMLButtonElement;
     expect(explode().getAttribute('aria-pressed')).toBe('false');
-    expect(explode().textContent ?? '').toContain('Show full trail path');
+    expect(explode().textContent ?? '').toContain('Show full path');
 
     explode().click();
     await flush();
     fixture.detectChanges();
     expect(explode().getAttribute('aria-pressed')).toBe('true');
-    expect(explode().textContent ?? '').toContain('Showing full path');
+    expect(explode().textContent ?? '').toContain('Hide full path');
 
-    // Clearing tears the explosion down (resettable full-path) so the overlay closes.
+    // Clearing tears the explosion down (contract) so the overlay closes.
     (fixture.nativeElement.querySelector('[data-testid="clear-trail"]') as HTMLButtonElement).click();
     await flush();
     fixture.detectChanges();

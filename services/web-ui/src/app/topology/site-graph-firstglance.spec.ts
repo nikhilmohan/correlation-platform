@@ -91,7 +91,7 @@ describe('CHANGE 2 — floating trail selector', () => {
 });
 
 describe('topology-v2 CHANGE 2c — explode-trail button', () => {
-  it('renders an explode-trail button in the trail detail that calls store.explodeTrail', async () => {
+  it('renders an explode-trail TOGGLE in the trail detail that calls store.toggleFullPath', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     store.selectTrail('TR-7');
@@ -101,9 +101,11 @@ describe('topology-v2 CHANGE 2c — explode-trail button', () => {
     const explode = fixture.nativeElement.querySelector('[data-testid="explode-trail"]') as HTMLButtonElement;
     expect(explode).not.toBeNull();
     expect(explode.tagName).toBe('BUTTON');
-    expect(explode.getAttribute('aria-label')).toBe('Show full trail path across sites');
+    // View 3 (not yet exploded): the toggle offers to SHOW the full path.
+    expect(explode.getAttribute('aria-label')).toBe('Show full path — reveal the cross-site trail members');
+    expect(explode.getAttribute('aria-pressed')).toBe('false');
 
-    const spy = vi.spyOn(store, 'explodeTrail');
+    const spy = vi.spyOn(store, 'toggleFullPath');
     explode.click();
     expect(spy).toHaveBeenCalledTimes(1);
   });

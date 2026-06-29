@@ -371,6 +371,152 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     expect(s.nodeMap().size).toBe(before);
   });
 
+  // ───── FOUR-VIEW STATE MODEL — additive layers on ONE stable base ─────
+
+  it('VIEW 3: selecting a trail does NOT mutate the node/edge set (highlight-only)', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const baseNodes = [...s.nodeMap().keys()].sort();
+    const baseEdges = [...s.edgeMap().keys()].sort();
+
+    s.selectTrail('TR-7'); // members span LON + FRA
+    await flush();
+
+    // ZERO graph mutation on select — the id-sets are byte-for-byte identical (no relayout trigger).
+    expect([...s.nodeMap().keys()].sort()).toEqual(baseNodes);
+    expect([...s.edgeMap().keys()].sort()).toEqual(baseEdges);
+    // But the trail IS selected + its full member set highlighted.
+    expect(s.selectedTrailId()).toBe('TR-7');
+    expect(s.trailMemberIds().size).toBe(4);
+    expect(s.explodeActive()).toBe(false);
+  });
+
+  it('VIEW 4: toggleFullPath ON adds the trail cross-site nodes (explode)', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const baseSize = s.nodeMap().size;
+
+    s.selectTrail('TR-7');
+    await flush();
+    s.toggleFullPath(); // ON → explode
+    await flush();
+
+    expect(s.explodeActive()).toBe(true);
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+    expect(s.nodeMap().size).toBeGreaterThan(baseSize);
+  });
+
+  it('CONTRACT: toggleFullPath OFF removes ONLY trail-added nodes and KEEPS the selection', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const baseNodes = [...s.nodeMap().keys()].sort();
+
+    s.selectTrail('TR-7');
+    await flush();
+    s.toggleFullPath(); // explode
+    await flush();
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+
+    s.toggleFullPath(); // contract — back to view 3
+    await flush();
+
+    // Exactly the base nodes remain (trail-added cross-site nodes removed), NOT a reset:
+    expect([...s.nodeMap().keys()].sort()).toEqual(baseNodes);
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+    expect(s.explodeActive()).toBe(false);
+    // The trail is STILL selected + highlighted (we stayed in view 3, not the default view).
+    expect(s.selectedTrailId()).toBe('TR-7');
+    expect(s.trailMemberIds().size).toBe(4);
+  });
+
+  it('INDEPENDENCE: an externally-expanded node SURVIVES a trail explode + contract', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+
+    // EXPAND-EXTERNAL layer: reveal Router:lon-r1's off-site neighbour (Router:fra-r1).
+    s.expandNode('Router:lon-r1');
+    await flush();
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+    expect(s.expandedNodeIds().has('Router:lon-r1')).toBe(true);
+    const afterExpand = s.nodeMap().size;
+
+    // TRAIL layer (independent): select → explode → contract. fra-r1 is already present, so the
+    // explode adds nothing new of fra-r1; contract must NOT remove the externally-revealed fra-r1.
+    s.selectTrail('TR-7');
+    await flush();
+    s.toggleFullPath(); // explode
+    await flush();
+    s.toggleFullPath(); // contract
+    await flush();
+
+    // The externally-revealed node is untouched by trail explode/contract (independent layers).
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+    expect(s.nodeMap().size).toBe(afterExpand);
+    expect(s.expandedNodeIds().has('Router:lon-r1')).toBe(true);
+  });
+
+  it('INDEPENDENCE: clearTrail removes trail-added nodes but KEEPS the expanded-set state', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const baseSize = s.nodeMap().size;
+
+    // EXPLODE a trail (adds Router:fra-r1 + its pulled-in neighbours as TRAIL-added nodes).
+    s.selectTrail('TR-7');
+    await flush();
+    s.toggleFullPath();
+    await flush();
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+    const exploded = s.nodeMap().size;
+    expect(exploded).toBeGreaterThan(baseSize);
+
+    // Independently mark lon-r1 EXPANDED (its off-site neighbour is already present, so nothing new is
+    // added — but the expanded-set membership records the EXPAND-EXTERNAL layer state).
+    s.expandNode('Router:lon-r1');
+    await flush();
+    expect(s.expandedNodeIds().has('Router:lon-r1')).toBe(true);
+
+    // clearTrail contracts the trail explosion (trail-added nodes gone) + clears the selection, but
+    // does NOT wipe the independent expanded-set layer.
+    s.clearTrail();
+    await flush();
+    expect(s.selectedTrailId()).toBeNull();
+    expect(s.trailMemberIds().size).toBe(0);
+    expect(s.explodeActive()).toBe(false);
+    // Trail-added cross-site nodes are removed (back to the base node count) ...
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+    expect(s.nodeMap().size).toBe(baseSize);
+    // ... but the independent expanded-set membership is NOT cleared by clearTrail.
+    expect(s.expandedNodeIds().has('Router:lon-r1')).toBe(true);
+  });
+
+  it('toggleFullPath with no trail selected is a no-op', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const before = s.nodeMap().size;
+    s.toggleFullPath();
+    await flush();
+    expect(s.nodeMap().size).toBe(before);
+    expect(s.explodeActive()).toBe(false);
+  });
+
   it('NODE_CAP is ALL-OR-NOTHING: an overflowing expansion is rejected wholesale (nothing added)', async () => {
     // Stub a TopologyClient whose neighbours return MORE than NODE_CAP fresh nodes in one merge.
     const many: NeighborsDto = {

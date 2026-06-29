@@ -206,10 +206,15 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     await expect(page.getByTestId('trail-detail')).toBeVisible();
     await expect(page.getByTestId('trail-member')).toHaveCount(0);
 
-    // CHANGE 2c: a plain trail SELECT is highlight-only (in-site portion). The cross-site EXPLODE is
-    // an explicit opt-in — click "Show full path across sites" to pull the off-site members + their
-    // neighbours into the graph so the full path renders + highlights.
-    await page.getByTestId('explode-trail').click();
+    // VIEW 3: a plain trail SELECT is highlight-only (in-site portion). The "show full path" control
+    // is a TOGGLE: unpressed in view 3.
+    const fullPath = page.getByTestId('explode-trail');
+    await expect(fullPath).toHaveAttribute('aria-pressed', 'false');
+
+    // VIEW 3 → VIEW 4: toggle ON (explode) to pull the off-site members + their neighbours into the
+    // graph so the full cross-site path renders + highlights; the toggle now reads pressed.
+    await fullPath.click();
+    await expect(fullPath).toHaveAttribute('aria-pressed', 'true');
 
     // Non-hollow full-path highlight: after the explode the trail's full member set is in the graph
     // and highlighted (member nodes + the edges between them), so the painted highlight count reflects
@@ -231,9 +236,20 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
 
     await shot(page, testInfo, 'topology-trail-exploded');
 
-    // RESETTABLE FULL-PATH: clearing the trail tears the explosion down — the second site box
-    // disappears (back to the single in-site base view) and the overlay closes. (Mock-only: the
-    // cross-site explosion is a mock-topology property, as gated above.)
+    // VIEW 4 → VIEW 3: the "show full path" toggle is a real TOGGLE — clicking it again CONTRACTS
+    // (removes only the trail-added cross-site nodes) and returns to view 3 while KEEPING the trail
+    // selected (overlay stays open, toggle unpressed, second site box gone). Mock-only: the cross-site
+    // explosion is a mock-topology property, as gated above.
+    if (MODE === 'mock') {
+      await fullPath.click();
+      await expect(fullPath).toHaveAttribute('aria-pressed', 'false');
+      // Trail is STILL selected (overlay open) — contract returns to view 3, not the default view.
+      await expect(page.getByTestId('trail-detail')).toBeVisible();
+      // The added second site box is gone (back to the single in-site base view).
+      await expect.poll(async () => Number(await cy.getAttribute('data-cy-site-count'))).toBe(1);
+    }
+
+    // DESELECT: clearing the trail closes the overlay and returns to the default site view.
     if (MODE === 'mock') {
       await page.getByTestId('clear-trail').click();
       await expect(page.getByTestId('trail-detail')).toHaveCount(0);
