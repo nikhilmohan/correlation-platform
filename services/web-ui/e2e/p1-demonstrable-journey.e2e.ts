@@ -409,14 +409,20 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await expect(nodes.first()).toBeVisible();
     await nodes.first().click();
 
-    // If the selected device belongs to >=1 trail (getTrailsForObject), the membership badge
-    // appears on the matching cluster AND the real Cytoscape render highlights it (the data-cy-
-    // highlight-count bridge goes > 0). With no trail membership the click still succeeds (no
-    // error) — the visualization must not crash, which the heading-still-visible guard covers.
+    // If the selected device belongs to >=1 trail (getTrailsForObject), the matching trail-cluster
+    // gets the `.highlighted` class AND the real Cytoscape render highlights the trail on the
+    // canvas (the data-cy-highlight-count bridge goes > 0). With no trail membership the click
+    // still succeeds (no error) — the visualization must not crash, which the heading-still-visible
+    // guard covers.
+    //
+    // Membership guard: the `.highlighted` trail-cluster buttons live INSIDE the trail-selector
+    // dropdown which is COLLAPSED by default (#299, intended UX) — so they are ATTACHED but not
+    // VISIBLE. We therefore guard on their COUNT (attachment), not visibility, and assert the
+    // faithful "trail is highlighted on the topology" signal via the canvas bridge.
     const cyEl = page.locator('.cy-canvas');
     const highlighted = page.locator('[data-testid="trail-cluster"].highlighted');
     if (await highlighted.count()) {
-      await expect(highlighted.first()).toBeVisible();
+      await expect(highlighted.first()).toBeAttached();
       await expect
         .poll(async () => Number(await cyEl.getAttribute('data-cy-highlight-count')))
         .toBeGreaterThan(0);
