@@ -152,7 +152,7 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('a member row in the overlay selects that node (opens the detail drawer)', async () => {
+  it('the SLIMMED overlay has NO per-member object rows — only the summary line + explode button', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     store.selectTrail('TR-7');
@@ -160,14 +160,37 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     fixture.detectChanges();
 
     const overlay = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
-    const memberBtn = overlay.querySelector('[data-testid="trail-member"]') as HTMLButtonElement;
-    expect(memberBtn).not.toBeNull();
-    const memberId = store.selectedTrailDetail()!.members[0].managedObjectId;
-    const spy = vi.spyOn(store, 'selectNode');
-    memberBtn.click();
+    // Operator feedback: the raw managedObjectId member rows were removed.
+    expect(overlay.querySelectorAll('[data-testid="trail-member"]').length).toBe(0);
+    // The slimmed overlay keeps the summary (member count) and the on-canvas explode action.
+    expect(overlay.textContent ?? '').toContain('members');
+    expect(overlay.querySelector('[data-testid="explode-trail"]')).not.toBeNull();
+  });
+
+  it('the explode button reflects exploded state (aria-pressed + label) and resets on clear', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    store.selectTrail('TR-7');
     await flush();
-    expect(spy).toHaveBeenCalledWith(memberId);
-    expect(store.selectedObjectId()).toBe(memberId);
+    fixture.detectChanges();
+
+    const explode = () =>
+      fixture.nativeElement.querySelector('[data-testid="explode-trail"]') as HTMLButtonElement;
+    expect(explode().getAttribute('aria-pressed')).toBe('false');
+    expect(explode().textContent ?? '').toContain('Show full trail path');
+
+    explode().click();
+    await flush();
+    fixture.detectChanges();
+    expect(explode().getAttribute('aria-pressed')).toBe('true');
+    expect(explode().textContent ?? '').toContain('Showing full path');
+
+    // Clearing tears the explosion down (resettable full-path) so the overlay closes.
+    (fixture.nativeElement.querySelector('[data-testid="clear-trail"]') as HTMLButtonElement).click();
+    await flush();
+    fixture.detectChanges();
+    expect(store.explodeActive()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="trail-detail"]')).toBeNull();
   });
 
   it('the overlay collapse toggle hides the body but keeps the panel + close affordance', async () => {
