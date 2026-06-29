@@ -26,8 +26,8 @@ async function mountSiteGraph(): Promise<ComponentFixture<SiteGraphComponent>> {
   return fixture;
 }
 
-describe('AC 65 — trail-detail panel renders trailId, igpArea, srlgGroup + members', () => {
-  it('shows trailId, igpArea, srlgGroup and each member managedObjectId (both fields populated)', async () => {
+describe('AC 65 — SLIMMED trail-detail overlay renders trailId, igpArea, srlgGroup + summary (no member rows)', () => {
+  it('shows trailId, igpArea, srlgGroup, member count and the explode button — but NO per-member object rows', async () => {
     const detail: TrailDetail = {
       trailId: 'TR-BOTH',
       domain: 'core-ip',
@@ -77,13 +77,17 @@ describe('AC 65 — trail-detail panel renders trailId, igpArea, srlgGroup + mem
     expect(text).toContain('TR-BOTH');
     expect(text).toContain('0.0.0.42'); // igpArea rendered
     expect(text).toContain('SRLG-9'); // srlgGroup rendered
+    expect(text).toContain('2 members'); // summary count rendered (replaces per-member rows)
 
-    // Every member's managedObjectId renders as a panel member button.
+    // SLIMMED overlay (operator feedback): the per-member object rows were removed; the magenta
+    // canvas highlight conveys the path. The overlay keeps only the summary + the explode button.
     const members = panel.querySelectorAll('[data-testid="trail-member"]');
-    expect(members.length).toBe(2);
-    const memberText = [...members].map((m) => m.textContent ?? '').join(' ');
-    expect(memberText).toContain('Router:lon-r1');
-    expect(memberText).toContain('Interface:lon-r1-e1');
+    expect(members.length).toBe(0);
+    // The raw member managedObjectIds are NOT listed in the overlay anymore.
+    expect(text).not.toContain('Interface:lon-r1-e1');
+    // The on-canvas explode action is present.
+    const explode = panel.querySelector('[data-testid="explode-trail"]');
+    expect(explode).not.toBeNull();
   });
 
   it('a null srlgGroup is not rendered as a value (the SRLG segment is absent)', async () => {
@@ -103,26 +107,25 @@ describe('AC 65 — trail-detail panel renders trailId, igpArea, srlgGroup + mem
   });
 });
 
-describe('AC 66 — activating a member in the panel selects that node in the graph', () => {
-  it('clicking a member button calls selectNode(memberId) → selectedObjectId equals that member', async () => {
+describe('AC 66 — the on-canvas explode action shows the full trail path', () => {
+  it('clicking the explode button calls explodeTrail (the slimmed overlay replaced per-member rows)', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
-    const selectSpy = vi.spyOn(store, 'selectNode');
+    const explodeSpy = vi.spyOn(store, 'explodeTrail');
 
-    store.selectTrail('TR-7'); // members include Router:lon-r1 (present in the LON graph)
+    store.selectTrail('TR-7'); // members span LON + FRA
     await flush();
     fixture.detectChanges();
 
     const panel = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
-    const memberBtn = panel.querySelector('[data-testid="trail-member"]') as HTMLButtonElement;
-    expect(memberBtn).not.toBeNull();
-    const memberId = store.selectedTrailDetail()!.members[0].managedObjectId;
+    const explodeBtn = panel.querySelector('[data-testid="explode-trail"]') as HTMLButtonElement;
+    expect(explodeBtn).not.toBeNull();
 
-    memberBtn.click();
+    explodeBtn.click();
     await flush();
 
-    expect(selectSpy).toHaveBeenCalledWith(memberId);
-    expect(store.selectedObjectId()).toBe(memberId);
+    expect(explodeSpy).toHaveBeenCalled();
+    expect(store.nodeMap().has('Router:fra-r1')).toBe(true); // full cross-site path pulled in
   });
 });
 

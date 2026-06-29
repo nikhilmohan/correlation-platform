@@ -302,6 +302,7 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     await flush();
     s.selectSite('Site:LON');
     await flush();
+    const baseSize = s.nodeMap().size; // pure in-site base
 
     s.selectTrail('TR-7'); // highlight-only — FRA member still absent
     await flush();
@@ -312,6 +313,8 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     await flush();
     expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
     expect(s.derivedNodes().map((n) => n.managedObjectId)).toContain('Router:fra-r1');
+    expect(s.explodeActive()).toBe(true);
+    expect(s.nodeMap().size).toBeGreaterThan(baseSize);
 
     // A second explode is a no-op once every member is present (no duplication / no growth).
     const after = s.nodeMap().size;
@@ -319,11 +322,41 @@ describe('Topology EXPLORER — accumulating graph, expand, cross-site trail exp
     await flush();
     expect(s.nodeMap().size).toBe(after);
 
-    // clearTrail drops the selection (keeps exploded nodes).
+    // RESETTABLE FULL-PATH: clearTrail drops the selection AND restores the in-site base graph —
+    // the exploded cross-site node is REMOVED (back to the original view), not kept.
     s.clearTrail();
     expect(s.selectedTrailId()).toBeNull();
     expect(s.trailMemberIds().size).toBe(0);
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+    expect(s.nodeMap().size).toBe(baseSize);
+    expect(s.explodeActive()).toBe(false);
+  });
+
+  it('RESETTABLE FULL-PATH: exploding trail A then selecting trail B tears down A\'s explosion (back to base, B highlighted)', async () => {
+    const s = store();
+    s.loadSites();
+    await flush();
+    s.selectSite('Site:LON');
+    await flush();
+    const baseSize = s.nodeMap().size;
+
+    s.selectTrail('TR-7');
+    await flush();
+    s.explodeTrail();
+    await flush();
     expect(s.nodeMap().has('Router:fra-r1')).toBe(true);
+    expect(s.nodeMap().size).toBeGreaterThan(baseSize);
+    expect(s.explodeActive()).toBe(true);
+
+    // Selecting a DIFFERENT trail restores the in-site base FIRST (A's exploded nodes gone), then
+    // highlights B on the clean base — B is NOT auto-exploded.
+    s.selectTrail('TR-8');
+    await flush();
+    expect(s.nodeMap().has('Router:fra-r1')).toBe(false);
+    expect(s.nodeMap().size).toBe(baseSize);
+    expect(s.selectedTrailId()).toBe('TR-8');
+    expect(s.explodeActive()).toBe(false);
+    expect(s.trailMemberIds().size).toBeGreaterThan(0);
   });
 
   it('explodeTrail with no trail selected is a no-op', async () => {

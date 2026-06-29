@@ -201,8 +201,10 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
 
     await trail.click();
 
-    // The trail detail panel renders the full member list.
+    // The SLIMMED trail detail overlay renders (summary + explode button); it no longer lists the
+    // per-member object rows (operator feedback) — the magenta canvas highlight conveys the path.
     await expect(page.getByTestId('trail-detail')).toBeVisible();
+    await expect(page.getByTestId('trail-member')).toHaveCount(0);
 
     // CHANGE 2c: a plain trail SELECT is highlight-only (in-site portion). The cross-site EXPLODE is
     // an explicit opt-in — click "Show full path across sites" to pull the off-site members + their
@@ -228,6 +230,15 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     }
 
     await shot(page, testInfo, 'topology-trail-exploded');
+
+    // RESETTABLE FULL-PATH: clearing the trail tears the explosion down — the second site box
+    // disappears (back to the single in-site base view) and the overlay closes. (Mock-only: the
+    // cross-site explosion is a mock-topology property, as gated above.)
+    if (MODE === 'mock') {
+      await page.getByTestId('clear-trail').click();
+      await expect(page.getByTestId('trail-detail')).toHaveCount(0);
+      await expect.poll(async () => Number(await cy.getAttribute('data-cy-site-count'))).toBe(1);
+    }
   });
 
   test('device nodes carry their network-element TYPE ICON (data-icon per type; generic for unknown)', async ({
