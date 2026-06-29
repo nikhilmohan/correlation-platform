@@ -17,6 +17,7 @@ import {
 import { TopologyStore } from './topology.store';
 import { ErrorBannerService } from '../core/error-banner.service';
 import { NavigationService } from '../core/navigation.service';
+import { ThemeService } from '../core/theme.service';
 import { AttributeDetailPanelComponent } from './attribute-detail-panel.component';
 import { LayerToggleComponent } from './layer-toggle.component';
 import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor } from './type-icon-mapper';
@@ -24,7 +25,14 @@ import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor } from './type-icon-mappe
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
 // is fetched only when this view is shown, and unit tests can mock it.
 import type cytoscape from 'cytoscape';
-import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } from 'cytoscape';
+import type {
+  Core as CyCore,
+  EdgeSingular,
+  ElementDefinition,
+  LayoutOptions,
+  NodeSingular,
+  StylesheetJson,
+} from 'cytoscape';
 
 /**
  * Site-level EXPLORER graph (spec tasks 7-9, AC 27-32). The graph is an ACCUMULATING set held in
@@ -355,11 +363,11 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         position: relative;
       }
       .cy-canvas {
-        height: 640px;
-        min-height: 640px;
+        height: min(78vh, 900px);
+        min-height: 560px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: #0b1220;
+        background: var(--canvas-bg);
         margin-bottom: 0.8rem;
         position: relative;
         overflow: hidden;
@@ -390,7 +398,7 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         font-weight: 600;
         border: 1px solid var(--border);
         border-radius: 50%;
-        background: rgba(11, 18, 32, 0.85);
+        background: color-mix(in srgb, var(--canvas-bg) 85%, transparent);
         color: var(--text-muted);
         cursor: pointer;
         pointer-events: auto;
@@ -398,7 +406,7 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 0 0 1px #0b1220;
+        box-shadow: 0 0 0 1px var(--canvas-bg);
         transition:
           opacity 0.1s ease,
           color 0.1s ease,
@@ -654,6 +662,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly store = inject(TopologyStore);
   readonly errors = inject(ErrorBannerService);
   private readonly nav = inject(NavigationService);
+  private readonly theme = inject(ThemeService);
   private readonly zone = inject(NgZone);
 
   /** Route param binding (withComponentInputBinding). */
@@ -704,6 +713,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly cyReady = signal(false);
   private structureEffect!: EffectRef;
   private decorationEffect!: EffectRef;
+  private themeEffect!: EffectRef;
   private resizeObserver: ResizeObserver | null = null;
 
   /** Disclosure state of the "List view" (Devices/Connections) region — collapsed by default so the
@@ -797,6 +807,104 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
       this.applyDecoration();
     });
+
+    // THEME effect — when the theme flips, rebuild the Cytoscape stylesheet (theme-dependent chip /
+    // label / outline / edge colours) WITHOUT relaying out, so nodeSpread + layoutDone are untouched.
+    // No-ops when cy is null (jsdom / pre-init).
+    this.themeEffect = effect(() => {
+      this.theme.theme(); // track
+      if (this.cy) {
+        this.cy.style(this.buildCyStyle());
+      }
+    });
+  }
+
+  /** Read a CSS custom property off the document root (theme-driven palette value). */
+  private cssVar(name: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  /**
+   * Build the Cytoscape stylesheet. Theme-dependent values (chip background, node label colour,
+   * label outline, default edge colour, highlight colours) are read from the live CSS palette via
+   * cssVar() so a theme flip re-themes the canvas. LAYER_COLORS / SITE_COLORS saturated accents stay
+   * identical in both themes (per product decision) and are kept as literals.
+   */
+  private buildCyStyle(): StylesheetJson {
+    const colors = SiteGraphComponent.LAYER_COLORS;
+    const canvasBg = this.cssVar('--canvas-bg') || '#0b1220';
+    const text = this.cssVar('--text') || '#f1f5f9';
+    const border = this.cssVar('--border') || '#475569';
+    const accent = this.cssVar('--accent') || '#60a5fa';
+    const highlight = this.cssVar('--new') || '#22d3ee';
+    return [
+      {
+        selector: 'node[?isSiteParent]',
+        style: {
+          // Labelled site-boundary box (compound parent): low-opacity bg, per-site border colour.
+          'background-color': 'data(boxColor)',
+          'background-opacity': 0.08,
+          'border-color': 'data(boxColor)',
+          'border-width': 2,
+          shape: 'round-rectangle',
+          label: 'data(label)',
+          color: 'data(boxColor)',
+          'font-size': 11,
+          'font-weight': 'bold',
+          'text-valign': 'top',
+          'text-halign': 'center',
+          'text-margin-y': -4,
+          padding: '18px',
+        },
+      },
+      {
+        selector: 'node[!isSiteParent]',
+        style: {
+          // Network-element TYPE ICON as the node glyph (AC 70-72): a same-origin bundled SVG
+          // resolved from the node's objectType, drawn contained over the canvas-coloured chip. The
+          // DERIVED LOGICAL LAYER stays readable as the node's coloured BORDER/ring (both type-icon
+          // AND layer are encoded). A generic.svg fallback guarantees no node is ever icon-less.
+          'background-image': (n: NodeSingular) => iconUrlFor(n.data('objectType') as string),
+          'background-fit': 'contain',
+          'background-clip': 'none',
+          'background-opacity': 1,
+          // ITEM 2: larger glyph share of the (bigger) node so the type icon reads clearly.
+          'background-width': '88%',
+          'background-height': '88%',
+          'background-color': canvasBg,
+          'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
+          'border-width': 4,
+          shape: 'round-rectangle',
+          label: 'data(label)',
+          color: text,
+          // 1b: wrap + cap the label so long device names read on two lines and don't clip.
+          'text-wrap': 'wrap',
+          'text-max-width': '90px',
+          'font-size': 14,
+          'text-outline-width': 2,
+          'text-outline-color': canvasBg,
+          'text-valign': 'bottom',
+          'text-margin-y': 4,
+          // ITEM 2: bumped node box (52 → 76) so the type-icon glyph is large and legible. The
+          // multi-site preset spacing + breadthfirst spacingFactor below are tuned to match so
+          // bigger nodes don't overlap (data-cy-node-spread stays > 40, deterministic).
+          width: 76,
+          height: 76,
+        },
+      },
+      {
+        selector: 'edge',
+        style: {
+          'line-color': (e: EdgeSingular) => colors[e.data('layer') as string] ?? border,
+          'curve-style': 'bezier',
+          width: 2,
+          opacity: 0.7,
+        },
+      },
+      { selector: 'node.highlighted', style: { 'border-width': 3, 'border-color': highlight } },
+      { selector: 'node.selected', style: { 'border-width': 4, 'border-color': accent } },
+      { selector: 'edge.trail-member', style: { 'line-color': highlight, width: 4, opacity: 1 } },
+    ];
   }
 
   ngOnInit(): void {
@@ -826,75 +934,10 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     try {
       const cy = (await import('cytoscape')).default;
       this.cytoscape = cy;
-      const colors = SiteGraphComponent.LAYER_COLORS;
       this.cy = cy({
         container: el,
         elements: [],
-        style: [
-          {
-            selector: 'node[?isSiteParent]',
-            style: {
-              // Labelled site-boundary box (compound parent): low-opacity bg, per-site border colour.
-              'background-color': 'data(boxColor)',
-              'background-opacity': 0.08,
-              'border-color': 'data(boxColor)',
-              'border-width': 2,
-              shape: 'round-rectangle',
-              label: 'data(label)',
-              color: 'data(boxColor)',
-              'font-size': 11,
-              'font-weight': 'bold',
-              'text-valign': 'top',
-              'text-halign': 'center',
-              'text-margin-y': -4,
-              padding: '18px',
-            },
-          },
-          {
-            selector: 'node[!isSiteParent]',
-            style: {
-              // Network-element TYPE ICON as the node glyph (AC 70-72): a same-origin bundled SVG
-              // resolved from the node's objectType, drawn contained over a dark chip. The DERIVED
-              // LOGICAL LAYER stays readable as the node's coloured BORDER/ring (both type-icon AND
-              // layer are encoded). A generic.svg fallback guarantees no node is ever icon-less.
-              'background-image': (n) => iconUrlFor(n.data('objectType') as string),
-              'background-fit': 'contain',
-              'background-clip': 'none',
-              'background-opacity': 1,
-              // ITEM 2: larger glyph share of the (bigger) node so the type icon reads clearly.
-              'background-width': '88%',
-              'background-height': '88%',
-              'background-color': '#0b1220',
-              'border-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
-              'border-width': 4,
-              shape: 'round-rectangle',
-              label: 'data(label)',
-              color: '#f1f5f9',
-              'font-size': 13,
-              'text-outline-width': 2,
-              'text-outline-color': '#0b1220',
-              'text-valign': 'bottom',
-              'text-margin-y': 4,
-              // ITEM 2: bumped node box (52 → 76) so the type-icon glyph is large and legible. The
-              // multi-site preset spacing + breadthfirst spacingFactor below are tuned to match so
-              // bigger nodes don't overlap (data-cy-node-spread stays > 40, deterministic).
-              width: 76,
-              height: 76,
-            },
-          },
-          {
-            selector: 'edge',
-            style: {
-              'line-color': (e) => colors[e.data('layer') as string] ?? '#475569',
-              'curve-style': 'bezier',
-              width: 2,
-              opacity: 0.7,
-            },
-          },
-          { selector: 'node.highlighted', style: { 'border-width': 3, 'border-color': '#22d3ee' } },
-          { selector: 'node.selected', style: { 'border-width': 4, 'border-color': '#60a5fa' } },
-          { selector: 'edge.trail-member', style: { 'line-color': '#22d3ee', width: 4, opacity: 1 } },
-        ],
+        style: this.buildCyStyle(),
       });
 
       this.cy.on('tap', 'node[!isSiteParent]', (evt) => {
@@ -1050,13 +1093,15 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             animate: false,
           } as unknown as LayoutOptions)
         : cy.layout({
-            // Single site: breadthfirst, but circle-packed and well-spaced so devices fan out across
-            // the canvas instead of stacking near the top edge.
+            // Single site: breadthfirst as a TOP-DOWN HIERARCHY (circle:false, directed:true) so the
+            // device graph fills the (now taller) canvas vertically as a tree instead of a flat ring
+            // crammed into a thin horizontal band. spacingFactor kept >= 1.6 so the laid-out tree
+            // (bigger 76px nodes + wrapped labels) keeps data-cy-node-spread well above 40.
             name: 'breadthfirst',
             animate: false,
-            circle: true,
-            // Wider spread to accommodate the bigger (76px) nodes without overlap.
-            spacingFactor: 2.9,
+            circle: false,
+            directed: true,
+            spacingFactor: 1.7,
             padding: 70,
             nodeDimensionsIncludeLabels: true,
             avoidOverlap: true,
@@ -1304,6 +1349,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   ngOnDestroy(): void {
     this.structureEffect.destroy();
     this.decorationEffect.destroy();
+    this.themeEffect.destroy();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.cy?.destroy();

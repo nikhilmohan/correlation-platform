@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { ErrorBannerService } from './core/error-banner.service';
+import { ThemeService } from './core/theme.service';
 
 interface NavLink {
   path: string;
@@ -27,6 +28,18 @@ interface NavLink {
           }
         </ul>
       </nav>
+      <button
+        type="button"
+        class="theme-toggle"
+        data-testid="theme-toggle"
+        [attr.aria-pressed]="theme.theme() === 'light'"
+        [attr.aria-label]="
+          theme.theme() === 'light' ? 'Switch to dark theme' : 'Switch to light theme'
+        "
+        (click)="theme.toggle()"
+      >
+        <span aria-hidden="true">{{ theme.theme() === 'light' ? '☾' : '☀' }}</span>
+      </button>
     </header>
 
     @if (errors.errors().length) {
@@ -74,6 +87,24 @@ interface NavLink {
         background: var(--accent-strong);
         color: #fff;
       }
+      .theme-toggle {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.1rem;
+        height: 2.1rem;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 6px;
+        font-size: 1rem;
+        line-height: 1;
+      }
+      .theme-toggle:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
       .shell-errors {
         padding: 0 1rem;
       }
@@ -87,6 +118,7 @@ interface NavLink {
 })
 export class AppComponent {
   readonly errors = inject(ErrorBannerService);
+  readonly theme = inject(ThemeService);
   readonly links: NavLink[] = [
     { path: '/dashboard', label: 'Dashboard' },
     { path: '/streaming', label: 'Streaming' },
