@@ -1,7 +1,7 @@
 @import 'maplibre-gl/dist/maplibre-gl.css';
 
 :root {
-  /* WCAG AA contrast-checked palette (all text >= 4.5:1 on its background). */
+  /* DARK (default) — WCAG AA contrast-checked palette (all text >= 4.5:1 on its background). */
   --bg: #0f172a;
   --surface: #1e293b;
   --surface-2: #334155;
@@ -10,11 +10,42 @@
   --text-muted: #cbd5e1;
   --accent: #60a5fa;
   --accent-strong: #2563eb;
+
+  /* Semantic status + logical-layer accents — IDENTICAL in both themes (per product decision). */
   --ok: #4ade80;
   --warn: #fbbf24;
   --error: #f87171;
   --new: #22d3ee;
   --changed: #fbbf24;
+
+  /* De-hardcoded theme-dependent literals (dark values here; light overridden below). */
+  --on-accent: #fff; /* text on a filled accent button / active nav — white in both themes */
+  --canvas-bg: #0b1220; /* map + graph canvas backdrop; also read by the imperative canvas re-theme */
+  --error-bg: #3f1d1d;
+  --error-text: #fecaca;
+  --badge-new-text: #06303a;
+  --badge-changed-text: #3a2c06;
+  --marker-bg: rgba(15, 23, 42, 0.92); /* maplibre site-marker background */
+}
+
+/* LIGHT — WCAG AA contrast-checked light palette. Status + layer accents stay identical. */
+[data-theme='light'] {
+  --bg: #f8fafc;
+  --surface: #ffffff;
+  --surface-2: #f1f5f9;
+  --border: #cbd5e1;
+  --text: #0f172a;
+  --text-muted: #475569;
+  --accent: #2563eb;
+  --accent-strong: #2563eb;
+
+  --on-accent: #fff;
+  --canvas-bg: #e2e8f0;
+  --error-bg: #fee2e2;
+  --error-text: #991b1b;
+  --badge-new-text: #06303a;
+  --badge-changed-text: #3a2c06;
+  --marker-bg: rgba(255, 255, 255, 0.94);
 }
 
 * {
@@ -66,7 +97,7 @@ th {
 
 .btn {
   background: var(--accent-strong);
-  color: #fff;
+  color: var(--on-accent);
   border: 1px solid var(--accent-strong);
   border-radius: 6px;
   padding: 0.4rem 0.85rem;
@@ -91,9 +122,9 @@ th {
 }
 
 .error-banner {
-  background: #3f1d1d;
+  background: var(--error-bg);
   border: 1px solid var(--error);
-  color: #fecaca;
+  color: var(--error-text);
   border-radius: 8px;
   padding: 0.6rem 0.9rem;
   margin: 0.5rem 0;
@@ -115,12 +146,12 @@ th {
 
 .badge-new {
   background: var(--new);
-  color: #06303a;
+  color: var(--badge-new-text);
 }
 
 .badge-changed {
   background: var(--changed);
-  color: #3a2c06;
+  color: var(--badge-changed-text);
 }
 
 .visually-hidden {
@@ -174,8 +205,8 @@ th {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  background: rgba(15, 23, 42, 0.92);
-  color: #f1f5f9;
+  background: var(--marker-bg);
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 0.15rem 0.5rem;
@@ -192,7 +223,7 @@ th {
   height: 0.6rem;
   border-radius: 50%;
   flex: 0 0 auto;
-  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.9);
+  box-shadow: 0 0 0 2px var(--marker-bg);
 }
 .maplibre-site-marker .mm-monitored {
   background: var(--ok);
@@ -207,5 +238,5 @@ th {
 .maplibre-site-marker:hover,
 .maplibre-site-marker:focus-visible {
   border-color: var(--accent);
-  background: rgba(37, 99, 235, 0.25);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
 }

@@ -4,6 +4,7 @@ import {
   Component,
   ElementRef,
   EffectRef,
+  HostListener,
   NgZone,
   OnDestroy,
   OnInit,
@@ -17,14 +18,22 @@ import {
 import { TopologyStore } from './topology.store';
 import { ErrorBannerService } from '../core/error-banner.service';
 import { NavigationService } from '../core/navigation.service';
+import { ThemeService } from '../core/theme.service';
 import { AttributeDetailPanelComponent } from './attribute-detail-panel.component';
 import { LayerToggleComponent } from './layer-toggle.component';
-import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor } from './type-icon-mapper';
+import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor, typeLabelFor } from './type-icon-mapper';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
 // is fetched only when this view is shown, and unit tests can mock it.
 import type cytoscape from 'cytoscape';
-import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } from 'cytoscape';
+import type {
+  Core as CyCore,
+  EdgeSingular,
+  ElementDefinition,
+  LayoutOptions,
+  NodeSingular,
+  StylesheetJson,
+} from 'cytoscape';
 
 /**
  * Site-level EXPLORER graph (spec tasks 7-9, AC 27-32). The graph is an ACCUMULATING set held in
@@ -129,6 +138,94 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
             <button type="button" data-testid="zoom-reset" aria-label="Reset graph to site root" (click)="reset()">
               Reset
             </button>
+          </div>
+
+          <!-- CHANGE 2: FLOATING TRAIL SELECTOR pinned to the TOP-LEFT of the canvas (clear of the
+               top-right zoom controls). A toggle button opens a dropdown listing each trail; selecting
+               one highlights that trail's path on the topology (applyDecoration reuses the existing
+               selected/trail-member painting). The data-testid="trail-cluster" buttons live INSIDE the
+               menu (preserved for Vitest/Playwright + a11y) and stay in the DOM even while collapsed
+               ([hidden]), so the existing per-trail assertions still resolve. -->
+          @if (store.hasGraph()) {
+            <div class="cy-trail-selector" data-testid="trail-selector">
+              <button
+                type="button"
+                class="trail-toggle"
+                [attr.aria-expanded]="trailMenuOpen()"
+                aria-haspopup="listbox"
+                aria-controls="trail-menu"
+                aria-label="Trail clusters"
+                (click)="toggleTrailMenu()"
+              >
+                <span aria-hidden="true">⚲</span> Trails ({{ store.trails().length }})
+                <span class="caret" aria-hidden="true">{{ trailMenuOpen() ? '▴' : '▾' }}</span>
+              </button>
+
+              <div
+                id="trail-menu"
+                class="trail-menu"
+                data-testid="trail-menu"
+                role="listbox"
+                aria-label="Trail clusters"
+                [hidden]="!trailMenuOpen()"
+              >
+                @if (store.trails().length) {
+                  @if (store.selectedTrailId()) {
+                    <button
+                      type="button"
+                      class="trail-menu-clear"
+                      data-testid="clear-trail"
+                      role="option"
+                      [attr.aria-selected]="false"
+                      (click)="clearTrailFromMenu()"
+                    >
+                      Clear trail
+                    </button>
+                  }
+                  @for (trail of store.trails(); track trail.trailId) {
+                    <button
+                      type="button"
+                      class="trail-btn"
+                      data-testid="trail-cluster"
+                      role="option"
+                      [class.selected]="store.selectedTrailId() === trail.trailId"
+                      [class.highlighted]="store.highlightedTrailIds().has(trail.trailId)"
+                      [attr.aria-selected]="store.selectedTrailId() === trail.trailId"
+                      (click)="selectTrailFromMenu(trail.trailId)"
+                    >
+                      {{ trail.trailId }} ({{ trail.memberCount }} members)
+                      @if (store.highlightedTrailIds().has(trail.trailId)) {
+                        <span class="badge badge-new">member</span>
+                      }
+                    </button>
+                  }
+                } @else {
+                  <p class="empty-state trail-menu-empty">No trails for this snapshot.</p>
+                }
+              </div>
+            </div>
+          }
+
+          <!-- CHANGE 3: DEVICE DETAIL slides in as an OVERLAY DRAWER from the right WHEN (and only
+               when) a node/edge is selected; the graph keeps full width underneath (overlay, not
+               push). Esc / the ✕ button clear the selection. The panel component itself is reused
+               unchanged as the drawer body. -->
+          <div
+            class="detail-drawer"
+            [class.open]="detailOpen()"
+            data-testid="detail-drawer"
+            [attr.aria-hidden]="!detailOpen()"
+          >
+            <button
+              type="button"
+              class="drawer-close"
+              data-testid="close-detail"
+              aria-label="Close detail panel"
+              (click)="closeDetail()"
+            >
+              ✕
+            </button>
+            <app-attribute-detail-panel />
           </div>
         </div>
 
@@ -251,33 +348,10 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
             </ul>
           </div>
 
-          <h2>Trail clusters</h2>
-          @if (store.trails().length) {
-            <ul class="trail-overlay" aria-label="Trail clusters overlaid on the graph">
-              @for (trail of store.trails(); track trail.trailId) {
-                <li>
-                  <button
-                    type="button"
-                    class="trail-btn"
-                    data-testid="trail-cluster"
-                    [class.selected]="store.selectedTrailId() === trail.trailId"
-                    [class.highlighted]="store.highlightedTrailIds().has(trail.trailId)"
-                    [attr.aria-pressed]="store.selectedTrailId() === trail.trailId"
-                    (click)="store.selectTrail(trail.trailId)"
-                  >
-                    {{ trail.trailId }} ({{ trail.memberCount }} members)
-                    @if (store.highlightedTrailIds().has(trail.trailId)) {
-                      <span class="badge badge-new">member</span>
-                    }
-                  </button>
-                </li>
-              }
-            </ul>
-          } @else {
-            <p class="empty-state">No trails for this snapshot.</p>
-          }
+          <!-- Selected-trail detail: full member path (each a button → select that device), area/SRLG.
+               Lives below the graph; the trail itself is now selected from the floating on-canvas
+               Trails selector (CHANGE 2). -->
 
-          <!-- Selected-trail detail: full member path (each a button → select that device), area/SRLG. -->
           @if (store.selectedTrailDetail(); as td) {
             <section class="trail-detail" data-testid="trail-detail" aria-label="Selected trail detail">
               <h2>Trail {{ td.trailId }}</h2>
@@ -314,8 +388,6 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
           <p class="empty-state">No objects at this site.</p>
         }
       </section>
-
-      <app-attribute-detail-panel />
     </div>
   `,
   styles: [
@@ -346,20 +418,20 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         color: var(--warn);
         font-size: 0.85rem;
       }
+      /* CHANGE 3: single-column layout — the graph fills the full width; the detail panel is an
+         OVERLAY drawer pinned inside .cy-wrap (below), not a permanent column. */
       .layout {
-        display: grid;
-        grid-template-columns: 2fr 1fr;
-        gap: 1rem;
+        display: block;
       }
       .cy-wrap {
         position: relative;
       }
       .cy-canvas {
-        height: 640px;
-        min-height: 640px;
+        height: min(78vh, 900px);
+        min-height: 560px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: #0b1220;
+        background: var(--canvas-bg);
         margin-bottom: 0.8rem;
         position: relative;
         overflow: hidden;
@@ -390,7 +462,7 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         font-weight: 600;
         border: 1px solid var(--border);
         border-radius: 50%;
-        background: rgba(11, 18, 32, 0.85);
+        background: color-mix(in srgb, var(--canvas-bg) 85%, transparent);
         color: var(--text-muted);
         cursor: pointer;
         pointer-events: auto;
@@ -398,7 +470,7 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 0 0 1px #0b1220;
+        box-shadow: 0 0 0 1px var(--canvas-bg);
         transition:
           opacity 0.1s ease,
           color 0.1s ease,
@@ -586,15 +658,59 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         font-size: 0.72rem;
         margin-left: 0.3rem;
       }
-      .trail-overlay {
-        list-style: none;
-        padding: 0;
-        margin: 0;
+      /* CHANGE 2: floating on-canvas trail selector (top-left, clear of the top-right zoom group). */
+      .cy-trail-selector {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        z-index: 4;
         display: flex;
         flex-direction: column;
-        gap: 0.3rem;
+        align-items: flex-start;
+        gap: 4px;
       }
-      .trail-btn {
+      .trail-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.3rem 0.6rem;
+        font: inherit;
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      .trail-toggle:hover,
+      .trail-toggle:focus-visible {
+        border-color: var(--accent);
+      }
+      .trail-toggle .caret {
+        color: var(--accent);
+      }
+      .trail-menu {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.3rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        max-height: 320px;
+        max-width: 320px;
+        overflow-y: auto;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+      }
+      .trail-menu[hidden] {
+        display: none;
+      }
+      .trail-menu-empty {
+        margin: 0;
+        padding: 0.3rem 0.6rem;
+      }
+      .trail-btn,
+      .trail-menu-clear {
         background: var(--surface-2);
         color: var(--text);
         border: 1px solid var(--border);
@@ -603,6 +719,17 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
         text-align: left;
         cursor: pointer;
         width: 100%;
+        font: inherit;
+        font-size: 0.8rem;
+      }
+      .trail-menu-clear {
+        color: var(--accent);
+      }
+      .trail-btn:hover,
+      .trail-btn:focus-visible,
+      .trail-menu-clear:hover,
+      .trail-menu-clear:focus-visible {
+        border-color: var(--accent);
       }
       .trail-btn.highlighted {
         color: var(--new);
@@ -611,6 +738,58 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
       .trail-btn.selected {
         border-color: var(--accent);
         outline: 2px solid var(--accent);
+      }
+      /* CHANGE 3: slide-in detail drawer overlaying the right edge of the graph area. */
+      .detail-drawer {
+        position: absolute;
+        top: 0;
+        right: 0;
+        height: 100%;
+        width: min(360px, 92%);
+        background: var(--surface);
+        border-left: 1px solid var(--border);
+        border-radius: 0 10px 10px 0;
+        box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+        transform: translateX(100%);
+        transition: transform 0.22s ease;
+        z-index: 6;
+        overflow-y: auto;
+        padding: 0.6rem;
+        visibility: hidden;
+      }
+      .detail-drawer.open {
+        transform: translateX(0);
+        visibility: visible;
+      }
+      .drawer-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 1.9rem;
+        height: 1.9rem;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 6px;
+        cursor: pointer;
+        line-height: 1;
+        z-index: 1;
+      }
+      .drawer-close:hover,
+      .drawer-close:focus-visible {
+        border-color: var(--accent);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .detail-drawer {
+          transition: none;
+        }
+      }
+      @media (max-width: 800px) {
+        .detail-drawer {
+          width: 100%;
+          border-radius: 0;
+          border-left: none;
+        }
       }
       .trail-detail {
         margin-top: 1rem;
@@ -642,11 +821,6 @@ import type { Core as CyCore, ElementDefinition, LayoutOptions, NodeSingular } f
       .active-trail {
         color: var(--accent);
       }
-      @media (max-width: 800px) {
-        .layout {
-          grid-template-columns: 1fr;
-        }
-      }
     `,
   ],
 })
@@ -654,6 +828,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly store = inject(TopologyStore);
   readonly errors = inject(ErrorBannerService);
   private readonly nav = inject(NavigationService);
+  private readonly theme = inject(ThemeService);
   private readonly zone = inject(NgZone);
 
   /** Route param binding (withComponentInputBinding). */
@@ -704,6 +879,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly cyReady = signal(false);
   private structureEffect!: EffectRef;
   private decorationEffect!: EffectRef;
+  private themeEffect!: EffectRef;
   private resizeObserver: ResizeObserver | null = null;
 
   /** Disclosure state of the "List view" (Devices/Connections) region — collapsed by default so the
@@ -711,6 +887,42 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   readonly listViewOpen = signal(false);
   toggleListView(): void {
     this.listViewOpen.update((v) => !v);
+  }
+
+  /** True when a device OR an edge is selected — drives the slide-in detail drawer (CHANGE 3). */
+  readonly detailOpen = computed(() => !!this.store.selectedObjectId() || !!this.store.selectedEdgeId());
+
+  /** Close the detail drawer (✕ button / Esc) — clears the object/edge selection. */
+  closeDetail(): void {
+    this.store.clearSelection();
+  }
+
+  /** Esc closes the open detail drawer (and the trail menu) — keyboard dismissal (WCAG). */
+  @HostListener('document:keydown.escape')
+  onEscape(): void {
+    if (this.trailMenuOpen()) {
+      this.trailMenuOpen.set(false);
+      return;
+    }
+    if (this.detailOpen()) {
+      this.closeDetail();
+    }
+  }
+
+  /** Open/closed state of the floating on-canvas trail SELECTOR dropdown (CHANGE 2). */
+  readonly trailMenuOpen = signal(false);
+  toggleTrailMenu(): void {
+    this.trailMenuOpen.update((v) => !v);
+  }
+  /** Select a trail from the floating menu (highlights its path on the canvas) and close the menu. */
+  selectTrailFromMenu(trailId: string): void {
+    this.store.selectTrail(trailId);
+    this.trailMenuOpen.set(false);
+  }
+  /** Clear the trail selection from the floating menu and close it. */
+  clearTrailFromMenu(): void {
+    this.store.clearTrail();
+    this.trailMenuOpen.set(false);
   }
 
   /** On-canvas "+" expand affordances: one per device node, positioned at the node's RENDERED
@@ -797,6 +1009,106 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
       this.applyDecoration();
     });
+
+    // THEME effect — when the theme flips, rebuild the Cytoscape stylesheet (theme-dependent chip /
+    // label / outline / edge colours) WITHOUT relaying out, so nodeSpread + layoutDone are untouched.
+    // No-ops when cy is null (jsdom / pre-init).
+    this.themeEffect = effect(() => {
+      this.theme.theme(); // track
+      if (this.cy) {
+        this.cy.style(this.buildCyStyle());
+      }
+    });
+  }
+
+  /** Read a CSS custom property off the document root (theme-driven palette value). */
+  private cssVar(name: string): string {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  /**
+   * Build the Cytoscape stylesheet. Theme-dependent values (chip background, node label colour,
+   * label outline, default edge colour, highlight colours) are read from the live CSS palette via
+   * cssVar() so a theme flip re-themes the canvas. LAYER_COLORS / SITE_COLORS saturated accents stay
+   * identical in both themes (per product decision) and are kept as literals.
+   */
+  private buildCyStyle(): StylesheetJson {
+    const colors = SiteGraphComponent.LAYER_COLORS;
+    const canvasBg = this.cssVar('--canvas-bg') || '#0b1220';
+    const text = this.cssVar('--text') || '#f1f5f9';
+    const border = this.cssVar('--border') || '#475569';
+    const accent = this.cssVar('--accent') || '#60a5fa';
+    const highlight = this.cssVar('--new') || '#22d3ee';
+    return [
+      {
+        selector: 'node[?isSiteParent]',
+        style: {
+          // Labelled site-boundary box (compound parent): low-opacity bg, per-site border colour.
+          'background-color': 'data(boxColor)',
+          'background-opacity': 0.08,
+          'border-color': 'data(boxColor)',
+          'border-width': 2,
+          shape: 'round-rectangle',
+          label: 'data(label)',
+          color: 'data(boxColor)',
+          'font-size': 11,
+          'font-weight': 'bold',
+          'text-valign': 'top',
+          'text-halign': 'center',
+          'text-margin-y': -4,
+          padding: '18px',
+        },
+      },
+      {
+        selector: 'node[!isSiteParent]',
+        style: {
+          // Network-element TYPE ICON as the node glyph (AC 70-72): a same-origin bundled SVG
+          // resolved from the node's objectType, drawn contained over the canvas-coloured chip. The
+          // DERIVED LOGICAL LAYER stays readable as the node's coloured BORDER/ring (both type-icon
+          // AND layer are encoded). A generic.svg fallback guarantees no node is ever icon-less.
+          'background-image': (n: NodeSingular) => iconUrlFor(n.data('objectType') as string),
+          'background-fit': 'contain',
+          'background-clip': 'none',
+          'background-opacity': 1,
+          // ITEM 2: larger glyph share of the (bigger) node so the type icon reads clearly.
+          'background-width': '88%',
+          'background-height': '88%',
+          'background-color': canvasBg,
+          'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
+          'border-width': 4,
+          shape: 'round-rectangle',
+          // Two-line label: line 1 = friendly device TYPE, line 2 = device NAME, so the operator
+          // identifies each box at first glance without selecting it. text-wrap:'wrap' renders the
+          // embedded newline (and wraps long names) within text-max-width.
+          label: 'data(label)',
+          color: text,
+          'text-wrap': 'wrap',
+          'text-max-width': '110px',
+          'font-size': 14,
+          'text-outline-width': 2,
+          'text-outline-color': canvasBg,
+          'text-valign': 'bottom',
+          'text-margin-y': 4,
+          // CHANGE 1: bumped node box (76 → 100) so the type-icon glyph + two-line label read
+          // clearly. The multi-site preset spacing + breadthfirst spacingFactor below are tuned to
+          // match so bigger nodes don't overlap (data-cy-node-spread stays > 40, deterministic).
+          width: 100,
+          height: 100,
+        },
+      },
+      {
+        selector: 'edge',
+        style: {
+          'line-color': (e: EdgeSingular) => colors[e.data('layer') as string] ?? border,
+          'curve-style': 'bezier',
+          width: 2,
+          opacity: 0.7,
+        },
+      },
+      { selector: 'node.highlighted', style: { 'border-width': 3, 'border-color': highlight } },
+      { selector: 'node.selected', style: { 'border-width': 4, 'border-color': accent } },
+      { selector: 'edge.trail-member', style: { 'line-color': highlight, width: 4, opacity: 1 } },
+    ];
   }
 
   ngOnInit(): void {
@@ -826,75 +1138,10 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     try {
       const cy = (await import('cytoscape')).default;
       this.cytoscape = cy;
-      const colors = SiteGraphComponent.LAYER_COLORS;
       this.cy = cy({
         container: el,
         elements: [],
-        style: [
-          {
-            selector: 'node[?isSiteParent]',
-            style: {
-              // Labelled site-boundary box (compound parent): low-opacity bg, per-site border colour.
-              'background-color': 'data(boxColor)',
-              'background-opacity': 0.08,
-              'border-color': 'data(boxColor)',
-              'border-width': 2,
-              shape: 'round-rectangle',
-              label: 'data(label)',
-              color: 'data(boxColor)',
-              'font-size': 11,
-              'font-weight': 'bold',
-              'text-valign': 'top',
-              'text-halign': 'center',
-              'text-margin-y': -4,
-              padding: '18px',
-            },
-          },
-          {
-            selector: 'node[!isSiteParent]',
-            style: {
-              // Network-element TYPE ICON as the node glyph (AC 70-72): a same-origin bundled SVG
-              // resolved from the node's objectType, drawn contained over a dark chip. The DERIVED
-              // LOGICAL LAYER stays readable as the node's coloured BORDER/ring (both type-icon AND
-              // layer are encoded). A generic.svg fallback guarantees no node is ever icon-less.
-              'background-image': (n) => iconUrlFor(n.data('objectType') as string),
-              'background-fit': 'contain',
-              'background-clip': 'none',
-              'background-opacity': 1,
-              // ITEM 2: larger glyph share of the (bigger) node so the type icon reads clearly.
-              'background-width': '88%',
-              'background-height': '88%',
-              'background-color': '#0b1220',
-              'border-color': (n) => colors[n.data('layer') as string] ?? colors['other'],
-              'border-width': 4,
-              shape: 'round-rectangle',
-              label: 'data(label)',
-              color: '#f1f5f9',
-              'font-size': 13,
-              'text-outline-width': 2,
-              'text-outline-color': '#0b1220',
-              'text-valign': 'bottom',
-              'text-margin-y': 4,
-              // ITEM 2: bumped node box (52 → 76) so the type-icon glyph is large and legible. The
-              // multi-site preset spacing + breadthfirst spacingFactor below are tuned to match so
-              // bigger nodes don't overlap (data-cy-node-spread stays > 40, deterministic).
-              width: 76,
-              height: 76,
-            },
-          },
-          {
-            selector: 'edge',
-            style: {
-              'line-color': (e) => colors[e.data('layer') as string] ?? '#475569',
-              'curve-style': 'bezier',
-              width: 2,
-              opacity: 0.7,
-            },
-          },
-          { selector: 'node.highlighted', style: { 'border-width': 3, 'border-color': '#22d3ee' } },
-          { selector: 'node.selected', style: { 'border-width': 4, 'border-color': '#60a5fa' } },
-          { selector: 'edge.trail-member', style: { 'line-color': '#22d3ee', width: 4, opacity: 1 } },
-        ],
+        style: this.buildCyStyle(),
       });
 
       this.cy.on('tap', 'node[!isSiteParent]', (evt) => {
@@ -981,10 +1228,15 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
 
     const leafDefs: ElementDefinition[] = nodes.map((n) => {
       const siteId = siteMap.get(n.managedObjectId);
+      // Two-line node label so the operator reads WHAT each box is at first glance: line 1 = friendly
+      // device type (Router / Line Card / …), line 2 = the device name. text-wrap:'wrap' on the node
+      // style renders the embedded newline as two lines.
+      const name = n.name ?? n.managedObjectId;
       return {
         data: {
           id: n.managedObjectId,
-          label: n.name ?? n.managedObjectId,
+          label: `${typeLabelFor(n.objectType)}\n${name}`,
+          name,
           layer: n.derivedLayer,
           // objectType drives the type-icon background-image; `icon` is the resolved key (AC 70-72).
           objectType: n.objectType,
@@ -1050,13 +1302,15 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             animate: false,
           } as unknown as LayoutOptions)
         : cy.layout({
-            // Single site: breadthfirst, but circle-packed and well-spaced so devices fan out across
-            // the canvas instead of stacking near the top edge.
+            // Single site: breadthfirst as a TOP-DOWN HIERARCHY (circle:false, directed:true) so the
+            // device graph fills the (now taller) canvas vertically as a tree instead of a flat ring
+            // crammed into a thin horizontal band. spacingFactor kept >= 1.6 so the laid-out tree
+            // (bigger 76px nodes + wrapped labels) keeps data-cy-node-spread well above 40.
             name: 'breadthfirst',
             animate: false,
-            circle: true,
-            // Wider spread to accommodate the bigger (76px) nodes without overlap.
-            spacingFactor: 2.9,
+            circle: false,
+            directed: true,
+            spacingFactor: 2.1,
             padding: 70,
             nodeDimensionsIncludeLabels: true,
             avoidOverlap: true,
@@ -1067,7 +1321,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // expands do NOT re-fit, preserving the operator's manual zoom/pan. Pad generously so the laid-out
     // graph fills the canvas centred rather than hugging the top edge.
     if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
-      cy.fit(undefined, 60);
+      cy.fit(undefined, 70);
       this.firstFitDone = true;
       this.lastFittedSiteCount = siteCount;
     }
@@ -1105,8 +1359,8 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     });
 
-    const NODE_GAP = 170; // spacing between devices within a site box (bigger 76px nodes → wider spread)
-    const COL_GAP = 240; // horizontal gap between site columns
+    const NODE_GAP = 220; // spacing between devices within a site box (bigger 100px nodes → wider spread)
+    const COL_GAP = 310; // horizontal gap between site columns
     const columns: Array<{ ids: string[] }> = [];
     for (const id of sites) {
       columns.push({ ids: bySite.get(id) ?? [] });
@@ -1192,7 +1446,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       const halfH = (n.height() / 2) * zoom;
       markers.push({
         id: n.id(),
-        name: (n.data('label') as string) ?? n.id(),
+        name: (n.data('name') as string) ?? n.id(),
         x: rp.x + halfW * 0.7,
         y: rp.y - halfH * 0.7,
       });
@@ -1261,7 +1515,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     if (!cy) {
       return;
     }
-    cy.fit(undefined, 60);
+    cy.fit(undefined, 70);
     this.zoomLevel.set(this.roundZoom());
     this.refreshOverlayMarkers();
   }
@@ -1304,6 +1558,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   ngOnDestroy(): void {
     this.structureEffect.destroy();
     this.decorationEffect.destroy();
+    this.themeEffect.destroy();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.cy?.destroy();

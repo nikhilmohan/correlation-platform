@@ -284,6 +284,16 @@ export class TopologyStore {
   }
 
   /**
+   * Clear the current device/edge selection (closes the detail drawer). Keeps any explicit trail
+   * exploration intact — only the object-anchored selection + its trail-highlight are cleared.
+   */
+  clearSelection(): void {
+    this.selectedObjectId.set(null);
+    this.selectedEdgeId.set(null);
+    this.highlightedTrailIds.set(new Set());
+  }
+
+  /**
    * SELECT + EXPLODE a trail: highlight its full member path and pull any members not yet in the
    * graph (with their connecting edges) so the — possibly cross-site — path actually renders. The
    * member set is sourced from getTrail (the TrailSummary list carries no members).
