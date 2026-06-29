@@ -181,9 +181,14 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
     // The trail detail panel renders the full member list.
     await expect(page.getByTestId('trail-detail')).toBeVisible();
 
-    // Non-hollow full-path highlight: selecting a trail explodes its full member set into the graph
-    // and highlights all of it (member nodes + the edges between them), so the painted highlight count
-    // reflects the trail's OWN member count — NOT the old hollow single node. Holds in mock AND real.
+    // CHANGE 2c: a plain trail SELECT is highlight-only (in-site portion). The cross-site EXPLODE is
+    // an explicit opt-in — click "Show full path across sites" to pull the off-site members + their
+    // neighbours into the graph so the full path renders + highlights.
+    await page.getByTestId('explode-trail').click();
+
+    // Non-hollow full-path highlight: after the explode the trail's full member set is in the graph
+    // and highlighted (member nodes + the edges between them), so the painted highlight count reflects
+    // the trail's OWN member count — NOT the old hollow single node. Holds in mock AND real.
     await expect
       .poll(async () => Number(await cy.getAttribute('data-cy-highlight-count')))
       .toBeGreaterThanOrEqual(memberCount);

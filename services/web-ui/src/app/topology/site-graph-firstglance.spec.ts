@@ -90,6 +90,46 @@ describe('CHANGE 2 — floating trail selector', () => {
   });
 });
 
+describe('topology-v2 CHANGE 2c — explode-trail button', () => {
+  it('renders an explode-trail button in the trail detail that calls store.explodeTrail', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    store.selectTrail('TR-7');
+    await flush();
+    fixture.detectChanges();
+
+    const explode = fixture.nativeElement.querySelector('[data-testid="explode-trail"]') as HTMLButtonElement;
+    expect(explode).not.toBeNull();
+    expect(explode.tagName).toBe('BUTTON');
+    expect(explode.getAttribute('aria-label')).toBe('Show full trail path across sites');
+
+    const spy = vi.spyOn(store, 'explodeTrail');
+    explode.click();
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('selecting a trail from the menu does NOT grow the graph (highlight-only — no auto-explode)', async () => {
+    const fixture = await mountSiteGraph();
+    const store = TestBed.inject(TopologyStore);
+    const before = store.derivedNodes().length;
+    store.selectTrail('TR-7'); // mock TR-7 spans LON+FRA
+    await flush();
+    fixture.detectChanges();
+    // No off-site member pulled in by a plain select — the node count is unchanged.
+    expect(store.derivedNodes().length).toBe(before);
+    expect(store.trailMemberIds().size).toBeGreaterThan(1); // but the full member set IS highlighted
+  });
+});
+
+describe('topology-v2 CHANGE 1 — external-link cue hint', () => {
+  it('renders the self-explanatory "extends to other sites" hint near the graph', async () => {
+    const fixture = await mountSiteGraph();
+    const hint = fixture.nativeElement.querySelector('[data-testid="external-link-hint"]') as HTMLElement;
+    expect(hint).not.toBeNull();
+    expect(hint.textContent).toMatch(/extends to other sites/i);
+  });
+});
+
 describe('CHANGE 3 — device detail slide-in drawer', () => {
   it('the drawer is closed (not .open) when nothing is selected', async () => {
     const fixture = await mountSiteGraph();
