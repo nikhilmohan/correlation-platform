@@ -11,7 +11,29 @@ under the **MIT License** (the same permissive license as the project), per the 
 golden rule "only permissive open source license components (MIT, Apache 2.0, BSD, CC0)".
 
 No external icon pack, icon font, or CDN sprite is used. The icons are simple 24x24
-two-tone glyphs designed to read at small node size on the dark graph canvas.
+glyphs designed to read at node size on BOTH the dark and the light graph canvas.
+
+### v3 redesign (topology-v3)
+
+The glyphs were redrawn as LITERAL network-equipment shapes so they read at a glance
+(operator feedback: the old router glyph read as a house/arrow):
+
+- `router` — rack-mount chassis (horizontal box, front port row + status LEDs)
+- `linecard` — vertical blade/card (gold connector edge + port slots)
+- `port` — single RJ/SFP socket (jack housing + contact pins)
+- `interface` — cable plug entering a socket with a bidirectional flow arrow
+- `ip-link` — two IP endpoints joined by a solid cable
+- `fiber-span` — twin optical strands between two connectors (distinct from ip-link)
+- `igp-adjacency` — two routers joined by a peering/adjacency arrow
+- `lsp` — MPLS label tag + arrow through a tunnel pipe
+- `vpn-service` — padlock over a cloud (secured service)
+- `srlg` — grouping bracket over shared links
+- `generic` — neutral chassis fallback
+
+**Theme-neutral palette:** bodies use mid-slate `#64748b` with `#94a3b8` outlines and a
+`#cbd5e1`/`#e2e8f0` detail tone — all of which keep sufficient contrast against BOTH the
+dark (`#0f172a`) and the white light-theme graph canvas — plus saturated per-element
+accents (amber/blue/violet/green/pink). No pure-white-only fills (which vanish on white).
 
 ## Offline guarantee (AC 72)
 
