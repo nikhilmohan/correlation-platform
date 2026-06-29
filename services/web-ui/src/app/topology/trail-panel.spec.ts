@@ -74,18 +74,21 @@ describe('AC 65 — SLIMMED trail-detail overlay renders trailId, igpArea, srlgG
     const panel = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
     expect(panel).not.toBeNull();
     const text = panel.textContent ?? '';
+    // BUG 2: the trail reference now lives in the TOP trail-ref chip next to the dropdown. The trail id
+    // is shown inline; the member count · IGP area · SRLG summary is surfaced as the chip's title tooltip.
     expect(text).toContain('TR-BOTH');
-    expect(text).toContain('0.0.0.42'); // igpArea rendered
-    expect(text).toContain('SRLG-9'); // srlgGroup rendered
-    expect(text).toContain('2 members'); // summary count rendered (replaces per-member rows)
+    const summary = (panel.querySelector('.trail-ref') as HTMLElement).getAttribute('title') ?? '';
+    expect(summary).toContain('0.0.0.42'); // igpArea
+    expect(summary).toContain('SRLG-9'); // srlgGroup
+    expect(summary).toContain('2 members'); // summary count (replaces per-member rows)
 
-    // SLIMMED overlay (operator feedback): the per-member object rows were removed; the magenta
-    // canvas highlight conveys the path. The overlay keeps only the summary + the explode button.
+    // The per-member object rows were removed; the magenta canvas highlight conveys the path.
     const members = panel.querySelectorAll('[data-testid="trail-member"]');
     expect(members.length).toBe(0);
-    // The raw member managedObjectIds are NOT listed in the overlay anymore.
+    // The raw member managedObjectIds are NOT listed in the chip.
     expect(text).not.toContain('Interface:lon-r1-e1');
-    // The on-canvas explode action is present.
+    expect(summary).not.toContain('Interface:lon-r1-e1');
+    // The explode ("Show full path") toggle is present in the chip.
     const explode = panel.querySelector('[data-testid="explode-trail"]');
     expect(explode).not.toBeNull();
   });
@@ -101,9 +104,10 @@ describe('AC 65 — SLIMMED trail-detail overlay renders trailId, igpArea, srlgG
     const panel = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
     expect(panel).not.toBeNull();
     expect(store.selectedTrailDetail()?.srlgGroup).toBeNull();
-    // igpArea (populated) is shown; the SRLG value is NOT shown when null.
-    expect(panel.textContent).toContain('0.0.0.0');
-    expect(panel.textContent).not.toContain('SRLG');
+    // igpArea (populated) is shown in the chip-summary tooltip; the SRLG segment is absent when null.
+    const summary = (panel.querySelector('.trail-ref') as HTMLElement).getAttribute('title') ?? '';
+    expect(summary).toContain('0.0.0.0');
+    expect(summary).not.toContain('SRLG');
   });
 });
 

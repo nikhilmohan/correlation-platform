@@ -22,6 +22,7 @@ import { ThemeService } from '../core/theme.service';
 import { AttributeDetailPanelComponent } from './attribute-detail-panel.component';
 import { LayerToggleComponent } from './layer-toggle.component';
 import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor, typeLabelFor } from './type-icon-mapper';
+import type { TrailDetail } from '../api/models';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
 // is fetched only when this view is shown, and unit tests can mock it.
@@ -152,18 +153,57 @@ import type {
                ([hidden]), so the existing per-trail assertions still resolve. -->
           @if (store.hasGraph()) {
             <div class="cy-trail-selector" data-testid="trail-selector">
-              <button
-                type="button"
-                class="trail-toggle"
-                [attr.aria-expanded]="trailMenuOpen()"
-                aria-haspopup="listbox"
-                aria-controls="trail-menu"
-                aria-label="Trail clusters"
-                (click)="toggleTrailMenu()"
-              >
-                <span aria-hidden="true">⚲</span> Trails ({{ store.trails().length }})
-                <span class="caret" aria-hidden="true">{{ trailMenuOpen() ? '▴' : '▾' }}</span>
-              </button>
+              <!-- TOP control row: the trail dropdown PLUS — when a trail is selected — the SELECTED-TRAIL
+                   REFERENCE and the "Show full path" TOGGLE right beside it, so the reference + explode
+                   control are at the TOP next to the dropdown (BUG 2). data-testid trail-detail /
+                   explode-trail / clear-trail all live here now. -->
+              <div class="trail-control-row">
+                <button
+                  type="button"
+                  class="trail-toggle"
+                  [attr.aria-expanded]="trailMenuOpen()"
+                  aria-haspopup="listbox"
+                  aria-controls="trail-menu"
+                  aria-label="Trail clusters"
+                  (click)="toggleTrailMenu()"
+                >
+                  <span aria-hidden="true">⚲</span> Trails ({{ store.trails().length }})
+                  <span class="caret" aria-hidden="true">{{ trailMenuOpen() ? '▴' : '▾' }}</span>
+                </button>
+
+                @if (store.selectedTrailDetail(); as td) {
+                  <div class="trail-ref-chip" data-testid="trail-detail" aria-label="Selected trail detail">
+                    <span class="trail-dot" aria-hidden="true"></span>
+                    <span class="trail-ref" [attr.title]="trailRefSummary(td)">Trail {{ td.trailId }}</span>
+                    <button
+                      type="button"
+                      class="explode-trail"
+                      data-testid="explode-trail"
+                      [class.pressed]="store.explodeActive()"
+                      [attr.aria-pressed]="store.explodeActive()"
+                      [attr.aria-label]="
+                        store.explodeActive()
+                          ? 'Hide full path — collapse the cross-site trail members'
+                          : 'Show full path — reveal the cross-site trail members'
+                      "
+                      [attr.title]="store.explodeActive() ? 'Hide full path' : 'Show full path'"
+                      (click)="store.toggleFullPath()"
+                    >
+                      <span aria-hidden="true">{{ store.explodeActive() ? '⤡' : '⤢' }}</span>
+                      {{ store.explodeActive() ? 'Hide full path' : 'Show full path' }}
+                    </button>
+                    <button
+                      type="button"
+                      class="trail-ref-clear"
+                      data-testid="clear-trail"
+                      aria-label="Clear selected trail"
+                      (click)="store.clearTrail()"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                }
+              </div>
 
               <div
                 id="trail-menu"
@@ -175,10 +215,12 @@ import type {
               >
                 @if (store.trails().length) {
                   @if (store.selectedTrailId()) {
+                    <!-- The canonical clear-trail control (data-testid) is the ✕ in the top trail-ref chip
+                         (BUG 2). This menu option stays as a convenience clear but without the testid, so
+                         exactly one element carries data-testid="clear-trail". -->
                     <button
                       type="button"
                       class="trail-menu-clear"
-                      data-testid="clear-trail"
                       role="option"
                       [attr.aria-selected]="false"
                       (click)="clearTrailFromMenu()"
@@ -232,80 +274,10 @@ import type {
             <app-attribute-detail-panel />
           </div>
 
-          <!-- VIEW 3/4 — SELECTED-TRAIL REFERENCE as a floating ON-CANVAS OVERLAY (bottom-left). It
-               carries the SELECTED-TRAIL REFERENCE (the trail id) PROMINENTLY in the header with the
-               "show full path" TOGGLE icon RIGHT NEXT TO it, so the operator always sees which trail is
-               selected and can explode/contract its full cross-site path with one adjacent control. The
-               toggle (data-testid="explode-trail") reflects TOGGLE state via aria-pressed=explodeActive
-               and flips its label between "Show full path" (view 3) and "Hide full path" (view 4) — a
-               click calls toggleFullPath() (explode ⇄ contract, keeping the selection + magenta
-               highlight). The slimmed body keeps the summary line (member count · IGP area · SRLG); the
-               magenta highlight on the canvas conveys the path visually. Collapsible + dismissable so it
-               never blocks the graph. Keeps data-testid="trail-detail" / "explode-trail" / "clear-trail". -->
-          @if (store.selectedTrailDetail(); as td) {
-            <section
-              class="trail-overlay"
-              data-testid="trail-detail"
-              aria-label="Selected trail detail"
-              [class.collapsed]="trailOverlayCollapsed()"
-            >
-              <header class="trail-overlay-head">
-                <span class="trail-overlay-title">
-                  <span class="trail-dot" aria-hidden="true"></span>
-                  <span class="trail-ref">Trail {{ td.trailId }}</span>
-                </span>
-                <!-- "Show full path" TOGGLE — right next to the trail reference. -->
-                <button
-                  type="button"
-                  class="explode-trail"
-                  data-testid="explode-trail"
-                  [class.pressed]="store.explodeActive()"
-                  [attr.aria-pressed]="store.explodeActive()"
-                  [attr.aria-label]="
-                    store.explodeActive()
-                      ? 'Hide full path — collapse the cross-site trail members'
-                      : 'Show full path — reveal the cross-site trail members'
-                  "
-                  [attr.title]="store.explodeActive() ? 'Hide full path' : 'Show full path'"
-                  (click)="store.toggleFullPath()"
-                >
-                  <span aria-hidden="true">{{ store.explodeActive() ? '⤡' : '⤢' }}</span>
-                  {{ store.explodeActive() ? 'Hide full path' : 'Show full path' }}
-                </button>
-                <button
-                  type="button"
-                  class="trail-overlay-collapse"
-                  [attr.aria-expanded]="!trailOverlayCollapsed()"
-                  aria-controls="trail-overlay-body"
-                  [attr.aria-label]="trailOverlayCollapsed() ? 'Expand trail detail' : 'Collapse trail detail'"
-                  (click)="toggleTrailOverlay()"
-                >
-                  <span aria-hidden="true">{{ trailOverlayCollapsed() ? '▸' : '▾' }}</span>
-                </button>
-                <button
-                  type="button"
-                  class="trail-overlay-close"
-                  data-testid="clear-trail"
-                  aria-label="Clear selected trail"
-                  (click)="store.clearTrail()"
-                >
-                  ✕
-                </button>
-              </header>
-
-              <div id="trail-overlay-body" class="trail-overlay-body" [hidden]="trailOverlayCollapsed()">
-                <p class="muted">
-                  {{ td.memberCount }} members
-                  @if (td.igpArea) {
-                    · IGP area {{ td.igpArea }}
-                  }
-                  @if (td.srlgGroup) {
-                    · SRLG {{ td.srlgGroup }}
-                  }
-                </p>
-              </div>
-            </section>
-          }
+          <!-- BUG 2: the SELECTED-TRAIL REFERENCE + "Show full path" TOGGLE now live in the TOP control
+               row next to the trail-selector dropdown (see .trail-control-row above). The former
+               bottom-left trail-overlay has been removed; the magenta highlight on the canvas still
+               conveys the path. data-testid trail-detail / explode-trail / clear-trail moved to the top. -->
 
           <!-- CHANGE 7 (v3): on-canvas COLLAPSIBLE LEGEND panel (bottom-right). A "Legend" disclosure
                chip expands to show the layer-colour, site-boundary + type-icon legends and the amber-cue
@@ -759,11 +731,56 @@ import type {
         position: absolute;
         top: 8px;
         left: 8px;
+        /* Leave room for the top-right zoom controls; wrap the ref chip below the dropdown on narrow
+           canvases rather than colliding. */
+        right: 120px;
         z-index: 4;
         display: flex;
         flex-direction: column;
         align-items: flex-start;
         gap: 4px;
+      }
+      /* BUG 2: top control row — trail dropdown + (when selected) the trail-ref chip with the
+         "Show full path" toggle, aligned next to the dropdown at the TOP of the canvas. */
+      .trail-control-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+      .trail-ref-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        border: 1px solid var(--trail-hl);
+        border-radius: 6px;
+        padding: 0.2rem 0.45rem;
+        backdrop-filter: blur(2px);
+        max-width: 100%;
+      }
+      .trail-ref-chip .trail-ref {
+        font-weight: 600;
+        font-size: 0.8rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 14ch;
+      }
+      .trail-ref-clear {
+        width: 1.5rem;
+        height: 1.5rem;
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 6px;
+        cursor: pointer;
+        line-height: 1;
+        font-size: 0.8rem;
+      }
+      .trail-ref-clear:hover,
+      .trail-ref-clear:focus-visible {
+        border-color: var(--accent);
       }
       .trail-toggle {
         display: inline-flex;
@@ -887,73 +904,16 @@ import type {
           border-left: none;
         }
       }
-      /* CHANGE 6 (v3): on-canvas selected-trail overlay (bottom-left, semi-transparent themed surface). */
-      .trail-overlay {
-        position: absolute;
-        left: 8px;
-        bottom: 8px;
-        z-index: 5;
-        width: min(280px, 60%);
-        background: color-mix(in srgb, var(--surface) 92%, transparent);
-        border: 1px solid var(--trail-hl);
-        border-radius: 8px;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
-        backdrop-filter: blur(2px);
-        overflow: hidden;
-      }
-      .trail-overlay-head {
-        display: flex;
-        align-items: center;
-        gap: 0.4rem;
-        padding: 0.4rem 0.5rem;
-        border-bottom: 1px solid var(--border);
-      }
-      .trail-overlay.collapsed .trail-overlay-head {
-        border-bottom: none;
-      }
-      .trail-overlay-title {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        font-weight: 600;
-        font-size: 0.85rem;
-        flex: 1;
-      }
+      /* Trail-ref dot (BUG 2): the magenta marker shown in the top trail-ref chip. */
       .trail-dot {
         width: 0.7rem;
         height: 0.7rem;
         border-radius: 50%;
         background: var(--trail-hl);
       }
-      .trail-overlay-collapse,
-      .trail-overlay-close {
-        width: 1.6rem;
-        height: 1.6rem;
-        border: 1px solid var(--border);
-        background: var(--surface-2);
-        color: var(--text);
-        border-radius: 6px;
-        cursor: pointer;
-        line-height: 1;
-        font-size: 0.8rem;
-      }
-      .trail-overlay-collapse:hover,
-      .trail-overlay-collapse:focus-visible,
-      .trail-overlay-close:hover,
-      .trail-overlay-close:focus-visible {
-        border-color: var(--accent);
-      }
-      .trail-overlay-body {
-        padding: 0.5rem;
-        max-height: 40vh;
-        overflow-y: auto;
-      }
-      .trail-overlay-body[hidden] {
-        display: none;
-      }
-      /* "Show full path" TOGGLE — sits in the trail-overlay header, right next to the trail ref. The
-         PRESSED state (full path shown / view 4) is filled magenta; the unpressed state (view 3) is an
-         outline so the toggle reads as off-then-on at a glance. */
+      /* "Show full path" TOGGLE — now sits in the top trail-ref chip, right next to the trail ref (BUG 2).
+         The PRESSED state (full path shown) is filled magenta; the unpressed state is an outline so the
+         toggle reads as off-then-on at a glance. */
       .explode-trail {
         display: inline-flex;
         align-items: center;
@@ -1134,10 +1094,24 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  /** CHANGE 6 (v3): collapse state of the on-canvas selected-trail detail overlay (bottom-left). */
+  /** Retained collapse state for legacy spec coverage; the bottom trail overlay was removed (BUG 2) in
+   *  favour of the top trail-ref chip, so this no longer drives any visible element. */
   readonly trailOverlayCollapsed = signal(false);
   toggleTrailOverlay(): void {
     this.trailOverlayCollapsed.update((v) => !v);
+  }
+
+  /** Compact summary (member count · IGP area · SRLG) surfaced as the trail-ref chip's title/tooltip,
+   *  replacing the removed bottom-overlay summary line (BUG 2). */
+  trailRefSummary(td: TrailDetail): string {
+    const parts = [`${td.memberCount} members`];
+    if (td.igpArea) {
+      parts.push(`IGP area ${td.igpArea}`);
+    }
+    if (td.srlgGroup) {
+      parts.push(`SRLG ${td.srlgGroup}`);
+    }
+    return parts.join(' · ');
   }
 
   /** CHANGE 7 (v3): disclosure state of the on-canvas Legend panel (bottom-right). Collapsed by
@@ -1537,28 +1511,120 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     cy.elements().remove();
     cy.add([...parentDefs, ...leafDefs, ...edgeDefs]);
 
-    // For the MULTI-SITE preset layout every position is recomputed deterministically, so locking is
-    // neither needed nor wanted (the preset is authoritative + stable). For a SINGLE-SITE same-scope
-    // expand we lock already-placed nodes so only the NEW nodes are positioned and the operator's
-    // view is preserved. (Scope-grow always re-lays-out + re-fits to reveal the new box.)
-    const scopeGrew = distinctSites.length > this.lastFittedSiteCount;
-    const multiSite = distinctSites.length > 1;
-    const locked: NodeSingular[] = [];
-    if (!scopeGrew && !multiSite) {
-      cy.nodes('[!isSiteParent]').forEach((n) => {
-        const p = prevPos.get(n.id());
-        if (p) {
-          n.position(p);
-          n.lock();
-          locked.push(n);
-        }
-      });
+    // ADDITIVE-MERGE GUARANTEE (BUG 1): an EXPAND / TRAIL-EXPLODE / external-reveal must only ADD nodes
+    // around the existing graph — every node already on the canvas must stay PIXEL-STABLE, regardless of
+    // whether the add crosses a site boundary (single→multi-site). The previous code re-ran a full preset
+    // recompute as soon as distinctSites went 1→2, which re-laid-out EVERYTHING and scattered the base
+    // tree. We detect an additive change as "prevPos already holds positions" (i.e. there was a graph and
+    // we are merging into it), and in that case we DO NOT run a discrete/preset relayout over the whole
+    // graph. Instead we run a single deterministic PRESET whose position map is:
+    //   - EXISTING nodes  → exactly their prevPos (verbatim — pixel-stable), and
+    //   - NEW nodes only   → a deterministic cluster OFFSET to the RIGHT of the current extent, grouped by
+    //                        their (possibly new) site box, so they never overlap the locked base.
+    // A FRESH site load (prevPos empty) keeps the original first-layout behaviour (breadthfirst single /
+    // preset multi) + a one-time fit. This makes explode truly additive and contract trivially safe.
+    const newLeafIds: string[] = [];
+    cy.nodes('[!isSiteParent]').forEach((n) => {
+      if (!prevPos.has(n.id())) {
+        newLeafIds.push(n.id());
+      }
+    });
+    const isAdditive = prevPos.size > 0;
+
+    if (isAdditive) {
+      this.layoutAdditive(prevPos, newLeafIds);
+    } else {
+      this.runLayout(distinctSites.length);
+    }
+  }
+
+  /**
+   * ADDITIVE layout (BUG 1) — keep every EXISTING node exactly where it was and place ONLY the NEW nodes.
+   * We build one `preset` position map: existing ids map to their captured prevPos verbatim (guaranteeing
+   * pixel-stability across a single→multi-site explode), and new ids are placed in a deterministic grid
+   * cluster offset to the RIGHT of the current node extent so they never overlap the locked base. We run a
+   * single preset layout with that full map (animate:false so layoutstop / data-cy-layout-done still
+   * fires), then publish spread + refresh overlays. We DO NOT re-fit / re-center / re-zoom: the viewport
+   * stays put and the operator can drag/zoom (or hit Fit) to reach the new nodes.
+   */
+  private layoutAdditive(prevPos: Map<string, { x: number; y: number }>, newLeafIds: readonly string[]): void {
+    const cy = this.cy;
+    if (!cy) {
+      return;
+    }
+    cy.resize();
+
+    const siteMap = this.store.nodeSiteMap();
+    const positions = SiteGraphComponent.computeAdditivePositions(prevPos, newLeafIds, (id) => siteMap.get(id) ?? '');
+
+    const layout = cy.layout({
+      name: 'preset',
+      positions,
+      fit: false,
+      animate: false,
+    } as unknown as LayoutOptions);
+    layout.run();
+
+    // No re-fit / re-center / re-zoom on an additive merge — the viewport must NOT jump. The operator drags
+    // or hits Fit to reach the new cluster. (Contract reuses this path too: removed nodes simply vanish and
+    // every surviving base node keeps its prevPos.)
+    this.publishSpread();
+    this.refreshOverlayMarkers();
+  }
+
+  /**
+   * PURE, deterministic position map for an ADDITIVE merge (BUG 1 crux). This is the contract that keeps
+   * the base layout pixel-stable on a single→multi-site explode:
+   *   - every EXISTING node (in prevPos) maps to its EXACT prior position — verbatim, never recomputed, so
+   *     the base tree does not move one pixel regardless of whether the add crossed a site boundary; and
+   *   - every NEW node is placed in a deterministic grid cluster OFFSET to the RIGHT of the existing
+   *     extent, grouped by site box, so the new nodes never overlap the locked base.
+   * Extracted as a static pure function so the position-preservation guarantee is unit-testable without a
+   * Cytoscape canvas (jsdom has no WebGL). Used by layoutAdditive() with the store's nodeSiteMap.
+   */
+  static computeAdditivePositions(
+    prevPos: ReadonlyMap<string, { x: number; y: number }>,
+    newLeafIds: readonly string[],
+    siteOf: (id: string) => string,
+  ): Record<string, { x: number; y: number }> {
+    const positions: Record<string, { x: number; y: number }> = {};
+    // Existing nodes: verbatim prevPos → pixel-stable.
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    for (const [id, p] of prevPos) {
+      positions[id] = { x: p.x, y: p.y };
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+    }
+    if (!Number.isFinite(maxX)) {
+      maxX = 0;
+      minY = 0;
     }
 
-    this.runLayout(distinctSites.length);
-    for (const n of locked) {
-      n.unlock();
+    // New nodes: a deterministic grid cluster to the RIGHT of the existing extent, grouped by site box so a
+    // cross-site explode reads as its own column rather than overlapping the base. Fully deterministic.
+    const NODE_GAP = 150;
+    const CLUSTER_GAP = 240; // clearance between the base extent and the new cluster
+    const bySite = new Map<string, string[]>();
+    for (const id of newLeafIds) {
+      const site = siteOf(id);
+      if (!bySite.has(site)) {
+        bySite.set(site, []);
+      }
+      bySite.get(site)!.push(id);
     }
+    let cursorX = maxX + CLUSTER_GAP;
+    const baseY = minY;
+    for (const ids of bySite.values()) {
+      const gridCols = Math.max(1, Math.ceil(Math.sqrt(ids.length)));
+      ids.forEach((id, i) => {
+        const gx = i % gridCols;
+        const gy = Math.floor(i / gridCols);
+        positions[id] = { x: cursorX + gx * NODE_GAP, y: baseY + gy * NODE_GAP };
+      });
+      cursorX += gridCols * NODE_GAP + NODE_GAP;
+    }
+    return positions;
   }
 
   /** Run the size-appropriate deterministic layout. A single site uses breadthfirst (circle-packed,
@@ -1600,11 +1666,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             avoidOverlap: true,
           } as unknown as LayoutOptions);
     layout.run();
-    // Auto-fit on the FIRST layout, and once more whenever the graph gains a NEW site box (a major
-    // scope change, e.g. a cross-site expand / trail explode) so the new box is visible. Same-site
-    // expands do NOT re-fit, preserving the operator's manual zoom/pan. Pad generously so the laid-out
-    // graph fills the canvas centred rather than hugging the top edge.
-    if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
+    // Auto-fit ONLY on the FIRST layout of a site (fresh selectSite / reset). We deliberately DROPPED the
+    // former re-fit-on-scope-grow (siteCount > lastFittedSiteCount): additive changes (expand / trail
+    // explode) no longer reach runLayout at all (they go through layoutAdditive, which never re-fits), so
+    // the viewport never jumps on explode. The operator drags or hits Fit to reach new nodes. Pad
+    // generously so the first laid-out graph fills the canvas centred rather than hugging the top edge.
+    if (!this.firstFitDone) {
       cy.fit(undefined, 50);
       // CHANGE 2 (v3): PIN the READABLE zoom as the default first view. cy.fit() shrinks a small/tall
       // site to a tiny, hard-to-read scale; with the shorter links (CHANGE 4) the whole site now fits
