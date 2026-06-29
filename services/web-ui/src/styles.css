@@ -20,7 +20,13 @@
 
   /* De-hardcoded theme-dependent literals (dark values here; light overridden below). */
   --on-accent: #fff; /* text on a filled accent button / active nav — white in both themes */
-  --canvas-bg: #0b1220; /* map + graph canvas backdrop; also read by the imperative canvas re-theme */
+  --canvas-bg: #0b1220; /* MAP canvas backdrop; also read by the imperative geo-map re-theme */
+  /* Site-GRAPH canvas backdrop: points at the app surface so the graph blends with the page
+     (operator feedback — the old grey --canvas-bg read as a grey block). Read by buildCyStyle
+     via cssVar so a theme flip re-themes the canvas; node chips/labels stay legible against it. */
+  --graph-bg: #0f172a;
+  /* A larger, AMBER outward-arrow "extends externally" node cue (CHANGE 1) — works in both themes. */
+  --expand-cue: #f59e0b;
   --error-bg: #3f1d1d;
   --error-text: #fecaca;
   --badge-new-text: #06303a;
@@ -41,6 +47,9 @@
 
   --on-accent: #fff;
   --canvas-bg: #e2e8f0;
+  /* Light: the graph canvas blends with the white page surface (no grey block). */
+  --graph-bg: #ffffff;
+  --expand-cue: #b45309; /* darker amber for AA contrast on the white light-theme canvas */
   --error-bg: #fee2e2;
   --error-text: #991b1b;
   --badge-new-text: #06303a;

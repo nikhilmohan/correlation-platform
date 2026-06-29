@@ -107,14 +107,17 @@ import type {
             aria-label="Device-level topology graph for this site. Nodes and edges are listed below."
           ></div>
 
-          <!-- ALWAYS-VISIBLE on-canvas EXPAND affordance per device node (UX redesign — the canvas
-               IS the interface). Each "+" is an HTML overlay button positioned at the node's RENDERED
-               position and re-positioned on every pan/zoom/layout so it tracks the node. It carries
-               data-testid="expand-node" + the "Expand neighbours of <name>" aria-label so the existing
-               e2e + a11y selectors still resolve, and is cap-disabled. In jsdom (no real cy render)
-               overlayMarkers() is empty; the accessible List-view row control is the test/SR equivalent. -->
+          <!-- CHANGE 1: on-canvas "extends externally" cue. Rendered ONLY on nodes that actually have
+               OFF-SITE links (store.externalLinkNodeIds) — leaf/in-site-only nodes get NO cue, and a
+               node drops the cue once its external neighbours are all revealed. A larger (~22px), AMBER
+               outward-arrow (↗) badge so the operator sees which devices extend beyond the site and can
+               click to reveal them. Still a real <button> positioned at the node's RENDERED position and
+               re-positioned on every pan/zoom/layout so it tracks the node. Keeps data-testid="expand-node"
+               + the accessible label so the existing e2e + a11y selectors still resolve, and is
+               cap-disabled. In jsdom (no real cy render) overlayMarkers() is empty; the accessible
+               List-view row control is the test/SR equivalent. -->
           <div class="cy-expand-layer" aria-hidden="false">
-            @for (m of overlayMarkers(); track m.id) {
+            @for (m of externalCueMarkers(); track m.id) {
               <button
                 type="button"
                 class="cy-expand"
@@ -122,10 +125,11 @@ import type {
                 [style.left.px]="m.x"
                 [style.top.px]="m.y"
                 [disabled]="store.capReached()"
-                [attr.aria-label]="'Expand neighbours of ' + m.name"
+                [attr.aria-label]="'Show external links for ' + m.name"
+                [attr.title]="'Show external links for ' + m.name"
                 (click)="store.expandNode(m.id)"
               >
-                +
+                <span aria-hidden="true">↗</span>
               </button>
             }
           </div>
@@ -254,6 +258,10 @@ import type {
               </li>
             }
           </ul>
+          <!-- CHANGE 1: self-explanatory hint for the amber ↗ cue. -->
+          <p class="cue-hint" data-testid="external-link-hint">
+            <span class="cue-glyph" aria-hidden="true">↗</span> extends to other sites — click to reveal external links
+          </p>
         </div>
 
         @if (store.graphLoading()) {
@@ -379,9 +387,23 @@ import type {
                   </li>
                 }
               </ul>
-              <button type="button" class="clear-trail" data-testid="clear-trail" (click)="store.clearTrail()">
-                Clear trail
-              </button>
+              <!-- CHANGE 2c: explicit EXPLODE — pulls the trail's missing (possibly cross-site)
+                   members + their neighbours into the graph so the full path renders. Plain SELECT is
+                   highlight-only (in-site portion); this opts into the cross-site explosion. -->
+              <div class="trail-detail-actions">
+                <button
+                  type="button"
+                  class="explode-trail"
+                  data-testid="explode-trail"
+                  aria-label="Show full trail path across sites"
+                  (click)="store.explodeTrail()"
+                >
+                  Show full path across sites
+                </button>
+                <button type="button" class="clear-trail" data-testid="clear-trail" (click)="store.clearTrail()">
+                  Clear trail
+                </button>
+              </div>
             </section>
           }
         } @else {
@@ -431,7 +453,8 @@ import type {
         min-height: 560px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--canvas-bg);
+        /* CHANGE 4: blend with the page surface (was the grey --canvas-bg). */
+        background: var(--graph-bg);
         margin-bottom: 0.8rem;
         position: relative;
         overflow: hidden;
@@ -446,45 +469,69 @@ import type {
         pointer-events: none;
         z-index: 3;
       }
-      /* ITEM 1: a SMALL, SUBTLE corner badge — sized RELATIVE to the (now bigger) node icon so it
-         reads as a secondary affordance and does not compete with the type-icon glyph. Smaller box,
-         lower-profile colour (muted border/translucent fill at rest), reduced opacity until hover/
-         focus. Still a real focusable <button>: keyboard-reachable, visible, and clickable, and it
-         keeps its data-testid/aria-label/click→expandNode/cap-disabled behaviour unchanged. */
+      /* CHANGE 1: a LARGER (~22px), AMBER outward-arrow (↗) "extends externally" badge — rendered only
+         on nodes with hidden OFF-SITE links so the operator sees which devices extend beyond the site
+         and can click to reveal them. Higher-profile than the old tiny "+": amber fill + ring so it
+         reads as a real, noticeable affordance. Still a real focusable <button>: keyboard-reachable,
+         visible, clickable, and it keeps its data-testid/click→expandNode/cap-disabled behaviour. */
       .cy-expand {
         position: absolute;
         transform: translate(-50%, -50%);
-        width: 0.85rem;
-        height: 0.85rem;
+        width: 22px;
+        height: 22px;
         padding: 0;
         line-height: 1;
-        font-size: 0.62rem;
-        font-weight: 600;
-        border: 1px solid var(--border);
+        font-size: 0.85rem;
+        font-weight: 700;
+        border: 1.5px solid var(--expand-cue);
         border-radius: 50%;
-        background: color-mix(in srgb, var(--canvas-bg) 85%, transparent);
-        color: var(--text-muted);
+        background: var(--expand-cue);
+        color: #1a1205;
         cursor: pointer;
         pointer-events: auto;
-        opacity: 0.7;
+        opacity: 0.95;
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 0 0 1px var(--canvas-bg);
+        box-shadow:
+          0 0 0 2px var(--graph-bg),
+          0 1px 3px rgba(0, 0, 0, 0.4);
         transition:
           opacity 0.1s ease,
-          color 0.1s ease,
-          border-color 0.1s ease;
+          transform 0.1s ease,
+          box-shadow 0.1s ease;
       }
       .cy-expand:hover:not(:disabled),
       .cy-expand:focus-visible:not(:disabled) {
         opacity: 1;
-        border-color: var(--accent);
-        color: var(--accent);
+        transform: translate(-50%, -50%) scale(1.12);
+        box-shadow:
+          0 0 0 2px var(--graph-bg),
+          0 0 0 4px color-mix(in srgb, var(--expand-cue) 50%, transparent);
       }
       .cy-expand:disabled {
-        opacity: 0.3;
+        opacity: 0.4;
         cursor: not-allowed;
+      }
+      /* CHANGE 1: the self-explanatory cue hint shown beneath the layer/site legends. */
+      .cue-hint {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.8rem;
+        color: var(--text-muted);
+      }
+      .cue-hint .cue-glyph {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.1rem;
+        height: 1.1rem;
+        border-radius: 50%;
+        background: var(--expand-cue);
+        color: #1a1205;
+        font-weight: 700;
+        font-size: 0.75rem;
       }
       .list-view-toggle {
         display: inline-flex;
@@ -806,6 +853,27 @@ import type {
         flex-wrap: wrap;
         gap: 0.4rem;
       }
+      .trail-detail-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 0.5rem;
+      }
+      .explode-trail {
+        background: var(--accent);
+        color: var(--on-accent);
+        border: 1px solid var(--accent);
+        border-radius: 6px;
+        padding: 0.3rem 0.7rem;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 600;
+      }
+      .explode-trail:hover,
+      .explode-trail:focus-visible {
+        background: var(--accent-strong);
+        border-color: var(--accent-strong);
+      }
       .clear-trail {
         background: var(--surface-2);
         color: var(--text);
@@ -874,6 +942,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   /** Small deterministic palette for site-boundary boxes (by site index). */
   static readonly SITE_COLORS = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#fb7185', '#facc15'];
 
+  /** CHANGE 3: readability floor for the FIRST/scope-grow auto-fit. A small site (a couple of device
+   *  stacks) fits to a tiny scale; we never let the default first view drop below this zoom so the
+   *  device boxes render legibly (matches the operator's readable-zoom screenshot). Larger graphs fit
+   *  above the floor and keep cy.fit's scale, so they never overflow. */
+  static readonly READABLE_ZOOM_FLOOR = 0.75;
+
   private cytoscape: typeof cytoscape | null = null;
   private cy: CyCore | null = null;
   private readonly cyReady = signal(false);
@@ -929,6 +1003,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
    *  position (canvas pixels) so each "+" tracks its node on pan/zoom/layout. Empty under jsdom
    *  (no real Cytoscape render) — there the accessible list-row control is the equivalent. */
   readonly overlayMarkers = signal<ReadonlyArray<{ id: string; name: string; x: number; y: number }>>([]);
+
+  /** CHANGE 1: the overlay markers FILTERED to only the nodes that have hidden OFF-SITE links
+   *  (store.externalLinkNodeIds). The amber ↗ cue renders for these alone — nodes with nothing
+   *  external (leaves / fully-revealed) get no cue. */
+  readonly externalCueMarkers = computed(() => {
+    const external = this.store.externalLinkNodeIds();
+    return this.overlayMarkers().filter((m) => external.has(m.id));
+  });
 
   /** True once the deterministic layout has settled at least once (bridged to data-cy-layout-done). */
   readonly layoutDone = signal(false);
@@ -1034,7 +1116,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
    */
   private buildCyStyle(): StylesheetJson {
     const colors = SiteGraphComponent.LAYER_COLORS;
-    const canvasBg = this.cssVar('--canvas-bg') || '#0b1220';
+    // CHANGE 4: the GRAPH canvas backdrop is now the app surface (--graph-bg), so the chip fill and
+    // the label text-outline match the canvas and the node labels stay legible on the lighter bg.
+    const canvasBg = this.cssVar('--graph-bg') || this.cssVar('--canvas-bg') || '#0f172a';
     const text = this.cssVar('--text') || '#f1f5f9';
     const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
@@ -1322,6 +1406,46 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // graph fills the canvas centred rather than hugging the top edge.
     if (!this.firstFitDone || siteCount > this.lastFittedSiteCount) {
       cy.fit(undefined, 70);
+      // CHANGE 3 (refined #294): cy.fit() shrinks a SMALL site (a couple of device stacks) to a tiny,
+      // hard-to-read scale, so we apply a readability FLOOR — but ONLY when raising to the floor still
+      // keeps the whole graph inside the viewport. For a TALL single-site tree (e.g. WAW-01:
+      // Router→LineCard→Port→Interface→IPLink in two stacks) cy.fit already maximises to the canvas
+      // HEIGHT; forcing the zoom up to the floor would push the graph past the top/bottom edges and
+      // scroll the ROUTERS (the most important nodes, where the external-link cue lives) off-screen on
+      // first view. So: compute whether the graph's rendered box at the floor zoom would overflow the
+      // padded viewport on EITHER axis. If it would, keep cy.fit's natural scale (whole tree visible).
+      // Only short/small graphs with spare room are bumped to the floor. Re-centre after any change so
+      // the top of the tree is never cropped. Guarded by the cy.zoom API (real core / a stub with it).
+      if (typeof cy.zoom === 'function' && cy.zoom() < SiteGraphComponent.READABLE_ZOOM_FLOOR) {
+        const floorZoom = SiteGraphComponent.READABLE_ZOOM_FLOOR;
+        // Model-space extent of all elements (zoom-independent): width/height of the laid-out graph.
+        const bb = cy.elements().boundingBox();
+        const graphW = bb.w;
+        const graphH = bb.h;
+        // Padded viewport budget (same 70px pad cy.fit used, on each side → 140 total per axis).
+        const FIT_PAD = 70;
+        const viewW = typeof cy.width === 'function' ? cy.width() : 0;
+        const viewH = typeof cy.height === 'function' ? cy.height() : 0;
+        const budgetW = Math.max(0, viewW - 2 * FIT_PAD);
+        const budgetH = Math.max(0, viewH - 2 * FIT_PAD);
+        // If we can't measure the viewport (e.g. a stub without width/height), be conservative and
+        // raise to the floor (preserves the small-site readability behaviour from #291).
+        const canMeasure = budgetW > 0 && budgetH > 0;
+        const wouldOverflow = canMeasure && (graphW * floorZoom > budgetW || graphH * floorZoom > budgetH);
+        if (!wouldOverflow) {
+          const ext = cy.extent();
+          cy.zoom({
+            level: floorZoom,
+            position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
+          });
+        }
+      }
+      // Always re-centre so the TOP of the graph (site box / routers) stays in view regardless of the
+      // zoom path taken above — cy.fit centres, but an explicit re-centre keeps the top visible if the
+      // tree is taller than the viewport (it then sits centred, top edge reachable, not cropped above).
+      if (typeof cy.center === 'function') {
+        cy.center();
+      }
       this.firstFitDone = true;
       this.lastFittedSiteCount = siteCount;
     }
