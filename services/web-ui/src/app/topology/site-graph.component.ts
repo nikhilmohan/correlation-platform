@@ -232,12 +232,13 @@ import type {
             <app-attribute-detail-panel />
           </div>
 
-          <!-- CHANGE 6 (v3): SELECTED-TRAIL DETAIL as a floating ON-CANVAS OVERLAY (bottom-left), not a
-               section below the graph. Lists the trail's member devices (each clickable → selectNode,
-               which opens the right detail drawer) + igpArea/SRLG meta + member count. Collapsible and
-               dismissable so it never blocks the graph. The explode + clear controls live in its header
-               (CHANGE 5: on-canvas). Member rows keep data-testid="trail-member"; the panel keeps
-               data-testid="trail-detail" and explode keeps data-testid="explode-trail". -->
+          <!-- SELECTED-TRAIL DETAIL as a floating ON-CANVAS OVERLAY (bottom-left). SLIMMED (operator
+               feedback): the per-member object rows were removed (operators found the raw
+               FiberSpan/IGPAdjacency/Interface/IPLink managedObjectIds unclear). It now carries only the
+               trail id/title, the summary line (member count · IGP area · SRLG), the on-canvas
+               "Show full trail path" explode button, and a clear/close control — the magenta highlight
+               on the canvas conveys the path visually. Collapsible + dismissable so it never blocks the
+               graph. Keeps data-testid="trail-detail" / "explode-trail" / "clear-trail". -->
           @if (store.selectedTrailDetail(); as td) {
             <section
               class="trail-overlay"
@@ -282,33 +283,26 @@ import type {
                   }
                 </p>
 
-                <!-- CHANGE 5 (v3): on-canvas EXPLODE — pulls the trail's missing (possibly cross-site)
-                     members + their neighbours in so the full path renders. Keeps data-testid. -->
+                <!-- RESETTABLE FULL-PATH: on-canvas EXPLODE — pulls the SELECTED trail's missing
+                     (possibly cross-site) members + their neighbours in so the full path renders.
+                     Inherently scoped (overlay only shows when a trail is selected) and resettable
+                     (selecting another trail / clearing tears the explosion down via the store base
+                     restore). Reflects exploded state via aria-pressed + label. Keeps data-testid. -->
                 <button
                   type="button"
                   class="explode-trail"
                   data-testid="explode-trail"
-                  aria-label="Show full trail path across sites"
+                  [attr.aria-pressed]="store.explodeActive()"
+                  [attr.aria-label]="
+                    store.explodeActive()
+                      ? 'Full trail path shown'
+                      : 'Show full trail path across sites'
+                  "
                   (click)="store.explodeTrail()"
                 >
-                  <span aria-hidden="true">⤢</span> Show full trail path
+                  <span aria-hidden="true">⤢</span>
+                  {{ store.explodeActive() ? 'Showing full path' : 'Show full trail path' }}
                 </button>
-
-                <ul class="trail-members" aria-label="Trail members">
-                  @for (m of td.members; track m.managedObjectId) {
-                    <li>
-                      <button
-                        type="button"
-                        class="obj"
-                        data-testid="trail-member"
-                        (click)="store.selectNode(m.managedObjectId)"
-                      >
-                        {{ m.managedObjectId }}
-                        <span class="layer-tag">{{ m.objectType }}</span>
-                      </button>
-                    </li>
-                  }
-                </ul>
               </div>
             </section>
           }
@@ -956,14 +950,6 @@ import type {
       }
       .trail-overlay-body[hidden] {
         display: none;
-      }
-      .trail-members {
-        list-style: none;
-        padding: 0;
-        margin: 0.4rem 0 0;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem;
       }
       .explode-trail {
         display: inline-flex;
