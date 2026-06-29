@@ -253,11 +253,13 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
    * ── AC 33.3 — trails render ──────────────────────────────────────────────────────────────────
    * solution-goals: P1-4 (trails built — area-bounded, not one giant trail), P1-6.
    * Acceptance criteria:
-   *   - On the drilled-in site (LON-01), the Trail-clusters overlay SURFACE renders (heading
-   *     present) — proving the trail visualization is wired even when a snapshot has no trails.
-   *   - When trails exist they are listed as DISCRETE area-bounded clusters (each with a member
-   *     count), i.e. multiple bounded trail rows rather than one giant trail. The explicit
-   *     empty-state ("No trails for this snapshot") is the accepted fallback for an empty snapshot.
+   *   - On the drilled-in site (LON-01), the floating Trail SELECTOR surface renders (the
+   *     "Trails (N)" toggle is present) — proving the trail visualization is wired even when a
+   *     snapshot has no trails. Opening it discloses the trail-clusters menu.
+   *   - When trails exist they are listed inside the menu as DISCRETE area-bounded clusters (each
+   *     with a member count), i.e. multiple bounded trail rows rather than one giant trail. The
+   *     explicit empty-state ("No trails for this snapshot") is the accepted fallback for an empty
+   *     snapshot.
    * Screenshot: ac-33-3-trails-overlay (trail-cluster overlay on the site graph).
    */
   test('AC 33.3 — trail clusters overlay the site graph as area-bounded clusters [P1-4, P1-6]', async ({
@@ -270,12 +272,22 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await anchor.click();
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
 
-    // P1-4: trails built from topology + Knowledge trail policy are overlaid on the graph. The
-    // Trail-clusters section renders either trail rows (live data present) or an explicit empty
-    // state — both are valid renders; the journey assertion is that the overlay surface exists
-    // and, when trails exist, they are listed (area-bounded clusters, not one giant trail).
-    const trailHeading = page.getByRole('heading', { name: /Trail clusters/i });
-    await expect(trailHeading).toBeVisible();
+    // P1-4: trails built from topology + Knowledge trail policy are overlaid on the graph. After
+    // the #291 redesign the Trail-clusters surface is a FLOATING TRAIL SELECTOR pinned to the
+    // canvas — a toggle button (data-testid="trail-selector") labelled "Trails (N)" that opens a
+    // dropdown (data-testid="trail-menu") containing the per-trail clusters. The journey assertion
+    // is that the overlay surface exists and, when trails exist, they are listed as DISCRETE
+    // area-bounded clusters (each with a member count), not one giant trail.
+    const trailSelector = page.getByTestId('trail-selector');
+    await expect(trailSelector).toBeVisible();
+    // The selector advertises the trail count in its label, e.g. "Trails (3)".
+    await expect(trailSelector).toContainText(/Trails \(\d+\)/i);
+
+    // Open the dropdown — the trail-cluster items live INSIDE the menu and are hidden until the
+    // selector is toggled open (the redesign keeps them in the DOM via [hidden]).
+    await trailSelector.click();
+    const trailMenu = page.getByTestId('trail-menu');
+    await expect(trailMenu).toBeVisible();
 
     const clusters = page.getByTestId('trail-cluster');
     const clusterCount = await clusters.count();
