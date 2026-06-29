@@ -38,6 +38,36 @@ const ICON_MAP: Readonly<Record<string, IconKey>> = {
   SRLG: 'srlg',
 };
 
+/**
+ * objectType -> short, human-friendly TYPE LABEL for the on-canvas node glyph (line 1 of the
+ * two-line device label, so the operator reads WHAT each box is at first glance). Unknown types
+ * fall back to the raw objectType (or 'Device' when absent) so a node is never type-less.
+ */
+const TYPE_LABEL_MAP: Readonly<Record<string, string>> = {
+  Node: 'Router',
+  Router: 'Router',
+  LineCard: 'Line Card',
+  Port: 'Port',
+  Interface: 'Interface',
+  FiberSpan: 'Fiber',
+  OpticalLine: 'Fiber',
+  IPLink: 'IP Link',
+  IGPAdjacency: 'IGP Adj',
+  LSP: 'LSP',
+  VPNService: 'VPN',
+  Service: 'VPN',
+  ServiceEndpoint: 'VPN',
+  SRLG: 'SRLG',
+};
+
+/** Short human-friendly TYPE LABEL for an objectType; falls back to the raw type, then 'Device'. */
+export function typeLabelFor(objectType: string | undefined | null): string {
+  if (!objectType) {
+    return 'Device';
+  }
+  return TYPE_LABEL_MAP[objectType] ?? objectType;
+}
+
 /** The icon KEY for an objectType (the `data-icon` bridge value); `generic` for any unknown type. */
 export function iconKeyForObjectType(objectType: string | undefined | null): IconKey {
   if (!objectType) {
