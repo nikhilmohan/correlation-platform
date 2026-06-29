@@ -154,6 +154,12 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
   }, testInfo) => {
     const cy = await rootAtSite(page);
 
+    // #291 redesign: trail clusters live inside the floating trail SELECTOR dropdown — open it
+    // before reaching the per-trail rows (courtesy only; this test's cross-site assertions remain
+    // a known #285 failure on real single-site P1 data and are unchanged).
+    await page.getByTestId('trail-selector').click();
+    await expect(page.getByTestId('trail-menu')).toBeVisible();
+
     // Mode-portable: select the FIRST rendered trail cluster (no literal mock id like TR-7). Some
     // snapshots may have no trails — skip cleanly rather than hardcode a trail that doesn't exist.
     const trail = page.getByTestId('trail-cluster').first();
