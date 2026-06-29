@@ -232,13 +232,16 @@ import type {
             <app-attribute-detail-panel />
           </div>
 
-          <!-- SELECTED-TRAIL DETAIL as a floating ON-CANVAS OVERLAY (bottom-left). SLIMMED (operator
-               feedback): the per-member object rows were removed (operators found the raw
-               FiberSpan/IGPAdjacency/Interface/IPLink managedObjectIds unclear). It now carries only the
-               trail id/title, the summary line (member count · IGP area · SRLG), the on-canvas
-               "Show full trail path" explode button, and a clear/close control — the magenta highlight
-               on the canvas conveys the path visually. Collapsible + dismissable so it never blocks the
-               graph. Keeps data-testid="trail-detail" / "explode-trail" / "clear-trail". -->
+          <!-- VIEW 3/4 — SELECTED-TRAIL REFERENCE as a floating ON-CANVAS OVERLAY (bottom-left). It
+               carries the SELECTED-TRAIL REFERENCE (the trail id) PROMINENTLY in the header with the
+               "show full path" TOGGLE icon RIGHT NEXT TO it, so the operator always sees which trail is
+               selected and can explode/contract its full cross-site path with one adjacent control. The
+               toggle (data-testid="explode-trail") reflects TOGGLE state via aria-pressed=explodeActive
+               and flips its label between "Show full path" (view 3) and "Hide full path" (view 4) — a
+               click calls toggleFullPath() (explode ⇄ contract, keeping the selection + magenta
+               highlight). The slimmed body keeps the summary line (member count · IGP area · SRLG); the
+               magenta highlight on the canvas conveys the path visually. Collapsible + dismissable so it
+               never blocks the graph. Keeps data-testid="trail-detail" / "explode-trail" / "clear-trail". -->
           @if (store.selectedTrailDetail(); as td) {
             <section
               class="trail-overlay"
@@ -249,8 +252,26 @@ import type {
               <header class="trail-overlay-head">
                 <span class="trail-overlay-title">
                   <span class="trail-dot" aria-hidden="true"></span>
-                  Trail {{ td.trailId }}
+                  <span class="trail-ref">Trail {{ td.trailId }}</span>
                 </span>
+                <!-- "Show full path" TOGGLE — right next to the trail reference. -->
+                <button
+                  type="button"
+                  class="explode-trail"
+                  data-testid="explode-trail"
+                  [class.pressed]="store.explodeActive()"
+                  [attr.aria-pressed]="store.explodeActive()"
+                  [attr.aria-label]="
+                    store.explodeActive()
+                      ? 'Hide full path — collapse the cross-site trail members'
+                      : 'Show full path — reveal the cross-site trail members'
+                  "
+                  [attr.title]="store.explodeActive() ? 'Hide full path' : 'Show full path'"
+                  (click)="store.toggleFullPath()"
+                >
+                  <span aria-hidden="true">{{ store.explodeActive() ? '⤡' : '⤢' }}</span>
+                  {{ store.explodeActive() ? 'Hide full path' : 'Show full path' }}
+                </button>
                 <button
                   type="button"
                   class="trail-overlay-collapse"
@@ -282,27 +303,6 @@ import type {
                     · SRLG {{ td.srlgGroup }}
                   }
                 </p>
-
-                <!-- RESETTABLE FULL-PATH: on-canvas EXPLODE — pulls the SELECTED trail's missing
-                     (possibly cross-site) members + their neighbours in so the full path renders.
-                     Inherently scoped (overlay only shows when a trail is selected) and resettable
-                     (selecting another trail / clearing tears the explosion down via the store base
-                     restore). Reflects exploded state via aria-pressed + label. Keeps data-testid. -->
-                <button
-                  type="button"
-                  class="explode-trail"
-                  data-testid="explode-trail"
-                  [attr.aria-pressed]="store.explodeActive()"
-                  [attr.aria-label]="
-                    store.explodeActive()
-                      ? 'Full trail path shown'
-                      : 'Show full trail path across sites'
-                  "
-                  (click)="store.explodeTrail()"
-                >
-                  <span aria-hidden="true">⤢</span>
-                  {{ store.explodeActive() ? 'Showing full path' : 'Show full trail path' }}
-                </button>
               </div>
             </section>
           }
@@ -951,19 +951,27 @@ import type {
       .trail-overlay-body[hidden] {
         display: none;
       }
+      /* "Show full path" TOGGLE — sits in the trail-overlay header, right next to the trail ref. The
+         PRESSED state (full path shown / view 4) is filled magenta; the unpressed state (view 3) is an
+         outline so the toggle reads as off-then-on at a glance. */
       .explode-trail {
         display: inline-flex;
         align-items: center;
-        gap: 0.3rem;
-        background: var(--trail-hl);
-        color: #ffffff;
+        gap: 0.25rem;
+        background: transparent;
+        color: var(--trail-hl);
         border: 1px solid var(--trail-hl);
         border-radius: 6px;
-        padding: 0.3rem 0.7rem;
+        padding: 0.2rem 0.55rem;
         cursor: pointer;
         font: inherit;
+        font-size: 0.78rem;
         font-weight: 600;
-        margin-top: 0.3rem;
+        white-space: nowrap;
+      }
+      .explode-trail.pressed {
+        background: var(--trail-hl);
+        color: #ffffff;
       }
       .explode-trail:hover,
       .explode-trail:focus-visible {

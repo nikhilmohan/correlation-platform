@@ -131,19 +131,38 @@ export class TopologyStore {
   private pendingObjectsSiteId: string | null = null;
 
   /**
-   * RESETTABLE FULL-PATH (operator feedback): a snapshot of the PURE in-site base graph, taken
-   * right after objectsAtSite seeds the graph (before ANY explode or node-expand). selectTrail
-   * (switching/re-selecting a trail) and clearTrail RESTORE the graph to this base so exploded
-   * full-path nodes (and expand reveals) do NOT persist across trails — selecting a different
-   * trail or clearing returns to the original in-site view. Copies of the seeded node/edge maps
-   * are kept (simplest + robust); the base node id set drives quick "is this a base node" checks.
+   * FOUR-VIEW STATE MODEL — the BASE snapshot of the pure in-site graph, taken right after
+   * objectsAtSite seeds the graph (before ANY explode or external-expand). It is the stable anchor:
+   * NOTHING (select / expand / explode / contract / clear) re-lays-out or re-fits the base — base
+   * node positions stay fixed across every transition (the component's rebuildAndLayout locks
+   * existing positions). The base id set drives quick "is this a base node" checks. Copies of the
+   * seeded node/edge maps are kept so later mutation can never alias the base.
+   *
+   * The view model is composed of THREE INDEPENDENT, ADDITIVE layers on top of this base:
+   *   1. DEFAULT SITE VIEW   = base only.
+   *   2. EXPAND-EXTERNAL     = base + nodes revealed via expandNode (tracked in expandedNodeIds;
+   *                            the actual added node ids are not separately tracked because external
+   *                            reveals are never auto-removed — only selectSite/collapseToRoot reset
+   *                            them).
+   *   3. TRAIL SELECTED      = base (UNCHANGED — no relayout, no add/remove) + magenta highlight of
+   *                            the selected trail's in-site members.
+   *   4. TRAIL EXPLODED      = TRAIL SELECTED + the trail's cross-site member nodes ADDED (tracked in
+   *                            trailExplodedNodeIds, so contract removes EXACTLY those).
+   * Layers 2 and 4 are independent: an external reveal is never torn down by trail explode/contract/
+   * clear, and a trail explode/contract never removes an externally-revealed node.
    */
   private baseNodeMap: ReadonlyMap<string, NodeDto> = new Map();
   private baseEdgeMap: ReadonlyMap<string, EdgeDto> = new Map();
   private baseNodeIds: ReadonlySet<string> = new Set();
 
+  /** TRAIL EXPLODED layer: the node ids THIS trail explosion added to the graph (cross-site members +
+   *  their pulled-in neighbours that were not already present). Contract removes EXACTLY these ids (and
+   *  their now-dangling edges), so the base and any independently-expanded external nodes are untouched.
+   *  Cleared on contract / clear / a switch to a different trail. */
+  private trailExplodedNodeIds: ReadonlySet<string> = new Set();
+
   /** True while the currently-selected trail has been EXPLODED to its full (cross-site) path. Drives
-   *  the explode-button pressed/label state; reset whenever the graph is restored to the base. */
+   *  the explode/contract TOGGLE pressed/label state; cleared on contract / clear / site change. */
   readonly explodeActive = signal<boolean>(false);
 
   readonly derivedNodes = computed<DerivedNode[]>(() => {
@@ -242,6 +261,7 @@ export class TopologyStore {
     this.baseNodeMap = new Map();
     this.baseEdgeMap = new Map();
     this.baseNodeIds = new Set();
+    this.trailExplodedNodeIds = new Set();
     this.explodeActive.set(false);
     this.nodeMap.set(new Map());
     this.edgeMap.set(new Map());
@@ -346,21 +366,38 @@ export class TopologyStore {
   }
 
   /**
-   * RESETTABLE FULL-PATH: restore the accumulating graph to the pure in-site BASE snapshot taken at
-   * site load — tearing down any trail explosion AND node-expand reveals so the view returns to the
-   * original in-site graph. Resets the expanded set + explode flag and recomputes the amber external
-   * cues against the restored base (so the always-on cues reappear on the base nodes). No-op before a
-   * base snapshot exists (e.g. selectSite's pre-seed clearTrail call) — selectSite owns the reset then.
+   * CONTRACT (view 4 → view 3): SUBTRACTIVE tear-down of THIS trail's explosion only. Removes
+   * EXACTLY the node ids the explode added (trailExplodedNodeIds) plus their now-dangling edges from
+   * the accumulating graph — and NOTHING else. Base nodes and independently-expanded external nodes
+   * (expandedNodeIds layer) are untouched, so contract is the precise inverse of explode and leaves
+   * the base pixel-identical to view 3 before the explode (the component re-locks surviving base
+   * positions and does not re-fit on a same-scope shrink). KEEPS selectedTrailId / selectedTrailDetail
+   * / trailMemberIds (stay in view 3, trail still selected + magenta-highlighted); clears the explode
+   * flag + the added-id tracking. No-op when nothing was exploded. The external amber cues are
+   * recomputed (a removed cross-site node may re-hide an external link, restoring a node's ↗ cue).
    */
-  private restoreBaseGraph(): void {
-    if (this.baseNodeIds.size === 0) {
+  private contractTrail(): void {
+    const added = this.trailExplodedNodeIds;
+    if (added.size === 0) {
       return;
     }
-    this.nodeMap.set(new Map(this.baseNodeMap));
-    this.edgeMap.set(new Map(this.baseEdgeMap));
-    this.expandedNodeIds.set(new Set());
-    this.capReached.set(false);
+    const nextNodes = new Map(this.nodeMap());
+    for (const id of added) {
+      nextNodes.delete(id);
+    }
+    // Drop edges that now dangle (an endpoint was removed). Edges between two surviving nodes stay.
+    const surviving = new Set(nextNodes.keys());
+    const nextEdges = new Map<string, EdgeDto>();
+    for (const [id, e] of this.edgeMap()) {
+      if (surviving.has(e.from) && surviving.has(e.to)) {
+        nextEdges.set(id, e);
+      }
+    }
+    this.nodeMap.set(nextNodes);
+    this.edgeMap.set(nextEdges);
+    this.trailExplodedNodeIds = new Set();
     this.explodeActive.set(false);
+    // Removing cross-site nodes may have re-hidden some external links (the ↗ cue should reappear).
     this.recomputeExternalCues();
   }
 
@@ -495,18 +532,24 @@ export class TopologyStore {
   }
 
   /**
-   * CHANGE 2b: SELECT a trail — HIGHLIGHT ONLY. Sets selectedTrailDetail + trailMemberIds (the full
-   * member set) so the IN-SITE portion of the trail lights up (cyan, via applyDecoration). It does
-   * NOT pull any off-site members in and does NOT relayout/zoom: the operator first sees the trail's
-   * in-site presence, then opts into the full cross-site path via explodeTrail(). The member set is
-   * sourced from getTrail (the TrailSummary list carries no members).
+   * VIEW 3 — TRAIL SELECTED (HIGHLIGHT-ONLY, ZERO graph mutation when nothing needs tearing down).
+   * Sets selectedTrailDetail + trailMemberIds (the full member set) so the IN-SITE portion of the
+   * trail lights up magenta via applyDecoration. It does NOT mutate nodeMap/edgeMap and does NOT
+   * relayout/zoom — the base looks PIXEL-IDENTICAL before/after select (the component's value-gated
+   * structure effect re-decorates only because the node id-set is unchanged). The operator then opts
+   * into the full cross-site path via the toggleFullPath() explode. The member set is sourced from
+   * getTrail (the TrailSummary list carries no members).
+   *
+   * The ONLY graph mutation here is the inverse-explode of a DIFFERENT trail that was previously
+   * EXPLODED: switching trails contracts the prior trail's added cross-site nodes first (so they
+   * don't persist under the newly-selected trail). If no trail was exploded, the graph is untouched.
    */
   selectTrail(trailId: string): void {
-    // RESETTABLE FULL-PATH: switching to (or re-selecting) a trail FIRST tears down any prior
-    // explosion/expand, restoring the pure in-site base graph — so the new trail starts from the
-    // clean in-site view and a previously-exploded trail's cross-site nodes do NOT persist. The
-    // new trail is then highlight-only until the operator explicitly explodes it.
-    this.restoreBaseGraph();
+    // Switching AWAY from a currently-exploded trail tears down that trail's added nodes only (the
+    // base + external reveals stay). Re-selecting the SAME already-exploded trail keeps its explosion.
+    if (this.explodeActive() && this.selectedTrailId() !== trailId) {
+      this.contractTrail();
+    }
     this.selectedTrailId.set(trailId);
     this.selectedObjectId.set(null);
     this.selectedEdgeId.set(null);
@@ -525,13 +568,18 @@ export class TopologyStore {
   }
 
   /**
-   * CHANGE 2c: EXPLODE the selected trail — pull every member not already in the graph (with its
-   * connecting edges) so the — possibly cross-site — full path actually renders + highlights. Uses
-   * the currently-selected trail's detail (set by selectTrail). Each missing member is synthesized as
-   * a node from its TrailMember (so the member itself is guaranteed present) AND its neighbours are
-   * fetched so its connecting edges (and the link to the rest of the path) come in. forkJoin the
-   * union so the merge runs once (one structureKey change → one relayout). No-op if no trail is
-   * selected or every member is already present.
+   * VIEW 3 → VIEW 4 — EXPLODE (additive) the selected trail. Pulls every member not already in the
+   * graph (with its connecting edges) so the — possibly cross-site — full path actually renders +
+   * highlights. Uses the currently-selected trail's detail (set by selectTrail). Each missing member
+   * is synthesized as a node from its TrailMember (so the member itself is guaranteed present) AND its
+   * neighbours are fetched so its connecting edges (and the link to the rest of the path) come in.
+   * forkJoin the union so the merge runs once (one structureKey change → one relayout that LOCKS the
+   * existing base positions, so only the new trail nodes are placed). No-op if no trail is selected or
+   * every member is already present.
+   *
+   * TRACKS the node ids THIS explode actually added (trailExplodedNodeIds) — only ids that were not
+   * already present and were actually merged (cap-respecting) — so contract removes EXACTLY those and
+   * leaves the base + external reveals intact.
    */
   explodeTrail(): void {
     const detail = this.selectedTrailDetail();
@@ -564,24 +612,60 @@ export class TopologyStore {
           edges.push(n.via);
         }
       }
-      this.mergeGraph(nodes, edges);
-      // Mark the active trail as exploded (resettable full-path); restoring the base resets this.
+      // Compute which ids are genuinely NEW (not already present) BEFORE the merge, so we can track
+      // exactly what this explode added (for a precise contract). The merge is all-or-nothing at the
+      // cap; only record the added ids when the merge was actually applied.
+      const before = this.nodeMap();
+      const newlyAdded = new Set<string>();
+      for (const n of nodes) {
+        if (n && !before.has(n.managedObjectId)) {
+          newlyAdded.add(n.managedObjectId);
+        }
+      }
+      const merged = this.mergeGraph(nodes, edges);
+      if (!merged) {
+        return; // cap rejection (all-or-nothing) — nothing added, stay in view 3.
+      }
+      // Union with any ids a PRIOR partial explode of this same trail already added, so a re-explode
+      // (e.g. after a cap-freeing collapse) still tracks the full added set for contract.
+      const tracked = new Set(this.trailExplodedNodeIds);
+      for (const id of newlyAdded) {
+        tracked.add(id);
+      }
+      this.trailExplodedNodeIds = tracked;
       this.explodeActive.set(true);
       this.recomputeExternalCues();
     });
   }
 
   /**
-   * Clear the explicit trail exploration AND restore the pure in-site base graph (resettable
-   * full-path). Any exploded cross-site full-path nodes (and node-expand reveals) are torn down so
-   * the no-trail default view is exactly the original in-site graph, with the amber external cues
-   * recomputed against the restored base. The highlight selection is cleared.
+   * The single "show full path" TOGGLE wired to the on-canvas explode-trail button. When the selected
+   * trail is already exploded (view 4) it CONTRACTS back to view 3 (removes only this trail's added
+   * nodes, keeps the selection + highlight); otherwise it EXPLODES (view 3 → view 4). No-op when no
+   * trail is selected.
+   */
+  toggleFullPath(): void {
+    if (!this.selectedTrailId()) {
+      return;
+    }
+    if (this.explodeActive()) {
+      this.contractTrail();
+    } else {
+      this.explodeTrail();
+    }
+  }
+
+  /**
+   * DESELECT the trail (view 3/4 → default site view). Contracts any active trail explosion first
+   * (removes ONLY this trail's added cross-site nodes), then clears the selection + magenta highlight,
+   * returning to the base — OR base + external reveals, since the EXPAND-EXTERNAL layer is INDEPENDENT
+   * and is deliberately NOT torn down here (only selectSite/collapseToRoot reset external reveals).
    */
   clearTrail(): void {
+    this.contractTrail();
     this.selectedTrailId.set(null);
     this.selectedTrailDetail.set(null);
     this.trailMemberIds.set(new Set());
-    this.restoreBaseGraph();
   }
 
   activateTrail(trailId: string): void {
