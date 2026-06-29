@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Fiber span">
-  <path d="M3 18C7 18 7 6 12 6s5 12 9 12" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round"/>
-  <circle cx="3" cy="18" r="2" fill="#f59e0b"/>
-  <circle cx="21" cy="18" r="2" fill="#f59e0b"/>
-  <path d="M3 18C7 18 7 6 12 6" fill="none" stroke="#fde68a" stroke-width="0.8" stroke-linecap="round" opacity="0.8"/>
+  <!-- Optical fiber: twin intertwined strands between two optical connectors. -->
+  <path d="M4 17C8 17 8 7 12 7s4 10 8 10" fill="none" stroke="#f59e0b" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M4 7C8 7 8 17 12 17s4-10 8-10" fill="none" stroke="#fbbf24" stroke-width="1.8" stroke-linecap="round" opacity="0.9"/>
+  <rect x="1.5" y="5.5" width="3" height="13" rx="1" fill="#94a3b8"/>
+  <rect x="19.5" y="5.5" width="3" height="13" rx="1" fill="#94a3b8"/>
 </svg>
