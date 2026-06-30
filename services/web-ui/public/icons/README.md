@@ -6,34 +6,53 @@ design `## Icon asset design`).
 
 ## Source & license
 
-These icons are **original works authored in-repo** for this project. They are released
-under the **MIT License** (the same permissive license as the project), per the platform
-golden rule "only permissive open source license components (MIT, Apache 2.0, BSD, CC0)".
+These glyphs are **[Lucide](https://lucide.dev) icons**, released under the
+**ISC License** — a permissive OSI-approved license (functionally equivalent to MIT/BSD),
+which satisfies the platform golden rule "only permissive open source license components
+(MIT, Apache 2.0, BSD, ISC, CC0)". The Lucide SVG path data is copied verbatim into the
+per-file assets below and attributed in each file's comment header.
 
-No external icon pack, icon font, or CDN sprite is used. The icons are simple 24x24
-glyphs designed to read at node size on BOTH the dark and the light graph canvas.
+> Lucide — ISC License — https://lucide.dev — Copyright (c) the Lucide contributors.
 
-### v3 redesign (topology-v3)
+No icon font, no CDN sprite, and no runtime network request to lucide.dev is used: the
+path data is vendored as static 24×24 SVGs under `public/icons/` and served same-origin
+(see "Offline guarantee" below).
 
-The glyphs were redrawn as LITERAL network-equipment shapes so they read at a glance
-(operator feedback: the old router glyph read as a house/arrow):
+### Lucide redesign (build/web-ui-lucide-and-collapse)
 
-- `router` — rack-mount chassis (horizontal box, front port row + status LEDs)
-- `linecard` — vertical blade/card (gold connector edge + port slots)
-- `port` — single RJ/SFP socket (jack housing + contact pins)
-- `interface` — cable plug entering a socket with a bidirectional flow arrow
-- `ip-link` — two IP endpoints joined by a solid cable
-- `fiber-span` — twin optical strands between two connectors (distinct from ip-link)
-- `igp-adjacency` — two routers joined by a peering/adjacency arrow
-- `lsp` — MPLS label tag + arrow through a tunnel pipe
-- `vpn-service` — padlock over a cloud (secured service)
-- `srlg` — grouping bracket over shared links
-- `generic` — neutral chassis fallback
+Operator feedback was that the prior hand-drawn glyphs were not intuitive, so each device
+file now maps to a recognizable Lucide glyph:
 
-**Theme-neutral palette:** bodies use mid-slate `#64748b` with `#94a3b8` outlines and a
-`#cbd5e1`/`#e2e8f0` detail tone — all of which keep sufficient contrast against BOTH the
-dark (`#0f172a`) and the white light-theme graph canvas — plus saturated per-element
-accents (amber/blue/violet/green/pink). No pure-white-only fills (which vanish on white).
+| file | Lucide glyph |
+|---|---|
+| `router` | `router` |
+| `linecard` | `cpu` |
+| `port` | `ethernet-port` |
+| `interface` | `cable` |
+| `ip-link` | `spline` |
+| `fiber-span` | `cable` (tinted amber — distinct from `ip-link`) |
+| `igp-adjacency` | `waypoints` |
+| `lsp` | `route` |
+| `vpn-service` | `shield-check` |
+| `srlg` | `shield-alert` |
+| `generic` | `box` |
+
+`lsp` (route) and `igp-adjacency` (waypoints) are deliberately different glyphs so the two
+read as distinct element types.
+
+**Dual-theme legibility.** The node chip background is theme-driven — dark navy
+(`#0f172a`) in dark mode, white (`#ffffff`) in light mode — and the icon renders as a
+Cytoscape `background-image`, so it does NOT inherit any CSS `currentColor`. A single
+stroke colour cannot read on both a near-black and a white chip, so each SVG carries its
+own **slate-200 (`#e2e8f0`) rounded backing rect** with the Lucide glyph stroked in
+**slate-700 (`#334155`)** on top (amber `#b45309` for `fiber-span`). The slate-200 tile
+contrasts against BOTH the dark-navy and the white chip, and the slate-700 stroke contrasts
+against the slate-200 tile — so the glyph is clearly visible in either theme.
+
+**Fit in the box.** The viewBox stays `0 0 24 24`; the node style draws the icon at
+`background-width/height: 74%` (down from the prior 88%) so the slate backing tile sits as
+a comfortably-inset square inside the coloured-border node chip with padding, and the
+2px-stroke Lucide glyph is never clipped.
 
 ## Offline guarantee (AC 72)
 

@@ -1,13 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Router">
-  <!-- Rack-mount chassis: a horizontal device box with a row of front ports + status LEDs. -->
-  <rect x="2.5" y="7.5" width="19" height="9" rx="1.8" fill="#64748b" stroke="#94a3b8" stroke-width="1.4"/>
-  <rect x="2.5" y="7.5" width="19" height="3" rx="1.8" fill="#94a3b8" opacity="0.35"/>
-  <rect x="5" y="12" width="2.4" height="2.6" rx="0.5" fill="#0f172a" stroke="#cbd5e1" stroke-width="0.7"/>
-  <rect x="8" y="12" width="2.4" height="2.6" rx="0.5" fill="#0f172a" stroke="#cbd5e1" stroke-width="0.7"/>
-  <rect x="11" y="12" width="2.4" height="2.6" rx="0.5" fill="#0f172a" stroke="#cbd5e1" stroke-width="0.7"/>
-  <circle cx="16.6" cy="10" r="0.9" fill="#34d399"/>
-  <circle cx="19" cy="10" r="0.9" fill="#60a5fa"/>
-  <circle cx="16.6" cy="13.3" r="0.9" fill="#cbd5e1"/>
-  <circle cx="19" cy="13.3" r="0.9" fill="#cbd5e1"/>
-  <path d="M2.5 9.5h-1.3M2.5 14.5h-1.3M21.5 9.5h1.3M21.5 14.5h1.3" stroke="#94a3b8" stroke-width="1.2" stroke-linecap="round"/>
+  <!-- Lucide "router" (ISC License, https://lucide.dev). Glyph stroked slate-700 on a slate-200
+       rounded backing so it reads on BOTH the white (light) and dark-navy (dark) node chip. -->
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#e2e8f0"/>
+  <g fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect width="20" height="8" x="2" y="14" rx="2"/>
+    <path d="M6.01 18h.01"/>
+    <path d="M10.01 18h.01"/>
+    <path d="M15 10v4"/>
+    <path d="M17.84 7.17a4 4 0 0 0-5.66 0"/>
+    <path d="M20.66 4.34a8 8 0 0 0-11.31 0"/>
+  </g>
 </svg>
