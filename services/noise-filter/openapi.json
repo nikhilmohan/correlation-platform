@@ -1,0 +1,612 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Noise Filter \u2014 run-stats read API",
+    "description": "Read-only run-stats + observed-chatter signature API (Phase-2 telemetry).",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthModel"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Metrics",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/run-stats": {
+      "get": {
+        "summary": "List Run Stats",
+        "operationId": "list_run_stats_api_v1_run_stats_get",
+        "parameters": [
+          {
+            "name": "trailId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trailid"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStatsPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/run-stats/{run_id}": {
+      "get": {
+        "summary": "Get Run Stats",
+        "operationId": "get_run_stats_api_v1_run_stats__run_id__get",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunStatsRowModel"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/observed-chatter": {
+      "get": {
+        "summary": "List Observed Chatter",
+        "operationId": "list_observed_chatter_api_v1_observed_chatter_get",
+        "parameters": [
+          {
+            "name": "alarmType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Alarmtype"
+            }
+          },
+          {
+            "name": "trailId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Trailid"
+            }
+          },
+          {
+            "name": "minOccurrence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Minoccurrence"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservedChatterPage"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthModel": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "store": {
+            "type": "string",
+            "title": "Store",
+            "description": "run-stats store: ok | degraded"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "store"
+        ],
+        "title": "HealthModel"
+      },
+      "ObservedChatterPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ObservedChatterSignatureModel"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "ObservedChatterPage"
+      },
+      "ObservedChatterSignatureModel": {
+        "properties": {
+          "managedObjectId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managedobjectid"
+          },
+          "alarmType": {
+            "type": "string",
+            "title": "Alarmtype"
+          },
+          "eventType": {
+            "type": "string",
+            "title": "Eventtype"
+          },
+          "trailId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trailid"
+          },
+          "occurrenceCount": {
+            "type": "integer",
+            "title": "Occurrencecount"
+          },
+          "firstSeen": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Firstseen"
+          },
+          "lastSeen": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Lastseen"
+          }
+        },
+        "type": "object",
+        "required": [
+          "alarmType",
+          "eventType",
+          "occurrenceCount",
+          "firstSeen",
+          "lastSeen"
+        ],
+        "title": "ObservedChatterSignatureModel"
+      },
+      "RunStatsPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunStatsRowModel"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit"
+          },
+          "offset": {
+            "type": "integer",
+            "title": "Offset"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "RunStatsPage"
+      },
+      "RunStatsRowModel": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "runTimestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Runtimestamp"
+          },
+          "trailId": {
+            "type": "string",
+            "title": "Trailid"
+          },
+          "snapshotId": {
+            "type": "string",
+            "title": "Snapshotid"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "windowStart": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Windowstart"
+          },
+          "windowEnd": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Windowend"
+          },
+          "eps": {
+            "type": "number",
+            "title": "Eps"
+          },
+          "minSamples": {
+            "type": "integer",
+            "title": "Minsamples"
+          },
+          "windowSize": {
+            "type": "integer",
+            "title": "Windowsize"
+          },
+          "algorithm": {
+            "type": "string",
+            "title": "Algorithm"
+          },
+          "alarmsIn": {
+            "type": "integer",
+            "title": "Alarmsin"
+          },
+          "clustersFormed": {
+            "type": "integer",
+            "title": "Clustersformed"
+          },
+          "alarmsKept": {
+            "type": "integer",
+            "title": "Alarmskept"
+          },
+          "alarmsDropped": {
+            "type": "integer",
+            "title": "Alarmsdropped"
+          },
+          "noiseRatio": {
+            "type": "number",
+            "title": "Noiseratio"
+          },
+          "stormMaxClusterSize": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormmaxclustersize"
+          },
+          "stormReductionRatio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stormreductionratio"
+          },
+          "retentionVsOracle": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retentionvsoracle"
+          },
+          "hopFeatureEnabled": {
+            "type": "boolean",
+            "title": "Hopfeatureenabled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId",
+          "runTimestamp",
+          "trailId",
+          "snapshotId",
+          "windowStart",
+          "windowEnd",
+          "eps",
+          "minSamples",
+          "windowSize",
+          "algorithm",
+          "alarmsIn",
+          "clustersFormed",
+          "alarmsKept",
+          "alarmsDropped",
+          "noiseRatio",
+          "hopFeatureEnabled"
+        ],
+        "title": "RunStatsRowModel"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}
