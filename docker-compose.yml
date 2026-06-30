@@ -136,11 +136,51 @@ services:
     networks:
       - cp-net
 
+  # --- Noise Filter (Phase-2 DBSCAN storm reduction over alarms.enriched → transactions.clean).
+  #     Owns the PostgreSQL `noise_filter` schema (nf_run_stats + nf_observed_chatter); applies
+  #     its own yoyo migrations on startup. Consumes Knowledge/Topology/Trail-Builder via their
+  #     published APIs (config-switchable mock/real). Serves /health + /metrics + the read API. ---
+  noise-filter:
+    build:
+      context: .
+      dockerfile: services/noise-filter/Dockerfile
+    image: acp/noise-filter:dev
+    container_name: cp-noise-filter
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      # When kafka-init is added (topic catalog) the noise-filter must also depend on it
+      # (it never creates topics); add `kafka-init: { condition: service_completed_successfully }`.
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_CONSUMER_GROUP_ID: noise-filter-alarms.enriched
+      KNOWLEDGE_SERVICE_URL: http://knowledge:8080
+      KNOWLEDGE_CLIENT_MODE: real
+      TOPOLOGY_SERVICE_URL: http://topology:8080
+      TOPOLOGY_CLIENT_MODE: real
+      TRAIL_BUILDER_URL: http://trail-builder:8080
+      TRAIL_BUILDER_CLIENT_MODE: real
+      # Shared Postgres instance/database; NF writes ONLY its own `noise_filter` schema.
+      NOISE_FILTER_DB_URL: postgresql://correlation:correlation@postgres:5432/correlation
+      LOG_LEVEL: INFO
+      HTTP_PORT: "8080"
+    ports:
+      - "8086:8080"      # /health + /metrics + run-stats read API
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - cp-net
+
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
 #   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
-#   noise-filter, pattern-manager, correlation-engine, web-ui
+#   pattern-manager, correlation-engine, web-ui
 #
 #   Also deferred:
 #     - kafka-init: one-shot container creating the architecture.md topic catalog
