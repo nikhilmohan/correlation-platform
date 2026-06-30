@@ -124,7 +124,7 @@ describe('topology-v3 CHANGE 3 — magenta trail highlight + no zoom on select',
 });
 
 describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
-  it('the trail detail overlay renders INSIDE the canvas wrap (not below the graph)', async () => {
+  it('the trail reference renders in the TOP control row next to the trail-selector dropdown (BUG 2)', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     store.selectTrail('TR-7');
@@ -133,8 +133,15 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
 
     const overlay = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
     expect(overlay).not.toBeNull();
-    // It is a descendant of the .cy-wrap canvas container (on-canvas overlay), not a below-graph block.
-    expect(overlay.closest('.cy-wrap')).not.toBeNull();
+    // BUG 2 / #304 regression fix: the trail-ref chip lives in the top control row, beside the
+    // dropdown TOGGLE BUTTON. data-testid="trail-selector" is now the toggle BUTTON itself (so a
+    // test/user click opens the menu), not the wrapper — the chip is a SIBLING of it inside the
+    // shared .trail-control-row (data-testid="trail-control-row"), NOT a descendant of the button.
+    expect(overlay.closest('[data-testid="trail-control-row"]')).not.toBeNull();
+    expect(overlay.closest('.trail-control-row')).not.toBeNull();
+    const selector = fixture.nativeElement.querySelector('[data-testid="trail-selector"]') as HTMLElement;
+    expect(selector.tagName).toBe('BUTTON');
+    expect(overlay.contains(selector)).toBe(false);
   });
 
   it('the explode button lives on-canvas (inside .cy-wrap) and calls toggleFullPath', async () => {
@@ -152,7 +159,7 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
-  it('the SLIMMED overlay has NO per-member object rows — only the summary line + explode button', async () => {
+  it('the trail-ref chip has NO per-member object rows — only the summary tooltip + explode toggle', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     store.selectTrail('TR-7');
@@ -160,10 +167,11 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     fixture.detectChanges();
 
     const overlay = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
-    // Operator feedback: the raw managedObjectId member rows were removed.
+    // The raw managedObjectId member rows were removed.
     expect(overlay.querySelectorAll('[data-testid="trail-member"]').length).toBe(0);
-    // The slimmed overlay keeps the summary (member count) and the on-canvas explode action.
-    expect(overlay.textContent ?? '').toContain('members');
+    // The summary (member count) is carried in the chip's title tooltip; the explode toggle is present.
+    const summary = (overlay.querySelector('.trail-ref') as HTMLElement).getAttribute('title') ?? '';
+    expect(summary).toContain('members');
     expect(overlay.querySelector('[data-testid="explode-trail"]')).not.toBeNull();
   });
 
@@ -193,22 +201,20 @@ describe('topology-v3 CHANGE 5/6 — on-canvas trail overlay + explode', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="trail-detail"]')).toBeNull();
   });
 
-  it('the overlay collapse toggle hides the body but keeps the panel + close affordance', async () => {
+  it('the top trail-ref chip keeps a reachable clear-trail control next to the explode toggle (BUG 2)', async () => {
     const fixture = await mountSiteGraph();
     const store = TestBed.inject(TopologyStore);
     store.selectTrail('TR-7');
     await flush();
     fixture.detectChanges();
 
-    const collapse = fixture.nativeElement.querySelector('.trail-overlay-collapse') as HTMLButtonElement;
-    expect(collapse.getAttribute('aria-expanded')).toBe('true');
-    collapse.click();
-    fixture.detectChanges();
-    expect(collapse.getAttribute('aria-expanded')).toBe('false');
-    const body = fixture.nativeElement.querySelector('#trail-overlay-body') as HTMLElement;
-    expect(body.hasAttribute('hidden')).toBe(true);
-    // The panel + clear-trail close still exist.
-    expect(fixture.nativeElement.querySelector('[data-testid="trail-detail"]')).not.toBeNull();
+    const chip = fixture.nativeElement.querySelector('[data-testid="trail-detail"]') as HTMLElement;
+    expect(chip).not.toBeNull();
+    // Exactly one clear-trail control, and it lives inside the top chip next to the explode toggle.
+    const clears = fixture.nativeElement.querySelectorAll('[data-testid="clear-trail"]');
+    expect(clears.length).toBe(1);
+    expect(chip.querySelector('[data-testid="clear-trail"]')).not.toBeNull();
+    expect(chip.querySelector('[data-testid="explode-trail"]')).not.toBeNull();
   });
 });
 
