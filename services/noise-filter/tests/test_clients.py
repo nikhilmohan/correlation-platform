@@ -40,7 +40,7 @@ def test_topology_client_missing_attributes_returns_empty():
 
 @respx.mock
 def test_trail_builder_client_parses_members_edges_seed_snapshot():
-    respx.get(f"{TB}/api/v1/trails/t1").mock(
+    respx.get(f"{TB}/trails/t1").mock(
         return_value=httpx.Response(
             200,
             json={
@@ -66,7 +66,7 @@ def test_trail_builder_client_parses_members_edges_seed_snapshot():
 
 @respx.mock
 def test_trail_builder_client_handles_alt_edge_key_names():
-    respx.get(f"{TB}/api/v1/trails/t2").mock(
+    respx.get(f"{TB}/trails/t2").mock(
         return_value=httpx.Response(
             200,
             json={

@@ -20,13 +20,14 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from urllib.parse import quote
 
 import httpx
 import pytest
 import respx
 
 from noise_filter import app as app_mod
-from noise_filter.clients import FEATURE_CONFIG_RECORD_ID, MODEL_PARAMS_RECORD_ID
+from noise_filter.clients import MODEL_PARAMS_RECORD_ID, MODEL_PARAMS_RECORD_TYPE
 from noise_filter.config import FeatureSettings, ModelParams, Settings
 from noise_filter.metrics import Metrics
 from noise_filter.repository import (
@@ -338,21 +339,24 @@ async def test_serve_runs_http_and_consumer_concurrently_then_shuts_down(monkeyp
     metrics = Metrics()
 
     with respx.mock(assert_all_called=False) as router:
-        router.get(f"http://knowledge.test/api/v1/records/{MODEL_PARAMS_RECORD_ID}").mock(
+        mp_path = (
+            f"/domains/core-ip/{MODEL_PARAMS_RECORD_TYPE}/{quote(MODEL_PARAMS_RECORD_ID, safe='')}"
+        )
+        router.get(f"http://knowledge.test{mp_path}").mock(
             return_value=httpx.Response(
                 200,
                 json=_kn_envelope(
                     MODEL_PARAMS_RECORD_ID,
-                    {"eps": 1.0, "minSamples": 3, "windowSize": 600, "algorithm": "dbscan"},
-                ),
-            )
-        )
-        router.get(f"http://knowledge.test/api/v1/records/{FEATURE_CONFIG_RECORD_ID}").mock(
-            return_value=httpx.Response(
-                200,
-                json=_kn_envelope(
-                    FEATURE_CONFIG_RECORD_ID,
-                    {"attributeKeys": [], "hopDistanceEnabled": False},
+                    {
+                        "params": [
+                            {"key": "dbscan.epsilon", "value": 1.0},
+                            {"key": "dbscan.minSamples", "value": 3},
+                            {"key": "window.sizeSeconds", "value": 600},
+                            {"key": "feature.attributeKeys", "value": []},
+                            {"key": "feature.hopDistance.enabled", "value": False},
+                        ],
+                        "paramSet": "noise-filter",
+                    },
                 ),
             )
         )

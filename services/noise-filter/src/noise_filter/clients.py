@@ -9,11 +9,25 @@ IMPORTANT (recurring envelope bug): Knowledge record reads return a **RecordResp
 ``{ "recordId", "recordType", "version", "domain", "payload": {...} }``. Consumers MUST read
 ``.payload`` — never the top level. :meth:`KnowledgeClient.fetch_model_params` and
 :meth:`KnowledgeClient.fetch_feature_config` both unwrap ``payload`` explicitly.
+
+REAL Knowledge API (verified live against cp-knowledge ``/openapi.json``): records are served by
+the generic recordType route ``GET /domains/{domain}/{recordType}`` (a LIST of RecordResponse
+envelopes) and ``GET /domains/{domain}/{recordType}/{recordId}`` (one envelope; the recordId
+contains slashes and MUST be URL-encoded). The recordType path segment is **kebab-case**
+(``model-params``) even though the recordId carries the camelCase ``modelParams`` token. There is
+NO ``/api/v1/records/...`` route. The DBSCAN params live in the model-params record's
+``payload.params`` array as ``{key, value}`` entries (e.g. ``dbscan.epsilon``,
+``dbscan.minSamples``, ``window.sizeSeconds``) — NOT as flat top-level fields. The same record
+carries the feature toggles (``feature.attributeKeys``, ``feature.hopDistance.enabled``,
+``feature.objectTypeLayer.enabled``); there is no separate ``feature-config`` recordType (a
+``feature-config`` GET 400s), so feature config is derived from the model-params record with
+documented fallbacks for any absent knob.
 """
 
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -22,28 +36,58 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 
-# Knowledge recordIds (design: core-ip/modelParams/noise-filter).
+# Knowledge domain + recordType path segments (verified live). recordType is kebab-case in the
+# path even though the recordId token is camelCase.
+KNOWLEDGE_DOMAIN = "core-ip"
+MODEL_PARAMS_RECORD_TYPE = "model-params"
+# Full recordId of the noise-filter model-params record (carries the camelCase token + slashes).
 MODEL_PARAMS_RECORD_ID = "core-ip/modelParams/noise-filter"
-FEATURE_CONFIG_RECORD_ID = "core-ip/featureConfig/noise-filter"
+
+
+def _params_to_map(payload: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a Knowledge model-params ``payload.params`` array into a ``{key: value}`` map.
+
+    Real model-params payloads are ``{"params": [{"key", "value", ...}], "paramSet": ...}``.
+    Returns ``{}`` when no ``params`` array is present (caller applies documented fallbacks).
+    """
+    params = payload.get("params")
+    if not isinstance(params, list):
+        return {}
+    out: dict[str, Any] = {}
+    for entry in params:
+        if isinstance(entry, dict) and "key" in entry:
+            out[str(entry["key"])] = entry.get("value")
+    return out
 
 
 class KnowledgeClient:
     """Fetches DBSCAN model params + feature config from the Knowledge Service.
 
-    Both reads unwrap the RecordResponse ``payload`` envelope (recurring-bug guard).
+    Both reads target the real ``GET /domains/{domain}/{recordType}/{recordId}`` route and unwrap
+    the RecordResponse ``payload`` envelope (recurring-bug guard).
     """
 
     def __init__(self, base_url: str, *, timeout: float = 10.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
 
-    def _get_record_payload(self, record_id: str) -> dict[str, Any]:
-        """GET /api/v1/records/{recordId} and return the unwrapped ``payload`` map.
+    def _record_url(self, record_type: str, record_id: str) -> str:
+        """Build the live single-record URL ``/domains/{domain}/{recordType}/{recordId}``.
 
-        The Knowledge read API returns a RecordResponse ENVELOPE; the actual model-params /
-        feature-config content lives under ``payload`` (NOT at the top level).
+        The recordId contains slashes (``core-ip/modelParams/noise-filter``) so it MUST be fully
+        percent-encoded (``safe=""``) into a single path segment, or the router 404s.
         """
-        url = f"{self._base_url}/api/v1/records/{record_id}"
+        return (
+            f"{self._base_url}/domains/{KNOWLEDGE_DOMAIN}/{record_type}/{quote(record_id, safe='')}"
+        )
+
+    def _get_record_payload(self, record_type: str, record_id: str) -> dict[str, Any]:
+        """GET the single record and return the unwrapped ``payload`` map.
+
+        The Knowledge read API returns a RecordResponse ENVELOPE; the actual model-params content
+        lives under ``payload`` (NOT at the top level).
+        """
+        url = self._record_url(record_type, record_id)
         resp = httpx.get(url, timeout=self._timeout)
         resp.raise_for_status()
         body = resp.json()
@@ -58,27 +102,44 @@ class KnowledgeClient:
         return payload
 
     def fetch_model_params(self) -> ModelParams:
-        """Fetch + parse the DBSCAN model params from the RecordResponse payload."""
-        payload = self._get_record_payload(MODEL_PARAMS_RECORD_ID)
+        """Fetch + parse the DBSCAN model params from the RecordResponse payload.params array."""
+        payload = self._get_record_payload(MODEL_PARAMS_RECORD_TYPE, MODEL_PARAMS_RECORD_ID)
+        p = _params_to_map(payload)
         return ModelParams(
-            eps=float(payload["eps"]),
-            min_samples=int(payload["minSamples"]),
-            window_size_seconds=int(payload["windowSize"]),
-            algorithm=str(payload.get("algorithm", "dbscan")),
+            eps=float(p["dbscan.epsilon"]),
+            min_samples=int(p["dbscan.minSamples"]),
+            window_size_seconds=int(p["window.sizeSeconds"]),
+            algorithm=str(p.get("dbscan.algorithm", "dbscan")),
         )
 
     def fetch_feature_config(self) -> FeatureSettings:
-        """Fetch + parse the active feature config from the RecordResponse payload."""
-        payload = self._get_record_payload(FEATURE_CONFIG_RECORD_ID)
-        keys = payload.get("attributeKeys", []) or []
+        """Derive the active feature config from the model-params RecordResponse payload.
+
+        Feature toggles live in the same model-params record (there is no separate feature-config
+        recordType in the real Knowledge service); any absent knob falls back to the documented
+        default rather than crashing.
+        """
         defaults = FeatureSettings.fallback()
+        try:
+            payload = self._get_record_payload(MODEL_PARAMS_RECORD_TYPE, MODEL_PARAMS_RECORD_ID)
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("feature_config_fetch_failed_using_defaults", error=str(exc))
+            return defaults
+        p = _params_to_map(payload)
+        keys = p.get("feature.attributeKeys", []) or []
+        if not isinstance(keys, list):
+            keys = []
         return FeatureSettings(
             attribute_keys=tuple(str(k) for k in keys),
-            hop_distance_enabled=bool(payload.get("hopDistanceEnabled", False)),
-            hop_traversal_max_depth=int(payload.get("hopTraversalMaxDepth", 8)),
+            hop_distance_enabled=bool(p.get("feature.hopDistance.enabled", False)),
+            hop_traversal_max_depth=int(p.get("feature.hopTraversalMaxDepth", 8)),
             # Encoding knobs co-tuned with eps — Knowledge-authored, not code literals.
-            time_scale_seconds=float(payload.get("timeScaleSeconds", defaults.time_scale_seconds)),
-            categorical_weight=float(payload.get("categoricalWeight", defaults.categorical_weight)),
+            time_scale_seconds=float(
+                p.get("feature.timeScaleSeconds", defaults.time_scale_seconds)
+            ),
+            categorical_weight=float(
+                p.get("feature.categoricalWeight", defaults.categorical_weight)
+            ),
         )
 
 
@@ -137,8 +198,14 @@ class TrailBuilderClient:
         self._timeout = timeout
 
     def get_trail(self, trail_id: str) -> TrailContext:
-        """GET /api/v1/trails/{trailId} -> TrailContext (members, edges, seed, snapshotId)."""
-        url = f"{self._base_url}/api/v1/trails/{trail_id}"
+        """GET /trails/{trailId} -> TrailContext (members, edges, seed, snapshotId).
+
+        Real trail-builder serves NO ``/api/v1`` prefix (verified live: ``/trails/{trailId}``).
+        The live ``TrailDetail`` carries members + snapshotId (+ domain/igpArea/srlgGroup);
+        ``edges`` and ``seed`` are not in the contract, so the tolerant extraction below yields
+        empty/None.
+        """
+        url = f"{self._base_url}/trails/{quote(trail_id, safe='')}"
         resp = httpx.get(url, timeout=self._timeout)
         resp.raise_for_status()
         body = resp.json()

@@ -20,6 +20,7 @@ Marked ``integration`` (deselected by the unit gate; the integration stage runs 
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -34,8 +35,8 @@ from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 from noise_filter import app as app_mod  # noqa: E402
 from noise_filter.clients import (  # noqa: E402
-    FEATURE_CONFIG_RECORD_ID,
     MODEL_PARAMS_RECORD_ID,
+    MODEL_PARAMS_RECORD_TYPE,
 )
 from noise_filter.config import Settings  # noqa: E402
 from noise_filter.metrics import Metrics  # noqa: E402
@@ -87,21 +88,24 @@ async def test_real_entrypoint_serves_http_and_persists_to_postgres(monkeypatch)
         router = respx.mock(assert_all_called=False, assert_all_mocked=False)
         router.route(host="127.0.0.1").pass_through()
         router.route(host="localhost").pass_through()
-        router.get(f"{KNOWLEDGE_URL}/api/v1/records/{MODEL_PARAMS_RECORD_ID}").mock(
+        mp_path = (
+            f"/domains/core-ip/{MODEL_PARAMS_RECORD_TYPE}/{quote(MODEL_PARAMS_RECORD_ID, safe='')}"
+        )
+        router.get(f"{KNOWLEDGE_URL}{mp_path}").mock(
             return_value=httpx.Response(
                 200,
                 json=_envelope(
                     MODEL_PARAMS_RECORD_ID,
-                    {"eps": 1.0, "minSamples": 3, "windowSize": 600, "algorithm": "dbscan"},
-                ),
-            )
-        )
-        router.get(f"{KNOWLEDGE_URL}/api/v1/records/{FEATURE_CONFIG_RECORD_ID}").mock(
-            return_value=httpx.Response(
-                200,
-                json=_envelope(
-                    FEATURE_CONFIG_RECORD_ID,
-                    {"attributeKeys": [], "hopDistanceEnabled": False},
+                    {
+                        "params": [
+                            {"key": "dbscan.epsilon", "value": 1.0},
+                            {"key": "dbscan.minSamples", "value": 3},
+                            {"key": "window.sizeSeconds", "value": 600},
+                            {"key": "feature.attributeKeys", "value": []},
+                            {"key": "feature.hopDistance.enabled", "value": False},
+                        ],
+                        "paramSet": "noise-filter",
+                    },
                 ),
             )
         )
@@ -140,7 +144,7 @@ async def test_real_entrypoint_serves_http_and_persists_to_postgres(monkeypatch)
 
         # The real trail context is resolved over HTTP in the entrypoint; stub it via respx so
         # snapshotId resolves and a run-stats row (+ chatter) is produced.
-        router.get(url__regex=r"http://trail.test/api/v1/trails/.*").mock(
+        router.get(url__regex=r"http://trail.test/trails/.*").mock(
             return_value=httpx.Response(
                 200,
                 json={
