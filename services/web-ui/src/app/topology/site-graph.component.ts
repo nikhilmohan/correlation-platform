@@ -1198,8 +1198,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   /** CHANGE 3: readability floor for the FIRST/scope-grow auto-fit. A small site (a couple of device
    *  stacks) fits to a tiny scale; we never let the default first view drop below this zoom so the
    *  device boxes render legibly (matches the operator's readable-zoom screenshot). Larger graphs fit
-   *  above the floor and keep cy.fit's scale, so they never overflow. */
-  static readonly READABLE_ZOOM_FLOOR = 0.75;
+   *  above the floor and keep cy.fit's scale, so they never overflow.
+   *  Lowered from 0.75 → 0.52 (≈ 0.75 ÷ 1.2 ÷ 1.2, i.e. two zoom-out steps): the operator found
+   *  the default opened too zoomed-IN and routinely clicked zoom-out twice; this opens sites at the
+   *  comfortable level. The operator can still zoom in. */
+  static readonly READABLE_ZOOM_FLOOR = 0.52;
 
   private cytoscape: typeof cytoscape | null = null;
   private cy: CyCore | null = null;
