@@ -1,0 +1,76 @@
+# /config/rulesets.yaml — Enrichment-owned per-source ruleset configuration (NOT Knowledge).
+# Mounted at ENRICHMENT_RULESETS_FILE. Field mappings + filter parameters + base chatter list per
+# source. The MVP ships one profile (the core-ip `default`) plus nms-alpha / vendor-beta as
+# illustrative sources; the registry/selector/state-keying already support N profiles.
+defaultRuleset: default
+rulesets:
+  - source: default            # MANDATORY built-in fallback ruleset
+    fieldMapping:
+      defaultObjectType: Node
+      managedObjectIdTemplate: "{objectType}:{rawObjectId}"
+      severityMap: { "1": CRITICAL, "2": MAJOR, "3": MINOR, "4": WARNING, "5": CLEARED }
+      eventTypeMap: {}
+      probableCauseMap: {}
+      alarmTypeMap:
+        rawField: rawAlarmType
+        fallback: ReachabilityLoss
+        onUnmapped: default
+        values:
+          "1": ReachabilityLoss
+          "2": LinkDown
+          "3": InterfaceDown
+      vendorRawPassthrough: ["*"]
+    filterParams:
+      dedupWindow: 30s
+      selfClearHoldTime: 15s
+      flapN: 5
+      flapWindow: 60s
+      chatterList: []
+
+  - source: nms-alpha
+    fieldMapping:
+      defaultObjectType: Interface
+      managedObjectIdTemplate: "Interface:{ne}-{ifIndex}"
+      severityMap: { CRIT: CRITICAL, MAJ: MAJOR, MIN: MINOR, WARN: WARNING, CLR: CLEARED }
+      eventTypeMap: { LINK_DOWN: communicationsAlarm, LOS: communicationsAlarm }
+      probableCauseMap: { LINK_DOWN: linkDown, LOS: lossOfSignal }
+      alarmTypeMap:
+        rawField: rawEventType
+        fallback: ReachabilityLoss
+        onUnmapped: default
+        values:
+          LINK_DOWN: LinkDown
+          LOS: LOS
+          PORT_DOWN: PortDown
+          IF_DOWN: InterfaceDown
+      vendorRawPassthrough: ["ne", "ifIndex", "rawSeverity", "vendorCode"]
+    filterParams:
+      dedupWindow: 20s
+      selfClearHoldTime: 5s
+      flapN: 3
+      flapWindow: 45s
+      chatterList:
+        - { managedObjectId: "Interface:edge1-12", eventType: communicationsAlarm }
+
+  - source: vendor-beta
+    fieldMapping:
+      defaultObjectType: Port
+      managedObjectIdTemplate: "Port:{chassis}-{slot}-{port}"
+      severityMap: { P1: CRITICAL, P2: MAJOR, P3: MINOR, P4: WARNING, OK: CLEARED }
+      eventTypeMap: { "port-fault": equipmentAlarm, "card-fault": equipmentAlarm }
+      probableCauseMap: { "port-fault": equipmentMalfunction }
+      alarmTypeMap:
+        rawField: rawAlarmType
+        fallback: ReachabilityLoss
+        onUnmapped: default
+        values:
+          "port-fault": PortDown
+          "card-fault": FiberFault
+          "los": LOS
+      vendorRawPassthrough: ["chassis", "slot", "port", "code"]
+    filterParams:
+      dedupWindow: 60s
+      selfClearHoldTime: 120s
+      flapN: 8
+      flapWindow: 180s
+      chatterList: []
