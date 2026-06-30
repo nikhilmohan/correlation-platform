@@ -55,6 +55,25 @@ public final class TestRulesets {
                         Duration.ofSeconds(180), List.of()));
     }
 
+    /**
+     * flap-source: a source tuned for the full-pipeline flap test — a short self-clear hold (1s) so
+     * raises are released quickly into the flap stage, flapN=3 within a wide 300s window, and a tiny
+     * dedup window (1s) so distinct-state oscillation alarms are not collapsed. Field mapping mirrors
+     * nms-alpha (Interface objects, LINK_DOWN -> LinkDown).
+     */
+    public static Ruleset flapSource() {
+        return new Ruleset("flap-source", false,
+                new FieldMapping("Interface", "Interface:{ne}-{ifIndex}",
+                        Map.of("CRIT", "CRITICAL", "MAJ", "MAJOR", "MIN", "MINOR", "WARN", "WARNING",
+                                "CLR", "CLEARED"),
+                        Map.of("LINK_DOWN", "communicationsAlarm", "LOS", "communicationsAlarm"),
+                        Map.of("LINK_DOWN", "linkDown", "LOS", "lossOfSignal"),
+                        nmsAlphaAlarmTypeMap(),
+                        List.of("ne", "ifIndex", "rawSeverity")),
+                new FilterParams(Duration.ofSeconds(1), Duration.ofSeconds(1), 3,
+                        Duration.ofSeconds(300), List.of()));
+    }
+
     /** default: numeric severity, 30s/15s/flapN 5. */
     public static Ruleset defaultRuleset() {
         return new Ruleset("default", true,

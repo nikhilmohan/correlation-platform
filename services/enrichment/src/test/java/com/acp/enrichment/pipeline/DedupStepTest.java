@@ -56,6 +56,38 @@ class DedupStepTest {
     }
 
     @Test
+    void doesNotCollapseClearAgainstRaise() {
+        // B1: a raised and a cleared on the same (managedObjectId, eventType) are NOT identical
+        // alarms, so the clear must pass through dedup (state is part of the dedup key). Otherwise
+        // the clear is swallowed before self-clear/flap-damp can see it.
+        StepResult raise = step.apply(
+                alarm("Interface:edge1-1", "communicationsAlarm").withState(AlarmEvent.State.RAISED),
+                ruleset, Path.HISTORY);
+        clock.advance(Duration.ofSeconds(3)); // within the 20s dedup window
+        StepResult clear = step.apply(
+                alarm("Interface:edge1-1", "communicationsAlarm").withState(AlarmEvent.State.CLEARED),
+                ruleset, Path.HISTORY);
+
+        assertThat(raise).isInstanceOf(StepResult.Continue.class);
+        assertThat(clear).as("clear must not be deduped against the earlier raise")
+                .isInstanceOf(StepResult.Continue.class);
+    }
+
+    @Test
+    void stillCollapsesTwoIdenticalClears() {
+        // Two cleared alarms with the same key DO collapse (criterion 1 holds for any single state).
+        StepResult first = step.apply(
+                alarm("Interface:edge1-1", "communicationsAlarm").withState(AlarmEvent.State.CLEARED),
+                ruleset, Path.HISTORY);
+        StepResult second = step.apply(
+                alarm("Interface:edge1-1", "communicationsAlarm").withState(AlarmEvent.State.CLEARED),
+                ruleset, Path.HISTORY);
+
+        assertThat(first).isInstanceOf(StepResult.Continue.class);
+        assertThat(second).isInstanceOf(StepResult.Drop.class);
+    }
+
+    @Test
     void freshWindowAfterExpiryPassesAgain() {
         step.apply(alarm("Interface:edge1-1", "communicationsAlarm"), ruleset, Path.HISTORY);
         clock.advance(Duration.ofSeconds(21)); // past the 20s window

@@ -81,10 +81,12 @@ dependencyManagement {
     }
 }
 
-// Unit/contract tests (default). Integration tests (Testcontainers Kafka + real Spring Boot
-// context over real HTTP) are tagged "integration" and excluded from the fast unit run; they run
-// via the `integrationTest` task. The full `check`/`build` includes both so `./gradlew build` is
-// the single green gate (DoD).
+// Unit/contract tests (default). The integration test (embedded-Kafka + real Spring Boot context
+// over real HTTP — no Docker required) is tagged "integration" and excluded from the fast unit run;
+// it runs via the `integrationTest` task. The OpenAPI drift check is tagged "openapi-gen" and runs
+// via `verifyOpenApi`. BOTH are wired into `check` below (see `check.dependsOn`), so a plain
+// `./gradlew build` is the single green gate (DoD): unit tests + JaCoCo coverage + the
+// embedded-Kafka integration entrypoint test + the OpenAPI byte-drift verification.
 tasks.named('test', Test) {
     useJUnitPlatform {
         // Exclude the slow real-context tests from the fast unit gate: 'integration' (embedded
@@ -106,6 +108,8 @@ tasks.register('integrationTest', Test) {
 }
 
 // Regenerate the checked-in services/enrichment/openapi.json from the live springdoc surface.
+// Output is normalised (recursively key-sorted + static server URL) so it is byte-stable across
+// runs and the drift check below is meaningful.
 tasks.register('generateOpenApi', Test) {
     description = 'Boots the app and writes services/enrichment/openapi.json (springdoc 3.1).'
     group = 'documentation'
@@ -113,9 +117,26 @@ tasks.register('generateOpenApi', Test) {
         includeTags 'openapi-gen'
     }
     systemProperty 'enrichment.openapi-out', "${projectDir}/openapi.json"
+    systemProperty 'enrichment.openapi-verify', 'false'
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
     outputs.upToDateWhen { false }
+}
+
+// Verify the checked-in services/enrichment/openapi.json has not drifted from the live springdoc
+// surface (byte-identical after the same normalisation generateOpenApi applies). Wired into `check`.
+tasks.register('verifyOpenApi', Test) {
+    description = 'Fails the build if services/enrichment/openapi.json drifted from the served spec.'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'openapi-gen'
+    }
+    workingDir = projectDir
+    systemProperty 'enrichment.openapi-verify', 'true'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    outputs.upToDateWhen { false }
+    shouldRunAfter test
 }
 
 jacocoTestReport {
@@ -163,4 +184,8 @@ jacocoTestCoverageVerification {
     }
 }
 
+// The single green gate (DoD): `./gradlew build` runs unit tests + JaCoCo coverage AND the
+// embedded-Kafka integration entrypoint test AND the OpenAPI byte-drift verification.
 check.dependsOn jacocoTestCoverageVerification
+check.dependsOn integrationTest
+check.dependsOn verifyOpenApi

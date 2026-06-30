@@ -230,9 +230,20 @@ independently:
 
 | Store (in-memory) | Key | Value | Expiry |
 |---|---|---|---|
-| `DedupWindowStore` | `(path, source, managedObjectId, eventType)` | first-seen timestamp plus collapsed count | per-source dedup-window duration |
+| `DedupWindowStore` | `(path, source, managedObjectId, eventType, state)` | first-seen timestamp plus collapsed count | per-source dedup-window duration |
 | `SelfClearStore` | `(path, source, managedObjectId, eventType)` | pending raise timestamp plus the held raise alarm | per-source hold-time duration |
 | `FlapWindowStore` | `(path, source, managedObjectId, eventType)` | rolling oscillation count plus window-start timestamp plus first raise alarm | per-source flap-window duration |
+
+> **Dedup is state-aware; self-clear/flap are not — by design.** The `DedupWindowStore` key
+> includes the alarm `state` because the dedup stage count-collapses *repeated **identical** alarms*
+> (spec criterion 1 / task 3): a `raised` and a `cleared` on the same `(managedObjectId, eventType)`
+> are **not** identical and MUST NOT collapse together. If `state` were omitted, a `cleared` would be
+> dropped as a "duplicate" of an earlier `raised` and never reach the self-clear / flap stages,
+> defeating self-clear suppression (criterion 4) and flap-damping (criterion 3). The `SelfClearStore`
+> and `FlapWindowStore` keys deliberately **omit** `state` so they can correlate a raise with its
+> later clear (self-clear pairs the two; flap counts the oscillation across states). Criteria 1 and 2
+> are unaffected: two same-state duplicates still collapse, and two different `eventType`s still pass
+> separately.
 
 ```mermaid
 classDiagram
@@ -1097,12 +1108,24 @@ the Knowledge Service. There is no `KNOWLEDGE_*` config (removed from the prior 
 
 ## Build and run
 
-- **Build:** `./gradlew --no-daemon clean build` (Java 17 toolchain) — runs JUnit 5 unit/contract
-  tests with a WireMock Trail Builder stub, an embedded/Testcontainers Kafka, an in-test rulesets
-  file + temp chatter overlay, and `MockMvc` chatter-API tests; produces a runnable Spring Boot
-  jar. The build **regenerates and verifies the checked-in `services/enrichment/openapi.json`**
-  (springdoc) so the published chatter-API contract cannot drift. Depends on the published
-  `com.acp:event-model` jar.
+- **Build:** `./gradlew --no-daemon clean build` (Java 17 toolchain) is the single green gate (DoD).
+  `check` (and therefore `build`) wires in, in addition to the fast unit `test` task:
+  - **`test`** — JUnit 5 unit/contract tests with a WireMock Trail Builder stub, an in-test rulesets
+    file + temp chatter overlay, and `MockMvc` chatter-API tests, followed by JaCoCo coverage
+    verification (line gate 70%).
+  - **`integrationTest`** (tag `integration`) — the real deployed entrypoint test: boots the full
+    Spring Boot context against a **real in-JVM Kafka broker** (`@EmbeddedKafka` — no Docker
+    required, so it runs in CI) with a mounted rulesets file and a WireMock Trail Builder, then
+    asserts the HTTP server (Actuator + chatter API + `/openapi.json`) and the Kafka consumers run
+    concurrently and that an alarm produced to `alarms.history` is enriched onto `alarms.enriched`
+    over the real broker.
+  - **`verifyOpenApi`** (tag `openapi-gen`) — boots the context and asserts the served springdoc
+    document, after deterministic normalisation (recursively key-sorted + static placeholder server
+    URL), is **byte-identical** to the checked-in `services/enrichment/openapi.json`, failing the
+    build on drift. `generateOpenApi` regenerates that file with the same normalisation so it is
+    byte-stable across runs and the drift check is meaningful.
+
+  Produces a runnable Spring Boot jar. Depends on the published `com.acp:event-model` jar.
 - **Dockerfile (`eclipse-temurin:17-jdk` build stage, `:17-jre` runtime):** multi-stage — build
   stage runs `./gradlew build`, runtime stage copies the boot jar, exposes the HTTP port
   (chatter API, `/openapi.json`, Swagger UI, `/actuator/health`, `/actuator/prometheus`), and sets
