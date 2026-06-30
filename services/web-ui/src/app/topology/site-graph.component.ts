@@ -119,18 +119,26 @@ import type {
                List-view row control is the test/SR equivalent. -->
           <div class="cy-expand-layer" aria-hidden="false">
             @for (m of externalCueMarkers(); track m.id) {
+              <!-- DUAL-STATE on-node badge (per-node expand/collapse toggle). When the node is NOT
+                   expanded it is the amber "+" (↗) expand affordance; once expanded it flips to the
+                   blue-tinted "−" collapse affordance that removes ONLY that node's revealed external
+                   links. Keeps data-testid="expand-node" in BOTH states; aria-label reflects state.
+                   The "+" is cap-disabled; the "−" is never cap-disabled (collapsing always frees). -->
               <button
                 type="button"
                 class="cy-expand"
+                [class.collapse]="m.expanded"
                 data-testid="expand-node"
                 [style.left.px]="m.x"
                 [style.top.px]="m.y"
-                [disabled]="store.capReached()"
-                [attr.aria-label]="'Show external links for ' + m.name"
-                [attr.title]="'Show external links for ' + m.name"
-                (click)="store.expandNode(m.id)"
+                [disabled]="!m.expanded && store.capReached()"
+                [attr.aria-label]="
+                  (m.expanded ? 'Hide external links for ' : 'Show external links for ') + m.name
+                "
+                [attr.title]="(m.expanded ? 'Hide external links for ' : 'Show external links for ') + m.name"
+                (click)="m.expanded ? store.collapseNodeExternal(m.id) : store.expandNode(m.id)"
               >
-                <span aria-hidden="true">↗</span>
+                <span aria-hidden="true">{{ m.expanded ? '−' : '↗' }}</span>
               </button>
             }
           </div>
@@ -417,12 +425,16 @@ import type {
                   <button
                     type="button"
                     class="expand-btn"
+                    [class.collapse]="isNodeExpanded(node.managedObjectId)"
                     data-testid="expand-node"
-                    [disabled]="store.capReached()"
-                    [attr.aria-label]="'Expand neighbours of ' + (node.name ?? node.managedObjectId)"
-                    (click)="store.expandNode(node.managedObjectId)"
+                    [disabled]="!isNodeExpanded(node.managedObjectId) && store.capReached()"
+                    [attr.aria-label]="
+                      (isNodeExpanded(node.managedObjectId) ? 'Hide external links for ' : 'Expand neighbours of ') +
+                      (node.name ?? node.managedObjectId)
+                    "
+                    (click)="toggleNodeExternal(node.managedObjectId)"
                   >
-                    +expand
+                    {{ isNodeExpanded(node.managedObjectId) ? '−collapse' : '+expand' }}
                   </button>
                 </li>
               }
@@ -558,6 +570,20 @@ import type {
       .cy-expand:disabled {
         opacity: 0.4;
         cursor: not-allowed;
+      }
+      /* Per-node toggle "−" (collapse) state — a muted BLUE badge, distinct from the amber "+"
+         (expand) state, so the operator reads at a glance whether a node will expand or collapse.
+         Uses theme accent tokens so it reads clearly in both light and dark themes. */
+      .cy-expand.collapse {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #ffffff;
+      }
+      .cy-expand.collapse:hover:not(:disabled),
+      .cy-expand.collapse:focus-visible:not(:disabled) {
+        box-shadow:
+          0 0 0 2px var(--graph-bg),
+          0 0 0 4px color-mix(in srgb, var(--accent) 50%, transparent);
       }
       /* CHANGE 1: the self-explanatory cue hint shown beneath the layer/site legends. */
       .cue-hint {
@@ -761,6 +787,12 @@ import type {
       .expand-btn:disabled {
         opacity: 0.5;
         cursor: not-allowed;
+      }
+      /* List-view per-row "−collapse" state mirrors the canvas badge's blue collapse tint. */
+      .expand-btn.collapse {
+        color: #ffffff;
+        background: var(--accent);
+        border-color: var(--accent);
       }
       .obj.selected {
         border-color: var(--accent);
@@ -1195,13 +1227,34 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
    *  (no real Cytoscape render) — there the accessible list-row control is the equivalent. */
   readonly overlayMarkers = signal<ReadonlyArray<{ id: string; name: string; x: number; y: number }>>([]);
 
-  /** CHANGE 1: the overlay markers FILTERED to only the nodes that have hidden OFF-SITE links
-   *  (store.externalLinkNodeIds). The amber ↗ cue renders for these alone — nodes with nothing
-   *  external (leaves / fully-revealed) get no cue. */
+  /** CHANGE 1 + per-node toggle: the overlay markers FILTERED to the nodes that should show the
+   *  on-node badge. A node shows the badge when EITHER it still has hidden OFF-SITE links
+   *  (store.externalLinkNodeIds — the "+" expand affordance) OR it is currently expanded
+   *  (store.expandedNodeIds — so the "−" collapse affordance stays available even though its amber
+   *  cue would otherwise have dropped once its neighbours were revealed). Each marker carries an
+   *  `expanded` flag so the template can render + vs − and wire the right click handler. */
   readonly externalCueMarkers = computed(() => {
     const external = this.store.externalLinkNodeIds();
-    return this.overlayMarkers().filter((m) => external.has(m.id));
+    const expanded = this.store.expandedNodeIds();
+    return this.overlayMarkers()
+      .filter((m) => external.has(m.id) || expanded.has(m.id))
+      .map((m) => ({ ...m, expanded: expanded.has(m.id) }));
   });
+
+  /** Per-node toggle helper for the accessible list-view row button (and any other dual-state UI):
+   *  true when this node is currently expanded, so its control should render as a "−"/collapse. */
+  isNodeExpanded(managedObjectId: string): boolean {
+    return this.store.expandedNodeIds().has(managedObjectId);
+  }
+
+  /** Toggle a single node's external reveal: collapse if currently expanded, otherwise expand. */
+  toggleNodeExternal(managedObjectId: string): void {
+    if (this.store.expandedNodeIds().has(managedObjectId)) {
+      this.store.collapseNodeExternal(managedObjectId);
+    } else {
+      this.store.expandNode(managedObjectId);
+    }
+  }
 
   /** True once the deterministic layout has settled at least once (bridged to data-cy-layout-done). */
   readonly layoutDone = signal(false);
