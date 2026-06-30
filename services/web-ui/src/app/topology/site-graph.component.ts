@@ -1505,12 +1505,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           // The glyph IMAGE stays fully opaque; the node BODY fill is transparent (no plate).
           'background-image-opacity': 1,
           // CHANGE 3: NO light plate — the chip body fill is fully transparent (background-opacity 0)
-          // so the glyph sits directly on the graph canvas. CHANGE 1: glyph at ~70% of the box (was
-          // 90%) so the stroke (router antenna / interface plug) sits FULLY inside the grey box with
-          // clear padding, never clipped. The box is a uniform GREY OUTLINE (--node-outline), ~3px
-          // (was a 4px layer colour); the layer is now shown by a small accent dot overlay.
-          'background-width': '70%',
-          'background-height': '70%',
+          // so the glyph sits directly on the graph canvas. CHANGE 1: glyph at ~55% of the box (was
+          // 70%) so the stroke (router antenna / interface plug) sits FULLY inside the grey box with
+          // clear empty padding around it, never clipped. The box is a uniform GREY OUTLINE
+          // (--node-outline), ~3px (was a 4px layer colour); the layer is now shown by a small accent dot overlay.
+          'background-width': '55%',
+          'background-height': '55%',
           'background-color': canvasBg,
           'background-opacity': 0,
           'border-color': nodeOutline,
