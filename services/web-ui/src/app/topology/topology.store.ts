@@ -67,8 +67,19 @@ export class TopologyStore {
   readonly visibleLayers = signal<ReadonlySet<LogicalLayer>>(new Set(ALL_LAYERS));
   readonly selectedObjectId = signal<string | null>(null);
   readonly selectedEdgeId = signal<string | null>(null);
-  /** Ids of nodes the operator has already expanded (so the +expand affordance can reflect state). */
+  /** Ids of nodes the operator has already expanded (so the +expand affordance can reflect state).
+   *  Note: this holds the SOURCE node ids that were expanded, NOT the revealed neighbours. */
   readonly expandedNodeIds = signal<ReadonlySet<string>>(new Set());
+
+  /**
+   * CHANGE 2: the set of node ids that were NEWLY REVEALED by an external expandNode() (the off-site
+   * neighbours pulled in, not the source node that was already present). This is the EXPAND-EXTERNAL
+   * layer's added-id tracking — the precise inverse set that collapseExternal() removes, mirroring
+   * trailExplodedNodeIds for the trail layer. Empty until the operator reveals an external link;
+   * cleared on selectSite/collapseToRoot and on collapseExternal(). Drives the "Hide external links"
+   * control's visibility (shown only while this is non-empty).
+   */
+  readonly externalRevealedNodeIds = signal<ReadonlySet<string>>(new Set());
 
   /**
    * CHANGE 1: in-site device ids that have at least one OFF-SITE neighbour (a hidden external link).
@@ -140,10 +151,11 @@ export class TopologyStore {
    *
    * The view model is composed of THREE INDEPENDENT, ADDITIVE layers on top of this base:
    *   1. DEFAULT SITE VIEW   = base only.
-   *   2. EXPAND-EXTERNAL     = base + nodes revealed via expandNode (tracked in expandedNodeIds;
-   *                            the actual added node ids are not separately tracked because external
-   *                            reveals are never auto-removed — only selectSite/collapseToRoot reset
-   *                            them).
+   *   2. EXPAND-EXTERNAL     = base + nodes revealed via expandNode. The SOURCE node ids that were
+   *                            expanded are tracked in expandedNodeIds; the actual REVEALED neighbour
+   *                            ids are tracked in externalRevealedNodeIds so collapseExternal() can
+   *                            remove EXACTLY those (the precise inverse of the reveals), leaving the
+   *                            base + trail layers untouched.
    *   3. TRAIL SELECTED      = base (UNCHANGED — no relayout, no add/remove) + magenta highlight of
    *                            the selected trail's in-site members.
    *   4. TRAIL EXPLODED      = TRAIL SELECTED + the trail's cross-site member nodes ADDED (tracked in
@@ -268,6 +280,7 @@ export class TopologyStore {
     this.selectedObjectId.set(null);
     this.selectedEdgeId.set(null);
     this.expandedNodeIds.set(new Set());
+    this.externalRevealedNodeIds.set(new Set());
     this.capReached.set(false);
     this.highlightedTrailIds.set(new Set());
     this.externalLinkNodeIds.set(new Set());
@@ -401,6 +414,54 @@ export class TopologyStore {
     this.recomputeExternalCues();
   }
 
+  /**
+   * CHANGE 2: COLLAPSE the EXPAND-EXTERNAL layer only. SUBTRACTIVE tear-down of exactly the nodes the
+   * external reveals added (externalRevealedNodeIds) plus their now-dangling edges — and NOTHING else.
+   * This mirrors contractTrail() for the external layer: the base and any active trail explosion are
+   * untouched. To stay strictly additive-safe a revealed id is KEPT if it also belongs to the base or
+   * to the current trail explosion (so an overlapping node that another layer still owns is never
+   * yanked out from under it). Clears externalRevealedNodeIds + expandedNodeIds (no external link is
+   * revealed anymore), then recomputes the amber cues so revealed-then-collapsed nodes regain their ↗.
+   * No-op when nothing was revealed. The base layout stays pixel-stable (a node-set shrink; surviving
+   * nodes keep their prevPos, no re-fit).
+   */
+  collapseExternal(): void {
+    const revealed = this.externalRevealedNodeIds();
+    if (revealed.size === 0) {
+      return;
+    }
+    // Only remove ids this layer alone owns: never a base node, never a node the active trail
+    // explosion added (those belong to other additive layers and must survive).
+    const toRemove = new Set<string>();
+    for (const id of revealed) {
+      if (this.baseNodeIds.has(id) || this.trailExplodedNodeIds.has(id)) {
+        continue;
+      }
+      toRemove.add(id);
+    }
+    if (toRemove.size > 0) {
+      const nextNodes = new Map(this.nodeMap());
+      for (const id of toRemove) {
+        nextNodes.delete(id);
+      }
+      // Drop edges that now dangle (an endpoint was removed); edges between two survivors stay.
+      const surviving = new Set(nextNodes.keys());
+      const nextEdges = new Map<string, EdgeDto>();
+      for (const [id, e] of this.edgeMap()) {
+        if (surviving.has(e.from) && surviving.has(e.to)) {
+          nextEdges.set(id, e);
+        }
+      }
+      this.nodeMap.set(nextNodes);
+      this.edgeMap.set(nextEdges);
+    }
+    // The external layer is fully torn down regardless of whether some overlapping ids survived.
+    this.externalRevealedNodeIds.set(new Set());
+    this.expandedNodeIds.set(new Set());
+    // Re-hiding the off-site nodes restores the amber ↗ cue on the nodes that linked to them.
+    this.recomputeExternalCues();
+  }
+
   /** Re-root the graph at the current site, discarding all expansions (the "Reset" affordance). */
   collapseToRoot(): void {
     const siteId = this.selectedSiteId();
@@ -424,8 +485,20 @@ export class TopologyStore {
         if (!res) {
           return;
         }
+        const nodes = res.neighbors.map((n) => n.node);
+        // CHANGE 2: capture which neighbour node ids are genuinely NEW (not already present) BEFORE the
+        // merge, so collapseExternal() can later remove EXACTLY the ids this reveal added (the precise
+        // inverse), leaving base + trail layers intact. The merge is all-or-nothing at the cap; only
+        // record the added ids when the merge actually applied.
+        const before = this.nodeMap();
+        const newlyRevealed = new Set<string>();
+        for (const n of nodes) {
+          if (n && !before.has(n.managedObjectId)) {
+            newlyRevealed.add(n.managedObjectId);
+          }
+        }
         const merged = this.mergeGraph(
-          res.neighbors.map((n) => n.node),
+          nodes,
           res.neighbors.map((n) => n.via),
         );
         // Only mark the node expanded when the expansion was actually applied; an all-or-nothing
@@ -434,6 +507,13 @@ export class TopologyStore {
           const next = new Set(this.expandedNodeIds());
           next.add(managedObjectId);
           this.expandedNodeIds.set(next);
+          // CHANGE 2: accumulate the revealed-neighbour ids across successive expands so a later
+          // collapseExternal removes the full set this layer added.
+          const revealed = new Set(this.externalRevealedNodeIds());
+          for (const id of newlyRevealed) {
+            revealed.add(id);
+          }
+          this.externalRevealedNodeIds.set(revealed);
           // CHANGE 1: revealing neighbours may have pulled in a node's off-site links — drop the cue
           // from any node whose external neighbours are now all present.
           this.recomputeExternalCues();

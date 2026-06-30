@@ -1,7 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Interface">
-  <!-- A cable PLUG entering a socket — a network interface (bidirectional connector). -->
-  <rect x="13" y="9" width="8" height="6" rx="1.2" fill="#64748b" stroke="#94a3b8" stroke-width="1.4"/>
-  <path d="M13 10.5h-3v3h3" fill="#0f172a" stroke="#cbd5e1" stroke-width="0.9" stroke-linejoin="round"/>
-  <path d="M16.5 9V7.2" stroke="#94a3b8" stroke-width="1.2" stroke-linecap="round"/>
-  <path d="M9.5 12H3.5M6 9.5L3.5 12l2.5 2.5" fill="none" stroke="#60a5fa" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Lucide "cable" (ISC License, https://lucide.dev). Slate-700 glyph on a slate-200 backing for
+       dual-theme legibility on the node chip. -->
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#e2e8f0"/>
+  <g fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M17 21v-2a1 1 0 0 1-1-1v-1a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1a1 1 0 0 1-1 1"/>
+    <path d="M19 15V6.5a1 1 0 0 0-7 0v11a1 1 0 0 1-7 0V9"/>
+    <path d="M21 21v-2h-4"/>
+    <path d="M3 5h4V3"/>
+    <path d="M7 5a1 1 0 0 1 1 1v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1z"/>
+  </g>
 </svg>
