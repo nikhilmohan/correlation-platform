@@ -1383,6 +1383,13 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // CHANGE 4: the GRAPH canvas backdrop is now the app surface (--graph-bg), so the chip fill and
     // the label text-outline match the canvas and the node labels stay legible on the lighter bg.
     const canvasBg = this.cssVar('--graph-bg') || this.cssVar('--canvas-bg') || '#0f172a';
+    // DEVICE-NODE ICON PLATE: a FIXED LIGHT tile behind every glyph that does NOT flip per theme, so
+    // the dark-slate glyph always reads (a dark glyph on the dark-navy --graph-bg chip was invisible
+    // in dark theme). --node-plate is defined identically in :root and [data-theme=light], so this
+    // value is light in both themes. The node keeps its layer-coloured border + the label below the
+    // node stays on the canvas (--text / canvasBg outline), so dark-on-light glyph + light-on-dark
+    // label both read.
+    const nodePlate = this.cssVar('--node-plate') || '#f1f5f9';
     const text = this.cssVar('--text') || '#f1f5f9';
     const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
@@ -1420,15 +1427,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           'background-fit': 'contain',
           'background-clip': 'none',
           'background-opacity': 1,
-          // CHANGE 1 (Lucide icons): each glyph is now a TRANSPARENT Lucide stroke over a faint inset
-          // slate chip (the old full-viewport opaque grey backing rect was removed — it made the icon
-          // read as an oversized box). The node's coloured-border chip is the real background, so we
-          // sit the glyph at ~60% of the node box — centered (default position) with comfortable
-          // padding all round, contained so the stroke is never clipped, and the layer-coloured
-          // border frames it cleanly on both light and dark themes. (Was 74% with the old box rect.)
+          // ICON PLATE: each glyph is a TRANSPARENT dark-slate Lucide stroke drawn over a FIXED LIGHT
+          // chip (--node-plate, light in BOTH themes). The plate provides the contrast, so the faint
+          // inset slate rect was removed from the SVGs (the glyph is now clean on the light plate). We
+          // sit the glyph at ~60% of the node box — centered with comfortable padding, contained so
+          // the stroke is never clipped, and the layer-coloured border frames it as a device badge.
           'background-width': '60%',
           'background-height': '60%',
-          'background-color': canvasBg,
+          'background-color': nodePlate,
           'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
           'border-width': 4,
           shape: 'round-rectangle',

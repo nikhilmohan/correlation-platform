@@ -25,6 +25,11 @@
      (operator feedback — the old grey --canvas-bg read as a grey block). Read by buildCyStyle
      via cssVar so a theme flip re-themes the canvas; node chips/labels stay legible against it. */
   --graph-bg: #0f172a;
+  /* DEVICE-NODE ICON PLATE: the fixed LIGHT tile that sits behind every device glyph in the site
+     graph. Deliberately the SAME light value in BOTH themes (it does NOT flip) so the dark-slate
+     icon glyph always reads — a dark glyph on the dark-navy --graph-bg was near-invisible. The node
+     keeps its layer-coloured border; the label below the node stays on the canvas (--text). */
+  --node-plate: #f1f5f9;
   /* A larger, AMBER outward-arrow "extends externally" node cue (CHANGE 1) — works in both themes. */
   --expand-cue: #f59e0b;
   /* HOT MAGENTA trail highlight (topology-v3 CHANGE 3) — deliberately distinct from the layer
@@ -53,6 +58,8 @@
   --canvas-bg: #e2e8f0;
   /* Light: the graph canvas blends with the white page surface (no grey block). */
   --graph-bg: #ffffff;
+  /* Icon plate stays the SAME light value as dark (does NOT flip) — keeps the dark glyph legible. */
+  --node-plate: #f1f5f9;
   --expand-cue: #b45309; /* darker amber for AA contrast on the white light-theme canvas */
   --trail-hl: #db2777; /* slightly deeper magenta for AA contrast on the white light-theme canvas */
   --error-bg: #fee2e2;
