@@ -2,15 +2,28 @@
 
 Subcommands:
   (default)  apply migrations + run the consume loop + HTTP server.
-  migrate    apply yoyo migrations only (idempotent) then exit.
+  migrate    apply schema migrations only (idempotent, over asyncpg) then exit.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from .config import Settings
-from .migrate import apply_migrations
+from .migrate import apply_migrations_asyncpg
+
+
+async def _migrate(db_url: str) -> None:
+    import asyncpg
+
+    from .app import _asyncpg_url
+
+    pool = await asyncpg.create_pool(_asyncpg_url(db_url))
+    try:
+        await apply_migrations_asyncpg(pool)
+    finally:
+        await pool.close()
 
 
 def main() -> None:  # pragma: no cover - process entrypoint
@@ -18,7 +31,7 @@ def main() -> None:  # pragma: no cover - process entrypoint
         settings = Settings()
         if not settings.noise_filter_db_url:
             raise SystemExit("NOISE_FILTER_DB_URL is required for migrate")
-        apply_migrations(settings.noise_filter_db_url)
+        asyncio.run(_migrate(settings.noise_filter_db_url))
         return
     from .app import main as run_main
 

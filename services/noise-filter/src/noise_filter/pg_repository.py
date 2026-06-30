@@ -138,9 +138,14 @@ class PgObservedChatterRepository:
         self._pool = pool
 
     async def upsert_signature(self, sig: ChatterSignature) -> None:
-        # Two conflict targets depending on NULL managedObjectId (partial unique indexes).
+        # Two conflict targets depending on NULL managedObjectId. Both indexes are PARTIAL, so the
+        # ON CONFLICT inference MUST repeat each index's WHERE predicate or Postgres cannot match it
+        # ("no unique or exclusion constraint matching the ON CONFLICT specification").
         if sig.managed_object_id is not None:
-            conflict = "(managed_object_id, alarm_type, event_type, trail_id)"
+            conflict = (
+                "(managed_object_id, alarm_type, event_type, trail_id) "
+                "WHERE managed_object_id IS NOT NULL"
+            )
         else:
             conflict = "(alarm_type, event_type, trail_id) WHERE managed_object_id IS NULL"
         sql = (

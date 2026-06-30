@@ -89,11 +89,22 @@ class FeatureSettings:
     ``attribute_keys`` is the ordered set of device/connection attribute keys to add as feature
     dimensions (e.g. ``equipmentType``); empty => no Topology call. ``hop_distance_enabled``
     toggles the single soft hop-distance dimension; when off, no Trail Builder hop call is made.
+
+    ``time_scale_seconds`` and ``categorical_weight`` are the feature *encoding* knobs (design:
+    "per-key encoding" lives in the feature config). They co-tune the relative-timestamp axis vs.
+    the categorical/ordinal axes against ``eps`` and so MUST be authored alongside it in the
+    Knowledge feature-config record — they are NOT hidden code literals. The relative timestamp is
+    divided by ``time_scale_seconds`` (so a storm tight within tens of seconds maps to a small
+    distance) and the categorical/ordinal dims are multiplied by ``categorical_weight`` so they
+    NUDGE cluster density without dominating the primary temporal axis. The values below are only
+    the documented last-resort fallback used when Knowledge is unreachable.
     """
 
     attribute_keys: tuple[str, ...] = ()
     hop_distance_enabled: bool = False
     hop_traversal_max_depth: int = 8
+    time_scale_seconds: float = 10.0
+    categorical_weight: float = 0.3
 
     @staticmethod
     def fallback() -> FeatureSettings:

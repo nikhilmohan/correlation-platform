@@ -50,8 +50,8 @@ never blocks `transactions.clean` emission.
 ```sh
 pip install -e '.[dev]'            # installs acp-event-model + service deps
 ruff check . && black --check .    # lint + format gate
-pytest                             # unit/contract suite (in-memory store stand-ins)
-pytest -m integration --run-integration   # Testcontainers Postgres tests (needs Docker)
+pytest                             # unit/contract suite (in-memory store stand-ins; integration deselected)
+pytest -m integration -o addopts=""   # Testcontainers Postgres + real-entrypoint tests (needs Docker)
 ```
 
 Regenerate the published OpenAPI artifact after any API change:

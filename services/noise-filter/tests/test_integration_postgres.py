@@ -16,7 +16,7 @@ asyncpg = pytest.importorskip("asyncpg")
 testcontainers_postgres = pytest.importorskip("testcontainers.postgres")
 from testcontainers.postgres import PostgresContainer  # noqa: E402
 
-from noise_filter.migrate import apply_migrations  # noqa: E402
+from noise_filter.migrate import apply_migrations_asyncpg  # noqa: E402
 from noise_filter.pg_repository import (  # noqa: E402
     PgObservedChatterRepository,
     PgRunStatsRepository,
@@ -30,15 +30,15 @@ from .test_pg_repository import _row  # noqa: E402
 def pg_url():
     with PostgresContainer("postgres:16-alpine") as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql://")
-        apply_migrations(url)
-        # Re-apply to prove idempotency (DA-15).
-        apply_migrations(url)
         yield url
 
 
 @pytest.fixture
 async def pool(pg_url):
     p = await asyncpg.create_pool(pg_url)
+    # Apply migrations over the asyncpg pool (permissive-only; no psycopg2). Twice => idempotent.
+    await apply_migrations_asyncpg(p)
+    await apply_migrations_asyncpg(p)
     yield p
     await p.close()
 

@@ -66,6 +66,40 @@ def test_attribute_feature_config_driven_inclusion_and_exclusion(metrics):
     assert len(respx.calls) == calls_after_enabled  # no new Topology calls when disabled
 
 
+def test_encoding_scales_come_from_feature_config_not_literals(metrics):
+    """M1: time_scale_seconds + categorical_weight are read from FeatureSettings (config), so the
+    same alarms vectorized with different config knobs yield different scaled values."""
+    # Distinct severities -> distinct, vocab-INDEPENDENT severity ordinals (critical=5, warning=2),
+    # so the severity column cleanly reflects categorical_weight without vocab re-indexing effects.
+    alarms = [
+        make_alarm(
+            alarm_id="a1",
+            perceived_severity="critical",  # ordinal 5
+            raised_offset_seconds=0.0,
+        ),
+        make_alarm(
+            alarm_id="a2",
+            perceived_severity="warning",  # ordinal 2
+            raised_offset_seconds=20.0,
+        ),
+    ]
+    vec = FeatureVectorizer(metrics=metrics)
+    sev_col = 3  # severity is the 4th base dimension
+
+    f_default = FeatureSettings()  # time_scale=10, categorical_weight=0.3
+    m1 = vec.build_matrix(alarms, window_start=BASE_TIME, features=f_default)
+    # relative-timestamp col = (offset / time_scale): 20s / 10 = 2.0 for the 2nd alarm.
+    assert m1[1, 0] == pytest.approx(2.0)
+    # severity diff = |5 - 2| * 0.3 = 0.9
+    assert abs(m1[0, sev_col] - m1[1, sev_col]) == pytest.approx(0.9)
+
+    f_scaled = FeatureSettings(time_scale_seconds=20.0, categorical_weight=1.0)
+    m2 = vec.build_matrix(alarms, window_start=BASE_TIME, features=f_scaled)
+    # With time_scale=20: 20s / 20 = 1.0; with categorical_weight=1.0 severity diff = |5-2| = 3.0.
+    assert m2[1, 0] == pytest.approx(1.0)
+    assert abs(m2[0, sev_col] - m2[1, sev_col]) == pytest.approx(3.0)
+
+
 @respx.mock
 def test_topology_unavailable_degrades_skips_attribute(metrics):
     """EH-5: Topology error -> attribute dim degrades (alarm still vectorized, never dropped)."""

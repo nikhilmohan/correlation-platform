@@ -41,6 +41,8 @@ dev = [
     "ruff>=0.5",
     "black>=24",
     "jsonschema>=4",
+    # Integration stage only (Testcontainers Postgres + the real-entrypoint test). All Apache-2.0.
+    "testcontainers[postgres]>=4,<5",
 ]
 
 [tool.setuptools.packages.find]
@@ -79,4 +81,6 @@ markers = [
 ]
 
 [tool.coverage.run]
-omit = ["src/noise_filter/__main__.py", "src/noise_filter/app.py"]
+# app.py wiring is now covered by tests (test_app_wiring.py) + the integration entrypoint test;
+# only the bare __main__ / asyncio.run shims remain off the gate.
+omit = ["src/noise_filter/__main__.py"]

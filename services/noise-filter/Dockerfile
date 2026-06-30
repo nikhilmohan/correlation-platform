@@ -8,9 +8,11 @@
 #   docker build -f services/noise-filter/Dockerfile -t acp/noise-filter:dev .
 #
 # Run mode (per the service design):
-#   - default CMD : `python -m noise_filter` → apply yoyo migrations (idempotent), then the Kafka
-#                   consume loop (alarms.enriched → transactions.clean) + run-stats/observed-chatter
-#                   recording, with /health + /metrics + the read API served on HTTP_PORT.
+#   - default CMD : `python -m noise_filter` → create the asyncpg pool, apply schema migrations
+#                   (idempotent, over asyncpg — no sync driver needed), then run the Kafka consume
+#                   loop (alarms.enriched → transactions.clean) + run-stats/observed-chatter
+#                   recording CONCURRENTLY with the uvicorn HTTP server serving /health + /metrics +
+#                   the read API on HTTP_PORT.
 #   - migrate     : `python -m noise_filter migrate` applies migrations only (idempotent) then exits.
 
 # ---- builder ---------------------------------------------------------------------------
@@ -30,7 +32,7 @@ RUN python -m venv "$VIRTUAL_ENV"
 COPY libs/event-model/python /build/event-model
 RUN pip install /build/event-model
 
-# 2) Install the noise-filter package + its third-party deps from pyproject. The yoyo schema
+# 2) Install the noise-filter package + its third-party deps from pyproject. The schema
 #    migrations ship *inside* the package (src/noise_filter/migrations/*.sql, declared as
 #    [tool.setuptools.package-data]), so installing the package puts the SQL in the venv where it
 #    is resolved at runtime via importlib.resources — no separate migrations COPY needed.
@@ -57,6 +59,7 @@ USER noisefilter
 # /health + /metrics + the run-stats read API are served on HTTP_PORT (default 8080).
 EXPOSE 8080
 
-# Default: migrate (yoyo, idempotent) then run the consume loop + HTTP server. Config via env
-# (README): Kafka, Knowledge/Topology/Trail-Builder URLs + modes, NOISE_FILTER_DB_URL, LOG_LEVEL.
+# Default: apply migrations (idempotent) then run the consume loop + HTTP server concurrently.
+# Config via env (README): Kafka, Knowledge/Topology/Trail-Builder URLs + modes,
+# NOISE_FILTER_DB_URL, HTTP_PORT, LOG_LEVEL.
 CMD ["python", "-m", "noise_filter"]

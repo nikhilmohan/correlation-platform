@@ -8,9 +8,13 @@ Base feature row per alarm (design "Feature vector per alarm"):
   5. Optional attribute dims — one per enabled attribute key (Topology ``attributes`` map).
   6. Optional ONE soft hop-distance dim — when the hop-distance feature is enabled.
 
-Continuous features are standardized so ``eps`` is meaningful in a stable space. The relative
-timestamp dominates so temporally tight storms collapse to one dense cluster. Encoding is
-deterministic for a fixed input + fixed config (reproducibility requirement).
+Features share a single fixed-scale encoding so ``eps`` is meaningful: the relative timestamp is
+divided by the Knowledge-sourced ``timeScaleSeconds`` and the categorical/ordinal dims are scaled
+by the Knowledge-sourced ``categoricalWeight`` (both co-tuned WITH ``eps`` in the feature-config
+record — see :class:`FeatureSettings`). The relative timestamp dominates so temporally tight
+storms collapse to one dense cluster, while the categorical dims only nudge density. Encoding is
+deterministic for a fixed input + fixed config (reproducibility requirement). NOTE: this is a
+fixed-scale (not per-window z-score) encoding; the scale lives in config, not in code literals.
 """
 
 from __future__ import annotations
@@ -23,17 +27,6 @@ from .config import FeatureSettings
 from .logging_setup import get_logger
 
 log = get_logger(__name__)
-
-# Feature-ENCODING constants (fixed properties of the encoding, NOT Knowledge thresholds —
-# eps/minSamples/windowSize remain the Knowledge-sourced thresholds). The design names the
-# relative timestamp "THE primary storm-density signal": the continuous relative timestamp is
-# expressed in a stable scale (seconds / TIME_SCALE_SECONDS, so a storm tight within tens of
-# seconds maps to a small distance), while the categorical/ordinal dims (object-type layer,
-# eventType, severity, attributes, hop-distance) are given a modest fixed weight so they NUDGE
-# cluster density without dominating it. This keeps the temporal axis primary and makes the
-# clustering stable + deterministic for a fixed input + fixed params (reproducibility).
-TIME_SCALE_SECONDS = 10.0
-CATEGORICAL_WEIGHT = 0.3
 
 # X.733 perceived-severity ordering (ordinal). Unknown -> 0.
 _SEVERITY_ORDER = {
@@ -117,7 +110,7 @@ class HopDistanceResolver:
 
 
 class FeatureVectorizer:
-    """Builds the standardized feature matrix for a finalized window."""
+    """Builds the fixed-scale feature matrix for a finalized window (scales from feature config)."""
 
     def __init__(
         self,
@@ -138,40 +131,44 @@ class FeatureVectorizer:
         features: FeatureSettings,
         trail_ctx: TrailContext | None = None,
     ) -> np.ndarray:
-        """Return an (n_alarms, n_dims) standardized feature matrix.
+        """Return an (n_alarms, n_dims) fixed-scale feature matrix.
 
-        Topology is called only when ``features.attribute_keys`` is non-empty; the hop dimension
-        is added only when ``features.hop_distance_enabled``. Degradations (Topology / Trail
-        Builder unavailable) skip the affected dimension but NEVER drop an alarm (EH-5, EH-12).
+        Scales (``time_scale_seconds`` / ``categorical_weight``) come from the Knowledge-sourced
+        ``features`` (co-tuned with ``eps``). Topology is called only when
+        ``features.attribute_keys`` is non-empty; the hop dimension is added only when
+        ``features.hop_distance_enabled``. Degradations (Topology / Trail Builder unavailable) skip
+        the affected dimension but NEVER drop an alarm (EH-5, EH-12).
         """
         n = len(alarms)
         ws_epoch = window_start.timestamp()
+        time_scale = features.time_scale_seconds
+        cat_weight = features.categorical_weight
 
-        # 1. Relative timestamp (PRIMARY) — continuous, in a stable seconds-scaled space.
+        # 1. Relative timestamp (PRIMARY) — continuous, divided by the configured time scale.
         rel_ts = np.array(
-            [(a.raisedAt.timestamp() - ws_epoch) / TIME_SCALE_SECONDS for a in alarms],
+            [(a.raisedAt.timestamp() - ws_epoch) / time_scale for a in alarms],
             dtype=float,
         )
 
-        # 2-4. Categorical/ordinal dims — modest fixed weight so they nudge, not dominate.
+        # 2-4. Categorical/ordinal dims — configured weight so they nudge, not dominate.
         obj_vocab: list[str] = []
         obj_layer = (
             np.array(
                 [_stable_ordinal(object_type_of(a.managedObjectId), obj_vocab) for a in alarms],
                 dtype=float,
             )
-            * CATEGORICAL_WEIGHT
+            * cat_weight
         )
 
         et_vocab: list[str] = []
         event_type = (
             np.array([_stable_ordinal(a.eventType, et_vocab) for a in alarms], dtype=float)
-            * CATEGORICAL_WEIGHT
+            * cat_weight
         )
 
         severity = (
             np.array([_severity_ordinal(a.perceivedSeverity) for a in alarms], dtype=float)
-            * CATEGORICAL_WEIGHT
+            * cat_weight
         )
 
         columns: list[np.ndarray] = [rel_ts, obj_layer, event_type, severity]
@@ -186,7 +183,7 @@ class FeatureVectorizer:
                     attrs = self._fetch_attributes(a.managedObjectId, attr_cache)
                     val = attrs.get(key)
                     col[i] = _stable_ordinal(str(val), key_vocab) if val is not None else -1.0
-                columns.append(col * CATEGORICAL_WEIGHT)
+                columns.append(col * cat_weight)
 
         # 6. Optional ONE soft hop-distance dimension — categorical-weighted (never a hard gate).
         if (
@@ -202,7 +199,7 @@ class FeatureVectorizer:
                 hop_col = np.array(
                     [float(dists.get(a.managedObjectId, bound)) for a in alarms], dtype=float
                 )
-                columns.append(hop_col * CATEGORICAL_WEIGHT)
+                columns.append(hop_col * cat_weight)
             except Exception as exc:  # noqa: BLE001 — degrade, never drop (EH-12)
                 if self._metrics is not None:
                     self._metrics.hop_feature_skip.inc()

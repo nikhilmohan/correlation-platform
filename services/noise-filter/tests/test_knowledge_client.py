@@ -65,6 +65,45 @@ def test_knowledge_reads_unwrap_record_response_payload():
 
 
 @respx.mock
+def test_feature_config_reads_encoding_knobs_from_knowledge():
+    """M1: timeScaleSeconds + categoricalWeight are Knowledge-sourced (not code literals)."""
+    respx.get(f"{KNOWLEDGE_URL}/api/v1/records/{FEATURE_CONFIG_RECORD_ID}").mock(
+        return_value=httpx.Response(
+            200,
+            json=_record_envelope(
+                FEATURE_CONFIG_RECORD_ID,
+                {
+                    "attributeKeys": [],
+                    "hopDistanceEnabled": False,
+                    "timeScaleSeconds": 30.0,
+                    "categoricalWeight": 0.7,
+                },
+            ),
+        )
+    )
+    features = KnowledgeClient(KNOWLEDGE_URL).fetch_feature_config()
+    assert features.time_scale_seconds == 30.0
+    assert features.categorical_weight == 0.7
+
+
+@respx.mock
+def test_feature_config_encoding_knobs_fall_back_when_absent():
+    """When Knowledge omits the encoding knobs, the documented fallback defaults apply."""
+    respx.get(f"{KNOWLEDGE_URL}/api/v1/records/{FEATURE_CONFIG_RECORD_ID}").mock(
+        return_value=httpx.Response(
+            200,
+            json=_record_envelope(
+                FEATURE_CONFIG_RECORD_ID,
+                {"attributeKeys": [], "hopDistanceEnabled": False},
+            ),
+        )
+    )
+    features = KnowledgeClient(KNOWLEDGE_URL).fetch_feature_config()
+    assert features.time_scale_seconds == FeatureSettings.fallback().time_scale_seconds
+    assert features.categorical_weight == FeatureSettings.fallback().categorical_weight
+
+
+@respx.mock
 def test_knowledge_read_rejects_non_envelope_response():
     """A flat (non-envelope) response is rejected — guards against the recurring flat-shape bug."""
     respx.get(f"{KNOWLEDGE_URL}/api/v1/records/{MODEL_PARAMS_RECORD_ID}").mock(

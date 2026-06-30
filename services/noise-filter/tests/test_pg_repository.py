@@ -61,9 +61,14 @@ class FakePool:
         return self._conn
 
 
+# A real UUID string for the default run_id (the nf_run_stats.run_id column is UUID, so the
+# integration round-trip via _row() must supply a valid UUID, not a short token).
+_DEFAULT_RUN_ID = "11111111-1111-1111-1111-111111111111"
+
+
 def _record(**over):
     base = dict(
-        run_id="r1",
+        run_id=_DEFAULT_RUN_ID,
         run_timestamp=datetime.now(UTC),
         trail_id="t1",
         snapshot_id="s1",
@@ -125,7 +130,7 @@ async def test_pg_run_stats_list_builds_filters_and_pagination():
     rows, total = await repo.list_runs(
         trail_id="t1", from_ts=datetime.now(UTC), to_ts=datetime.now(UTC), limit=10, offset=5
     )
-    assert total == 1 and rows[0].run_id == "r1"
+    assert total == 1 and rows[0].run_id == "r1"  # fake pool returns the record verbatim
 
 
 @pytest.mark.asyncio
@@ -147,6 +152,9 @@ async def test_pg_chatter_upsert_with_mo_uses_full_key():
     )
     sql, args = conn.executed[0]
     assert "ON CONFLICT (managed_object_id, alarm_type, event_type, trail_id)" in sql
+    # The matching unique index is PARTIAL; ON CONFLICT MUST repeat its predicate or Postgres
+    # cannot infer it (regression guard for "no unique constraint matching ON CONFLICT").
+    assert "WHERE managed_object_id IS NOT NULL" in sql
     assert "occurrence_count + 1" in sql
 
 

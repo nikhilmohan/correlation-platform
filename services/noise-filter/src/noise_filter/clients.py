@@ -71,10 +71,14 @@ class KnowledgeClient:
         """Fetch + parse the active feature config from the RecordResponse payload."""
         payload = self._get_record_payload(FEATURE_CONFIG_RECORD_ID)
         keys = payload.get("attributeKeys", []) or []
+        defaults = FeatureSettings.fallback()
         return FeatureSettings(
             attribute_keys=tuple(str(k) for k in keys),
             hop_distance_enabled=bool(payload.get("hopDistanceEnabled", False)),
             hop_traversal_max_depth=int(payload.get("hopTraversalMaxDepth", 8)),
+            # Encoding knobs co-tuned with eps — Knowledge-authored, not code literals.
+            time_scale_seconds=float(payload.get("timeScaleSeconds", defaults.time_scale_seconds)),
+            categorical_weight=float(payload.get("categoricalWeight", defaults.categorical_weight)),
         )
 
 
