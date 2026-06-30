@@ -25,11 +25,15 @@
      (operator feedback — the old grey --canvas-bg read as a grey block). Read by buildCyStyle
      via cssVar so a theme flip re-themes the canvas; node chips/labels stay legible against it. */
   --graph-bg: #0f172a;
-  /* DEVICE-NODE ICON PLATE: the fixed LIGHT tile that sits behind every device glyph in the site
-     graph. Deliberately the SAME light value in BOTH themes (it does NOT flip) so the dark-slate
-     icon glyph always reads — a dark glyph on the dark-navy --graph-bg was near-invisible. The node
-     keeps its layer-coloured border; the label below the node stays on the canvas (--text). */
-  --node-plate: #f1f5f9;
+  /* DEVICE-NODE GLYPH COLOUR: the site-graph node now has NO light plate — the icon glyph sits
+     directly on the graph canvas inside a grey-outline box, so it MUST recolour per theme. DARK
+     theme = near-white glyph (reads on the dark-navy --graph-bg). buildCyStyle reads this via cssVar
+     and injects it into the icon data-URI; the themeEffect re-render recolours every glyph on flip. */
+  --icon-glyph: #f8fafc;
+  /* GREY OUTLINE for the device-node box (uniform in both themes) — the layer colour is now shown
+     as a small per-node accent dot, not the border. A mid-slate that frames clearly on both the
+     dark-navy and the white graph canvas. */
+  --node-outline: #64748b;
   /* A larger, AMBER outward-arrow "extends externally" node cue (CHANGE 1) — works in both themes. */
   --expand-cue: #f59e0b;
   /* HOT MAGENTA trail highlight (topology-v3 CHANGE 3) — deliberately distinct from the layer
@@ -58,8 +62,10 @@
   --canvas-bg: #e2e8f0;
   /* Light: the graph canvas blends with the white page surface (no grey block). */
   --graph-bg: #ffffff;
-  /* Icon plate stays the SAME light value as dark (does NOT flip) — keeps the dark glyph legible. */
-  --node-plate: #f1f5f9;
+  /* LIGHT theme glyph colour = dark-slate, reads on the white --graph-bg inside the grey box. */
+  --icon-glyph: #334155;
+  /* Grey node outline stays the same mid-slate — frames the box on the white light canvas. */
+  --node-outline: #64748b;
   --expand-cue: #b45309; /* darker amber for AA contrast on the white light-theme canvas */
   --trail-hl: #db2777; /* slightly deeper magenta for AA contrast on the white light-theme canvas */
   --error-bg: #fee2e2;
