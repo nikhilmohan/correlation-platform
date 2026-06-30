@@ -43,15 +43,24 @@ read as distinct element types.
 **Dual-theme legibility.** The node chip background is theme-driven — dark navy
 (`#0f172a`) in dark mode, white (`#ffffff`) in light mode — and the icon renders as a
 Cytoscape `background-image`, so it does NOT inherit any CSS `currentColor`. A single
-stroke colour cannot read on both a near-black and a white chip, so each SVG carries its
-own **slate-200 (`#e2e8f0`) rounded backing rect** with the Lucide glyph stroked in
-**slate-700 (`#334155`)** on top (amber `#b45309` for `fiber-span`). The slate-200 tile
-contrasts against BOTH the dark-navy and the white chip, and the slate-700 stroke contrasts
-against the slate-200 tile — so the glyph is clearly visible in either theme.
+stroke colour cannot read on both a near-black and a white chip. The earlier design solved
+this with a full-viewport opaque **slate-200 (`#e2e8f0`) backing rect**, but that filled
+the 24×24 viewBox so the "icon" read as a big grey square bursting the node box. That
+opaque rect has been **removed**.
+
+Instead each SVG now carries a **small, inset, translucent** backing —
+`<rect x="3" y="3" width="18" height="18" rx="4" fill="#94a3b8" fill-opacity="0.18"/>` — a
+faint slate tile that is theme-neutral (reads on BOTH white and dark-navy) yet clearly
+smaller than the node, so it never reads as a box again. The Lucide glyph is stroked in
+**mid-slate (`#475569`)** on top (amber `#b45309` for `fiber-span`), which contrasts both
+the faint tile and either chip background. Everything outside the inset tile is transparent,
+so the node's own layer-coloured border/chip frames the glyph directly.
 
 **Fit in the box.** The viewBox stays `0 0 24 24`; the node style draws the icon at
-`background-width/height: 74%` (down from the prior 88%) so the slate backing tile sits as
-a comfortably-inset square inside the coloured-border node chip with padding, and the
+`background-width/height: 60%` (down from the prior 74%) with `background-fit: contain` and
+the default centered `background-position`, so the glyph occupies roughly the middle ~60% of
+the 100px node box — centered, with comfortable padding all round inside the
+coloured-border chip, like a normal app icon in a button rather than edge-to-edge. The
 2px-stroke Lucide glyph is never clipped.
 
 ## Offline guarantee (AC 72)
