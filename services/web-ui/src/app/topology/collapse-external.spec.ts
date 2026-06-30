@@ -195,3 +195,112 @@ describe('CHANGE 2 — externalRevealedNodeIds tracking + collapseExternal', () 
     expect(store.externalLinkNodeIds().has('seed-0')).toBe(true);
   });
 });
+
+/**
+ * PER-NODE COLLAPSE (the on-node "−" affordance). expandNode() must record which neighbour ids each
+ * SOURCE revealed (provenance), and collapseNodeExternal(sourceId) must remove EXACTLY that source's
+ * exclusively-revealed nodes — never a base node, never a node the active trail explosion added, and
+ * never a node another still-expanded source also revealed (a shared reveal survives).
+ */
+describe('per-node collapse — revealedByNode tracking + collapseNodeExternal', () => {
+  it('collapseNodeExternal removes ONLY that source’s revealed nodes + flips it out of expandedNodeIds', async () => {
+    const store = setup();
+    store.selectSite('Site:LON');
+    await flush();
+
+    store.expandNode('seed-0');
+    await flush();
+    expect(store.expandedNodeIds().has('seed-0')).toBe(true);
+    expect(store.nodeMap().has('ext-1')).toBe(true);
+
+    store.collapseNodeExternal('seed-0');
+
+    // The source's revealed node + its dangling edge are gone…
+    expect(store.nodeMap().has('ext-1')).toBe(false);
+    expect(store.edgeMap().has('e-seed0-ext1')).toBe(false);
+    // …the source is no longer "expanded" (so its badge flips back to "+")…
+    expect(store.expandedNodeIds().has('seed-0')).toBe(false);
+    // …the flat reveal set drops it (no source reveals anything now)…
+    expect(store.externalRevealedNodeIds().size).toBe(0);
+    // …the base seed is untouched…
+    expect(store.nodeMap().has('seed-0')).toBe(true);
+    expect(store.nodeMap().has('seed-1')).toBe(true);
+    // …and the amber ↗ cue returns on the source.
+    expect(store.externalLinkNodeIds().has('seed-0')).toBe(true);
+  });
+
+  it('collapseNodeExternal is a no-op when the source was never expanded', async () => {
+    const store = setup();
+    store.selectSite('Site:LON');
+    await flush();
+    const before = store.nodeMap();
+
+    store.collapseNodeExternal('seed-1');
+
+    expect(store.nodeMap()).toBe(before); // same reference — untouched
+    expect(store.expandedNodeIds().size).toBe(0);
+  });
+
+  it('collapseNodeExternal leaves an active TRAIL explosion untouched', async () => {
+    const store = setup();
+    store.selectSite('Site:LON');
+    await flush();
+
+    store.expandNode('seed-0');
+    await flush();
+    store.selectTrail('T-1');
+    await flush();
+    store.explodeTrail();
+    await flush();
+
+    expect(store.nodeMap().has('ext-1')).toBe(true); // external layer
+    expect(store.nodeMap().has('trail-x')).toBe(true); // trail layer
+
+    store.collapseNodeExternal('seed-0');
+
+    // ONLY this source's external node is removed; the trail-exploded node survives.
+    expect(store.nodeMap().has('ext-1')).toBe(false);
+    expect(store.nodeMap().has('trail-x')).toBe(true);
+    expect(store.explodeActive()).toBe(true);
+  });
+
+  it('a node revealed by TWO sources survives collapse of one of them (shared reveal)', () => {
+    const store = setup();
+    // Drive the provenance + maps directly so the shared-reveal logic is tested deterministically,
+    // independent of which fixture neighbours overlap. Two sources (A, B) both reveal shared-1; B
+    // also exclusively reveals only-b.
+    store.nodeMap.set(
+      new Map([
+        ['A', { managedObjectId: 'A', objectType: 'Router', domain: 'core-ip', snapshotId: 'current', attributes: {} }],
+        ['B', { managedObjectId: 'B', objectType: 'Router', domain: 'core-ip', snapshotId: 'current', attributes: {} }],
+        ['shared-1', { managedObjectId: 'shared-1', objectType: 'Router', domain: 'core-ip', snapshotId: 'current', attributes: {} }],
+        ['only-b', { managedObjectId: 'only-b', objectType: 'Router', domain: 'core-ip', snapshotId: 'current', attributes: {} }],
+      ]),
+    );
+    store.edgeMap.set(new Map());
+    store.expandedNodeIds.set(new Set(['A', 'B']));
+    store.externalRevealedNodeIds.set(new Set(['shared-1', 'only-b']));
+    // Provenance: A→{shared-1}, B→{shared-1, only-b}.
+    (store as unknown as { revealedByNode: Map<string, Set<string>> }).revealedByNode = new Map([
+      ['A', new Set(['shared-1'])],
+      ['B', new Set(['shared-1', 'only-b'])],
+    ]);
+
+    // Collapse A: shared-1 is still required by B (still expanded) → it must SURVIVE.
+    store.collapseNodeExternal('A');
+
+    expect(store.nodeMap().has('shared-1')).toBe(true); // still required by B
+    expect(store.nodeMap().has('only-b')).toBe(true); // B's exclusive reveal, untouched
+    expect(store.expandedNodeIds().has('A')).toBe(false);
+    expect(store.expandedNodeIds().has('B')).toBe(true);
+    // Flat reveal set is recomputed from remaining provenance (B's reveals only).
+    expect([...store.externalRevealedNodeIds()].sort()).toEqual(['only-b', 'shared-1']);
+
+    // Now collapse B: nothing else needs shared-1 / only-b → both removed.
+    store.collapseNodeExternal('B');
+    expect(store.nodeMap().has('shared-1')).toBe(false);
+    expect(store.nodeMap().has('only-b')).toBe(false);
+    expect(store.expandedNodeIds().size).toBe(0);
+    expect(store.externalRevealedNodeIds().size).toBe(0);
+  });
+});
