@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALL_ICON_KEYS,
+  iconDataUriFor,
+  iconDataUriForKey,
   iconFileForObjectType,
   iconKeyForObjectType,
   iconUrlFor,
@@ -66,5 +68,48 @@ describe('type-icon-mapper — objectType → network-element icon (AC 70-72)', 
   it('ALL_ICON_KEYS covers the ten type keys plus the generic fallback', () => {
     expect(ALL_ICON_KEYS).toContain('generic');
     expect(ALL_ICON_KEYS.length).toBe(11);
+  });
+});
+
+/**
+ * THEME-AWARE glyph recolour (operator feedback: no plate → glyph sits on the canvas → must recolour
+ * per theme). iconDataUriFor/ForKey return a `data:image/svg+xml` URI whose stroke is the passed
+ * colour, so buildCyStyle can pass --icon-glyph (white in dark / dark-slate in light) and the
+ * themeEffect re-render recolours every glyph.
+ */
+describe('type-icon-mapper — theme-aware glyph recolour (data-URI)', () => {
+  it('iconDataUriFor returns a same-origin-free SVG data-URI (no external host, no /icons/ file)', () => {
+    const uri = iconDataUriFor('Node', '#f8fafc');
+    expect(uri.startsWith('data:image/svg+xml,')).toBe(true);
+    expect(uri).not.toMatch(/cdn|googleapis|jsdelivr|unpkg|cloudfront/i);
+  });
+
+  it('the data-URI EMBEDS the passed glyph colour (URL-encoded so the # is safe)', () => {
+    // Near-white DARK-theme glyph colour.
+    const dark = iconDataUriFor('Router', '#f8fafc');
+    expect(decodeURIComponent(dark)).toContain('stroke="#f8fafc"');
+    // The # is percent-encoded in the raw URI (so the URI is valid).
+    expect(dark).toContain('%23f8fafc');
+
+    // DARK-slate LIGHT-theme glyph colour — same glyph, different stroke.
+    const light = iconDataUriFor('Router', '#334155');
+    expect(decodeURIComponent(light)).toContain('stroke="#334155"');
+    expect(light).not.toBe(dark);
+  });
+
+  it('iconDataUriForKey recolours by KEY too (drives the theme-aware legend)', () => {
+    const uri = iconDataUriForKey('lsp', '#f8fafc');
+    expect(decodeURIComponent(uri)).toContain('stroke="#f8fafc"');
+    expect(decodeURIComponent(uri)).toContain('<svg');
+  });
+
+  it('an unknown objectType still yields a (generic) recoloured glyph — never icon-less', () => {
+    const uri = iconDataUriFor('UnknownFutureThing', '#abcdef');
+    expect(decodeURIComponent(uri)).toContain('stroke="#abcdef"');
+  });
+
+  it('the file-URL helpers stay same-origin assets (used by the list-row <img>)', () => {
+    // iconUrlFor unchanged: still a same-origin bundle URL, not a data-URI.
+    expect(iconUrlFor('Node').startsWith('data:')).toBe(false);
   });
 });

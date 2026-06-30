@@ -21,7 +21,15 @@ import { NavigationService } from '../core/navigation.service';
 import { ThemeService } from '../core/theme.service';
 import { AttributeDetailPanelComponent } from './attribute-detail-panel.component';
 import { LayerToggleComponent } from './layer-toggle.component';
-import { ICON_LEGEND, iconKeyForObjectType, iconUrlFor, typeLabelFor } from './type-icon-mapper';
+import {
+  ICON_LEGEND,
+  type IconKey,
+  iconDataUriFor,
+  iconDataUriForKey,
+  iconKeyForObjectType,
+  iconUrlFor,
+  typeLabelFor,
+} from './type-icon-mapper';
 import type { TrailDetail } from '../api/models';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
@@ -140,6 +148,24 @@ import type {
               >
                 <span aria-hidden="true">{{ m.expanded ? '−' : '↗' }}</span>
               </button>
+            }
+          </div>
+
+          <!-- CHANGE 4: per-node LAYER-COLOUR accent dots. The grey-outline box no longer encodes the
+               logical layer, so each device node carries a small filled dot in its layer colour at the
+               bottom-left corner (same HTML-overlay tracking as the amber expand cue). Decorative only
+               (aria-hidden) — the accessible layer info is the per-device list rows + the layer legend
+               key. Empty under jsdom (no real Cytoscape render). -->
+          <div class="cy-layer-dot-layer" aria-hidden="true">
+            @for (d of layerDotMarkers(); track d.id) {
+              <span
+                class="cy-layer-dot"
+                data-testid="node-layer-dot"
+                [attr.data-layer]="d.layer"
+                [style.left.px]="d.x"
+                [style.top.px]="d.y"
+                [style.background]="d.color"
+              ></span>
             }
           </div>
 
@@ -344,11 +370,11 @@ import type {
               }
               <h3 class="legend-h">Element types</h3>
               <ul class="icon-legend" aria-label="Network element type icon legend" data-testid="icon-legend">
-                @for (item of ICON_LEGEND; track item.key) {
+                @for (item of legendIcons(); track item.key) {
                   <li data-testid="icon-legend-item" [attr.data-icon]="item.key">
                     <img
                       class="icon-glyph"
-                      [src]="iconUrlForKey(item.key)"
+                      [src]="item.src"
                       alt=""
                       aria-hidden="true"
                       width="16"
@@ -526,6 +552,24 @@ import type {
         inset: 0;
         pointer-events: none;
         z-index: 3;
+      }
+      /* CHANGE 4: per-node LAYER-COLOUR accent dot overlay — same absolute-positioned tracking as the
+         expand layer, sits BELOW the expand badges (z-index 2) and is non-interactive. Each dot is a
+         small filled circle in the node's layer colour at its bottom-left corner, with a thin
+         canvas-coloured ring so it reads on both themes. Purely decorative (the legend is the key). */
+      .cy-layer-dot-layer {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 2;
+      }
+      .cy-layer-dot {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        box-shadow: 0 0 0 2px var(--graph-bg);
       }
       /* CHANGE 1: a LARGER (~22px), AMBER outward-arrow (↗) "extends externally" badge — rendered only
          on nodes with hidden OFF-SITE links so the operator sees which devices extend beyond the site
@@ -1130,6 +1174,19 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     const base = typeof document !== 'undefined' && document.baseURI ? document.baseURI : '/';
     return new URL(`icons/${key}.svg`, base).href;
   }
+
+  /** THEME-AWARE legend icons. The legend sits on the --surface panel, so its glyphs must recolour
+   *  per theme exactly like the on-canvas nodes (white-ish in dark, dark-slate in light). Reads the
+   *  theme signal so the computed recomputes on a theme flip, then injects --icon-glyph into the
+   *  same data-URI builder the canvas uses. */
+  readonly legendIcons = computed<ReadonlyArray<{ key: IconKey; label: string; src: string }>>(() => {
+    this.theme.theme(); // track — recompute on theme flip
+    const glyph =
+      (typeof document !== 'undefined'
+        ? getComputedStyle(document.documentElement).getPropertyValue('--icon-glyph').trim()
+        : '') || '#334155';
+    return ICON_LEGEND.map((item) => ({ ...item, src: iconDataUriForKey(item.key, glyph) }));
+  });
   /** Count of DISTINCT type-icon keys currently rendered (bridged as data-cy-icon-types — AC 70). */
   readonly distinctIconKeyCount = computed(
     () => new Set(this.store.derivedNodes().map((n) => iconKeyForObjectType(n.objectType))).size,
@@ -1225,7 +1282,23 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   /** On-canvas "+" expand affordances: one per device node, positioned at the node's RENDERED
    *  position (canvas pixels) so each "+" tracks its node on pan/zoom/layout. Empty under jsdom
    *  (no real Cytoscape render) — there the accessible list-row control is the equivalent. */
-  readonly overlayMarkers = signal<ReadonlyArray<{ id: string; name: string; x: number; y: number }>>([]);
+  readonly overlayMarkers = signal<
+    ReadonlyArray<{ id: string; name: string; x: number; y: number; layer: string; dotX: number; dotY: number }>
+  >([]);
+
+  /** CHANGE 4: per-node LAYER-COLOUR accent dot. The grey-outline box no longer encodes the logical
+   *  layer in its border, so each device node gets a small filled dot in its layer colour at the
+   *  bottom-left corner (same HTML-overlay technique as the amber expand cue). Drives the layer
+   *  legend key. Empty under jsdom (no real Cytoscape render). */
+  readonly layerDotMarkers = computed(() =>
+    this.overlayMarkers().map((m) => ({
+      id: m.id,
+      x: m.dotX,
+      y: m.dotY,
+      color: SiteGraphComponent.LAYER_COLORS[m.layer] ?? SiteGraphComponent.LAYER_COLORS['other'],
+      layer: m.layer,
+    })),
+  );
 
   /** CHANGE 1 + per-node toggle: the overlay markers FILTERED to the nodes that should show the
    *  on-node badge. A node shows the badge when EITHER it still has hidden OFF-SITE links
@@ -1383,13 +1456,13 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // CHANGE 4: the GRAPH canvas backdrop is now the app surface (--graph-bg), so the chip fill and
     // the label text-outline match the canvas and the node labels stay legible on the lighter bg.
     const canvasBg = this.cssVar('--graph-bg') || this.cssVar('--canvas-bg') || '#0f172a';
-    // DEVICE-NODE ICON PLATE: a FIXED LIGHT tile behind every glyph that does NOT flip per theme, so
-    // the dark-slate glyph always reads (a dark glyph on the dark-navy --graph-bg chip was invisible
-    // in dark theme). --node-plate is defined identically in :root and [data-theme=light], so this
-    // value is light in both themes. The node keeps its layer-coloured border + the label below the
-    // node stays on the canvas (--text / canvasBg outline), so dark-on-light glyph + light-on-dark
-    // label both read.
-    const nodePlate = this.cssVar('--node-plate') || '#f1f5f9';
+    // DEVICE-NODE: the light plate is REMOVED — the glyph now sits directly on the graph canvas
+    // inside a uniform GREY-OUTLINE box (--node-outline), so the glyph MUST recolour per theme. The
+    // glyph stroke colour comes from --icon-glyph (near-white in dark, dark-slate in light); it is
+    // injected into the icon data-URI here, and because buildCyStyle re-runs on the themeEffect a
+    // theme flip recolours every node glyph automatically.
+    const glyphColor = this.cssVar('--icon-glyph') || '#f8fafc';
+    const nodeOutline = this.cssVar('--node-outline') || '#64748b';
     const text = this.cssVar('--text') || '#f1f5f9';
     const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
@@ -1419,24 +1492,29 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       {
         selector: 'node[!isSiteParent]',
         style: {
-          // Network-element TYPE ICON as the node glyph (AC 70-72): a same-origin bundled SVG
-          // resolved from the node's objectType, drawn contained over the canvas-coloured chip. The
-          // DERIVED LOGICAL LAYER stays readable as the node's coloured BORDER/ring (both type-icon
-          // AND layer are encoded). A generic.svg fallback guarantees no node is ever icon-less.
-          'background-image': (n: NodeSingular) => iconUrlFor(n.data('objectType') as string),
+          // Network-element TYPE ICON as the node glyph (AC 70-72): a THEME-AWARE data-URI SVG
+          // resolved from the node's objectType, with the glyph stroke set to --icon-glyph (white in
+          // dark / dark-slate in light) so it reads directly on the canvas with NO plate. A generic
+          // fallback guarantees no node is ever icon-less. The DERIVED LOGICAL LAYER is conveyed by a
+          // small layer-coloured accent DOT overlay per node (externalCueMarkers sibling overlay), so
+          // the box border can stay a uniform grey.
+          'background-image': (n: NodeSingular) =>
+            iconDataUriFor(n.data('objectType') as string, glyphColor),
           'background-fit': 'contain',
           'background-clip': 'none',
-          'background-opacity': 1,
-          // ICON PLATE: each glyph is a TRANSPARENT dark-slate Lucide stroke drawn over a FIXED LIGHT
-          // chip (--node-plate, light in BOTH themes). The plate provides the contrast, so the faint
-          // inset slate rect was removed from the SVGs (the glyph is now clean on the light plate). We
-          // sit the glyph at ~90% of the node box — centered with comfortable padding, contained so
-          // the stroke is never clipped, and the layer-coloured border frames it as a device badge.
-          'background-width': '90%',
-          'background-height': '90%',
-          'background-color': nodePlate,
-          'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
-          'border-width': 4,
+          // The glyph IMAGE stays fully opaque; the node BODY fill is transparent (no plate).
+          'background-image-opacity': 1,
+          // CHANGE 3: NO light plate — the chip body fill is fully transparent (background-opacity 0)
+          // so the glyph sits directly on the graph canvas. CHANGE 1: glyph at ~70% of the box (was
+          // 90%) so the stroke (router antenna / interface plug) sits FULLY inside the grey box with
+          // clear padding, never clipped. The box is a uniform GREY OUTLINE (--node-outline), ~3px
+          // (was a 4px layer colour); the layer is now shown by a small accent dot overlay.
+          'background-width': '70%',
+          'background-height': '70%',
+          'background-color': canvasBg,
+          'background-opacity': 0,
+          'border-color': nodeOutline,
+          'border-width': 3,
           shape: 'round-rectangle',
           // Two-line label: line 1 = friendly device TYPE, line 2 = device NAME, so the operator
           // identifies each box at first glance without selecting it. text-wrap:'wrap' renders the
@@ -1450,11 +1528,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           'text-outline-color': canvasBg,
           'text-valign': 'bottom',
           'text-margin-y': 4,
-          // CHANGE 1: bumped node box (76 → 100) so the type-icon glyph + two-line label read
-          // clearly. The multi-site preset spacing + breadthfirst spacingFactor below are tuned to
-          // match so bigger nodes don't overlap (data-cy-node-spread stays > 40, deterministic).
-          width: 100,
-          height: 100,
+          // CHANGE 2: node box 100 → 98 (2pt smaller per operator feedback). The multi-site preset
+          // spacing + breadthfirst spacingFactor below are tuned to match so the boxes don't overlap
+          // (data-cy-node-spread stays > 40, deterministic).
+          width: 98,
+          height: 98,
         },
       },
       {
@@ -1937,7 +2015,15 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
     const zoom = cy.zoom();
-    const markers: Array<{ id: string; name: string; x: number; y: number }> = [];
+    const markers: Array<{
+      id: string;
+      name: string;
+      x: number;
+      y: number;
+      layer: string;
+      dotX: number;
+      dotY: number;
+    }> = [];
     leaves.forEach((n) => {
       const rp = n.renderedPosition();
       // Offset to the node's top-right corner; the rendered half-width scales with zoom.
@@ -1948,6 +2034,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         name: (n.data('name') as string) ?? n.id(),
         x: rp.x + halfW * 0.7,
         y: rp.y - halfH * 0.7,
+        // CHANGE 4: layer-colour accent dot at the node's BOTTOM-LEFT corner (mirrors the top-right
+        // expand cue), scaled with zoom so it stays attached to its node at any zoom.
+        layer: (n.data('layer') as string) ?? 'other',
+        dotX: rp.x - halfW * 0.7,
+        dotY: rp.y + halfH * 0.7,
       });
     });
     this.overlayMarkers.set(markers);
