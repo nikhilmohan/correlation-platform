@@ -1430,10 +1430,10 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           // ICON PLATE: each glyph is a TRANSPARENT dark-slate Lucide stroke drawn over a FIXED LIGHT
           // chip (--node-plate, light in BOTH themes). The plate provides the contrast, so the faint
           // inset slate rect was removed from the SVGs (the glyph is now clean on the light plate). We
-          // sit the glyph at ~60% of the node box — centered with comfortable padding, contained so
+          // sit the glyph at ~90% of the node box — centered with comfortable padding, contained so
           // the stroke is never clipped, and the layer-coloured border frames it as a device badge.
-          'background-width': '60%',
-          'background-height': '60%',
+          'background-width': '90%',
+          'background-height': '90%',
           'background-color': nodePlate,
           'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
           'border-width': 4,
