@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Router">
-  <!-- Lucide "router" (ISC License, https://lucide.dev). Glyph stroked slate-700 on a slate-200
-       rounded backing so it reads on BOTH the white (light) and dark-navy (dark) node chip. -->
-  <rect x="1" y="1" width="22" height="22" rx="5" fill="#e2e8f0"/>
-  <g fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Lucide "router" (ISC License, https://lucide.dev). Mid-slate (#475569) glyph on a faint inset
+       slate chip (transparent elsewhere) so it reads on BOTH the white (light) and dark-navy node chip. -->
+  <rect x="3" y="3" width="18" height="18" rx="4" fill="#94a3b8" fill-opacity="0.18"/>
+  <g fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <rect width="20" height="8" x="2" y="14" rx="2"/>
     <path d="M6.01 18h.01"/>
     <path d="M10.01 18h.01"/>

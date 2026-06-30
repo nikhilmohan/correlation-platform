@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="LSP">
-  <!-- Lucide "route" (ISC License, https://lucide.dev). Slate-700 glyph on a slate-200 backing for
-       dual-theme legibility. Distinct from IGP adjacency (waypoints). -->
-  <rect x="1" y="1" width="22" height="22" rx="5" fill="#e2e8f0"/>
-  <g fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Lucide "route" (ISC License, https://lucide.dev). Mid-slate (#475569) glyph on a faint inset
+       slate chip (transparent elsewhere) for dual-theme legibility. Distinct from IGP adjacency. -->
+  <rect x="3" y="3" width="18" height="18" rx="4" fill="#94a3b8" fill-opacity="0.18"/>
+  <g fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <circle cx="6" cy="19" r="3"/>
     <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/>
     <circle cx="18" cy="5" r="3"/>

@@ -1420,12 +1420,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           'background-fit': 'contain',
           'background-clip': 'none',
           'background-opacity': 1,
-          // CHANGE 1 (Lucide icons): each glyph ships with its own slate-200 rounded backing rect, so
-          // we sit it at ~74% of the node chip — comfortable padding (not edge-to-edge) so the icon's
-          // backing reads as an inset tile inside the coloured-border node chip, and the Lucide stroke
-          // is never clipped. (Balanced vs the prior 88% which crowded the chip border.)
-          'background-width': '74%',
-          'background-height': '74%',
+          // CHANGE 1 (Lucide icons): each glyph is now a TRANSPARENT Lucide stroke over a faint inset
+          // slate chip (the old full-viewport opaque grey backing rect was removed — it made the icon
+          // read as an oversized box). The node's coloured-border chip is the real background, so we
+          // sit the glyph at ~60% of the node box — centered (default position) with comfortable
+          // padding all round, contained so the stroke is never clipped, and the layer-coloured
+          // border frames it cleanly on both light and dark themes. (Was 74% with the old box rect.)
+          'background-width': '60%',
+          'background-height': '60%',
           'background-color': canvasBg,
           'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
           'border-width': 4,
