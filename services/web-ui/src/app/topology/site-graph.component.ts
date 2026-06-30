@@ -145,6 +145,24 @@ import type {
             </button>
           </div>
 
+          <!-- CHANGE 2: COLLAPSE the externally-revealed links. Appears ONLY while external nodes have
+               actually been revealed (externalRevealedNodeIds non-empty) — discoverable but unobtrusive.
+               Clicking removes ONLY the externally-revealed nodes (base + trail layers untouched) and
+               restores the amber ↗ cues. Pinned bottom-left, clear of the top-right zoom controls and
+               the top-left trail selector. Both themes. -->
+          @if (store.externalRevealedNodeIds().size > 0) {
+            <button
+              type="button"
+              class="collapse-external"
+              data-testid="collapse-external"
+              aria-label="Hide external links — collapse the revealed off-site nodes"
+              title="Hide external links"
+              (click)="store.collapseExternal()"
+            >
+              <span aria-hidden="true">⤓</span> Hide external links
+            </button>
+          }
+
           <!-- CHANGE 2: FLOATING TRAIL SELECTOR pinned to the TOP-LEFT of the canvas (clear of the
                top-right zoom controls). A toggle button opens a dropdown listing each trail; selecting
                one highlights that trail's path on the topology (applyDecoration reuses the existing
@@ -590,7 +608,11 @@ import type {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        z-index: 2;
+        /* CHANGE 3 (z-index bug): the zoom/Fit/Reset controls MUST sit ABOVE the .cy-expand-layer
+           (z-index 3) graph overlay, which previously occluded them when an exploded cross-site
+           cluster rendered into the top-right. Raised to 5 so the controls are ALWAYS visible and
+           clickable on top of the overlay. */
+        z-index: 5;
       }
       .cy-controls button {
         width: 2rem;
@@ -611,6 +633,36 @@ import type {
       }
       .cy-controls button:hover {
         border-color: var(--accent);
+      }
+      /* CHANGE 2: the "Hide external links" collapse chip — pinned bottom-left, clear of the top-right
+         zoom controls and the top-left trail selector. Unobtrusive surface chip; only mounted while
+         external nodes are revealed. Above the .cy-expand-layer overlay so it stays clickable. Both
+         themes (uses theme surface/border/text tokens). */
+      .collapse-external {
+        position: absolute;
+        bottom: 8px;
+        left: 8px;
+        z-index: 5;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.35rem 0.6rem;
+        font: inherit;
+        font-size: 0.78rem;
+        cursor: pointer;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+      }
+      .collapse-external:hover,
+      .collapse-external:focus-visible {
+        border-color: var(--accent);
+      }
+      .collapse-external span {
+        color: var(--expand-cue);
+        font-weight: 700;
       }
       .layer-legend,
       .site-legend {
@@ -1315,9 +1367,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           'background-fit': 'contain',
           'background-clip': 'none',
           'background-opacity': 1,
-          // ITEM 2: larger glyph share of the (bigger) node so the type icon reads clearly.
-          'background-width': '88%',
-          'background-height': '88%',
+          // CHANGE 1 (Lucide icons): each glyph ships with its own slate-200 rounded backing rect, so
+          // we sit it at ~74% of the node chip — comfortable padding (not edge-to-edge) so the icon's
+          // backing reads as an inset tile inside the coloured-border node chip, and the Lucide stroke
+          // is never clipped. (Balanced vs the prior 88% which crowded the chip border.)
+          'background-width': '74%',
+          'background-height': '74%',
           'background-color': canvasBg,
           'border-color': (n: NodeSingular) => colors[n.data('layer') as string] ?? colors['other'],
           'border-width': 4,
@@ -1606,6 +1661,13 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     // cross-site explode reads as its own column rather than overlapping the base. Fully deterministic.
     const NODE_GAP = 150;
     const CLUSTER_GAP = 240; // clearance between the base extent and the new cluster
+    // CHANGE 3: start the new cluster BELOW the top edge of the base extent so its top-right corner
+    // does not land under the on-canvas top-right zoom/Fit/Reset controls (the additive merge does NOT
+    // re-fit, so the cluster renders near the base's top-right). A downward offset (plus the rightward
+    // CLUSTER_GAP) keeps the initial placement clear of the controls region; the operator can still
+    // drag the cluster anywhere. Base nodes are untouched (their prevPos is verbatim), so this only
+    // moves the INITIAL placement of NEW nodes.
+    const TOP_MARGIN = 130;
     const bySite = new Map<string, string[]>();
     for (const id of newLeafIds) {
       const site = siteOf(id);
@@ -1615,7 +1677,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       bySite.get(site)!.push(id);
     }
     let cursorX = maxX + CLUSTER_GAP;
-    const baseY = minY;
+    const baseY = minY + TOP_MARGIN;
     for (const ids of bySite.values()) {
       const gridCols = Math.max(1, Math.ceil(Math.sqrt(ids.length)));
       ids.forEach((id, i) => {

@@ -1,7 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="LSP">
-  <!-- MPLS LSP: a label tag + an arrow threaded through a tunnel/pipe. -->
-  <rect x="2.5" y="8.5" width="19" height="7" rx="3.5" fill="none" stroke="#94a3b8" stroke-width="1.3" opacity="0.8"/>
-  <path d="M6 12h10" stroke="#34d399" stroke-width="2" stroke-linecap="round"/>
-  <path d="M13.5 8.7l4 3.3-4 3.3" fill="#34d399" stroke="#34d399" stroke-width="1.2" stroke-linejoin="round"/>
-  <path d="M2 12l2-2h3v4H4z" fill="#34d399" stroke="#34d399" stroke-width="0.8" stroke-linejoin="round"/>
+  <!-- Lucide "route" (ISC License, https://lucide.dev). Slate-700 glyph on a slate-200 backing for
+       dual-theme legibility. Distinct from IGP adjacency (waypoints). -->
+  <rect x="1" y="1" width="22" height="22" rx="5" fill="#e2e8f0"/>
+  <g fill="none" stroke="#334155" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="6" cy="19" r="3"/>
+    <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/>
+    <circle cx="18" cy="5" r="3"/>
+  </g>
 </svg>
