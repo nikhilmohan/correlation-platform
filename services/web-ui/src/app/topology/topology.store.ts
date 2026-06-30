@@ -82,6 +82,18 @@ export class TopologyStore {
   readonly externalRevealedNodeIds = signal<ReadonlySet<string>>(new Set());
 
   /**
+   * PER-NODE COLLAPSE tracking: sourceNodeId → the set of neighbour ids THAT source's expandNode()
+   * NEWLY added to the graph. The flat externalRevealedNodeIds() (above) is the union across all
+   * sources; this map remembers the provenance so collapseNodeExternal(X) can remove EXACTLY X's
+   * exclusively-revealed nodes. A revealed node reachable from two expanded sources is recorded under
+   * BOTH — on collapse of X it is removed only if no OTHER still-expanded source also revealed it.
+   * Populated in expandNode(); pruned/cleared in collapseNodeExternal(), collapseExternal(), and on
+   * selectSite/collapseToRoot. Private (not a signal): the public per-node UI state is derived from
+   * expandedNodeIds (a node is collapsible iff it is in expandedNodeIds).
+   */
+  private revealedByNode = new Map<string, Set<string>>();
+
+  /**
    * CHANGE 1: in-site device ids that have at least one OFF-SITE neighbour (a hidden external link).
    * Computed once per site load (a neighbours probe per seeded in-site device); drives the amber
    * "extends externally" (↗) node cue. A node whose external neighbours have all been pulled into the
@@ -281,6 +293,7 @@ export class TopologyStore {
     this.selectedEdgeId.set(null);
     this.expandedNodeIds.set(new Set());
     this.externalRevealedNodeIds.set(new Set());
+    this.revealedByNode = new Map();
     this.capReached.set(false);
     this.highlightedTrailIds.set(new Set());
     this.externalLinkNodeIds.set(new Set());
@@ -458,7 +471,95 @@ export class TopologyStore {
     // The external layer is fully torn down regardless of whether some overlapping ids survived.
     this.externalRevealedNodeIds.set(new Set());
     this.expandedNodeIds.set(new Set());
+    this.revealedByNode = new Map();
     // Re-hiding the off-site nodes restores the amber ↗ cue on the nodes that linked to them.
+    this.recomputeExternalCues();
+  }
+
+  /**
+   * PER-NODE COLLAPSE (CHANGE 2 — the on-node "−" affordance). Collapses ONLY the external nodes
+   * that the given source's expandNode() revealed — the inverse of expanding just that one node.
+   * Mirrors collapseExternal() but scoped to a single source.
+   *
+   * SELECTION OF WHAT TO REMOVE (correctness): start from this source's recorded reveals
+   * (revealedByNode[sourceId]), then KEEP (do not remove) any id that is still required by another
+   * layer or another still-expanded source, specifically a candidate id is removed only when it is
+   *   • NOT a base node (base layer owns it), AND
+   *   • NOT a node the active trail explosion added (trailExplodedNodeIds), AND
+   *   • NOT present in revealedByNode[Y] for any OTHER source Y still in expandedNodeIds after this
+   *     source is removed (another expanded source still needs it).
+   * This makes per-node collapse precise: a neighbour reachable from two expanded sources survives
+   * the collapse of one of them. Dangling edges (an endpoint removed) are dropped; edges between two
+   * survivors stay. The base layout stays pixel-stable (a node-set shrink; survivors keep prevPos,
+   * no re-fit). The source regains its amber "+" cue (its external links are hidden again) and the
+   * on-node badge flips back to "+". No-op when the source was not expanded.
+   */
+  collapseNodeExternal(sourceId: string): void {
+    if (!this.expandedNodeIds().has(sourceId)) {
+      return;
+    }
+    const mine = this.revealedByNode.get(sourceId) ?? new Set<string>();
+
+    // The set of sources still expanded AFTER this one is collapsed.
+    const remainingSources = new Set(this.expandedNodeIds());
+    remainingSources.delete(sourceId);
+
+    // Ids any OTHER still-expanded source revealed — these must survive even if this source revealed
+    // them too (shared reveal).
+    const stillRequired = new Set<string>();
+    for (const other of remainingSources) {
+      const set = this.revealedByNode.get(other);
+      if (!set) {
+        continue;
+      }
+      for (const id of set) {
+        stillRequired.add(id);
+      }
+    }
+
+    // Candidate-remove this source's reveals minus anything another layer/source still owns.
+    const toRemove = new Set<string>();
+    for (const id of mine) {
+      if (this.baseNodeIds.has(id) || this.trailExplodedNodeIds.has(id) || stillRequired.has(id)) {
+        continue;
+      }
+      toRemove.add(id);
+    }
+
+    if (toRemove.size > 0) {
+      const nextNodes = new Map(this.nodeMap());
+      for (const id of toRemove) {
+        nextNodes.delete(id);
+      }
+      const surviving = new Set(nextNodes.keys());
+      const nextEdges = new Map<string, EdgeDto>();
+      for (const [id, e] of this.edgeMap()) {
+        if (surviving.has(e.from) && surviving.has(e.to)) {
+          nextEdges.set(id, e);
+        }
+      }
+      this.nodeMap.set(nextNodes);
+      this.edgeMap.set(nextEdges);
+    }
+
+    // Drop this source from the expanded set + its provenance entry (regains its "+" / amber cue).
+    const nextExpanded = new Set(this.expandedNodeIds());
+    nextExpanded.delete(sourceId);
+    this.expandedNodeIds.set(nextExpanded);
+    this.revealedByNode.delete(sourceId);
+
+    // The flat reveal set is the union of the remaining sources' reveals (so the global "Hide
+    // external links" control + collapseExternal stay correct). Recompute it from provenance.
+    const nextRevealed = new Set<string>();
+    for (const set of this.revealedByNode.values()) {
+      for (const id of set) {
+        nextRevealed.add(id);
+      }
+    }
+    this.externalRevealedNodeIds.set(nextRevealed);
+
+    // Re-hiding this source's off-site nodes restores the amber ↗ cue on it (and any node whose
+    // external neighbours are no longer all present).
     this.recomputeExternalCues();
   }
 
@@ -514,6 +615,17 @@ export class TopologyStore {
             revealed.add(id);
           }
           this.externalRevealedNodeIds.set(revealed);
+          // PER-NODE COLLAPSE: record which ids THIS source revealed (provenance for
+          // collapseNodeExternal). Merge into any existing set so a re-expand of the same source
+          // accumulates. An empty newlyRevealed (everything was already present) still marks the
+          // source as expanded above, but contributes no exclusively-owned ids here.
+          if (newlyRevealed.size > 0) {
+            const existing = this.revealedByNode.get(managedObjectId) ?? new Set<string>();
+            for (const id of newlyRevealed) {
+              existing.add(id);
+            }
+            this.revealedByNode.set(managedObjectId, existing);
+          }
           // CHANGE 1: revealing neighbours may have pulled in a node's off-site links — drop the cue
           // from any node whose external neighbours are now all present.
           this.recomputeExternalCues();

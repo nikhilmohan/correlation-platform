@@ -245,6 +245,63 @@ describe('topology-v3 CHANGE 7 — on-canvas collapsible Legend panel', () => {
   });
 });
 
+describe('per-node expand/collapse — on-node badge flips + ↔ −', () => {
+  it('the on-canvas expand-node badge is "+" (↗) when not expanded and "−" once expanded', async () => {
+    const fixture = await mountSiteGraph();
+    const component = fixture.componentInstance;
+    const store = TestBed.inject(TopologyStore);
+    const el: HTMLElement = fixture.nativeElement;
+
+    // Place an on-canvas marker for a node (jsdom has no real cy render, so seed overlayMarkers
+    // directly) and flag it as having an external link so the cue (the "+") shows.
+    component.overlayMarkers.set([{ id: 'R1', name: 'Router-1', x: 10, y: 10 }]);
+    store.externalLinkNodeIds.set(new Set(['R1']));
+    store.expandedNodeIds.set(new Set());
+    fixture.detectChanges();
+
+    let badge = el.querySelector('.cy-expand-layer [data-testid="expand-node"]') as HTMLButtonElement;
+    expect(badge).not.toBeNull();
+    expect(badge.textContent?.trim()).toBe('↗');
+    expect(badge.classList.contains('collapse')).toBe(false);
+    expect(badge.getAttribute('aria-label')).toBe('Show external links for Router-1');
+
+    // Mark the node expanded — the SAME badge (same testid) must flip to "−"/collapse, even though
+    // the amber cue would otherwise drop (externalLinkNodeIds no longer needs to contain it).
+    store.expandedNodeIds.set(new Set(['R1']));
+    store.externalLinkNodeIds.set(new Set()); // cue dropped, but expanded keeps the badge
+    fixture.detectChanges();
+
+    badge = el.querySelector('.cy-expand-layer [data-testid="expand-node"]') as HTMLButtonElement;
+    expect(badge).not.toBeNull();
+    expect(badge.textContent?.trim()).toBe('−');
+    expect(badge.classList.contains('collapse')).toBe(true);
+    expect(badge.getAttribute('aria-label')).toBe('Hide external links for Router-1');
+  });
+
+  it('clicking the "−" badge calls collapseNodeExternal, the "+" badge calls expandNode', async () => {
+    const fixture = await mountSiteGraph();
+    const component = fixture.componentInstance;
+    const store = TestBed.inject(TopologyStore);
+    const el: HTMLElement = fixture.nativeElement;
+    const expandSpy = vi.spyOn(store, 'expandNode');
+    const collapseSpy = vi.spyOn(store, 'collapseNodeExternal');
+
+    component.overlayMarkers.set([{ id: 'R1', name: 'Router-1', x: 10, y: 10 }]);
+    store.externalLinkNodeIds.set(new Set(['R1']));
+    store.expandedNodeIds.set(new Set());
+    fixture.detectChanges();
+
+    (el.querySelector('.cy-expand-layer [data-testid="expand-node"]') as HTMLButtonElement).click();
+    expect(expandSpy).toHaveBeenCalledWith('R1');
+    expect(collapseSpy).not.toHaveBeenCalled();
+
+    store.expandedNodeIds.set(new Set(['R1']));
+    fixture.detectChanges();
+    (el.querySelector('.cy-expand-layer [data-testid="expand-node"]') as HTMLButtonElement).click();
+    expect(collapseSpy).toHaveBeenCalledWith('R1');
+  });
+});
+
 describe('topology-v3 CHANGE 8 — network-planes help', () => {
   it('renders an info toggle that discloses the planes helper text', () => {
     TestBed.configureTestingModule({ providers: [...testProviders()] });

@@ -378,6 +378,37 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
       .toBeGreaterThan(0);
   });
 
+  test('per-node toggle: an expanded node’s badge flips to "−" and collapses ONLY its revealed links', async ({
+    page,
+  }) => {
+    // After a node is expanded the SAME on-canvas badge (data-testid="expand-node") flips from the
+    // amber "+" (↗, aria "Show external links for …") to a "−" collapse affordance (aria "Hide
+    // external links for …") that removes ONLY that node's revealed off-site links. The global Reset
+    // (zoom-reset) and "Hide external links" (collapse-external) controls are unaffected.
+    const cy = await rootAtSite(page);
+    await expandUntilGraphGrows(page, cy);
+    const grownCount = Number(await cy.getAttribute('data-cy-node-count'));
+
+    // At least one node is now expanded → a "−" collapse badge exists carrying the per-state label.
+    await expect
+      .poll(async () => Number(await cy.getAttribute('data-cy-expanded-node-count')))
+      .toBeGreaterThanOrEqual(1);
+    const collapseBadge = page.locator(
+      '.cy-expand-layer [data-testid="expand-node"][aria-label^="Hide external links for "]',
+    );
+    await expect.poll(async () => collapseBadge.count()).toBeGreaterThanOrEqual(1);
+
+    // Clicking the "−" collapses that node's reveals: the graph shrinks back and the node leaves the
+    // expanded set (its badge returns to "+").
+    await collapseBadge.first().click();
+    await expect
+      .poll(async () => Number(await cy.getAttribute('data-cy-node-count')))
+      .toBeLessThan(grownCount);
+    await expect
+      .poll(async () => Number(await cy.getAttribute('data-cy-expanded-node-count')))
+      .toBeLessThan(1 + (await collapseBadge.count()));
+  });
+
   test('UX redesign: Devices/Connections lists are collapsed by default behind the "List view" disclosure', async ({
     page,
   }) => {
