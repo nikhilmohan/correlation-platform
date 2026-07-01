@@ -65,9 +65,7 @@ class Settings(BaseSettings):
     # Codebook Service (Stage 2 domain-knowledge anchoring). Only wiring/operational knobs live
     # here — the fault-origin scenario SET and every anchoring THRESHOLD come from Codebook +
     # Knowledge at runtime, never from a code/env default (spec Non-functional, AC-17).
-    codebook_base_url: str = Field(
-        default="http://codebook-generator:8080", alias="CODEBOOK_BASE_URL"
-    )
+    codebook_base_url: str = Field(default="http://codebook-api:8000", alias="CODEBOOK_BASE_URL")
     codebook_client_mode: ClientMode = Field(default=ClientMode.real, alias="CODEBOOK_CLIENT_MODE")
     codebook_retry_max: int = Field(default=5, alias="CODEBOOK_RETRY_MAX")
     codebook_retry_backoff_ms: int = Field(default=500, alias="CODEBOOK_RETRY_BACKOFF_MS")
