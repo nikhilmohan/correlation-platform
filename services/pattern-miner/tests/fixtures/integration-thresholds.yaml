@@ -1,0 +1,12 @@
+# MIRROR (local unit gate only) of the Simulator-OWNED pattern-quality bounds from
+# services/simulator/integration-thresholds.yaml. The Simulator owns these definitions; the numeric
+# MVP targets are CONFIG, not literals in pattern-miner source (spec AC-19/AC-20). This mirror lets
+# the accuracy-oracle regression guard run on the local unit gate where the simulator branch's file
+# is not checked out; the integration harness reads the authoritative simulator file. The oracle
+# test prefers services/simulator/integration-thresholds.yaml when present and only falls back here.
+distinct_patterns_min: 8
+distinct_patterns_max: 10
+per_pattern_type_span_min: 10
+per_pattern_type_span_max: 20
+pattern_coverage_min: 0.50
+pattern_coverage_max: 0.60

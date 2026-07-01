@@ -14,6 +14,7 @@ sequence mining, no topology. The frequent-subsequence discovery is delegated to
 from __future__ import annotations
 
 from .engine import FreqSequence, PrefixSpanEngine
+from .grouped_miner import GroupedMiner, GroupPattern
 from .miner import MinedSequence, PrefixSpanMiner
 
 __all__ = [
@@ -21,4 +22,6 @@ __all__ = [
     "PrefixSpanEngine",
     "MinedSequence",
     "PrefixSpanMiner",
+    "GroupedMiner",
+    "GroupPattern",
 ]

@@ -23,7 +23,8 @@ import time
 import uvicorn
 
 from .api import ApiState, create_app
-from .assemble import PatternAssembler, group_transactions
+from .assemble import ThreeStagePipeline, group_transactions
+from .codebook import CodebookClient, CodebookError, NoActiveCodebookError
 from .config import MiningEngineKind, Settings
 from .emit import PatternEmitter
 from .ingest import Dedup, DlqPublisher, MessageRouter, RouteDecision
@@ -31,7 +32,7 @@ from .kafka_io import PatternProducer, make_consumer
 from .knowledge import MiningParamsClient
 from .logging_setup import configure_logging, get_logger
 from .metrics import Metrics
-from .mining import PrefixSpanMiner
+from .mining import GroupedMiner, PrefixSpanMiner
 from .mining.engine import PrefixSpanEngine
 from .timing import TimingComputer
 from .windowing import SessionWindower
@@ -59,6 +60,24 @@ def build_knowledge_client(settings: Settings) -> MiningParamsClient:
         retry_max=settings.knowledge_retry_max,
         retry_backoff_ms=settings.knowledge_retry_backoff_ms,
     )
+
+
+def build_codebook_client(settings: Settings) -> CodebookClient:
+    """Construct the Codebook client (Stage 2) from env config (no hard-coded URL)."""
+    return CodebookClient(
+        settings.codebook_base_url,
+        retry_max=settings.codebook_retry_max,
+        retry_backoff_ms=settings.codebook_retry_backoff_ms,
+    )
+
+
+def _batches_by_key(trail_batches, default_domain: str):
+    """Group trail batches by their ``(domain, snapshotId)`` codebook-resolution key."""
+    grouped: dict[tuple[str, str], list] = {}
+    for tb in trail_batches:
+        key = (tb.domain or default_domain, tb.snapshot_id)
+        grouped.setdefault(key, []).append(tb)
+    return grouped
 
 
 def make_http_server(app, port: int) -> uvicorn.Server:
@@ -95,12 +114,14 @@ def consume_loop(
     settings: Settings,
     engine: PrefixSpanEngine,
     knowledge: MiningParamsClient,
+    codebook: CodebookClient,
     metrics: Metrics,
     api_state: ApiState,
     stop_event: threading.Event,
 ) -> None:
     """Blocking confluent-kafka consume->mine->produce loop (runs on a worker thread)."""
     miner = PrefixSpanMiner(engine, metrics=metrics)
+    grouped_miner = GroupedMiner(miner, metrics=metrics)
     timing = TimingComputer()
     producer = PatternProducer(settings.kafka_bootstrap_servers)
     dlq = DlqPublisher(producer.raw, settings.dlq_topic)
@@ -128,14 +149,32 @@ def consume_loop(
         try:
             params = knowledge.fetch()
             windower = SessionWindower(params.windowing, metrics=metrics)
-            assembler = PatternAssembler(windower, miner, timing, metrics=metrics)
+            pipeline = ThreeStagePipeline(windower, grouped_miner, timing, metrics=metrics)
             metrics.mining_runs.inc()
+
+            # Stage 2 needs the domain's fault-origin scenarios; resolve the active codebook per
+            # distinct (domain, snapshotId) in the run (single snapshot per run in practice).
+            # A Codebook failure fails the run fast (no unanchored global mining) — offsets NOT
+            # committed, so replay retries once Codebook returns.
+            trail_batches = group_transactions(batch)
+            scenarios_by_key: dict[tuple[str, str], list] = {}
+            for tb in trail_batches:
+                key = (tb.domain or settings.knowledge_domain, tb.snapshot_id)
+                if key not in scenarios_by_key:
+                    scenarios_by_key[key] = codebook.scenarios_for(key[0], key[1])
+
             envelopes = []
-            for trail_batch in group_transactions(batch):
-                envelopes.extend(assembler.mine_batch(trail_batch, params))
+            for key, group_batches in _batches_by_key(
+                trail_batches, settings.knowledge_domain
+            ).items():
+                envelopes.extend(pipeline.run(group_batches, scenarios_by_key[key], params))
             emitter.emit(envelopes)
             consumer.commit()
             log.info("mining_run_completed", transactions=len(batch), emitted=len(envelopes))
+        except CodebookError as exc:  # Stage-2 anchoring unavailable: fail fast, do NOT commit.
+            metrics.mining_failures.inc()
+            metrics.codebook_fetch_failures.inc()
+            log.error("mining_run_failed", reason="codebook_unavailable", error=str(exc))
         except Exception as exc:  # noqa: BLE001 — fail the batch, do NOT commit; replay-safe
             metrics.mining_failures.inc()
             log.error("mining_run_failed", error=str(exc))
@@ -171,13 +210,43 @@ def consume_loop(
         log.info("pattern_miner_consumer_stopped")
 
 
+async def gate_on_codebook(
+    codebook: CodebookClient,
+    settings: Settings,
+    api_state: ApiState,
+    *,
+    deadline_seconds: int = 120,
+) -> None:
+    """Block readiness until the Codebook Service is reachable; bounded retry then raise.
+
+    Reachability is probed with a lightweight resolve using the configured domain and a probe
+    snapshot; a 404 (no active codebook for that probe snapshot) still proves the service is UP, so
+    readiness is satisfied. Only transport/5xx exhaustion blocks readiness.
+    """
+    deadline = time.monotonic() + deadline_seconds
+    while True:
+        try:
+            # A 404 (no active codebook for the probe snapshot) still proves the service is UP.
+            with contextlib.suppress(NoActiveCodebookError):
+                codebook.resolve_codebook_id(settings.knowledge_domain, "_readiness_probe_")
+            api_state.codebook_ready = True
+            return
+        except Exception as exc:  # noqa: BLE001 — transport/5xx exhaustion: service not reachable
+            log.error("codebook_gate_failed", error=str(exc))
+            if time.monotonic() > deadline:
+                raise
+            await asyncio.sleep(3)
+
+
 async def serve(settings: Settings, metrics: Metrics) -> None:
     """Run the HTTP server + Kafka consume loop concurrently until SIGTERM."""
     engine = build_engine(settings)
     knowledge = build_knowledge_client(settings)
+    codebook = build_codebook_client(settings)
 
     api_state = ApiState(metrics_registry=metrics.registry)
     await gate_on_knowledge(knowledge, api_state)
+    await gate_on_codebook(codebook, settings, api_state)
 
     app = create_app(api_state)
     server = make_http_server(app, settings.http_port)
@@ -201,6 +270,7 @@ async def serve(settings: Settings, metrics: Metrics) -> None:
             settings=settings,
             engine=engine,
             knowledge=knowledge,
+            codebook=codebook,
             metrics=metrics,
             api_state=api_state,
             stop_event=stop_event,

@@ -60,6 +60,15 @@ def _live_payload() -> dict:
                 "type": "object",
                 "value": {"fast": 0.5, "slow": 30.0, "default": 5.0},
             },
+            {
+                "key": "anchoring.matchConfidenceThreshold",
+                "type": "number",
+                "value": 0.6,
+                "min": 0.0,
+                "max": 1.0,
+            },
+            {"key": "anchoring.weights.order", "type": "number", "value": 0.7},
+            {"key": "anchoring.weights.jaccard", "type": "number", "value": 0.3},
             {"key": "codebookVersion", "type": "string", "value": "current"},
         ],
     }
@@ -88,6 +97,10 @@ def test_fetch_parses_live_enveloped_shape():
     assert w.tempo_percentile == 95.0
     assert w.profiles["fast"].floor_seconds == 0.5
     assert w.profiles["slow"].floor_seconds == 30.0
+    # Stage-2 anchoring block parsed from the same record.
+    assert params.anchoring.match_confidence_threshold == 0.6
+    assert params.anchoring.w_order == 0.7
+    assert params.anchoring.w_jaccard == 0.3
 
 
 @respx.mock

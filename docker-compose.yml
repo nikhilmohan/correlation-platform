@@ -469,6 +469,8 @@ services:
     depends_on:
       knowledge:
         condition: service_healthy
+      codebook-api:
+        condition: service_healthy
       kafka-init:
         condition: service_completed_successfully
     environment:
@@ -481,6 +483,10 @@ services:
       KNOWLEDGE_CLIENT_MODE: real
       KNOWLEDGE_DOMAIN: core-ip
       KNOWLEDGE_MODEL_PARAMS_RECORD_ID: core-ip/modelParams/pattern-miner
+      # Stage-2 domain-knowledge anchoring: the Codebook read API (codebook-api serves the
+      # /codebooks/* endpoints on 8000). Scenario set + anchoring params are runtime-sourced.
+      CODEBOOK_BASE_URL: http://codebook-api:8000
+      CODEBOOK_CLIENT_MODE: real
       SPARK_MASTER: "local[*]"
       MINING_ENGINE: spark
       LOG_LEVEL: INFO

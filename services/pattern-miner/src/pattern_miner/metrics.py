@@ -45,6 +45,21 @@ class Metrics:
             "Knowledge mining-params fetch failures",
             registry=r,
         )
+        self.codebook_fetch_failures = Counter(
+            "pm_codebook_fetch_failures_total",
+            "Codebook scenarios/active-codebook fetch failures (Stage 2)",
+            registry=r,
+        )
+        self.cascades_anchored = Counter(
+            "pm_cascades_anchored_total",
+            "Candidate cascades anchored to a fault-origin scenario (Stage 2)",
+            registry=r,
+        )
+        self.cascades_unexplained = Counter(
+            "pm_cascades_unexplained_total",
+            "Candidate cascades with no confident scenario match (unexplained)",
+            registry=r,
+        )
         self.produce_failures = Counter(
             "pm_produce_failures_total", "patterns.mined produce failures", registry=r
         )
@@ -56,4 +71,9 @@ class Metrics:
         )
         self.last_run_sequence_count = Gauge(
             "pm_last_run_sequence_count", "Sequences discovered in the last mining run", registry=r
+        )
+        self.anchored_group_count = Gauge(
+            "pm_anchored_group_count",
+            "Distinct anchored fault-origin groups in the last mining run",
+            registry=r,
         )

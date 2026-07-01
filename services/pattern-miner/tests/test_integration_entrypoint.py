@@ -42,10 +42,32 @@ from pattern_miner.metrics import Metrics  # noqa: E402
 from .helpers import make_alarm, make_transaction, wrap  # noqa: E402
 
 KNOWLEDGE_URL = "http://knowledge.test"
+CODEBOOK_URL = "http://codebook.test"
 DOMAIN = "core-ip"
 RECORD_ID = "core-ip/modelParams/pattern-miner"
 HTTP_PORT = 8189
 FIBER_CUT = ["FiberFault", "LinkDown", "AdjDown"]
+CODEBOOK_ID = "cb-int-1"
+
+
+def _scenarios_body() -> dict:
+    return {
+        "codebookId": CODEBOOK_ID,
+        "domain": DOMAIN,
+        "scenarios": [
+            {
+                "scenarioId": "SC-FIBER",
+                "faultOriginObjectId": "obj-fiber-1",
+                "faultOriginType": "FiberCut",
+                "predictedSymptoms": [
+                    {"alarmType": "FiberFault", "managedObjectId": "obj-fiber-1"},
+                    {"alarmType": "LinkDown", "managedObjectId": "obj-link-1"},
+                    {"alarmType": "AdjDown", "managedObjectId": "obj-rtr-1"},
+                ],
+                "trailIds": ["trail-int"],
+            }
+        ],
+    }
 
 
 def _record_envelope() -> dict:
@@ -65,6 +87,9 @@ def _record_envelope() -> dict:
                 {"key": "window.adaptive.gapMultiplier", "value": 3.0},
                 {"key": "window.adaptive.tempoPercentile", "value": 95.0},
                 {"key": "window.adaptive.profiles", "value": {"fast": 0.5, "slow": 30.0}},
+                {"key": "anchoring.matchConfidenceThreshold", "value": 0.5},
+                {"key": "anchoring.weights.order", "value": 0.7},
+                {"key": "anchoring.weights.jaccard", "value": 0.3},
                 {"key": "codebookVersion", "value": "current"},
             ],
         },
@@ -148,11 +173,18 @@ async def test_real_entrypoint_serves_http_and_mines_and_produces(monkeypatch):
     router.get(f"{KNOWLEDGE_URL}{mp_path}").mock(
         return_value=httpx.Response(200, json=_record_envelope())
     )
+    router.get(f"{CODEBOOK_URL}/codebooks/active").mock(
+        return_value=httpx.Response(200, json={"codebookId": CODEBOOK_ID, "domain": DOMAIN})
+    )
+    router.get(f"{CODEBOOK_URL}/codebooks/{CODEBOOK_ID}/scenarios").mock(
+        return_value=httpx.Response(200, json=_scenarios_body())
+    )
 
     settings = Settings(
         KNOWLEDGE_BASE_URL=KNOWLEDGE_URL,
         KNOWLEDGE_DOMAIN=DOMAIN,
         KNOWLEDGE_MODEL_PARAMS_RECORD_ID=RECORD_ID,
+        CODEBOOK_BASE_URL=CODEBOOK_URL,
         KAFKA_BOOTSTRAP_SERVERS="localhost:9092",
         HTTP_PORT=HTTP_PORT,
         MINING_ENGINE="local",
@@ -170,6 +202,7 @@ async def test_real_entrypoint_serves_http_and_mines_and_produces(monkeypatch):
                 health = await client.get(f"{base}/health")
                 assert health.status_code == 200, health.text
                 assert health.json()["knowledge"] == "up"
+                assert health.json()["codebook"] == "up"
                 metrics_resp = await client.get(f"{base}/metrics")
                 assert metrics_resp.status_code == 200
                 assert "pm_patterns_emitted_total" in metrics_resp.text
@@ -184,6 +217,8 @@ async def test_real_entrypoint_serves_http_and_mines_and_produces(monkeypatch):
                 typed = deserialize(envelope.to_json())
                 assert typed.type == "PatternMinedEvent"
                 sequences.append(typed.payload.sequence)
+                if typed.payload.sequence == FIBER_CUT:
+                    assert typed.payload.provenance.anchorScenarioId == "SC-FIBER"
             assert FIBER_CUT in sequences
         finally:
             serve_task.cancel()

@@ -8,32 +8,42 @@ from pattern_miner.api import ApiState, create_app
 from pattern_miner.metrics import Metrics
 
 
-def _client(kafka=False, knowledge=False) -> TestClient:
+def _client(kafka=False, knowledge=False, codebook=False) -> TestClient:
     metrics = Metrics()
     state = ApiState(
         metrics_registry=metrics.registry,
         kafka_connected=kafka,
         knowledge_ready=knowledge,
+        codebook_ready=codebook,
     )
     return TestClient(create_app(state))
 
 
 def test_health_reports_starting_until_ready():
-    client = _client(kafka=False, knowledge=False)
+    client = _client(kafka=False, knowledge=False, codebook=False)
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "starting"
     assert body["kafka"] == "down"
     assert body["knowledge"] == "down"
+    assert body["codebook"] == "down"
 
 
-def test_health_ok_when_kafka_and_knowledge_up():
-    client = _client(kafka=True, knowledge=True)
+def test_health_ok_when_kafka_knowledge_codebook_up():
+    client = _client(kafka=True, knowledge=True, codebook=True)
     body = client.get("/health").json()
     assert body["status"] == "ok"
     assert body["kafka"] == "up"
     assert body["knowledge"] == "up"
+    assert body["codebook"] == "up"
+
+
+def test_health_starting_when_codebook_down():
+    client = _client(kafka=True, knowledge=True, codebook=False)
+    body = client.get("/health").json()
+    assert body["status"] == "starting"
+    assert body["codebook"] == "down"
 
 
 def test_metrics_endpoint_serves_prometheus():

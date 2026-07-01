@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     knowledge_retry_max: int = Field(default=5, alias="KNOWLEDGE_RETRY_MAX")
     knowledge_retry_backoff_ms: int = Field(default=500, alias="KNOWLEDGE_RETRY_BACKOFF_MS")
 
+    # Codebook Service (Stage 2 domain-knowledge anchoring). Only wiring/operational knobs live
+    # here — the fault-origin scenario SET and every anchoring THRESHOLD come from Codebook +
+    # Knowledge at runtime, never from a code/env default (spec Non-functional, AC-17).
+    codebook_base_url: str = Field(
+        default="http://codebook-generator:8080", alias="CODEBOOK_BASE_URL"
+    )
+    codebook_client_mode: ClientMode = Field(default=ClientMode.real, alias="CODEBOOK_CLIENT_MODE")
+    codebook_retry_max: int = Field(default=5, alias="CODEBOOK_RETRY_MAX")
+    codebook_retry_backoff_ms: int = Field(default=500, alias="CODEBOOK_RETRY_BACKOFF_MS")
+
     spark_master: str = Field(default="local[*]", alias="SPARK_MASTER")
     mining_engine: MiningEngineKind = Field(default=MiningEngineKind.spark, alias="MINING_ENGINE")
 
@@ -118,16 +128,46 @@ class WindowingParams:
 
 
 @dataclass(frozen=True)
+class AnchoringParams:
+    """Immutable, Knowledge-sourced Stage-2 domain-knowledge anchoring parameters.
+
+    Every value originates from the Knowledge model-params record's ``anchoring.*`` keys — there is
+    **no** hard-coded matching threshold or scorer weight (spec AC-7, AC-17). Onboarding a new
+    domain re-authors these in Knowledge; no code change.
+
+    * ``match_confidence_threshold`` — the confidence in ``[0, 1]`` a cascade-vs-scenario match must
+      reach to anchor; below it the cascade is "unexplained". **Required** (no default).
+    * ``scoring_method`` — selects the scorer (the reusable template ships one:
+      ``ordered_subsequence_jaccard`` = weighted LCS-ratio + Jaccard). A structural token, not a
+      threshold; the Knowledge value is used when present.
+    * ``grouping_keys`` — the anchor-grouping key list (default ``["scenarioId"]`` — one group per
+      fault-origin scenario). Domain-agnostic structural default, not a domain literal.
+    * ``tie_break`` — deterministic tie-break token for equal-confidence scenarios
+      (``chain_length_then_scenario_id``). Structural, not a threshold.
+    * ``w_order`` / ``w_jaccard`` — scorer weights (sum to 1). **Required** (no default) —
+      Knowledge-sourced tuning knobs, not code literals.
+    """
+
+    match_confidence_threshold: float
+    w_order: float
+    w_jaccard: float
+    scoring_method: str
+    tie_break: str
+    grouping_keys: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MiningParams:
     """Immutable snapshot of the Knowledge-sourced mining configuration for one run.
 
     Sourced entirely from the Knowledge model-params record (recordId
-    ``core-ip/modelParams/pattern-miner``) — ``prefixspan.*``, ``window.adaptive.*``, and
-    ``codebookVersion``. No value here is a code default (spec criteria 9, 6).
+    ``core-ip/modelParams/pattern-miner``) — ``prefixspan.*``, ``window.adaptive.*``,
+    ``anchoring.*``, and ``codebookVersion``. No value here is a code default (spec criteria 9, 6).
     """
 
     min_support: float
     max_pattern_length: int
     max_sequence_count: int
     windowing: WindowingParams
+    anchoring: AnchoringParams
     codebook_version: str

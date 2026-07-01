@@ -7,11 +7,10 @@ import json
 import pytest
 from acp_event_model import deserialize
 
-from pattern_miner.assemble import group_transactions
 from pattern_miner.emit import PatternEmitter
 from pattern_miner.metrics import Metrics
 
-from .helpers import build_assembler, default_params, make_alarm, make_transaction
+from .helpers import default_params, make_alarm, make_scenario, make_transaction, run_pipeline
 
 
 class _FakeProducer:
@@ -35,17 +34,21 @@ class _FailingProducer:
         self.published.append((topic, envelope))
 
 
+FIBER_CUT = ["FiberFault", "LinkDown", "AdjDown"]
+
+
 def _envelopes():
-    alarms = [
-        make_alarm(alarm_type=t, raised_offset_seconds=i)
-        for i, t in enumerate(["FiberFault", "LinkDown", "AdjDown"])
+    txns = [
+        make_transaction(
+            trail_id=f"t{i}",
+            alarms=[
+                make_alarm(alarm_type=t, raised_offset_seconds=j) for j, t in enumerate(FIBER_CUT)
+            ],
+        )
+        for i in range(3)
     ]
-    txns = [make_transaction(trail_id=f"t{i}", alarms=alarms) for i in range(3)]
-    assembler = build_assembler(windowing=default_params().windowing)
-    out = []
-    for batch in group_transactions([(t, "tr") for t in txns]):
-        out.extend(assembler.mine_batch(batch, default_params(min_support=0.5)))
-    return out
+    scenarios = [make_scenario(scenario_id="SC-FIBER", symptom_chain=FIBER_CUT)]
+    return run_pipeline(txns, scenarios, default_params(min_support=0.5))
 
 
 def test_emit_produces_one_message_per_sequence():
@@ -83,13 +86,13 @@ def test_emit_fails_fast_and_counts_produce_failure():
     job exits non-zero for replay-safe re-consume; it must NOT be silently swallowed.
     """
     envelopes = _envelopes()
-    assert len(envelopes) >= 2
+    assert envelopes
     producer = _FailingProducer(fail_after=1)
     metrics = Metrics()
     emitter = PatternEmitter(producer, "patterns.mined", metrics=metrics)
 
     with pytest.raises(RuntimeError, match="broker unavailable"):
-        emitter.emit(envelopes)
+        emitter.emit(envelopes + envelopes)  # >= 2 envelopes so a mid-stream produce can fail
 
     # First envelope produced before the failure; failure counted, not swallowed.
     assert len(producer.published) == 1

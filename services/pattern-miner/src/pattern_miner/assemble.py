@@ -1,10 +1,18 @@
-"""Assemble ``PatternMinedEvent`` envelopes from sessions + mined sequences + timing + provenance.
+"""Assemble ``PatternMinedEvent`` envelopes from the 3-stage discovery pipeline.
 
-The end-to-end mining assembly (spec tasks 3-7): pool per-trail alarms -> adaptive session windows
--> PrefixSpan over the ``alarmType``-token session sequences -> support/confidence/lift -> ms timing
--> one ``PatternMinedEvent`` per discovered sequence on ``patterns.mined``, carrying provenance
-(``sourceWindowId``, ``snapshotId``, ``codebookVersion``, ``domain``) and NO RCA/lifecycle/patternId
-fields (structurally impossible — the frozen schema forbids extras).
+The end-to-end mining assembly (spec tasks 3-7), redesigned to the 3-stage approach:
+
+1. **Stage 1 — time+space correlation** (``windowing.SessionWindower``): pool per-trail alarms,
+   adaptive idle-gap session windowing -> per-trail **candidate cascades** (``Session``s).
+2. **Stage 2 — domain-knowledge anchoring** (``anchoring.AnchorGrouper``): assign each cascade to
+   the best-matching Codebook fault-origin ``scenarioId`` (or "unexplained"); group by anchor.
+3. **Stage 3 — bounded PrefixSpan per group** (``mining.GroupedMiner``): learn each group's
+   canonical ordered ``alarmType`` signature, support, confidence, lift -> **one**
+   ``PatternMinedEvent`` per anchored group (+ one unexplained if non-empty) on ``patterns.mined``.
+
+Provenance carries ``sourceWindowId``, ``snapshotId``, ``codebookVersion``, ``domain``, and
+``anchorScenarioId`` (the group's matched ``scenarioId``, or ``None`` for the unexplained group) —
+and NO RCA/lifecycle/patternId fields (structurally impossible — the frozen schema forbids extras).
 
 The mined ``sequence`` items are the ``alarms[].alarmType`` tokens (the canonical join token) —
 never ``eventType`` (X.733 category) or ``probableCause``.
@@ -24,9 +32,11 @@ from acp_event_model import (
     TypedEnvelope,
 )
 
+from .anchoring import AnchorGrouper
+from .codebook import Scenario
 from .config import MiningParams
 from .logging_setup import get_logger
-from .mining import MinedSequence, PrefixSpanMiner
+from .mining import GroupedMiner, GroupPattern
 from .timing import TimingComputer
 from .windowing import Session, SessionWindower
 
@@ -70,109 +80,119 @@ def group_transactions(
     return list(batches.values())
 
 
-class PatternAssembler:
-    """Builds ``PatternMinedEvent`` envelopes for the sequences mined from a trail's sessions.
+class ThreeStagePipeline:
+    """Runs Stage 1 -> Stage 2 -> Stage 3 over a run's trail batches and assembles the events.
 
-    Provenance vs timing scope (contract note for the Pattern Manager consumer)
-    --------------------------------------------------------------------------
-    A mined sequence can be an ordered subsequence of *several* of a trail's sessions. When it
-    is, the two derived fields are scoped differently — this is intentional and the consumer
-    must not assume they describe the same single window:
-
-    * ``provenance.sourceWindowId`` = the ``source_window_id`` of the **first** matching
-      session (deterministic given trail + snapshot + params). It is a stable, single-window
-      reference for lineage/back-tracing, **not** an exhaustive list of every window the
-      pattern appeared in.
-    * ``timing`` = statistics **aggregated over all** matching sessions (inter-arrival stats
-      pooled across every session that contains the sequence), so it reflects the pattern's
-      full observed tempo, not just the first window's.
-
-    So for a multi-session sequence, ``sourceWindowId`` points at one representative window
-    while ``timing`` summarises the whole matching set. Downstream (Pattern Manager) should
-    treat ``sourceWindowId`` as a first-window pointer, not as the sole source of the timing.
+    One instance is built per run with the run's Knowledge-sourced ``params`` and the once-per-run
+    Codebook ``scenarios``. It emits **one** ``PatternMinedEvent`` per anchored group (plus one for
+    the unexplained group if non-empty) — the bounded, accurate output the respec requires.
     """
 
     def __init__(
         self,
         windower: SessionWindower,
-        miner: PrefixSpanMiner,
+        grouped_miner: GroupedMiner,
         timing_computer: TimingComputer,
         *,
         metrics=None,
     ) -> None:
         self._windower = windower
-        self._miner = miner
+        self._grouped_miner = grouped_miner
         self._timing = timing_computer
         self._metrics = metrics
 
-    def mine_batch(self, batch: TrailBatch, params: MiningParams) -> list[TypedEnvelope]:
-        """Window, mine, and assemble ``PatternMinedEvent`` envelopes for one trail batch."""
-        sessions = self._windower.sessions_for_trail(
-            batch.trail_id,
-            batch.alarms,
-            snapshot_id=batch.snapshot_id,
-            domain=batch.domain,
-        )
+    def run(
+        self,
+        batches: list[TrailBatch],
+        scenarios: list[Scenario],
+        params: MiningParams,
+    ) -> list[TypedEnvelope]:
+        """Execute the 3 stages over the whole run and return the assembled envelopes."""
+        # Stage 1: window every trail into candidate cascades (sessions).
+        sessions: list[Session] = []
+        trace_by_window: dict[str, str | None] = {}
+        for batch in batches:
+            trail_sessions = self._windower.sessions_for_trail(
+                batch.trail_id,
+                batch.alarms,
+                snapshot_id=batch.snapshot_id,
+                domain=batch.domain,
+            )
+            for s in trail_sessions:
+                trace_by_window[s.source_window_id] = batch.trace_id
+            sessions.extend(trail_sessions)
+
+        if self._metrics is not None:
+            self._metrics.last_run_session_count.set(len(sessions))
         if not sessions:
             return []
 
-        sequences = [s.sequence for s in sessions]
-        mined = self._miner.mine(
-            sequences,
-            min_support=params.min_support,
-            max_pattern_length=params.max_pattern_length,
-            max_sequence_count=params.max_sequence_count,
-        )
-        if not mined:
-            log.info("mining_empty_result", trail_id=batch.trail_id, sessions=len(sessions))
-            return []
+        # Stage 2: anchor each cascade to a scenario (or unexplained) and group.
+        grouper = AnchorGrouper(scenarios, params.anchoring)
+        groups = grouper.group(sessions)
+        self._record_anchor_metrics(groups)
+
+        # Stage 3: bounded PrefixSpan within each group; one representative pattern per group.
+        group_patterns = self._grouped_miner.mine(groups, params)
 
         envelopes: list[TypedEnvelope] = []
-        for m in mined:
-            matching = [s for s in sessions if _contains_subsequence(s.sequence, m.sequence)]
-            envelope = self._build_event(batch, m, matching, params)
+        for gp in group_patterns:
+            envelope = self._build_event(gp, params, trace_by_window)
             envelopes.append(envelope)
             if self._metrics is not None:
                 self._metrics.patterns_emitted.inc()
             log.info(
                 "pattern_mined",
-                trail_id=batch.trail_id,
-                sequence=list(m.sequence),
-                support=round(m.support, 6),
-                confidence=round(m.confidence, 6),
-                lift=round(m.lift, 6),
+                anchor_scenario_id=gp.scenario_id,
+                sequence=list(gp.mined.sequence),
+                support=round(gp.mined.support, 6),
+                confidence=round(gp.mined.confidence, 6),
+                lift=round(gp.mined.lift, 6),
                 timing=envelope.payload.timing,
             )
         return envelopes
 
+    def _record_anchor_metrics(self, groups) -> None:
+        if self._metrics is None:
+            return
+        anchored_groups = 0
+        anchored_cascades = 0
+        unexplained_cascades = 0
+        for g in groups:
+            if g.is_unexplained:
+                unexplained_cascades += len(g.sessions)
+            else:
+                anchored_groups += 1
+                anchored_cascades += len(g.sessions)
+        self._metrics.anchored_group_count.set(anchored_groups)
+        self._metrics.cascades_anchored.inc(anchored_cascades)
+        self._metrics.cascades_unexplained.inc(unexplained_cascades)
+
     def _build_event(
         self,
-        batch: TrailBatch,
-        mined: MinedSequence,
-        matching_sessions: list[Session],
+        gp: GroupPattern,
         params: MiningParams,
+        trace_by_window: dict[str, str | None],
     ) -> TypedEnvelope:
-        # timing aggregates over ALL matching sessions (full observed tempo of the pattern).
-        timing = self._timing.compute([s.alarms for s in matching_sessions])
-        # sourceWindowId uses only the FIRST matching session (stable per input+boundary): a
-        # single-window lineage pointer, deliberately narrower than `timing`'s multi-session
-        # aggregate. See the PatternAssembler class docstring — the Pattern Manager consumer must
-        # not read sourceWindowId as the exhaustive window-set behind `timing`. The full window-set
-        # is fully determined by trail+snapshot+params.
-        source_window_id = matching_sessions[0].source_window_id
+        # timing aggregates over ALL matching sessions in the group (full observed tempo).
+        timing = self._timing.compute([s.alarms for s in gp.matching_sessions])
+        first = gp.matching_sessions[0]
+        source_window_id = first.source_window_id
+        trace_id = trace_by_window.get(source_window_id)
 
         provenance = Provenance(
             sourceWindowId=source_window_id,
-            snapshotId=batch.snapshot_id,
-            domain=batch.domain,
+            snapshotId=first.snapshot_id,
+            domain=first.domain,
             codebookVersion=params.codebook_version,
+            anchorScenarioId=gp.scenario_id,
         )
         payload = PatternMinedEvent(
-            sequence=list(mined.sequence),
-            support=mined.support,
-            confidence=mined.confidence,
-            lift=mined.lift,
-            trailId=batch.trail_id,
+            sequence=list(gp.mined.sequence),
+            support=gp.mined.support,
+            confidence=gp.mined.confidence,
+            lift=gp.mined.lift,
+            trailId=first.trail_id,
             timing=timing.to_dict(),
             provenance=provenance,
         )
@@ -182,12 +202,6 @@ class PatternAssembler:
             schemaVersion=1,
             occurredAt=datetime.now(UTC),
             source=SOURCE,
-            traceId=batch.trace_id or str(uuid.uuid4()),
+            traceId=trace_id or str(uuid.uuid4()),
             payload=payload,
         )
-
-
-def _contains_subsequence(session_seq: list[str], pattern: tuple[str, ...]) -> bool:
-    """True iff ``pattern`` is an ordered subsequence of ``session_seq`` (gaps allowed)."""
-    it = iter(session_seq)
-    return all(any(token == p for token in it) for p in pattern)

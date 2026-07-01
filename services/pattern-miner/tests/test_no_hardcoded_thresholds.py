@@ -22,6 +22,8 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "pattern_miner"
 THRESHOLD_FILES = [
     SRC / "windowing.py",
     SRC / "mining" / "miner.py",
+    SRC / "mining" / "grouped_miner.py",
+    SRC / "anchoring.py",
 ]
 
 # Structural constants that are NOT correlation thresholds (indices, unit conversions, math,
@@ -64,15 +66,56 @@ def test_no_threshold_literals_in_threshold_files():
 
 
 def test_config_declares_no_default_mining_thresholds():
-    """Settings must not carry a minSupport/maxPatternLength/session-gap env default."""
+    """Settings must not carry a minSupport/maxPatternLength/session-gap/anchoring env default."""
     src = (SRC / "config.py").read_text()
     for banned in (
         "min_support: float = 0",
         "max_pattern_length: int = ",
         "base_gap_seconds: float = 0",
+        "match_confidence_threshold: float = ",
+        "w_order: float = ",
+        "w_jaccard: float = ",
     ):
-        # MiningParams/WindowingParams are dataclasses WITHOUT defaults; Settings has no such field.
-        assert banned not in src, f"config declares a default mining threshold: {banned}"
-    # No mining-threshold env var exists on Settings (only wiring + operational knobs).
+        # MiningParams/WindowingParams/AnchoringParams are dataclasses WITHOUT defaults; Settings
+        # has no such field.
+        assert banned not in src, f"config declares a default mining/anchoring threshold: {banned}"
+    # No mining/anchoring-threshold env var exists on Settings (only wiring + operational knobs).
     assert "MIN_SUPPORT" not in src
     assert "SESSION_GAP" not in src
+    assert "MATCH_CONFIDENCE" not in src
+    assert "MATCHCONFIDENCE" not in src
+
+
+# Domain-specific tokens that MUST NOT appear as literals in source/default config (they belong to
+# the FIXTURES only). If the reusable template ever inlines a domain alarm type / fault-origin name,
+# this scan catches it. (Illustrative fixture tokens used across tests — never in src.)
+_DOMAIN_LITERALS = [
+    "FiberFault",
+    "LinkDown",
+    "AdjDown",
+    "PortDown",
+    "InterfaceDown",
+    "FiberCut",
+    "CardFail",
+    "SC-FIBER",
+    "SC-CARD",
+    "communicationsAlarm",
+]
+
+
+def test_no_domain_literals_in_source():
+    """No domain-specific alarm type / fault-origin name / scenarioId appears anywhere in src.
+
+    The whole pipeline is domain-agnostic: alarm vocabulary comes from alarms[].alarmType, scenario
+    chains from the Codebook, thresholds/weights/grouping from Knowledge. A source scan must find no
+    domain literal (spec Non-functional / AC-17; CLAUDE.md shared-code rule).
+    """
+    offenders: list[str] = []
+    for path in SRC.rglob("*.py"):
+        text = path.read_text()
+        for literal in _DOMAIN_LITERALS:
+            if literal in text:
+                offenders.append(f"{path.relative_to(SRC)} -> {literal!r}")
+    assert not offenders, "domain-specific literal(s) found in service source:\n" + "\n".join(
+        offenders
+    )
