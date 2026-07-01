@@ -29,10 +29,12 @@ from .helpers import (
     default_anchoring,
     default_params,
     default_windowing,
+    group_sessions,
     make_alarm,
     make_scenario,
     make_transaction,
     run_pipeline,
+    window_sessions,
 )
 
 # ------------------------------------------------------------------ threshold bounds (config)
@@ -124,8 +126,7 @@ def _build_corpus():
     return transactions, scenarios, gt_label_by_trail
 
 
-def _run():
-    transactions, scenarios, gt = _build_corpus()
+def _build_params():
     # Windowing tuned so each tight cascade stays one session; min_support 0.5 so the full chain
     # (support 1.0 within its group) is the representative; threshold 0.5 anchors clean chains only.
     windowing = default_windowing(
@@ -135,15 +136,32 @@ def _run():
         max_closing_gap_seconds=60.0,
         profiles={"default": 5.0},
     )
-    params = default_params(
+    return default_params(
         min_support=0.5,
         max_pattern_length=25,
         windowing=windowing,
         anchoring=default_anchoring(match_confidence_threshold=0.5, w_order=0.7, w_jaccard=0.3),
     )
+
+
+def _run():
+    transactions, scenarios, gt = _build_corpus()
+    params = _build_params()
     metrics = Metrics()
     envelopes = run_pipeline(transactions, scenarios, params, metrics=metrics)
     return envelopes, transactions, gt, metrics
+
+
+def _anchored_groups(transactions, scenarios, params):
+    """Re-derive the pipeline's OWN Stage-1 (windowing) + Stage-2 (anchoring) result.
+
+    Runs the exact same windower + AnchorGrouper the mining pipeline uses, so the returned groups
+    are the pipeline's actual anchoring decision — NOT the ground-truth labels. Coverage computed
+    from these groups is load-bearing: if anchoring regressed (everything -> null, or all-merged),
+    the non-null-anchor alarm count moves and the coverage assertion fails.
+    """
+    sessions = window_sessions(transactions, params)
+    return group_sessions(sessions, scenarios, params)
 
 
 def _total_alarms(transactions) -> int:
@@ -156,7 +174,10 @@ def _total_alarms(transactions) -> int:
 def test_int_pattern_set_size_span_coverage():
     """AC-19: pattern-set size, per-pattern span, coverage all within the yaml-sourced bounds."""
     bounds = _load_thresholds()
-    envelopes, transactions, gt, _ = _run()
+    transactions, scenarios, _ = _build_corpus()
+    params = _build_params()
+    metrics = Metrics()
+    envelopes = run_pipeline(transactions, scenarios, params, metrics=metrics)
 
     anchored = [e for e in envelopes if e.payload.provenance.anchorScenarioId is not None]
     # size
@@ -170,11 +191,20 @@ def test_int_pattern_set_size_span_coverage():
         assert (
             bounds["per_pattern_type_span_min"] <= span <= bounds["per_pattern_type_span_max"]
         ), f"pattern span {span} outside bounds for {e.payload.provenance.anchorScenarioId}"
-    # coverage = alarms explained by anchored patterns / total alarms.
+    # coverage = alarms the PIPELINE actually anchored / total input alarms.
+    # Derived from the pipeline's OWN Stage-1 windowing + Stage-2 anchoring (same windower +
+    # AnchorGrouper the mining run uses) — NOT the ground-truth labels. So if anchoring regressed
+    # (all cascades -> null, or all-merged into one over-broad group) this number moves and fails.
+    groups = _anchored_groups(transactions, scenarios, params)
     total = _total_alarms(transactions)
-    anchored_trails = {trail for trail, label in gt.items() if label is not None}
-    covered = sum(len(t.alarms) for t in transactions if t.trailId in anchored_trails)
+    covered = sum(len(s.alarms) for g in groups if not g.is_unexplained for s in g.sessions)
     coverage = covered / total
+    # cross-check the derived groups agree with what the pipeline actually emitted as anchored.
+    emitted_anchors = {e.payload.provenance.anchorScenarioId for e in anchored}
+    grouped_anchors = {g.scenario_id for g in groups if not g.is_unexplained}
+    assert (
+        emitted_anchors == grouped_anchors
+    ), f"anchored emissions {emitted_anchors} != anchored groups {grouped_anchors}"
     assert bounds["pattern_coverage_min"] <= coverage <= bounds["pattern_coverage_max"], (
         f"coverage {coverage:.3f} outside "
         f"[{bounds['pattern_coverage_min']}, {bounds['pattern_coverage_max']}]"
