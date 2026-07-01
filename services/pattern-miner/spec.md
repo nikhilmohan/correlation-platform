@@ -44,27 +44,32 @@ and Codebook scenarios — no code change to pattern-miner.
   boundaries). All windowing parameters are sourced from the Knowledge Service; no threshold
   is hardcoded.
 - **Stage 2 — Domain-knowledge anchoring.** Match each candidate cascade against the domain's
-  authored fault-origin scenarios (Codebook scenarios). Each cascade is assigned to the
+  authored fault-origin scenarios sourced from the Codebook via pattern-miner's own Codebook
+  client (OQ-1 resolved: Option A — see Open questions). Each cascade is assigned to the
   fault-origin scenario it best matches (the anchor), provided the match confidence meets the
-  Knowledge-sourced threshold. Cascades with no confident match (below the domain's matching
-  confidence threshold, sourced from Knowledge) are flagged as **unexplained** — a first-class,
-  correct outcome, not an error. This anchoring ensures the output pattern set is accurate: one
-  anchor = one pattern identity, so over-splitting (one cascade split into multiple patterns) and
-  over-merging (unrelated cascades combined into one) are minimized. All matching thresholds and
-  grouping keys are domain-sourced, never hardcoded.
+  Knowledge-sourced threshold. Cascades with no confident match are flagged as **unexplained**
+  — a first-class, correct outcome, not an error. This anchoring ensures the output pattern set
+  is accurate: one anchor = one pattern identity, so over-splitting and over-merging are
+  minimized. All matching thresholds and grouping keys are domain-sourced, never hardcoded.
+  Anchoring uses the Codebook's fault-origin scenario shape: each scenario carries a
+  `scenarioId`, `faultOriginObjectId`, `faultOriginType`, `predictedSymptoms` (ordered list of
+  `{alarmType, managedObjectId}`) and `trailIds`. The `predictedSymptoms[].alarmType` list
+  (ordered) is the canonical fault-origin symptom chain used for cascade matching; the
+  `faultOriginType`/`faultOriginObjectId` is the anchor identity.
 - **Stage 3 — ML pattern definition.** Run PrefixSpan (Spark MLlib) **within each anchored
   group** (bounded scope per fault-origin) to learn that group's canonical ordered alarm-type
   token signature, support, confidence, and lift. Emit one `PatternMinedEvent` per distinct
   anchored fault-origin pattern. Emit a separate `PatternMinedEvent` for the unexplained cascade
-  group (if non-empty), with the anchor identity field indicating "unexplained".
+  group (if non-empty), with `provenance.anchorScenarioId` null/absent.
 - Source all configuration — minimum support threshold, maximum pattern length, session-windowing
   adaptation parameters (including base/fallback gap), maximum sequence count, domain-anchoring
   matching confidence threshold, and grouping keys — from the Knowledge Service per domain. No
   hardcoded thresholds anywhere.
 - Attach mining provenance to each result: source `trailId`(s), `sourceWindowId`, `snapshotId`,
-  `codebookVersion`, and the fault-origin anchor identity (`anchorScenarioId` or equivalent, or
-  the "unexplained" sentinel) in scope at mining time. (The anchor field requires a contract
-  change — see Contract section and OQ-2.)
+  `codebookVersion`, and `provenance.anchorScenarioId` (the `scenarioId` of the matched
+  fault-origin scenario, or null/absent for the unexplained group). `provenance.anchorScenarioId`
+  is an optional string field on `PatternMinedEvent.provenance`; null/absent means "unexplained
+  cascade" — a first-class outcome. This field is already landed in `libs/event-model` (PR #331).
 - Route poison (unprocessable) messages to `transactions.clean.dlq`.
 - Expose `/health` and `/metrics` endpoints and emit structured JSON logs.
 - Run as a stateless Spark job (container-only — Spark/PySpark is not installed locally; see
@@ -88,7 +93,9 @@ and Codebook scenarios — no code change to pattern-miner.
   the Pattern Manager to the Correlation Engine.
 - **No Topology graph access.** The Topology Service is the sole owner of the NebulaGraph graph.
   Trail scoping (the spatial/topology grounding) is already encoded in `TransactionEvent.trailId`;
-  the Miner uses it as a grouping key without querying the graph directly.
+  the Miner uses it as a grouping key without querying the graph directly. The Codebook client
+  added for Stage 2 anchoring reads Codebook scenarios only — it does not grant or imply any
+  access to the topology graph.
 - **No global PrefixSpan.** PrefixSpan MUST NOT run over the full session corpus without prior
   domain-knowledge anchoring. Running it globally re-introduces the over-fragmentation defect
   this respec corrects.
@@ -115,12 +122,16 @@ and Codebook scenarios — no code change to pattern-miner.
    when no tempo-specific profile or derivation is available.
 
 4. **Stage 2 — Domain-knowledge anchoring.** For each candidate cascade (the output of Stage 1),
-   match the cascade's ordered alarm-type token sequence against the domain's fault-origin
-   scenarios sourced from the Codebook (active `codebookVersion` + `domain`). Assign the cascade
-   to the fault-origin scenario it most closely matches (the anchor), provided the match
-   confidence meets the Knowledge-sourced threshold. Cascades that do not reach the confidence
-   threshold are assigned to an "unexplained" group. Group all candidate cascades by their
-   assigned anchor (fault-origin scenario or "unexplained").
+   fetch the domain's fault-origin scenarios from the Codebook using pattern-miner's Codebook
+   client (built against the Codebook Service's published OpenAPI). Resolve the active codebook
+   (see OQ-3 for the remaining `codebookVersion`-to-`codebookId` mapping gap), then call
+   `GET /codebooks/{codebookId}/scenarios` to obtain the scenario list. Match the cascade's
+   ordered alarm-type token sequence against each scenario's `predictedSymptoms[].alarmType`
+   chain. Assign the cascade to the fault-origin scenario it most closely matches (the anchor),
+   provided the match confidence meets the Knowledge-sourced threshold; record the matched
+   scenario's `scenarioId` as `provenance.anchorScenarioId`. Cascades that do not reach the
+   confidence threshold are assigned to the "unexplained" group (`provenance.anchorScenarioId`
+   null/absent). Group all candidate cascades by their assigned anchor.
 
 5. **Stage 3 — ML pattern definition.** Run PrefixSpan (Spark MLlib) **within each anchored
    group** (bounded to that fault-origin's cascades, not globally) to discover the canonical
@@ -131,9 +142,9 @@ and Codebook scenarios — no code change to pattern-miner.
    (alarmType tokens), `support`, `confidence`, `lift`, `trailId`(s) in scope, `timing`
    (inter-arrival statistics in milliseconds: `timeframeMs`, `medianInterArrivalMs`,
    `maxInterArrivalMs`, `stddevInterArrivalMs`), and `provenance` (`sourceWindowId`,
-   `snapshotId`, `codebookVersion`, and the fault-origin anchor identity). The "unexplained"
-   group produces a `PatternMinedEvent` with the "unexplained" sentinel in the anchor-identity
-   field; it is a first-class correct outcome.
+   `snapshotId`, `codebookVersion`, and `anchorScenarioId`). The "unexplained" group produces a
+   `PatternMinedEvent` with `provenance.anchorScenarioId` null/absent — a first-class correct
+   outcome.
 
 7. Emit each `PatternMinedEvent` onto `patterns.mined` (one event per anchored fault-origin
    group, plus one for the unexplained group if non-empty).
@@ -147,7 +158,7 @@ Consistent with the canonical phase map in `docs/architecture.md`.
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
 | P1 — Topology onboarding | Not involved; topology and trail compilation precede the learning phase. | Idle | — |
-| P2 — Pattern learning | Core worker: session-windows candidate cascades (Stage 1), anchors each to a domain fault-origin scenario via the Codebook (Stage 2), then runs bounded PrefixSpan per anchored group (Stage 3) to produce a small, accurate set of root-cause-grounded mined patterns. | Active | In: `transactions.clean` (TransactionEvent); Knowledge mining+anchoring params API; Codebook fault-origin scenarios API. Out: `patterns.mined` (PatternMinedEvent). |
+| P2 — Pattern learning | Core worker: session-windows candidate cascades (Stage 1), anchors each to a domain fault-origin scenario via the Codebook client (Stage 2), then runs bounded PrefixSpan per anchored group (Stage 3) to produce a small, accurate set of root-cause-grounded mined patterns. | Active | In: `transactions.clean` (TransactionEvent); Knowledge mining+anchoring params API; Codebook fault-origin scenarios API (`GET /codebooks/active`, `GET /codebooks/{codebookId}/scenarios`). Out: `patterns.mined` (PatternMinedEvent). |
 | P3 — Real-time correlation | Not involved; mining is an offline/learning-only activity. Approved patterns are served by the Pattern Manager. | Idle | — |
 
 ## Contract
@@ -156,43 +167,42 @@ Consistent with the canonical phase map in `docs/architecture.md`.
   six required fields per entry: `alarmId`, `alarmType`, `eventType`, `raisedAt`,
   `managedObjectId`, `perceivedSeverity`. The Miner builds each mined `sequence` item from
   `alarmType` (the canonical join token) and its timing/windowing from `raisedAt`.
-- **Produces (Kafka):** `patterns.mined`
+- **Produces (Kafka):** `patterns.mined` (`PatternMinedEvent`). Every emitted event carries
+  `provenance.anchorScenarioId` (optional string, null/absent for the "unexplained" group). This
+  field is already present in `libs/event-model` as an optional, nullable field in `provenance`
+  (not in `provenance.required`), landed via PR #331, backward-compatible.
 - **APIs exposed:** None (pattern-miner is a stateless Spark job; no HTTP API surface beyond
   `/health` and `/metrics`; no OpenAPI spec is published).
 - **APIs/data consumed from other services:**
   - **Knowledge Service — mining + anchoring params:** `GET /domains/{domain}/model-params/{recordId}`
     (versioned-record envelope; `paramSet = "pattern-miner"`). Returns minimum support, maximum
     pattern length, session-windowing adaptation parameters (including the base/fallback gap),
-    maximum sequence count, domain-anchoring matching confidence threshold, and `codebookVersion`
-    in scope. Built against the Knowledge Service's published OpenAPI 3.1 spec.
-  - **Codebook — fault-origin scenarios (Stage 2):** Stage 2 requires reading the domain's
-    authored fault-origin scenarios. The existing Codebook API surface referenced in
-    `docs/architecture.md` is `GET /codebooks/active` and `GET /codebooks/{id}/scenarios`.
-    Whether pattern-miner gains this Codebook client or Stage 2 moves to pattern-manager is the
-    subject of **OQ-1** (boundary decision — unresolved, requires human decision before design).
-    The exact response shape and `codebookVersion`-to-`{id}` mapping require confirmation
-    (OQ-3).
+    maximum sequence count, domain-anchoring matching confidence threshold, grouping keys, and
+    `codebookVersion` in scope. Built against the Knowledge Service's published OpenAPI 3.1 spec.
+  - **Codebook Service — fault-origin scenarios (Stage 2):** pattern-miner holds a Codebook
+    client (OQ-1 resolved: Option A). The Codebook Service exposes an OpenAPI 3.1 spec at
+    `/openapi.json` — pattern-miner's client is built and mocked against it. Endpoints used:
+    `GET /codebooks?domain={domain}` (lists codebooks with `codebookId`, `snapshotId`, `domain`),
+    `GET /codebooks/active?snapshotId={snapshotId}` (requires `snapshotId` query param), and
+    `GET /codebooks/{codebookId}/scenarios`. Each scenario in the response carries:
+    `scenarioId`, `faultOriginObjectId`, `faultOriginType`,
+    `predictedSymptoms:[{alarmType, managedObjectId}]`, `trailIds:[...]`. The
+    `predictedSymptoms[].alarmType` list (ordered) is the canonical fault-origin symptom chain
+    used for Stage-2 cascade matching. The `codebookVersion`-to-`codebookId` resolution path
+    is the remaining open item (OQ-3).
 - **Integration points (mock vs. real):**
   - **Knowledge Service mining+anchoring params endpoint** (`GET /domains/{domain}/model-params/{recordId}`)
     — config-switchable per environment: unit tests use a mock/stub generated from the Knowledge
     Service's published OpenAPI spec; integration uses the real Knowledge Service at the Docker
     Compose address from env config.
-  - **Codebook fault-origin scenarios endpoint** (exact path TBD pending OQ-1 and OQ-3 resolution)
-    — config-switchable per environment: unit tests use a mock/stub generated from the Codebook
-    Service's published OpenAPI spec; integration uses the real service. Base URLs and
-    `mock|real` toggles provided via environment variables; no hardcoded URLs.
+  - **Codebook Service fault-origin scenarios endpoints** (`GET /codebooks/active`,
+    `GET /codebooks/{codebookId}/scenarios`, `GET /codebooks?domain={domain}`) — config-switchable
+    per environment: unit tests use a mock/stub generated from the Codebook Service's published
+    OpenAPI spec (`/openapi.json`); integration uses the real Codebook Service. Base URLs and
+    `mock|real` toggles provided via environment variables; no hardcoded URLs or domain-specific
+    literals.
 - **Data owned:** None (stateless; pattern-miner holds no datastore and persists no pattern
   state).
-
-> **CONTRACT CHANGE FLAG — `anchorScenarioId` on `PatternMinedEvent` (requires human approval).**
-> Stage 2 anchoring requires each emitted `PatternMinedEvent` to carry the fault-origin scenario
-> identity it was anchored to (or the "unexplained" sentinel). The current frozen
-> `PatternMinedEvent` does not carry this field. Adding it is a **contract change** requiring a
-> `libs/event-model` update + a `docs/architecture.md` update, both subject to human approval
-> per the golden rules, as their own PR into `main` before design/build proceeds. Stages 1 and 3
-> (session windowing and bounded PrefixSpan) can be specced and designed against the current
-> frozen contract. Stage 2 (anchoring and the unexplained-cascade flag in the emitted payload)
-> cannot be fully implemented until this contract change is approved. See OQ-1 and OQ-2.
 
 ## Non-functional
 
@@ -204,23 +214,26 @@ Consistent with the canonical phase map in `docs/architecture.md`.
   the Knowledge Service at runtime — not from code or static config files. No windowing gap
   literal, no domain-specific alarm type token, no fault-origin name exists as a hardcoded value
   anywhere in the service's source or default configuration. Integration URLs (Knowledge Service
-  and Codebook base URLs) and mock/real toggles are provided via environment variables.
+  base URL, Codebook Service base URL) and mock/real toggles are provided via environment
+  variables.
 - **Domain-agnostic requirement (hard — per CLAUDE.md and stakeholder-stated).** No
   domain-specific alarm types, cascade shapes, fault-origin names, or thresholds appear as
   literals in source or config. All domain-specific inputs flow from Knowledge (params) and
-  Codebook (scenarios), both keyed by `{domain}`. Adding a new domain = authoring its Knowledge
-  vocab/params + Codebook scenarios; no code change to pattern-miner is required.
+  Codebook (scenarios), both keyed by `{domain}`. The Codebook client is built against the
+  Codebook OpenAPI and is per-domain/snapshot scoped — not hardcoded to Core IP or any specific
+  domain. Adding a new domain = authoring its Knowledge vocab/params + Codebook scenarios; no
+  code change to pattern-miner is required.
 - **Observability:** `/health` endpoint; `/metrics` endpoint (Prometheus-compatible); structured
   JSON logs for every significant event (message consumed, session window finalized, anchoring
-  outcome per cascade including confidence score, mining run started/completed per anchored group,
-  events emitted, errors).
+  outcome per cascade including confidence score and matched `scenarioId` or "unexplained",
+  mining run started/completed per anchored group, events emitted, errors).
 - **API contract:** pattern-miner exposes no HTTP API surface and therefore publishes no OpenAPI
-  spec. Integration points are built against the Knowledge Service's and (pending OQ-1/OQ-3)
-  Codebook Service's published OpenAPI specs.
+  spec. Integration points are built against the Knowledge Service's and Codebook Service's
+  published OpenAPI specs (`/openapi.json`).
 - **Error handling:** Poison (unprocessable) messages are routed to `transactions.clean.dlq`.
-  Transient errors (Knowledge Service or Codebook unavailable) are retried with config-driven
-  back-off before the run fails fast. Mining does not proceed with stale or default thresholds
-  (no hardcoded fallback). Retry policy is config-driven.
+  Transient errors (Knowledge Service or Codebook Service unavailable) are retried with
+  config-driven back-off before the run fails fast. Mining does not proceed with stale or default
+  thresholds (no hardcoded fallback). Retry policy is config-driven.
 - **Spark/PySpark runtime:** Runs as a container-only stateless Spark job. Spark is not
   installed locally; all Spark execution occurs inside the service's Docker container. Python
   cohort; test framework is **pytest**.
@@ -256,37 +269,40 @@ threshold is hardcoded in the service.
 ### Stage 2 — Domain-knowledge anchoring
 
 **AC-4.** Given a batch of candidate cascades whose alarm-type token sequences clearly match two
-distinct fault-origin scenarios sourced from the Codebook mock, the service assigns each cascade
-to its correct fault-origin anchor; the two anchored groups are distinct, with no cascade
-appearing in both groups (zero over-merge).
+distinct fault-origin scenarios (each with a distinct `predictedSymptoms[].alarmType` chain)
+sourced from the Codebook mock, the service assigns each cascade to its correct fault-origin
+anchor and records the matched scenario's `scenarioId` in `provenance.anchorScenarioId`; the two
+anchored groups are distinct, with no cascade appearing in both groups (zero over-merge).
 
 **AC-5.** Given a single fault-origin scenario that manifests in multiple candidate cascades
 (same alarm-type pattern, different trails), all those cascades are assigned to the same
-anchored group — they are not split into multiple distinct anchored groups (zero over-split).
+anchored group and produce a single `PatternMinedEvent` with the same `provenance.anchorScenarioId`
+— they are not split into multiple distinct anchored groups (zero over-split).
 
 **AC-6.** Given a candidate cascade whose alarm-type sequence does not closely match any Codebook
-fault-origin scenario (match confidence below the Knowledge-sourced threshold), the service
-assigns that cascade to the "unexplained" group rather than forcing it into the closest-match
-anchor. The "unexplained" group produces a `PatternMinedEvent` with the "unexplained" sentinel
-in the anchor-identity field.
+fault-origin scenario's `predictedSymptoms[].alarmType` chain (match confidence below the
+Knowledge-sourced threshold), the service assigns that cascade to the "unexplained" group rather
+than forcing it into the closest-match anchor. The "unexplained" group produces a
+`PatternMinedEvent` with `provenance.anchorScenarioId` null/absent.
 
 **AC-7.** The matching confidence threshold used for anchoring is read exclusively from the
 Knowledge Service; replacing the Knowledge mock to return a different threshold changes which
 cascades are flagged as unexplained vs. anchored, with no code change.
 
 **AC-8.** The fault-origin scenario set used for anchoring is sourced from the Codebook for the
-active `codebookVersion` and `domain`; changing the Codebook mock to return a different scenario
-set changes which cascades are anchored to which fault-origin, with no code change.
+active codebook (domain-scoped) via the Codebook mock; changing the Codebook mock to return a
+different set of scenarios (with different `scenarioId`s and `predictedSymptoms`) changes which
+cascades are anchored to which fault-origin, with no code change.
 
 ### Stage 3 — Bounded ML pattern definition (PrefixSpan per anchored group)
 
-**AC-9.** Given a correctly anchored group containing cascades matching the fiber-cut
-fault-origin scenario (alarm-type sequence `["FiberFault", "LinkDown", "AdjDown"]` per the Core
-IP domain vocabulary as an example of the `alarmTypeVocabulary` — not a hardcoded literal in
-the service), PrefixSpan run within that group emits a `PatternMinedEvent` whose `sequence`
-equals that ordered alarm-type token list (built from `alarms[].alarmType`, the canonical join
-token — not `eventType` and not `probableCause`) and whose `support` equals the observed
-frequency of the sequence within that anchored group (within floating-point tolerance).
+**AC-9.** Given a correctly anchored group containing cascades matching a fiber-cut
+fault-origin scenario (e.g. alarm-type sequence `["FiberFault", "LinkDown", "AdjDown"]` from the
+`predictedSymptoms[].alarmType` chain of that scenario — not a hardcoded literal in the service),
+PrefixSpan run within that group emits a `PatternMinedEvent` whose `sequence` equals that ordered
+alarm-type token list (built from `alarms[].alarmType`, the canonical join token — not `eventType`
+and not `probableCause`) and whose `support` equals the observed frequency of the sequence within
+that anchored group (within floating-point tolerance).
 
 **AC-10.** When PrefixSpan runs within each anchored group independently (not globally), the
 total count of emitted `PatternMinedEvent`s on `patterns.mined` is bounded by the number of
@@ -301,17 +317,21 @@ support restores it.
 
 ### Overall contract and correctness
 
-**AC-12.** Every `PatternMinedEvent` emitted by the service validates against the frozen
-`PatternMinedEvent` Pydantic model from `libs/event-model/python`; all currently-required fields
+**AC-12.** Every `PatternMinedEvent` emitted by the service validates against the
+`PatternMinedEvent` Pydantic model from `libs/event-model/python`; all required fields
 (`sequence`, `support`, `confidence`, `lift`, `trailId`, `timing`, `provenance`) are present and
-well-typed.
+well-typed. Anchored-group events carry a non-null string `provenance.anchorScenarioId`; the
+unexplained-group event carries `provenance.anchorScenarioId` null/absent. The optional field's
+absence does not cause schema validation failure (it is not in `provenance.required`).
 
 **AC-13.** No emitted `PatternMinedEvent` contains a `rootCauseAlarmType`, `patternId`, or
-`lifecycle` field; the frozen schema's `extra="forbid"` enforces this.
+`lifecycle` field; the schema's `extra="forbid"` enforces this.
 
 **AC-14.** The `provenance` object on every emitted `PatternMinedEvent` carries `sourceWindowId`,
 `snapshotId`, and `codebookVersion` (all non-empty); `codebookVersion` equals the value returned
-by the Knowledge Service mining-params response for that run.
+by the Knowledge Service mining-params response for that run. For anchored-group events,
+`provenance.anchorScenarioId` is non-null and matches the `scenarioId` of the Codebook scenario
+the cascade was matched against.
 
 **AC-15.** When the service receives a `TransactionEvent` whose envelope `eventId` has already
 been processed in the current session, no `PatternMinedEvent` is emitted for that duplicate; the
@@ -324,7 +344,7 @@ event is silently acknowledged and dropped.
 **AC-17.** No mining or anchoring configuration threshold — minimum support, windowing gap,
 matching confidence, or grouping key — is present as a literal in the service's source code or
 default configuration; all such values are proven to flow exclusively from the Knowledge Service
-and Codebook integration points (confirmed by the Knowledge and Codebook mocks returning
+and Codebook Service integration points (confirmed by the Knowledge and Codebook mocks returning
 changed values and observing changed behaviour, with no code change).
 
 **AC-18.** The `timing` object on every emitted `PatternMinedEvent` carries exactly
@@ -335,10 +355,10 @@ milliseconds, computed from `alarms[].raisedAt`); the previous `meanInterArrival
 ### Pattern-set quality (integration-level assertions against integration-thresholds.yaml)
 
 **AC-19.** On the Simulator's P2 historical alarm corpus, the three-stage approach yields a
-pattern-set size in the range `distinct_patterns_min`–`distinct_patterns_max` (8-10 per
+pattern-set size in the range `distinct_patterns_min`--`distinct_patterns_max` (8-10 per
 `services/simulator/integration-thresholds.yaml`), with each anchored pattern's alarm-type token
-span in `per_pattern_type_span_min`–`per_pattern_type_span_max` (10-20), and total alarm
-coverage in `pattern_coverage_min`–`pattern_coverage_max` (50-60%). Asserted by the integration
+span in `per_pattern_type_span_min`--`per_pattern_type_span_max` (10-20), and total alarm
+coverage in `pattern_coverage_min`--`pattern_coverage_max` (50-60%). Asserted by the integration
 harness against the Simulator oracle; numeric bounds come from `integration-thresholds.yaml`, not
 from hardcoded values in pattern-miner.
 
@@ -351,91 +371,99 @@ ground-truth oracle.
 **AC-21.** Cascades with no confident domain-knowledge match are emitted as an "unexplained"
 `PatternMinedEvent` (if the unexplained group is non-empty), do not inflate the anchored pattern
 count, and do not cause the mining run to fail or error. The unexplained group's event is
-distinguishable from anchored patterns by its anchor-identity field value.
+distinguishable from anchored patterns by `provenance.anchorScenarioId` being null/absent.
 
 ## Open questions
 
-### OQ-1 — BOUNDARY DECISION (blocks Stage 2 design): Where does domain-knowledge anchoring live?
+### OQ-1 — RESOLVED: Option A (domain-knowledge anchoring lives in pattern-miner)
 
-**Context.** Stage 2 requires pattern-miner to access Codebook fault-origin scenarios to anchor
-candidate cascades. Under the current frozen spec, pattern-miner is "pure sequence mining — no
-topology/codebook access." Adding a Codebook client to pattern-miner is a service-boundary change.
-The alternative is for Stage 2 to live entirely in pattern-manager (which already has Codebook +
-RCA + the Pattern Store and already consumes `patterns.mined`).
+**Decision (human, final).** Stage 2 domain-knowledge anchoring lives in **pattern-miner**.
+pattern-miner gains a **Codebook client**. The old "no codebook access" boundary is intentionally
+superseded for the Codebook read only. pattern-miner still does NOT touch the NebulaGraph
+topology graph — Topology remains another service's sole domain; the Codebook client reads
+fault-origin scenarios, not graph data.
 
-**Trade-offs:**
+**Rationale.** Stage 3 (PrefixSpan/PySpark) is Python and runs in the miner; co-locating Stage 2
+keeps the anchor->mine loop in one service and makes `patterns.mined` accurate and small at
+source. pattern-manager receives clean per-fault-origin inputs for RCA and reconciliation.
 
-_Option A — Stage 2 in pattern-miner (pattern-miner gains a Codebook client):_
+**Trade-off record (for the record; decision is final).**
+
+_Option A — Stage 2 in pattern-miner (chosen):_
 - Pro: bounded PrefixSpan and anchoring are co-located; `patterns.mined` carries fully-anchored
   results; pattern-manager receives clean per-fault-origin inputs for RCA and reconciliation
   without needing to re-cluster.
 - Pro: the pattern set emerging from `patterns.mined` is immediately accurate and small.
-- Con: pattern-miner acquires a new Codebook dependency, breaking its current "no codebook
-  access" boundary.
-- Con: requires `PatternMinedEvent` to carry an anchor-identity field — a contract change
-  (OQ-2). If Codebook is unavailable during a P2 run, the run fails or degrades.
+- Con: pattern-miner acquires a new Codebook dependency, breaking its previous "no codebook
+  access" boundary (now intentionally superseded by this decision).
+- Con: if Codebook is unavailable during a P2 run, the run fails or degrades.
 
-_Option B — Stage 2 in pattern-manager (pattern-miner stays Codebook-free):_
-- Pro: pattern-miner's boundary is unchanged; no Codebook client in pattern-miner; no
-  `PatternMinedEvent` contract change for an anchor field.
-- Pro: pattern-manager already holds the Codebook client, the Pattern Store, and the RCA logic.
-- Con: pattern-manager must either (a) post-filter already globally-mined results (which does
-  not eliminate the global PrefixSpan defect — the root cause remains) or (b) coordinate with
-  pattern-miner to run bounded PrefixSpan per anchored group, which requires a feedback loop
-  (a new topic or API — itself a contract change of a different kind).
-- Con: pattern-manager is a Spring Boot (Java) service; running PySpark MLlib from it directly
-  is not in the current design.
-- Con: `patterns.mined` becomes a "raw partial result" topic rather than a "complete anchored
-  pattern" topic, changing its semantic contract.
+_Option B — Stage 2 in pattern-manager (not chosen):_
+- Pro: pattern-miner's boundary would be unchanged; no Codebook client in pattern-miner.
+- Con: pattern-manager must coordinate with pattern-miner to run bounded PrefixSpan per anchored
+  group, requiring a feedback loop (new topic or API — a different contract change).
+- Con: pattern-manager is Spring Boot (Java); running PySpark MLlib from it directly is not in
+  the current design.
+- Con: `patterns.mined` would become a "raw partial result" topic rather than a "complete
+  anchored pattern" topic, changing its semantic contract.
 
-**What the human must decide:** Which option (A, B, or a defined hybrid) governs the
-implementation? If Option A: approve the Codebook client addition to pattern-miner and the
-`PatternMinedEvent` contract change (OQ-2). If Option B: define how pattern-manager achieves
-bounded PrefixSpan per anchored group without a feedback-loop topic or PySpark dependency. This
-decision determines the design scope for both pattern-miner and pattern-manager. **Design work on
-Stage 2 must not begin until this is resolved.**
+**Spec impact.** The Scope, Out of scope, Tasks, Contract, Non-functional, and AC sections
+above have all been updated to reflect Option A as the resolved decision. No further action
+required before Stage 2 design begins (OQ-2 is also resolved; the one remaining item is OQ-3).
 
-A GitHub issue labeled `question` and `service:pattern-miner` is opened (see PR for link) to
-track this for human resolution.
+---
 
-### OQ-2 — CONTRACT CHANGE DECISION: anchor-identity field on `PatternMinedEvent`
+### OQ-2 — RESOLVED: anchorScenarioId contract change approved and landed (PR #331)
 
-**Context.** If OQ-1 resolves to Option A, each `PatternMinedEvent` must carry the fault-origin
-scenario it was anchored to (or the "unexplained" sentinel) so the Pattern Manager can associate
-the mined pattern with its known fault-origin for RCA and reconciliation. This requires a new
-field — e.g. `anchorScenarioId` (string, required) — on the frozen `PatternMinedEvent`, either
-at the payload top level or within `provenance`.
+**Decision (human, final).** The `PatternMinedEvent.provenance.anchorScenarioId` contract change
+is approved and already landed in `libs/event-model` on `main` (PR #331).
 
-**Impact:**
-- `libs/event-model` must be updated (new field in `PatternMinedEvent`; Python Pydantic model
-  and Java binding both require the field).
-- `docs/architecture.md` must be updated (event model description of `PatternMinedEvent`).
-- The pattern-manager spec must be updated to reflect anchored inputs.
-- Both `libs/event-model` and `docs/architecture.md` updates require human approval and must
-  land as their own PR into `main` before design/build for Stage 2 proceeds.
+**Concrete final shape:**
+- Field: `provenance.anchorScenarioId` (string, optional/nullable).
+- Placement: within the `provenance` object on `PatternMinedEvent`.
+- Null/absent semantics: null or absent means the cascade was "unexplained" (no confident
+  scenario match) — a first-class, valid outcome, not an error. There is no separate flag.
+- Backward-compat: the field is NOT in `provenance.required`; existing `PatternMinedEvent`
+  messages without the field still validate.
 
-**Stages 1 and 3 (session windowing and bounded PrefixSpan) can be specced and designed within
-the current frozen contract. Stage 2 and the full anchored payload cannot be implemented until
-this contract change is approved.**
+**Spec impact.** The contract change caveat block and the "cannot be implemented until this
+contract change is approved" caveats that appeared in the previous version of this spec have been
+removed throughout. All Contract, Non-functional, and AC sections now reference
+`provenance.anchorScenarioId` with the concrete final shape above.
 
-**What the human must decide:** Approve or reject the anchor-identity field contract change (and
-specify field name / placement if approved). This is a dependency of the pattern-miner designer
-and the event-model owner.
+---
 
-### OQ-3 — Codebook API surface for Stage 2
+### OQ-3 — PARTIALLY RESOLVED (one item remains for the designer)
 
-**Context.** Stage 2 requires reading fault-origin scenarios from the Codebook. The Codebook
-API surface referenced in `docs/architecture.md` is `GET /codebooks/active` and
-`GET /codebooks/{id}/scenarios`. However:
-- It is not confirmed whether the Codebook Service exposes an OpenAPI 3.1 spec that pattern-miner
-  can build and mock its client against.
-- The exact response shape for `GET /codebooks/{id}/scenarios` (fields on each scenario,
-  including the canonical ordered alarm-type sequence used for cascade matching) is not
-  documented in `docs/architecture.md`.
-- Whether `codebookVersion` (from Knowledge mining-params response) maps directly to the
-  Codebook `{id}` path parameter is not confirmed.
+**Confirmed (human-verified against the live Codebook Service):**
 
-**The designer cannot build the Stage 2 anchoring client without the Codebook OpenAPI surface,
-scenario response shape, and `codebookVersion`-to-`{id}` mapping being resolved.** If the
-Codebook API surface does not yet meet these requirements, a contract-change PR for the Codebook
-Service is required before Stage 2 design begins.
+1. The Codebook Service exposes an OpenAPI spec at `/openapi.json`. pattern-miner's Codebook
+   client MUST be built and mocked against it. Confirmed.
+
+2. Endpoints available (confirmed):
+   - `GET /codebooks/active` — requires a `snapshotId` query param (NOT domain alone).
+   - `GET /codebooks/{codebookId}/scenarios` — returns the scenario list for a codebook.
+   - `GET /codebooks?domain={domain}` — lists codebooks; each entry carries `codebookId`,
+     `snapshotId`, `domain`.
+
+3. Scenario response shape (confirmed): each scenario = `{ scenarioId, faultOriginObjectId,
+   faultOriginType, predictedSymptoms:[{alarmType, managedObjectId}], trailIds:[...] }`. The
+   `predictedSymptoms[].alarmType` list (ordered) is the canonical fault-origin symptom chain
+   used for Stage-2 cascade matching. `faultOriginType`/`faultOriginObjectId` is the anchor
+   identity.
+
+**Remaining gap (open — for the designer to resolve before Stage 2 design is final):**
+
+The Knowledge mining-params `codebookVersion` field returns the symbolic value `"current"`, and
+the Codebook's `version`/`codebookVersion` field is not populated — so **how `codebookVersion="current"`
+resolves to a concrete codebook `{codebookId}` is not cleanly defined**. The likely path is:
+mining runs under a topology `snapshotId` in scope -> `GET /codebooks/active?snapshotId={snap}`
+-> returns `codebookId`. But it is not confirmed whether:
+- `GET /codebooks/active?snapshotId={snap}` reliably returns a single unambiguous active codebook
+  for the domain+snapshot combination, or
+- a small Codebook API clarification (e.g. accept `"current"` as a codebookVersion, or a
+  resolve-by-domain endpoint) is needed.
+
+**The designer must confirm the `codebookVersion="current"` -> `codebookId` resolution path with
+the Codebook Service owner and, if a Codebook API change is required, raise that as a contract
+change PR before Stage 2 build begins.** This is the only remaining open item.
