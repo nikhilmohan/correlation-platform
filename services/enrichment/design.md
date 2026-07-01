@@ -64,7 +64,7 @@ Every spec **Tasks (high-level)** item is realized below and traceable to module
 |---|---|
 | 1. Select the matching per-source ruleset for each incoming alarm, or the default when no source-specific match is found | `RulesetSelector` reads the envelope `source` field, looks it up in `RulesetRegistry`; on miss returns the `default` ruleset. Selection happens before any other stage. |
 | 2. Apply the field-mapping portion of the matched ruleset to translate raw fields into the canonical `AlarmEvent` | `NormalizeStep` applies `Ruleset.fieldMapping` (severity-code map, eventType map, **alarmType map**, managedObjectId construction template, probableCause map, vendorRaw pass-through) and emits a canonical `AlarmEvent` validated against the frozen `event-model` binding. The required canonical `alarmType` join token is set from the source's `alarmTypeMap` (see NormalizeStep and Config model). |
-| 3. Deduplicate: count-collapse repeated identical alarms on `(managedObjectId, eventType)` within the per-source dedup window | `DedupStep` over `DedupWindowStore` keyed `(source, managedObjectId, eventType)`; window size from `Ruleset.filterParams.dedupWindow` |
+| 3. Deduplicate: count-collapse repeated identical alarms on `(managedObjectId, eventType)` within the per-source dedup window | `DedupStep` over `DedupWindowStore` keyed `(path, source, managedObjectId, eventType, alarmType, state)` — `alarmType`/`state` included so only genuinely-identical alarms collapse (Defects #1/#7); window size from `Ruleset.filterParams.dedupWindow` |
 | 4. Self-clear suppression using the per-source hold-time | `SelfClearStep` over `SelfClearStore`; hold-time from `Ruleset.filterParams.selfClearHoldTime` |
 | 5. Flap-damping using per-source N/window then one summary `AlarmEvent` (existing fields only) | `FlapDampStep` over `FlapWindowStore`; N and window from `Ruleset.filterParams.flapN` / `flapWindow`; summary shape per resolved Open question #40 below |
 | 6. Known-chatter removal using the per-source chatter list | `ChatterStep` consulting `Ruleset.filterParams.chatterList` for the resolved source |
@@ -250,9 +250,9 @@ independently:
 
 | Store (in-memory) | Key | Value | Expiry |
 |---|---|---|---|
-| `DedupWindowStore` | `(path, source, managedObjectId, eventType, state)` | first-seen timestamp plus collapsed count | per-source dedup-window duration |
-| `SelfClearStore` | `(path, source, managedObjectId, eventType)` | pending raise timestamp plus the held raise alarm | per-source hold-time duration |
-| `FlapWindowStore` | `(path, source, managedObjectId, eventType)` | rolling oscillation count plus window-start timestamp plus first raise alarm | per-source flap-window duration |
+| `DedupWindowStore` | `(path, source, managedObjectId, eventType, alarmType, state)` | first-seen timestamp plus collapsed count | per-source dedup-window duration |
+| `SelfClearStore` | `(path, source, managedObjectId, eventType, alarmType)` | pending raise timestamp plus the held raise alarm | per-source hold-time duration |
+| `FlapWindowStore` | `(path, source, managedObjectId, eventType, alarmType)` | rolling oscillation count plus window-start timestamp plus first raise alarm | per-source flap-window duration |
 
 > **Dedup is state-aware; self-clear/flap are not — by design.** The `DedupWindowStore` key
 > includes the alarm `state` because the dedup stage count-collapses *repeated **identical** alarms*
@@ -264,6 +264,27 @@ independently:
 > later clear (self-clear pairs the two; flap counts the oscillation across states). Criteria 1 and 2
 > are unaffected: two same-state duplicates still collapse, and two different `eventType`s still pass
 > separately.
+>
+> **All three windowed keys include `alarmType` (Defect #7).** The dedup, self-clear and flap keys
+> all carry the canonical `alarmType` alongside `eventType`. A fault cascade fires **many distinct
+> `alarmType`s on one object**, and in the Core IP domain many of them share **one coarse X.733
+> `eventType`** — e.g. `AdjDown`, `ISISAdjacencyDown`, `OSPFAdjacencyDown`, `BGPPeerDown`,
+> `RouteFlap`, `LDPSessionDown`, `LSPDown`, `TETunnelDown`, `FRRSwitchover` are all
+> `communicationsAlarm`. Keying only on `eventType` made the too-coarse window treat these **distinct
+> cascade members** as repeats/oscillations of a single alarm and collapse them onto one arbitrary
+> survivor: a live audit against ground truth showed **318 distinct `(managedObjectId, alarmType)`
+> cascade members silently eaten** — precisely the sequence steps the pattern-miner needs. The
+> smoking gun was that **0 of the 318 over-collapse cases were "whole key gone"**: every dropped
+> `alarmType` had a *different* `alarmType` survive on the same `(moid, eventType)` — the signature of
+> a key that is too coarse, not of genuine repeats. Adding `alarmType` makes each collapse operation
+> honour the spec intent exactly: dedup collapses only *repeated **identical** alarms* (two alarms
+> with a different `alarmType` are not identical); flap-damp collapses only oscillation of the **same**
+> alarm (raise/clear/raise of one `alarmType`); self-clear pairs a raise with a clear of the **same**
+> alarm (a clear clears a specific `alarmType`). `alarmType` is the canonical join token and is
+> 1:1-finer than `probableCause`, so it is the correct discriminator; `probableCause` is **not** added
+> unless two `alarmType`s are ever found to share it (none observed). This change only widens the key
+> tuple with `alarmType` — the state-aware dedup, event-time (`raisedAt`) windowing, and the
+> list-per-key self-clear (no-overwrite + event-time release + `drainAll`) fixes are all preserved.
 
 > **UPDATE (FIX #3) — windowing is over the alarm's logical `raisedAt` (event time), not
 > wall-clock arrival.** All three windowed stages (`DedupStep`, `SelfClearStep`, `FlapDampStep`)
@@ -857,7 +878,7 @@ flowchart TD
   MATCH -->|no| DEF["use default ruleset"]
   RS --> NORM["NormalizeStep apply fieldMapping to canonical AlarmEvent"]
   DEF --> NORM
-  NORM --> KEY["compute key path, source, managedObjectId, eventType"]
+  NORM --> KEY["compute key path, source, managedObjectId, eventType, alarmType"]
   KEY --> DUP{"seen in per source dedup window"}
   DUP -->|yes| DUPC["increment collapsed count then drop"]
   DUP -->|no| DUPN["record first seen then continue"]
@@ -886,7 +907,7 @@ flowchart TD
    (which requires `alarmType`). All subsequent stages operate only on canonical fields. `alarmType`
    is the canonical join token, **distinct from** `eventType` (X.733 category) and `probableCause`
    (X.733 probable cause).
-3. **Dedup (count-collapse).** First alarm for `(path, source, managedObjectId, eventType)` within
+3. **Dedup (count-collapse).** First alarm for `(path, source, managedObjectId, eventType, alarmType, state)` within
    the per-source window passes and records first-seen; subsequent identical-key alarms within the
    window are dropped while `collapsedCount` increments (metric). Window eviction starts a fresh
    window.
@@ -1000,7 +1021,7 @@ calls this design's chatter API is owned and wireframed by the **web-ui** servic
 
 The per-source `Ruleset` **already IS** a full, independent per-stream pipeline: its own field
 mapping (+ `alarmTypeMap`), its own filter/dedup/self-clear/flap parameters, **and** its own
-known-chatter list, with windowed state keyed by `(path, source, managedObjectId, eventType)`.
+known-chatter list, with windowed state keyed by `(path, source, managedObjectId, eventType, alarmType)`.
 `RulesetSelector` routes each alarm to exactly one such ruleset, and the window stores are keyed by
 `source`, so **different alarm streams (different NMS/vendor sources) are normalized, deduped,
 filtered, and chatter-suppressed concurrently and independently** — each by its own ruleset. The
@@ -1059,7 +1080,7 @@ topic's DLQ so reprocessing re-enters the pipeline from the original source.
 | Ruleset config format | env-var soup vs. single mounted YAML file vs. per-source files | **One mounted YAML file** (`@ConfigurationProperties` plus SnakeYAML). Structured nested mappings/lists do not fit flat env vars; a single file is simplest to mount, validate, and hot-reload. |
 | Hot-reload | none (restart to change) vs. file-watch atomic swap vs. Knowledge-driven refresh | **Optional file-watch atomic swap, Knowledge-free.** Allows retuning without redeploy while keeping config ownership inside Enrichment; Knowledge-driven refresh is explicitly out per the spec invariant. |
 | Stream-processing model | Kafka Streams (DSL/Processor API plus RocksDB) vs. plain `spring-kafka` plus in-process windowed state | **Plain spring-kafka plus in-process state.** Windows are short and state is intentionally ephemeral; Kafka Streams adds RocksDB/changelog/repartition overhead for state we do not need to survive restarts. Two-listeners-one-pipeline (criterion 9) is simpler. |
-| Windowed-state key | `(managedObjectId, eventType)` vs. include `source` | **Include `source` (and `path`).** Per-source parameters mean two sources may have different windows for the same object; keying by source keeps each source's windowing independent and prevents cross-source/cross-path contamination (criterion 11). |
+| Windowed-state key | `(managedObjectId, eventType)` vs. include `source` vs. also include `alarmType` | **Include `source`, `path` AND `alarmType`.** Per-source parameters mean two sources may have different windows for the same object; keying by source/path keeps each source's windowing independent and prevents cross-source/cross-path contamination (criterion 11). **`alarmType` is included (Defect #7)** because a fault cascade fires many distinct `alarmType`s on one object that share one coarse X.733 `eventType` (e.g. six IGP-adjacency alarms all `communicationsAlarm`); without `alarmType` the too-coarse window collapsed distinct cascade members as repeats/oscillations (318 members silently eaten in the live audit). `alarmType` is the canonical, 1:1-finer-than-`probableCause` discriminator; `probableCause` is not added unless two `alarmType`s ever share it. |
 | Trail Builder failure policy (GH #42) | (a) emit empty `trailIds`, (b) retry-then-DLQ, (c) retry-and-hold | **(b) retry-then-DLQ.** Preserves downstream trail-context correctness with an explicit operator signal (see Error handling). |
 | Flap-summary identity (GH #40) | new synthetic `alarmId` vs. first alarm `alarmId`; new flag field vs. `vendorRaw` metadata | **First alarm `alarmId` plus `vendorRaw.flapCount/flapWindowSeconds`, state raised.** Deterministic/idempotent id, no new contract field. |
 | Output routing | topic name in a message header vs. carried `Path` enum | **`Path` enum.** Type-safe, set at the listener, drives output-topic and DLQ choice, no reliance on a mutable header. |

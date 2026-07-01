@@ -30,21 +30,32 @@ import org.springframework.stereotype.Component;
  * it). The {@link Clock} is retained only for that fallback.
  *
  * <p><b>State-aware key (B1 fix).</b> The dedup key is
- * {@code (path, source, managedObjectId, eventType, state)} — it includes the alarm {@code state}.
- * A {@code raised} and a {@code cleared} alarm on the same {@code (managedObjectId, eventType)} are
- * <b>not identical alarms</b>, so they must NOT collapse together. Were {@code state} omitted, a
- * {@code cleared} would be swallowed here as a "duplicate" of an earlier {@code raised} and never
- * reach {@link SelfClearStep}/{@link FlapDampStep}, defeating self-clear suppression (criterion 4)
- * and flap-damping (criterion 3). Spec criteria 1 and 2 are unaffected: two same-state duplicates
- * still collapse (criterion 1) and two different {@code eventType}s still pass separately
- * (criterion 2). The downstream self-clear/flap stores deliberately key WITHOUT state
- * ({@link WindowKey}) so they can correlate a raise with its later clear.
+ * {@code (path, source, managedObjectId, eventType, alarmType, state)} — it includes the alarm
+ * {@code state}. A {@code raised} and a {@code cleared} alarm on the same
+ * {@code (managedObjectId, eventType, alarmType)} are <b>not identical alarms</b>, so they must NOT
+ * collapse together. Were {@code state} omitted, a {@code cleared} would be swallowed here as a
+ * "duplicate" of an earlier {@code raised} and never reach {@link SelfClearStep}/{@link FlapDampStep},
+ * defeating self-clear suppression (criterion 4) and flap-damping (criterion 3). Spec criteria 1
+ * and 2 are unaffected: two same-state duplicates still collapse (criterion 1) and two different
+ * {@code eventType}s still pass separately (criterion 2). The downstream self-clear/flap stores
+ * deliberately key WITHOUT state ({@link WindowKey}) so they can correlate a raise with its later
+ * clear.
+ *
+ * <p><b>alarmType in the key (Defect #7 fix).</b> The dedup key also includes {@code alarmType}.
+ * The spec defines dedup as collapsing <b>repeated IDENTICAL alarms</b>; two alarms with a
+ * different {@code alarmType} are NOT identical. In this domain a fault cascade fires many distinct
+ * {@code alarmType}s on one object that share ONE coarse X.733 {@code eventType} (e.g. six
+ * IGP-adjacency alarms — {@code AdjDown}, {@code ISISAdjacencyDown}, {@code OSPFAdjacencyDown},
+ * {@code BGPPeerDown}, {@code RouteFlap}, {@code LDPSessionDown} — all {@code communicationsAlarm}).
+ * Keying only on {@code eventType} collapsed those distinct cascade members onto one arbitrary
+ * survivor. {@code alarmType} is the canonical, 1:1-finer-than-{@code probableCause} discriminator,
+ * so it is the correct token to make dedup collapse only genuinely-identical alarms.
  */
 @Component
 public class DedupStep {
 
     private record DedupKey(Path path, String source, String managedObjectId, String eventType,
-            AlarmEvent.State state) {}
+            String alarmType, AlarmEvent.State state) {}
 
     private record Window(Instant firstSeen, long collapsedCount) {}
 
@@ -59,7 +70,7 @@ public class DedupStep {
 
     public StepResult apply(AlarmEvent alarm, Ruleset ruleset, Path path) {
         DedupKey key = new DedupKey(path, ruleset.source(), alarm.getManagedObjectId(),
-                alarm.getEventType(), alarm.getState());
+                alarm.getEventType(), alarm.getAlarmType(), alarm.getState());
         Duration window = ruleset.filterParams().dedupWindow();
         Instant now = EventTime.of(alarm.getRaisedAt(), clock);
 

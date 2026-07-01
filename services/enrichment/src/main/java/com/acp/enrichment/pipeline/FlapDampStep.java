@@ -17,6 +17,12 @@ import org.springframework.stereotype.Component;
  * window the burst is collapsed into exactly one <b>summary</b> {@code AlarmEvent} and the rest of
  * the burst is suppressed (an oscillation of {@code N} or fewer is not damped).
  *
+ * <p><b>Key includes {@code alarmType} (Defect #7 fix).</b> Flap-damping is the oscillation of the
+ * SAME alarm (raise/clear/raise of ONE {@code alarmType}). The {@link WindowKey} therefore includes
+ * {@code alarmType} so distinct cascade members that merely share a coarse {@code eventType} (e.g.
+ * six IGP-adjacency {@code alarmType}s all {@code communicationsAlarm} firing within seconds) are
+ * NOT miscounted as one flapping burst and collapsed onto one survivor.
+ *
  * <p><b>Event-time windowing (raisedAt, not wall-clock).</b> Like {@link DedupStep}, the flap window
  * is measured over the alarm's own {@code raisedAt} logical time. In P2 HISTORY batch-replay the
  * corpus arrives in &lt;1s wall-clock while {@code raisedAt} spans hours, so wall-clock windowing
@@ -49,7 +55,7 @@ public class FlapDampStep {
 
     public StepResult apply(AlarmEvent alarm, Ruleset ruleset, Path path) {
         WindowKey key = new WindowKey(path, ruleset.source(), alarm.getManagedObjectId(),
-                alarm.getEventType());
+                alarm.getEventType(), alarm.getAlarmType());
         int n = ruleset.filterParams().flapN();
         Duration window = ruleset.filterParams().flapWindow();
         Instant now = EventTime.of(alarm.getRaisedAt(), clock);

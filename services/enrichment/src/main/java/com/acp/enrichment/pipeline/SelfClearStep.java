@@ -25,6 +25,13 @@ import org.springframework.stereotype.Component;
  * <p>Because the hold-time is per source, the same transient is suppressed under a short-hold source
  * and emitted under a long-hold source (criterion 11).
  *
+ * <p><b>Key includes {@code alarmType} (Defect #7 fix).</b> A clear clears a SPECIFIC alarm, so a
+ * self-clear is a raise matched by a clear of the SAME {@code alarmType}. The {@link WindowKey}
+ * therefore includes {@code alarmType} so a clear of one cascade member does not cancel a held
+ * raise of a DIFFERENT cascade member that merely shares the coarse {@code eventType}. The
+ * state-less matching, event-time clear-matching/release, and list-per-key semantics (Defects #1,
+ * #3, #4) are unchanged — this only widens the key tuple with {@code alarmType}.
+ *
  * <p><b>Multi-hold per key (Defect #4 fix).</b> The hold store keeps a <b>list</b> of held raises
  * per {@link WindowKey} — it must never overwrite/drop a still-held raise when a second, distinct
  * raise arrives for the same {@code (path, source, managedObjectId, eventType)}. Two raises whose
@@ -101,7 +108,7 @@ public class SelfClearStep {
     public StepResult apply(AlarmEvent alarm, Ruleset ruleset, Path path, String occurredAt,
             String traceId) {
         WindowKey key = new WindowKey(path, ruleset.source(), alarm.getManagedObjectId(),
-                alarm.getEventType());
+                alarm.getEventType(), alarm.getAlarmType());
         Duration hold = ruleset.filterParams().selfClearHoldTime();
         Instant wallNow = clock.instant();
         Instant eventNow = EventTime.of(alarm.getRaisedAt(), clock);

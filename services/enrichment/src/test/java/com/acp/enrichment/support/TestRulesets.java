@@ -74,6 +74,24 @@ public final class TestRulesets {
                         Duration.ofSeconds(300), List.of()));
     }
 
+    /**
+     * flap-source-sim (Defect #7 tests): flap-tuned like {@link #flapSource()} (hold=1s, flapN=3,
+     * flapWindow=300s, dedupWindow=1s) but with an IDENTITY passthrough over the canonical
+     * {@code alarmType}/{@code eventType} fields (like {@link #simulator()}). This lets a genuine
+     * oscillation of a fixed {@code alarmType} be driven end-to-end so the negative control can prove
+     * flap-damp still summarises a same-alarmType flap after {@code alarmType} joined the window key.
+     */
+    public static Ruleset flapSourceSim() {
+        return new Ruleset("flap-source-sim", false,
+                new FieldMapping("Interface", "Interface:{ne}-{ifIndex}",
+                        Map.of(), Map.of(), Map.of(),
+                        new AlarmTypeMap("alarmType", identityAlarmTypeValues(),
+                                "ReachabilityLoss", "default"),
+                        List.of("*")),
+                new FilterParams(Duration.ofSeconds(1), Duration.ofSeconds(1), 3,
+                        Duration.ofSeconds(300), List.of()));
+    }
+
     /** The full 30-token Core IP vocabulary as an identity alarmTypeMap (token -> same token). */
     public static Map<String, String> identityAlarmTypeValues() {
         String[] tokens = {
