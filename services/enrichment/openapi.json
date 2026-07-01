@@ -1,0 +1,223 @@
+{
+  "components" : {
+    "schemas" : {
+      "ChatterEntry" : {
+        "description" : "A known-chatter list entry; match key is (managedObjectId, eventType).",
+        "properties" : {
+          "alarmType" : {
+            "description" : "Optional provenance (the promoted NF signature's canonical alarm-type)",
+            "example" : "LinkDown",
+            "type" : "string"
+          },
+          "eventType" : {
+            "example" : "communicationsAlarm",
+            "type" : "string"
+          },
+          "managedObjectId" : {
+            "example" : "Interface:edge1-12",
+            "type" : "string"
+          },
+          "promotedFrom" : {
+            "description" : "Optional free-text provenance note",
+            "example" : "nf-observed-chatter",
+            "type" : "string"
+          }
+        },
+        "required" : [ "eventType", "managedObjectId" ]
+      },
+      "ChatterListResponse" : {
+        "properties" : {
+          "entries" : {
+            "items" : {
+              "$ref" : "#/components/schemas/ChatterEntry"
+            },
+            "type" : "array"
+          },
+          "source" : {
+            "type" : "string"
+          },
+          "total" : {
+            "format" : "int32",
+            "type" : "integer"
+          }
+        }
+      },
+      "Error" : {
+        "properties" : {
+          "code" : {
+            "type" : "string"
+          },
+          "message" : {
+            "type" : "string"
+          }
+        }
+      }
+    }
+  },
+  "info" : {
+    "description" : "Operator-mediated promote/list/remove surface over a source's known-chatter list (the noise-to-live chatter feedback loop). Edits persist to an Enrichment-owned chatter overlay and hot-apply to the live filter path with no restart.",
+    "title" : "Enrichment Chatter-Management API",
+    "version" : "0.1.0"
+  },
+  "openapi" : "3.1.0",
+  "paths" : {
+    "/api/v1/sources/{source}/chatter" : {
+      "delete" : {
+        "operationId" : "remove",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "source",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ChatterEntry"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "204" : {
+            "description" : "Removed"
+          },
+          "400" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Error"
+                }
+              }
+            },
+            "description" : "Malformed entry"
+          },
+          "404" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Error"
+                }
+              }
+            },
+            "description" : "Unknown source or entry not present"
+          }
+        },
+        "summary" : "Remove a chatter entry; persists + hot-applies live",
+        "tags" : [ "chatter" ]
+      },
+      "get" : {
+        "operationId" : "list",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "source",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ChatterListResponse"
+                }
+              }
+            },
+            "description" : "OK"
+          },
+          "404" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Error"
+                }
+              }
+            },
+            "description" : "Unknown source"
+          }
+        },
+        "summary" : "List a source's effective chatter entries",
+        "tags" : [ "chatter" ]
+      },
+      "post" : {
+        "operationId" : "add",
+        "parameters" : [ {
+          "in" : "path",
+          "name" : "source",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ChatterEntry"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "201" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ChatterEntry"
+                }
+              }
+            },
+            "description" : "Created"
+          },
+          "400" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Error"
+                }
+              }
+            },
+            "description" : "Malformed entry"
+          },
+          "404" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Error"
+                }
+              }
+            },
+            "description" : "Unknown source"
+          },
+          "409" : {
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/Error"
+                }
+              }
+            },
+            "description" : "Entry already present"
+          }
+        },
+        "summary" : "Add (promote) a chatter entry; persists + hot-applies live",
+        "tags" : [ "chatter" ]
+      }
+    }
+  },
+  "servers" : [ {
+    "description" : "Generated server url",
+    "url" : "/"
+  } ],
+  "tags" : [ {
+    "description" : "Per-source known-chatter list management (promote/list/remove)",
+    "name" : "chatter"
+  } ]
+}

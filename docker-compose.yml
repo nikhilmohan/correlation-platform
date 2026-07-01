@@ -26,7 +26,10 @@ services:
       KAFKA_NODE_ID: "1"
       KAFKA_PROCESS_ROLES: "broker,controller"
       KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:29092"
+      # Bind with empty host (all interfaces) — NOT an explicit 0.0.0.0: the apache/kafka:3.9.0
+      # entrypoint derives advertised.listeners during the KRaft StorageTool format step and
+      # rejects a literal 0.0.0.0 ("advertised.listeners cannot use the nonroutable meta-address").
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093,INTERNAL://:29092"
       KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:29092"
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT"
       KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
@@ -35,16 +38,47 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
-      # Auto-create is convenient for the walking skeleton; topic creation becomes an explicit
-      # init job once the topic catalog is enforced.
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Auto-create is OFF: topics are provisioned explicitly by the `kafka-init` one-shot job
+      # below (architecture.md "Shared infrastructure conventions"). Services never create topics.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     volumes:
       - kafka-data:/var/lib/kafka/data
+    # Fast TCP readiness check on both listeners. The JVM `kafka-broker-api-versions.sh` tool
+    # takes ~6-8s to start and routinely exceeded the 10s healthcheck timeout, leaving the broker
+    # stuck "starting" and blocking kafka-init + every `depends_on: kafka healthy` service. `nc`
+    # is in the image and is instant; both ports open ⇒ the broker is accepting connections.
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "nc -z localhost 9092 && nc -z localhost 29092 || exit 1"]
       interval: 10s
-      timeout: 10s
-      retries: 12
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    networks:
+      - cp-net
+
+  # One-shot: create the architecture.md topic catalog (auto-create is OFF). Services depend on
+  # this completing before they start; they never create topics. Idempotent (--if-not-exists).
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: cp-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        B=kafka:29092
+        create() { /opt/kafka/bin/kafka-topics.sh --bootstrap-server $$B --create --if-not-exists --topic "$$1" --partitions "$$2" --replication-factor 1; }
+        for t in topology.changed trails.built codebook.generated knowledge.updated \
+                 alarms.history alarms.live alarms.enriched alarms.enriched.live alarms.persisted.live \
+                 alarms.status.changed transactions.clean patterns.mined patterns.discovered \
+                 patterns.approved correlation.results; do create "$$t" 3; done
+        # DLQs (one per consumed topic): single-partition is fine for poison messages
+        for t in topology.changed.dlq trails.built.dlq transactions.clean.dlq \
+                 alarms.history.dlq alarms.live.dlq alarms.enriched.live.dlq \
+                 alarms.persisted.live.dlq alarms.status.changed.dlq correlation.results.dlq; do create "$$t" 1; done
+        echo "kafka-init: topic catalog created."
     networks:
       - cp-net
 
@@ -126,8 +160,14 @@ services:
     depends_on:
       nebula-metad:
         condition: service_healthy
+      # storaged: service_STARTED, not service_healthy. storaged cannot become healthy until it
+      # is registered with metad via `ADD HOSTS`, and that registration is issued by the Topology
+      # Service THROUGH graphd. Gating graphd on storaged-healthy is therefore circular
+      # (graphd↜storaged-healthy↜ADD HOSTS↜topology↜graphd) and deadlocks on clean volumes —
+      # graphd only needs metad to serve nGQL; storaged just needs to be up on the network so the
+      # bootstrap can register it. Latent because reused volumes carried prior registration.
       nebula-storaged:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://nebula-graphd:19669/status >/dev/null || exit 1"]
       interval: 10s
@@ -136,24 +176,350 @@ services:
     networks:
       - cp-net
 
+  # --- Knowledge Service — authoritative, versioned store for authored domain knowledge.
+  #     Owns ONLY the `knowledge` PostgreSQL schema; produces `knowledge.updated`; consumes
+  #     nothing. Build context is the repo root (composite build includes libs/event-model). ---
+  knowledge:
+    build:
+      context: .
+      dockerfile: services/knowledge/Dockerfile
+    image: acp/knowledge:0.1.0
+    container_name: cp-knowledge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: "8080"
+      DB_URL: "jdbc:postgresql://postgres:5432/correlation"
+      DB_USER: "correlation"
+      DB_PASSWORD: "correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KAFKA_ENABLED: "true"
+      KNOWLEDGE_UPDATED_TOPIC: "knowledge.updated"
+      SEED_ON_STARTUP: "true"
+    ports:
+      - "8081:8080"      # /health + /metrics + /openapi.json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # JVM Spring Boot context init can take ~100-140s on a busy host; don't flip unhealthy
+      # during the legitimate startup window (boots ~10-15s on an idle host).
+      start_period: 180s
+    networks:
+      - cp-net
+
+  # --- Topology Service — sole owner of the NebulaGraph topology graph (nGQL 9669) + the
+  #     PostgreSQL topology_meta snapshot metadata. Ingests snapshot files via POST
+  #     /topology/snapshots, lifts into NebulaGraph, mints snapshotId, emits topology.changed.
+  #     Runs the idempotent ADD HOSTS + CREATE SPACE/TAG/EDGE bootstrap on startup (subsumes the
+  #     deferred nebula-init one-shot). All config from env; no hard-coded URLs/credentials. ---
+  topology:
+    build:
+      context: .
+      dockerfile: services/topology/Dockerfile
+    image: acp/topology:0.1.0
+    container_name: cp-topology
+    ports:
+      - "8082:8080"      # HTTP API + /actuator/health + /actuator/prometheus (8081 = knowledge)
+    environment:
+      TOPOLOGY_PORT: "8080"
+      # Use the INTERNAL listener kafka:29092 (all other services do). kafka:9092 is the PLAINTEXT
+      # listener advertised as localhost:9092 (for host-side tooling), so a producer bootstrapped on
+      # it connects, is told the broker lives at localhost:9092, and then cannot reach it from inside
+      # the container — topology.changed was silently lost (issue #205, P1 chain dead at hop 1).
+      TOPOLOGY_KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      TOPOLOGY_NEBULA_HOSTS: "nebula-graphd:9669"
+      TOPOLOGY_NEBULA_SPACE: "topology"
+      TOPOLOGY_NEBULA_USERNAME: "root"
+      TOPOLOGY_NEBULA_PASSWORD: "nebula"
+      TOPOLOGY_NEBULA_STORAGED_HOST: "nebula-storaged:9779"
+      TOPOLOGY_NEBULA_BOOTSTRAP: "true"
+      TOPOLOGY_POSTGRES_JDBC_URL: "jdbc:postgresql://postgres:5432/correlation"
+      TOPOLOGY_POSTGRES_USERNAME: "correlation"
+      TOPOLOGY_POSTGRES_PASSWORD: "correlation"
+      TOPOLOGY_KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      TOPOLOGY_KNOWLEDGE_MODE: "real"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      nebula-graphd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # JVM + NebulaGraph bootstrap can take ~90-140s on a busy host; allow the startup window.
+      start_period: 180s
+    networks:
+      - cp-net
+
+  # --- Trail Builder — builds policy-bounded correlation trails. Consumes `topology.changed`
+  #     (+ `knowledge.updated` for policy refresh), reads the Topology + Knowledge APIs, persists
+  #     trails durably in its own `trailbuilder` PostgreSQL schema, emits `trails.built`, and
+  #     serves the trail query API. Reads Topology via API only — never NebulaGraph. ---
+  trail-builder:
+    build:
+      context: .
+      dockerfile: services/trail-builder/Dockerfile
+    image: acp/trail-builder:0.1.0
+    container_name: cp-trail-builder
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: "postgresql+psycopg://correlation:correlation@postgres:5432/correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      TOPOLOGY_SERVICE_BASE_URL: "http://topology:8080"
+      TOPOLOGY_SERVICE_MODE: "real"
+      KNOWLEDGE_SERVICE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_SERVICE_MODE: "real"
+      LOG_LEVEL: "INFO"
+    ports:
+      - "8083:8000"      # trail query API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # Migrate-then-serve startup can be slow on a busy host; allow the startup window.
+      start_period: 120s
+    networks:
+      - cp-net
+
+  # --- Enrichment Service — source-aware, configuration-driven first-stage alarm normalizer +
+  #     deterministic filter pipeline + trail-tagger. Active in P2 (alarms.history → alarms.enriched)
+  #     and P3 (alarms.live → alarms.enriched.live), one codebase serving both. Owns NO relational
+  #     DB: per-source rulesets are a MOUNTED YAML (Enrichment-owned config, NOT Knowledge); the
+  #     chatter overlay is a WRITABLE mounted volume so operator chatter promotions survive restart.
+  #     Reads Trail Builder via the frozen GET /trails/by-object API only. Also serves the
+  #     chatter-management API + /openapi.json. Build context is the repo root (composite build
+  #     includes libs/event-model). ---
+  enrichment:
+    build:
+      context: .
+      dockerfile: services/enrichment/Dockerfile
+    image: acp/enrichment:0.1.0
+    container_name: cp-enrichment
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      trail-builder:
+        condition: service_started
+      knowledge:
+        condition: service_started
+    environment:
+      SERVER_PORT: "8080"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      # Frozen Trail Builder by-object contract on the in-cluster port 8000 (NO /api/v1 prefix).
+      TRAIL_BUILDER_BASE_URL: "http://trail-builder:8000"
+      TRAIL_BUILDER_MODE: "real"
+      TRAIL_BUILDER_MAX_RETRIES: "3"
+      TRAIL_BUILDER_RETRY_BACKOFF_MS: "200"
+      # Knowledge: authoritative alarmTypeVocabulary fetched at startup (validation only, NOT
+      # pipeline params). Degrades to the built-in 30-token fallback if Knowledge is unreachable.
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_MODE: "real"
+      ENRICHMENT_DOMAIN: "core-ip"
+      # Per-source rulesets: mounted, Enrichment-owned config (NOT Knowledge). Hot-reload on.
+      ENRICHMENT_RULESETS_FILE: "/config/rulesets.yaml"
+      ENRICHMENT_RULESETS_RELOAD: "true"
+      # Writable chatter overlay: operator promotions persisted here, durable across restart.
+      ENRICHMENT_CHATTER_OVERLAY_FILE: "/config/overlay/chatter-overlay.json"
+    volumes:
+      # Read-only base rulesets (hand-authored) + a writable overlay volume for chatter edits.
+      - ./services/enrichment/config/rulesets.yaml:/config/rulesets.yaml:ro
+      - enrichment-overlay:/config/overlay
+    ports:
+      - "8088:8080"      # chatter API + /openapi.json + Swagger UI + /actuator/health + /actuator/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # JVM Spring Boot context init can take ~100-140s on a busy host; allow the startup window.
+      start_period: 180s
+    networks:
+      - cp-net
+
+  # --- Codebook Generator — compiles the forward-propagation codebook. Consumes `trails.built`,
+  #     reads Knowledge (propagation templates / fault origins / vocabulary) + Topology query API,
+  #     persists the codebook in its own `codebook` PostgreSQL schema, emits `codebook.generated`.
+  #     Per the service design, the consumer and the read API run as SEPARATE processes sharing
+  #     one image: this `codebook-generator` runs `python -m codebook_generator` (yoyo migrate
+  #     then the consumer loop — no HTTP); the `codebook-api` below serves the read API. ---
+  codebook-generator:
+    build:
+      context: .
+      dockerfile: services/codebook-generator/Dockerfile
+    image: acp/codebook-generator:0.1.0
+    container_name: cp-codebook-generator
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment: &codebook-env
+      DATABASE_URL: "postgresql+pg8000://correlation:correlation@postgres:5432/correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      # codebook's IntegrationMode enum is UPPERCASE (MOCK|REAL) — distinct from trail-builder's
+      # lowercase ServiceMode and the simulator's lowercase Literal; values are per-service.
+      KNOWLEDGE_PROPAGATION_TEMPLATES_MODE: "REAL"
+      KNOWLEDGE_PROPAGATION_TEMPLATES_URL: "http://knowledge:8080"
+      KNOWLEDGE_FAULT_ORIGINS_MODE: "REAL"
+      KNOWLEDGE_FAULT_ORIGINS_URL: "http://knowledge:8080"
+      KNOWLEDGE_ALARM_TYPE_VOCABULARY_MODE: "REAL"
+      KNOWLEDGE_ALARM_TYPE_VOCABULARY_URL: "http://knowledge:8080"
+      TOPOLOGY_QUERY_MODE: "REAL"
+      TOPOLOGY_QUERY_URL: "http://topology:8080"
+      TRAIL_BUILDER_MODE: "REAL"
+      TRAIL_BUILDER_URL: "http://trail-builder:8000"
+      LOG_LEVEL: "INFO"
+    # default CMD = `python -m codebook_generator` (migrate + consumer loop), per the Dockerfile.
+    networks:
+      - cp-net
+
+  # Codebook read API (same image, the FastAPI app) — serves /codebooks/active + /health + /metrics
+  # for the Correlation Engine. Migrations are applied by the consumer service above.
+  codebook-api:
+    image: acp/codebook-generator:0.1.0
+    container_name: cp-codebook-api
+    depends_on:
+      codebook-generator:
+        condition: service_started
+    environment: *codebook-env
+    command: ["uvicorn", "codebook_generator.api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8084:8000"      # codebook read API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # Migrate-then-serve startup can be slow on a busy host; allow the startup window.
+      start_period: 120s
+    networks:
+      - cp-net
+
+  # Simulator — synthetic topology + labeled alarm streams (pure Kafka producer +
+  # Topology ingestion API client). Build context is the repo root so the image gets both
+  # libs/event-model and the service source. Defaults to a P2 (history) generate run; override
+  # PHASE / SIM_MODE / scenario knobs via env. All config is env-sourced (no hard-coded values).
+  simulator:
+    build:
+      context: .
+      dockerfile: services/simulator/Dockerfile
+    image: acp/simulator:dev
+    container_name: cp-simulator
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      PHASE: p2
+      SIM_MODE: generate
+      TOPOLOGY_API_MODE: mock          # switch to "real" + TOPOLOGY_API_BASE_URL for integration
+      KNOWLEDGE_MODE: local
+      TOPOLOGY_NODE_COUNT: "20"
+      SITE_COUNT: "5"
+      SCENARIO_INSTANCES: "8"
+      NOISE_RATE: "0.2"
+      HISTORY_DURATION: "3600"
+      SIM_OUTPUT_DIR: /data/sim        # persistent, configurable artifact path (labels+snapshot+corpus)
+      HTTP_PORT: "8080"
+      LOG_LEVEL: INFO
+    command: ["--phase", "p2"]
+    volumes:
+      - sim-data:/data/sim
+    ports:
+      - "8085:8080"                    # /health (liveness) + /metrics (Prometheus)
+    networks:
+      - cp-net
+
+  # --- web-ui — operator/engineer SPA (Angular 20, served by nginx). Static frontend that
+  #     calls the collaborating service REST APIs directly (no BFF). Backend wiring is injected
+  #     at container start from the *_API_BASE_URL env vars below (window.__ACP_ENV__), so the
+  #     one immutable image serves any stack with no rebuild. Host port 8086 (distinct from the
+  #     backend services on 8081-8085). Only the P1 read-API services that currently exist in
+  #     this compose (topology, trail-builder, codebook-api, knowledge) are wired and depended
+  #     on; the P2/P3 service URLs are intentionally left UNSET — the SPA degrades those views
+  #     gracefully rather than calling an invented backend. Add their *_API_BASE_URL when
+  #     pattern-manager / correlation-engine / alarm-manager / noise-filter land. ---
+  web-ui:
+    build:
+      context: services/web-ui
+      dockerfile: Dockerfile
+    image: acp/web-ui:0.1.0
+    container_name: cp-web-ui
+    depends_on:
+      topology:
+        condition: service_healthy
+      trail-builder:
+        condition: service_started
+      codebook-api:
+        condition: service_started
+      knowledge:
+        condition: service_started
+    environment:
+      INTEGRATION_MODE: "real"
+      # SAME-ORIGIN BASE URLS (CORS fix). These are consumed by the SPA running in the OPERATOR'S
+      # BROWSER. They are now SAME-ORIGIN relative path prefixes, NOT cross-origin backend hosts:
+      # the browser fetches /api/<svc>/... on the SPA's own origin (:8086), and nginx in this same
+      # container reverse-proxies each prefix to the backend BY DOCKER SERVICE NAME on cp-net
+      # (see services/web-ui/nginx.conf for the exact prefix→upstream mapping). Because every call
+      # is same-origin, the browser never performs a CORS check — eliminating the cross-origin
+      # block that previously stopped the SPA from loading data. No backend service is changed.
+      TOPOLOGY_API_BASE_URL: "/api/topology"            # → nginx → topology:8080
+      TRAIL_BUILDER_API_BASE_URL: "/api/trail-builder"  # → nginx → trail-builder:8000
+      CODEBOOK_API_BASE_URL: "/api/codebook"            # → nginx → codebook-api:8000
+      KNOWLEDGE_API_BASE_URL: "/api/knowledge"          # → nginx → knowledge:8080
+      # P2/P3 services not yet in this compose — left UNSET on purpose (graceful degrade). The
+      # nginx /api/<svc> proxy routes for them already exist (resolved at request time), so the
+      # moment those services land we just set the same-origin base URL below — no proxy change:
+      #   PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"
+      #   CORRELATION_ENGINE_API_BASE_URL: "/api/correlation-engine"
+      #   ALARM_MANAGER_API_BASE_URL: "/api/alarm-manager"
+      #   NOISE_FILTER_API_BASE_URL: "/api/noise-filter"
+      #   ENRICHMENT_CHATTER_API_BASE_URL: "/api/enrichment"
+      STREAMING_REFRESH_INTERVAL_MS: "3000"
+      DOMAIN: "core-ip"
+      SNAPSHOT_ID: "current"
+      LOG_LEVEL: "info"
+    ports:
+      - "8086:8080"      # static SPA (HTTP 200 on / for liveness)
+    healthcheck:
+      # Use 127.0.0.1, NOT localhost: the nginx image enables IPv6 resolvers, so `localhost`
+      # resolves to ::1 where nginx (listening on IPv4 0.0.0.0:8080) isn't bound → false-unhealthy.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - cp-net
+
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
-#   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
-#   noise-filter, pattern-manager, correlation-engine, web-ui
+#   noise-filter, pattern-manager, correlation-engine
 #
+#   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)
 #   Also deferred:
-#     - kafka-init: one-shot container creating the architecture.md topic catalog
-#       (topology.changed, trails.built, codebook.generated, knowledge.updated,
-#        alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
-#        transactions.clean,
-#        patterns.mined, patterns.discovered, patterns.approved, correlation.results, *.dlq)
 #     - spark: PySpark runtime for pattern-miner (container-only)
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
-#     - nebula-init: one-shot container that runs `ADD HOSTS "nebula-storaged":9779;` against
-#       nebula-graphd (port 9669) after first boot — NebulaGraph requires storaged hosts to be
-#       registered with metad before a graph space can be used. (Owned by the Topology Service's
-#       bootstrap once it is built.)
+#     - nebula-init: NO LONGER NEEDED as a separate one-shot — the Topology Service now runs the
+#       idempotent `ADD HOSTS "nebula-storaged":9779;` + CREATE SPACE/TAG/EDGE bootstrap itself on
+#       startup (see the `topology` service above), so storaged registration is owned by it.
 # -----------------------------------------------------------------------------------------
 
 volumes:
@@ -161,6 +527,8 @@ volumes:
   pg-data:
   nebula-meta:
   nebula-storage:
+  sim-data:        # Simulator persistent artifacts (ground-truth labels + snapshot + corpus)
+  enrichment-overlay:  # Enrichment chatter overlay (operator promotions, durable across restart)
 
 networks:
   cp-net:
