@@ -39,6 +39,17 @@ All DBSCAN parameters (`eps`, `minSamples`, `windowSize`, `algorithm`) and the a
 | `NOISE_FILTER_DB_URL` | PostgreSQL URL for the run-stats / observed-chatter store |
 | `LOG_LEVEL` | structured-log level (JSON) |
 | `HTTP_PORT` | port for `/health`, `/metrics`, `/openapi.json`, read API (default 8080) |
+| `DEDUPE_TTL_SECONDS` | TTL of the `eventId` dedupe cache (default 900) |
+| `WINDOW_WATERMARK_LAG_BUCKETS` | Event-time watermark lag: extra whole buckets of event time to wait past a bucket before finalizing it (default 0 — finalize bucket B once an alarm in B+1 arrives for the trail). Tolerates out-of-order event time. |
+| `WINDOW_BACKSTOP_SECONDS` | Wall-clock idle/end-of-stream backstop for a bucket with no successor (default 60). Set ABOVE the max upstream release cadence (Enrichment self-clear hold ~15 s + sweep) so it never fires mid-trickle during history batch replay. |
+
+**Window finalization** is event-time-driven (a `(trailId, bucket)` closes when event time advances
+past it), NOT wall-clock-inactivity-driven — so a logical window's members stay grouped even when
+Enrichment dribbles its held raises into `alarms.enriched` over ~15-20 s wall-clock in history batch
+mode. In live mode event time ≈ wall clock, so the next real-time alarm closes the prior bucket
+promptly (no added latency); the wall-clock backstop only flushes a genuinely-final/idle bucket.
+A late alarm for an already-finalized bucket re-opens it (counted `nf_windows_reopened_total`) rather
+than forming a dropped singleton.
 
 `eps`, `minSamples`, `windowSize`, `algorithm`, the attribute key set, and the hop-distance
 on/off flag + traversal bound are **Knowledge Service parameters** (loaded at startup, hot-refreshed

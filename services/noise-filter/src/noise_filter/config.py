@@ -57,7 +57,14 @@ class Settings(BaseSettings):
 
     # Operational (not domain) tunables — sane env-overridable defaults, not correlation thresholds.
     dedupe_ttl_seconds: int = Field(default=900, alias="DEDUPE_TTL_SECONDS")
-    window_grace_seconds: int = Field(default=5, alias="WINDOW_GRACE_SECONDS")
+    # Event-time watermark finalization (see windowing.TrailWindower). A (trailId, bucket) window
+    # finalizes when event time advances past it (watermark) — NOT on wall-clock idleness — so a
+    # logical window's members are grouped even when they dribble in over wall-clock (e.g. the
+    # ~20 s Enrichment self-clear hold during history batch replay).
+    window_watermark_lag_buckets: int = Field(default=0, alias="WINDOW_WATERMARK_LAG_BUCKETS")
+    # Wall-clock backstop for idle / end-of-stream buckets ONLY. Deliberately ABOVE the max upstream
+    # release cadence (Enrichment self-clear hold ~15 s + sweep) so it never fires mid-trickle.
+    window_backstop_seconds: int = Field(default=60, alias="WINDOW_BACKSTOP_SECONDS")
     read_api_default_limit: int = Field(default=50, alias="READ_API_DEFAULT_LIMIT")
     read_api_max_limit: int = Field(default=500, alias="READ_API_MAX_LIMIT")
 

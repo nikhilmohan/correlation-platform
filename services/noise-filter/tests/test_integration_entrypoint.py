@@ -163,7 +163,7 @@ async def test_real_entrypoint_serves_http_and_persists_to_postgres(monkeypatch)
             KAFKA_BOOTSTRAP_SERVERS="localhost:9092",
             HTTP_PORT=HTTP_PORT,
             NOISE_FILTER_DB_URL=db_url,
-            WINDOW_GRACE_SECONDS=0,
+            WINDOW_BACKSTOP_SECONDS=0,
         )
         metrics = Metrics()
 

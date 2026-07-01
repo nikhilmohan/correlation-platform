@@ -186,9 +186,16 @@ def consume_loop(
     """
     dedupe = DedupeCache(ttl_seconds=settings.dedupe_ttl_seconds)
     router = MessageRouter(dedupe, metrics=pipeline._metrics)  # noqa: SLF001 — same package
+
+    def _on_reopen(trail_id: str, bucket: int) -> None:
+        pipeline._metrics.windows_reopened.inc()  # noqa: SLF001 — same package
+        log.warning("window_reopened_late_alarm", trail_id=trail_id, bucket=bucket)
+
     windower = TrailWindower(
         window_size_provider=lambda: pipeline._params.get().window_size_seconds,  # noqa: SLF001
-        grace_seconds=settings.window_grace_seconds,
+        watermark_lag_buckets=settings.window_watermark_lag_buckets,
+        backstop_seconds=settings.window_backstop_seconds,
+        on_reopen=_on_reopen,
     )
     producer = TransactionProducer(settings.kafka_bootstrap_servers)
     dlq = DlqPublisher(producer.raw)
