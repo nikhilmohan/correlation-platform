@@ -52,6 +52,10 @@
         "codebookVersion": {
           "type": "string",
           "description": "Codebook version in scope when mining ran."
+        },
+        "anchorScenarioId": {
+          "type": "string",
+          "description": "The Codebook fault-origin scenario this pattern was anchored to during domain-knowledge anchoring; null/absent means the cascade was unexplained (no confident scenario match). Optional for backward-compat."
         }
       },
       "required": ["sourceWindowId", "snapshotId", "codebookVersion"]
