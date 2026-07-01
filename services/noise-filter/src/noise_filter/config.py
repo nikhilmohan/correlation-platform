@@ -57,7 +57,46 @@ class Settings(BaseSettings):
 
     # Operational (not domain) tunables — sane env-overridable defaults, not correlation thresholds.
     dedupe_ttl_seconds: int = Field(default=900, alias="DEDUPE_TTL_SECONDS")
-    window_grace_seconds: int = Field(default=5, alias="WINDOW_GRACE_SECONDS")
+    # Allowed-lateness / bounded-reorder finalization (DA-3c; see windowing.TrailWindower). The real
+    # alarms.enriched topic is keyed by managedObjectId, so ONE trail's alarms (spanning many
+    # managed objects) hash to DIFFERENT Kafka partitions and arrive interleaved / out of event-time
+    # order. A (trailId, bucket) window therefore must NOT finalize just because event time crosses
+    # the bucket boundary — it stays open until its OWN members stop arriving (per-bucket idleness),
+    # so cross-partition siblings land in the correct bucket instead of fragmenting into
+    # DBSCAN-noise singletons.
+    #
+    # window_allowed_lateness_buckets: reorder tolerance in whole event-time buckets — a bucket is
+    #   eligible to finalize only once the trail watermark has advanced this many buckets beyond the
+    #   bucket's OWN last add. Default 6: with windowSize=600 s that tolerates ~1 h of event-time
+    #   reorder skew, comfortably above observed cross-partition interleaving. The DA-3b name
+    #   WINDOW_WATERMARK_LAG_BUCKETS is retained as a back-compat alias so existing env stays valid.
+    window_allowed_lateness_buckets: int = Field(
+        default=6,
+        validation_alias="WINDOW_ALLOWED_LATENESS_BUCKETS",
+    )
+    window_watermark_lag_buckets: int | None = Field(
+        default=None, alias="WINDOW_WATERMARK_LAG_BUCKETS"
+    )
+    # window_idle_grace_seconds: wall-clock grace that must ALSO elapse since a bucket's last add
+    #   before the allowed-lateness path finalizes it — absorbs arrival-time skew (partition drain
+    #   lag, Enrichment self-clear hold) independently of event-time progress. Default 15 s.
+    window_idle_grace_seconds: float = Field(default=15.0, alias="WINDOW_IDLE_GRACE_SECONDS")
+    # window_backstop_seconds: wall-clock backstop / memory valve for idle / end-of-stream buckets.
+    #   Deliberately ABOVE the max upstream release cadence + reorder window so it never fires while
+    #   a bucket is still actively collecting cross-partition siblings. Default 300 s.
+    window_backstop_seconds: int = Field(default=300, alias="WINDOW_BACKSTOP_SECONDS")
+    # window_max_open_windows: hard cap on simultaneously-open (trailId, bucket) windows (memory
+    #   bound). Exceeding it force-finalizes the least-recently-added windows (emitted, never
+    #   dropped) so a pathological stream cannot OOM. Default 200k windows.
+    window_max_open_windows: int = Field(default=200_000, alias="WINDOW_MAX_OPEN_WINDOWS")
+
+    @property
+    def effective_allowed_lateness_buckets(self) -> int:
+        """Allowed-lateness margin, honouring the WINDOW_WATERMARK_LAG_BUCKETS alias if set."""
+        if self.window_watermark_lag_buckets is not None:
+            return self.window_watermark_lag_buckets
+        return self.window_allowed_lateness_buckets
+
     read_api_default_limit: int = Field(default=50, alias="READ_API_DEFAULT_LIMIT")
     read_api_max_limit: int = Field(default=500, alias="READ_API_MAX_LIMIT")
 

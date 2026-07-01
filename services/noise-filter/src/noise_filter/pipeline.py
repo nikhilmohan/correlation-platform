@@ -88,7 +88,10 @@ class Pipeline:
         """Run the full per-window flow and return its outcome."""
         params = self._params.get()
         features = self._features.get()
-        alarms = window.alarms
+        # Buffer-and-sort (DA-3c): the real alarms.enriched topic is keyed by managedObjectId, so a
+        # trail's alarms arrive out of event-time order across partitions. Order by raisedAt here so
+        # the feature matrix + emitted alarms[]/alarmIds[] are deterministically event-time ordered.
+        alarms = window.sorted_alarms()
         if self._metrics is not None:
             self._metrics.windows_finalized.inc()
             self._metrics.window_size_alarms.observe(len(alarms))

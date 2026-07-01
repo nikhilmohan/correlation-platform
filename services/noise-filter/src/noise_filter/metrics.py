@@ -22,6 +22,16 @@ class Metrics:
         self.windows_finalized = Counter(
             "nf_windows_finalized_total", "Trail-windows finalized", registry=r
         )
+        self.windows_reopened = Counter(
+            "nf_windows_reopened_total",
+            "Already-finalized (trailId,bucket) windows re-opened by a late alarm",
+            registry=r,
+        )
+        self.windows_force_finalized = Counter(
+            "nf_windows_force_finalized_total",
+            "Open (trailId,bucket) windows force-finalized by the max_open_windows memory bound",
+            registry=r,
+        )
         self.clusters_emitted = Counter(
             "nf_clusters_emitted_total", "Dense storm clusters emitted", registry=r
         )

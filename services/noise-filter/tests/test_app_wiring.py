@@ -53,6 +53,33 @@ def _settings(**over) -> Settings:
     return Settings(**base)
 
 
+def test_allowed_lateness_defaults_and_env_override():
+    """DA-3c finalization tunables default sanely and are env-overridable (no magic constants)."""
+    s = _settings()
+    # Documented defaults: lateness 6 buckets, 15 s grace, 300 s backstop, 200k cap.
+    assert s.effective_allowed_lateness_buckets == 6
+    assert s.window_idle_grace_seconds == 15.0
+    assert s.window_backstop_seconds == 300
+    assert s.window_max_open_windows == 200_000
+
+    over = _settings(
+        WINDOW_ALLOWED_LATENESS_BUCKETS=9,
+        WINDOW_IDLE_GRACE_SECONDS=8.5,
+        WINDOW_BACKSTOP_SECONDS=120,
+        WINDOW_MAX_OPEN_WINDOWS=10,
+    )
+    assert over.effective_allowed_lateness_buckets == 9
+    assert over.window_idle_grace_seconds == 8.5
+    assert over.window_backstop_seconds == 120
+    assert over.window_max_open_windows == 10
+
+
+def test_watermark_lag_env_alias_maps_to_allowed_lateness():
+    """The DA-3b WINDOW_WATERMARK_LAG_BUCKETS env stays valid, mapping onto allowed-lateness."""
+    s = _settings(WINDOW_WATERMARK_LAG_BUCKETS=4)
+    assert s.effective_allowed_lateness_buckets == 4  # alias wins over the DA-3c default
+
+
 def test_asyncpg_url_normalizes_driver_prefixes():
     assert app_mod._asyncpg_url("postgresql+asyncpg://u@h/db") == "postgresql://u@h/db"
     assert app_mod._asyncpg_url("postgres://u@h/db") == "postgresql://u@h/db"

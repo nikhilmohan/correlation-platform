@@ -69,7 +69,7 @@ async def test_window_all_noise_emits_nothing_but_records_stats(run_repo, chatte
 
 def test_per_trail_windowing_isolation():
     """DA-3: alarms on different trails never share a window."""
-    windower = TrailWindower(window_size_provider=lambda: 600, grace_seconds=0)
+    windower = TrailWindower(window_size_provider=lambda: 600)
     a1 = make_alarm(alarm_id="a1", trail_ids=["t1"], raised_offset_seconds=0.0)
     a2 = make_alarm(alarm_id="a2", trail_ids=["t2"], raised_offset_seconds=1.0)
     windower.add(a1)
@@ -82,7 +82,7 @@ def test_per_trail_windowing_isolation():
 
 def test_alarm_with_multiple_trail_ids_bucketed_into_each():
     """An alarm carrying multiple trailIds is bucketed into each trail's window."""
-    windower = TrailWindower(window_size_provider=lambda: 600, grace_seconds=0)
+    windower = TrailWindower(window_size_provider=lambda: 600)
     a = make_alarm(alarm_id="multi", trail_ids=["t1", "t2"])
     windower.add(a)
     windows = windower.drain_all()
