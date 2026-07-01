@@ -6,6 +6,8 @@ import com.acp.patternmanager.api.dto.PatternEdit;
 import com.acp.patternmanager.api.dto.PatternPage;
 import com.acp.patternmanager.api.dto.PatternView;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.validation.Valid;
 import java.util.UUID;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -55,6 +57,12 @@ public class PatternController {
     }
 
     @Operation(summary = "Approve or reject a draft pattern")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Decision applied; updated PatternView returned"),
+            @ApiResponse(responseCode = "404", description = "No pattern with the given id", content = @io.swagger.v3.oas.annotations.media.Content()),
+            @ApiResponse(responseCode = "409", description = "Pattern is not in a lifecycle state that permits approval/rejection", content = @io.swagger.v3.oas.annotations.media.Content()),
+            @ApiResponse(responseCode = "422", description = "Decision body fails validation (invalid decision/semantics)", content = @io.swagger.v3.oas.annotations.media.Content())
+    })
     @PostMapping("/{patternId}/approve")
     public PatternView approve(@PathVariable String patternId,
             @Valid @RequestBody ApprovalIntent intent) {
@@ -62,6 +70,12 @@ public class PatternController {
     }
 
     @Operation(summary = "Edit a draft pattern (per-position optional markers; frozen PatternEdit body)")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Edit applied; updated PatternView returned"),
+            @ApiResponse(responseCode = "404", description = "No pattern with the given id", content = @io.swagger.v3.oas.annotations.media.Content()),
+            @ApiResponse(responseCode = "409", description = "Pattern is not editable in its current lifecycle state (only drafts are editable)", content = @io.swagger.v3.oas.annotations.media.Content()),
+            @ApiResponse(responseCode = "422", description = "Edit body is un-processable (e.g. out-of-range position index)", content = @io.swagger.v3.oas.annotations.media.Content())
+    })
     @PatchMapping("/{patternId}")
     public PatternView edit(@PathVariable String patternId,
             @Valid @RequestBody PatternEdit edit) {

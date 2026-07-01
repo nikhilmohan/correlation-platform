@@ -71,7 +71,7 @@
         },
         "responses" : {
           "200" : {
-            "description" : "OK",
+            "description" : "Decision applied; updated PatternView returned",
             "content" : {
               "*/*" : {
                 "schema" : {
@@ -79,6 +79,15 @@
                 }
               }
             }
+          },
+          "422" : {
+            "description" : "Decision body fails validation (invalid decision/semantics)"
+          },
+          "404" : {
+            "description" : "No pattern with the given id"
+          },
+          "409" : {
+            "description" : "Pattern is not in a lifecycle state that permits approval/rejection"
           }
         }
       }
@@ -132,8 +141,11 @@
           "required" : true
         },
         "responses" : {
+          "409" : {
+            "description" : "Pattern is not editable in its current lifecycle state (only drafts are editable)"
+          },
           "200" : {
-            "description" : "OK",
+            "description" : "Edit applied; updated PatternView returned",
             "content" : {
               "*/*" : {
                 "schema" : {
@@ -141,6 +153,12 @@
                 }
               }
             }
+          },
+          "422" : {
+            "description" : "Edit body is un-processable (e.g. out-of-range position index)"
+          },
+          "404" : {
+            "description" : "No pattern with the given id"
           }
         }
       }
