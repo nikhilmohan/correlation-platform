@@ -25,7 +25,8 @@
       "sourceWindowId": "TXN-0001",
       "snapshotId": "SNAP-2026-06-08-001",
       "domain": "core-ip",
-      "codebookVersion": "CODEBOOK-2026-06-08-001"
+      "codebookVersion": "CODEBOOK-2026-06-08-001",
+      "anchorScenarioId": "CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1"
     }
   }
 }
