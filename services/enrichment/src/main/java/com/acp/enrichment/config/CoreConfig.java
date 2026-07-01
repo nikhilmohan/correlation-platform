@@ -4,6 +4,7 @@ import com.acp.enrichment.chatter.ChatterOverlayStore;
 import com.acp.enrichment.chatter.ChatterService;
 import com.acp.enrichment.ruleset.AlarmTypeVocabulary;
 import com.acp.enrichment.ruleset.RulesetConfigLoader;
+// AlarmTypeVocabulary bean now provided by KnowledgeConfig (fetched from Knowledge).
 import com.acp.enrichment.ruleset.RulesetRegistry;
 import com.acp.eventmodel.EventCodec;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,11 +39,6 @@ public class CoreConfig {
     @Bean
     public ObjectMapper enrichmentObjectMapper(EventCodec codec) {
         return codec.objectMapper();
-    }
-
-    @Bean
-    public AlarmTypeVocabulary alarmTypeVocabulary() {
-        return AlarmTypeVocabulary.coreIp();
     }
 
     @Bean

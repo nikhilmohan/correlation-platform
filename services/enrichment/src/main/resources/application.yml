@@ -17,6 +17,12 @@ trail-builder:
   base-url: ${TRAIL_BUILDER_BASE_URL:http://trail-builder:8000}
   mode: ${TRAIL_BUILDER_MODE:real}
 
+# Knowledge Service — authoritative source of the alarmTypeVocabulary (validated at startup).
+# Only the domain vocabulary is fetched here; pipeline params stay Enrichment-owned (spec invariant).
+knowledge:
+  base-url: ${KNOWLEDGE_BASE_URL:http://knowledge:8080}
+  mode: ${KNOWLEDGE_MODE:real}
+
 enrichment:
   consumer-group: ${ENRICHMENT_CONSUMER_GROUP:enrichment}
   domain: ${ENRICHMENT_DOMAIN:core-ip}

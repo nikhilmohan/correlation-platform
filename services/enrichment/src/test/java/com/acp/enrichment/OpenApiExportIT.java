@@ -58,6 +58,8 @@ class OpenApiExportIT {
     static void props(DynamicPropertyRegistry r) {
         r.add("kafka.bootstrap-servers", () -> "localhost:9092");
         r.add("trail-builder.base-url", () -> "http://localhost:1");
+        r.add("knowledge.base-url", () -> "http://localhost:1");
+        r.add("knowledge.connect-timeout-ms", () -> "200");
         r.add("enrichment.rulesets-file", () -> "config/rulesets.yaml");
         r.add("enrichment.chatter-overlay-file", () -> "build/tmp/overlay.json");
     }

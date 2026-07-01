@@ -314,6 +314,8 @@ services:
         condition: service_completed_successfully
       trail-builder:
         condition: service_started
+      knowledge:
+        condition: service_started
     environment:
       SERVER_PORT: "8080"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
@@ -322,6 +324,10 @@ services:
       TRAIL_BUILDER_MODE: "real"
       TRAIL_BUILDER_MAX_RETRIES: "3"
       TRAIL_BUILDER_RETRY_BACKOFF_MS: "200"
+      # Knowledge: authoritative alarmTypeVocabulary fetched at startup (validation only, NOT
+      # pipeline params). Degrades to the built-in 30-token fallback if Knowledge is unreachable.
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_MODE: "real"
       ENRICHMENT_DOMAIN: "core-ip"
       # Per-source rulesets: mounted, Enrichment-owned config (NOT Knowledge). Hot-reload on.
       ENRICHMENT_RULESETS_FILE: "/config/rulesets.yaml"

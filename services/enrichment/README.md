@@ -62,7 +62,10 @@ with `./gradlew generateOpenApi`.
 | `TRAIL_BUILDER_BASE_URL` | Trail Builder base URL (in-cluster `http://trail-builder:8000`) | `http://trail-builder:8000` |
 | `TRAIL_BUILDER_MODE` | `mock` \| `real` | `real` |
 | `TRAIL_BUILDER_MAX_RETRIES`, `TRAIL_BUILDER_RETRY_BACKOFF_MS` | Resilience4j retry policy | `3`, `200` |
-| `ENRICHMENT_DOMAIN` | domain passed to `getTrailsForObject` | `core-ip` |
+| `KNOWLEDGE_BASE_URL` | Knowledge base URL — startup `alarmTypeVocabulary` fetch (validation only, not pipeline params) | `http://knowledge:8080` |
+| `KNOWLEDGE_MODE` | `mock` \| `real` | `real` |
+| `KNOWLEDGE_CONNECT_TIMEOUT_MS`, `KNOWLEDGE_READ_TIMEOUT_MS` | vocabulary fetch timeouts; on failure degrades to the built-in 30-token fallback with a warning | `2000`, `3000` |
+| `ENRICHMENT_DOMAIN` | domain passed to `getTrailsForObject` and the Knowledge vocabulary fetch | `core-ip` |
 | `ENRICHMENT_RULESETS_FILE` | mounted per-source rulesets YAML | `/config/rulesets.yaml` |
 | `ENRICHMENT_RULESETS_RELOAD` | file-watch hot-reload | `false` |
 | `ENRICHMENT_CHATTER_OVERLAY_FILE` | writable chatter overlay file | `/config/chatter-overlay.json` |

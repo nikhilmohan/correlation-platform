@@ -16,6 +16,19 @@ import org.springframework.stereotype.Component;
  * passes and records first-seen; subsequent identical-key alarms within the window are dropped while
  * a collapsed count increments. Window eviction starts a fresh window.
  *
+ * <p><b>Event-time windowing (raisedAt, not wall-clock).</b> The dedup window is measured over the
+ * alarm's own logical {@code raisedAt} timestamp, NOT the wall-clock arrival time. The spec's dedup
+ * is "repeated identical alarms within the per-source dedup window" — the window is over <i>alarm
+ * time</i>. In P2 HISTORY mode the Simulator batch-replays the whole corpus in &lt;1s wall-clock
+ * while the alarms' {@code raisedAt} span many hours; wall-clock windowing would wrongly collapse
+ * alarms hours apart into a single "duplicate", destroying signal retention. Windowing on
+ * {@code raisedAt} dedups by logical alarm time in both modes: in P3 LIVE mode {@code raisedAt}
+ * ≈ wall-clock arrival, so the behaviour is identical there. The window {@code firstSeen} is the
+ * first alarm's {@code raisedAt}; an alarm whose {@code raisedAt} is more than {@code dedupWindow}
+ * after {@code firstSeen} starts a fresh window. If {@code raisedAt} is absent/unparseable the
+ * injected {@link Clock} is used as a safe fallback (keeps live-mode behaviour if a producer omits
+ * it). The {@link Clock} is retained only for that fallback.
+ *
  * <p><b>State-aware key (B1 fix).</b> The dedup key is
  * {@code (path, source, managedObjectId, eventType, state)} — it includes the alarm {@code state}.
  * A {@code raised} and a {@code cleared} alarm on the same {@code (managedObjectId, eventType)} are
@@ -48,10 +61,11 @@ public class DedupStep {
         DedupKey key = new DedupKey(path, ruleset.source(), alarm.getManagedObjectId(),
                 alarm.getEventType(), alarm.getState());
         Duration window = ruleset.filterParams().dedupWindow();
-        Instant now = clock.instant();
+        Instant now = EventTime.of(alarm.getRaisedAt(), clock);
 
         Window existing = windows.get(key);
-        if (existing != null && !expired(existing.firstSeen(), window, now)) {
+        // Only treat as duplicate when this alarm's raisedAt falls within [firstSeen, firstSeen+window].
+        if (existing != null && within(existing.firstSeen(), window, now)) {
             windows.put(key, new Window(existing.firstSeen(), existing.collapsedCount() + 1));
             meters.counter("filtered_total", "filter", "dedup", "source", ruleset.source())
                     .increment();
@@ -61,7 +75,13 @@ public class DedupStep {
         return StepResult.cont(alarm);
     }
 
-    private static boolean expired(Instant firstSeen, Duration window, Instant now) {
-        return now.isAfter(firstSeen.plus(window));
+    /**
+     * @return {@code true} iff {@code eventTime} is within the window opened at {@code firstSeen}.
+     *     Uses absolute distance so an out-of-order replay (a later-arriving earlier-raisedAt
+     *     alarm) inside the window still collapses; anything more than {@code window} apart in
+     *     logical alarm time is a distinct occurrence and opens a fresh window.
+     */
+    private static boolean within(Instant firstSeen, Duration window, Instant eventTime) {
+        return Duration.between(firstSeen, eventTime).abs().compareTo(window) <= 0;
     }
 }

@@ -74,6 +74,39 @@ public final class TestRulesets {
                         Duration.ofSeconds(300), List.of()));
     }
 
+    /** The full 30-token Core IP vocabulary as an identity alarmTypeMap (token -> same token). */
+    public static Map<String, String> identityAlarmTypeValues() {
+        String[] tokens = {
+                "LOS", "LOF", "OpticalPowerLow", "FiberCut", "FiberFault", "PortDown",
+                "LineCardFault", "CRCErrors", "PortFlapping", "LinkBundleDegraded", "NodeDown",
+                "InterfaceDown", "InterfaceErrors", "IPLinkDown", "LinkDown", "ISISAdjacencyDown",
+                "AdjDown", "OSPFAdjacencyDown", "BGPPeerDown", "RouteFlap", "LDPSessionDown",
+                "LSPDown", "FRRSwitchover", "TETunnelDown", "VPNReachabilityLoss", "ReachabilityLoss",
+                "ServiceDegraded", "Congestion", "QueueDrop", "HighLatency"};
+        java.util.Map<String, String> m = new java.util.LinkedHashMap<>();
+        for (String t : tokens) {
+            m.put(t, t);
+        }
+        return m;
+    }
+
+    /**
+     * simulator: the platform's own producer emits already-canonical payload fields, so this is an
+     * IDENTITY passthrough ruleset — empty severity/eventType/probableCause maps and an
+     * alarmTypeMap over {@code alarmType} that maps each of the 30 tokens to itself. Mirrors the
+     * shipped {@code config/rulesets.yaml} simulator profile (FIX #1).
+     */
+    public static Ruleset simulator() {
+        return new Ruleset("simulator", false,
+                new FieldMapping("Node", "{objectType}:{rawObjectId}",
+                        Map.of(), Map.of(), Map.of(),
+                        new AlarmTypeMap("alarmType", identityAlarmTypeValues(),
+                                "ReachabilityLoss", "default"),
+                        List.of("*")),
+                new FilterParams(Duration.ofSeconds(30), Duration.ofSeconds(15), 5,
+                        Duration.ofSeconds(60), List.of()));
+    }
+
     /** default: numeric severity, 30s/15s/flapN 5. */
     public static Ruleset defaultRuleset() {
         return new Ruleset("default", true,

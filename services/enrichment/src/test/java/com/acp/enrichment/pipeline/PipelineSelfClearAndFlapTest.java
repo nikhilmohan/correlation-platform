@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.acp.enrichment.support.TestRulesets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,7 +21,9 @@ import org.junit.jupiter.api.Test;
  */
 class PipelineSelfClearAndFlapTest {
 
-    private Map<String, Object> nmsAlpha(String alarmId, String state) {
+    private static final Instant T0 = Instant.parse("2026-06-11T10:00:00Z");
+
+    private Map<String, Object> nmsAlpha(String alarmId, String state, Instant raisedAt) {
         Map<String, Object> m = new HashMap<>();
         m.put("alarmId", alarmId);
         m.put("rawSeverity", "CRIT");
@@ -28,11 +31,11 @@ class PipelineSelfClearAndFlapTest {
         m.put("ne", "edge1");
         m.put("ifIndex", "1");
         m.put("state", state);
-        m.put("raisedAt", "2026-06-11T10:00:00Z");
+        m.put("raisedAt", raisedAt.toString());
         return m;
     }
 
-    private Map<String, Object> flapSource(String alarmId, String state) {
+    private Map<String, Object> flapSource(String alarmId, String state, Instant raisedAt) {
         Map<String, Object> m = new HashMap<>();
         m.put("alarmId", alarmId);
         m.put("rawSeverity", "CRIT");
@@ -40,7 +43,7 @@ class PipelineSelfClearAndFlapTest {
         m.put("ne", "edge9");
         m.put("ifIndex", "1");
         m.put("state", state);
-        m.put("raisedAt", "2026-06-11T10:00:00Z");
+        m.put("raisedAt", raisedAt.toString());
         return m;
     }
 
@@ -51,9 +54,10 @@ class PipelineSelfClearAndFlapTest {
         PipelineHarness h = new PipelineHarness(List.of(TestRulesets.nmsAlpha(),
                 TestRulesets.defaultRuleset()));
 
-        h.process(nmsAlpha("r-1", "raised"), "nms-alpha", Path.HISTORY);
+        h.process(nmsAlpha("r-1", "raised", T0), "nms-alpha", Path.HISTORY);
         h.clock.advance(Duration.ofSeconds(3)); // within the 5s hold
-        h.process(nmsAlpha("c-1", "cleared"), "nms-alpha", Path.HISTORY);
+        // Clear's raisedAt is 3s after the raise's raisedAt — within the 5s event-time hold.
+        h.process(nmsAlpha("c-1", "cleared", T0.plusSeconds(3)), "nms-alpha", Path.HISTORY);
 
         // Sweep after the hold would have elapsed: nothing must be released, because the clear
         // suppressed the held raise.
@@ -72,8 +76,8 @@ class PipelineSelfClearAndFlapTest {
         PipelineHarness h = new PipelineHarness(List.of(TestRulesets.nmsAlpha(),
                 TestRulesets.defaultRuleset()));
 
-        h.process(nmsAlpha("r-only", "raised"), "nms-alpha", Path.HISTORY);
-        h.clock.advance(Duration.ofSeconds(6)); // past the 5s hold, no clear arrived
+        h.process(nmsAlpha("r-only", "raised", T0), "nms-alpha", Path.HISTORY);
+        h.clock.advance(Duration.ofSeconds(6)); // past the 5s hold (wall-clock), no clear arrived
         h.sweepSelfClear();
 
         assertThat(h.emitted).hasSize(1);
@@ -93,11 +97,17 @@ class PipelineSelfClearAndFlapTest {
         PipelineHarness h = new PipelineHarness(List.of(TestRulesets.flapSource(),
                 TestRulesets.defaultRuleset()));
 
+        // Each oscillation gets a DISTINCT raisedAt 10s apart (> the 1s event-time dedup window so
+        // distinct raises are not deduped, well within the 300s flap window so they count as one
+        // burst). This mirrors a real flap: the same object oscillates over tens of seconds.
         for (int i = 1; i <= 6; i++) {
-            h.process(flapSource("raise-" + i, "raised"), "flap-source", Path.HISTORY);
-            h.clock.advance(Duration.ofSeconds(2)); // past the 1s hold
+            Instant raiseAt = T0.plusSeconds(i * 10L);
+            h.process(flapSource("raise-" + i, "raised", raiseAt), "flap-source", Path.HISTORY);
+            h.clock.advance(Duration.ofSeconds(2)); // past the 1s hold (wall-clock sweep)
             h.sweepSelfClear();                     // release the held raise into FlapDamp
-            h.process(flapSource("clear-" + i, "cleared"), "flap-source", Path.HISTORY);
+            // Clear's raisedAt is 3s after its raise — past the 1s event-time hold, so it flows.
+            h.process(flapSource("clear-" + i, "cleared", raiseAt.plusSeconds(3)), "flap-source",
+                    Path.HISTORY);
             h.clock.advance(Duration.ofSeconds(2));
             h.sweepSelfClear();
         }

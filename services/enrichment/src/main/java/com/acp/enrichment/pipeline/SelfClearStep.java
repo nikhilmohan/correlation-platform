@@ -24,13 +24,31 @@ import org.springframework.stereotype.Component;
  *
  * <p>Because the hold-time is per source, the same transient is suppressed under a short-hold source
  * and emitted under a long-hold source (criterion 11).
+ *
+ * <p><b>Event-time clear-matching (raisedAt, not wall-clock).</b> Whether a clear counts as
+ * "self-clearing" a held raise is decided over the alarms' own logical time: the transient is
+ * suppressed iff the clear's {@code raisedAt} is within the hold-time of the raise's
+ * {@code raisedAt}. This makes P2 HISTORY batch-replay correct — the whole corpus arrives in
+ * &lt;1s wall-clock while {@code raisedAt} spans hours, so a clear replayed microseconds after its
+ * raise but logically hours later must NOT be treated as a self-clear. In P3 LIVE mode
+ * {@code raisedAt} ≈ arrival so the behaviour is identical. The <b>release sweep</b> for an
+ * un-cleared held raise stays on the wall-clock {@link Clock} (it is a real scheduled flush so held
+ * state does not accumulate unbounded); {@code eventHeldAt} carries the raise's logical time used
+ * for clear-matching, {@code wallHeldAt} the arrival time used only by the sweep.
  */
 @Component
 public class SelfClearStep {
 
-    /** A held raise awaiting either a matching clear or hold-time expiry. */
-    private record Held(AlarmEvent raise, Ruleset ruleset, Path path, Instant heldAt,
-            String occurredAt, String traceId) {}
+    /**
+     * A held raise awaiting either a matching clear or hold-time expiry.
+     *
+     * @param eventHeldAt the raise's logical {@code raisedAt} (fallback: wall-clock) — used for
+     *     event-time clear-matching
+     * @param wallHeldAt the raise's wall-clock arrival — used only by the release sweep so held
+     *     state is flushed even when no clear ever arrives
+     */
+    private record Held(AlarmEvent raise, Ruleset ruleset, Path path, Instant eventHeldAt,
+            Instant wallHeldAt, String occurredAt, String traceId) {}
 
     private final ConcurrentHashMap<WindowKey, Held> held = new ConcurrentHashMap<>();
     private final MeterRegistry meters;
@@ -51,17 +69,21 @@ public class SelfClearStep {
         WindowKey key = new WindowKey(path, ruleset.source(), alarm.getManagedObjectId(),
                 alarm.getEventType());
         Duration hold = ruleset.filterParams().selfClearHoldTime();
-        Instant now = clock.instant();
+        Instant wallNow = clock.instant();
+        Instant eventNow = EventTime.of(alarm.getRaisedAt(), clock);
 
         if (alarm.getState() == AlarmEvent.State.RAISED) {
             // Hold the raise; do not emit yet.
-            held.put(key, new Held(alarm, ruleset, path, now, occurredAt, traceId));
+            held.put(key, new Held(alarm, ruleset, path, eventNow, wallNow, occurredAt, traceId));
             return StepResult.drop("self_clear_hold");
         }
 
-        // A clear: is there a held raise still within the hold-time?
+        // A clear: is there a held raise whose raise is within the hold-time of this clear (event
+        // time)? Prefer the clear's clearedAt, else its raisedAt, for the logical clear instant.
         Held h = held.get(key);
-        if (h != null && !now.isAfter(h.heldAt().plus(hold))) {
+        Instant clearEventTime = EventTime.of(
+                alarm.getClearedAt() != null ? alarm.getClearedAt() : alarm.getRaisedAt(), clock);
+        if (h != null && !clearEventTime.isAfter(h.eventHeldAt().plus(hold))) {
             held.remove(key);
             meters.counter("filtered_total", "filter", "self_clear", "source", ruleset.source())
                     .increment();
@@ -82,7 +104,9 @@ public class SelfClearStep {
         List<WindowKey> ready = new ArrayList<>();
         for (var e : held.entrySet()) {
             Held h = e.getValue();
-            if (now.isAfter(h.heldAt().plus(h.ruleset().filterParams().selfClearHoldTime()))) {
+            // Sweep on wall-clock: a held raise that no clear ever cleared is flushed once its
+            // hold-time has elapsed in real time, so held state never accumulates unbounded.
+            if (now.isAfter(h.wallHeldAt().plus(h.ruleset().filterParams().selfClearHoldTime()))) {
                 ready.add(e.getKey());
             }
         }

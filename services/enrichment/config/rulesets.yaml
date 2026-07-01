@@ -4,6 +4,69 @@
 # illustrative sources; the registry/selector/state-keying already support N profiles.
 defaultRuleset: default
 rulesets:
+  # ---------------------------------------------------------------------------------------------
+  # simulator — the platform's own alarm producer. It emits AlarmEvents with ALREADY-CANONICAL
+  # payload fields (managedObjectId in "Type:Id" form, canonical alarmType token, canonical
+  # eventType/probableCause, canonical lowercase perceivedSeverity, ISO-8601 raisedAt, state
+  # raised/cleared). So this ruleset is essentially an IDENTITY / passthrough profile: it must NOT
+  # remap anything, or the already-canonical alarm would be corrupted (e.g. the previous behaviour,
+  # where no simulator ruleset existed, fell back to `default` whose alarmTypeMap.rawField
+  # (rawAlarmType) is absent from the simulator payload — collapsing EVERY simulator alarmType to
+  # the fallback token). Keep this profile in sync with the platform's own simulator output.
+  - source: simulator
+    fieldMapping:
+      defaultObjectType: Node
+      # Simulator already sets a canonical managedObjectId ("Type:Id"); NormalizeStep honours a
+      # pre-canonical managedObjectId verbatim, so this template is a documented safety net only.
+      managedObjectIdTemplate: "{objectType}:{rawObjectId}"
+      severityMap: {}            # identity: perceivedSeverity is already canonical (e.g. "major")
+      eventTypeMap: {}           # identity: eventType is already canonical (e.g. communicationsAlarm)
+      probableCauseMap: {}       # identity passthrough: probableCause is already canonical
+      # alarmType is ALREADY the canonical vocabulary token in the simulator payload's `alarmType`
+      # field — map token -> same-token for all 30 Core IP vocabulary tokens (identity).
+      alarmTypeMap:
+        rawField: alarmType
+        fallback: ReachabilityLoss
+        onUnmapped: default
+        values:
+          LOS: LOS
+          LOF: LOF
+          OpticalPowerLow: OpticalPowerLow
+          FiberCut: FiberCut
+          FiberFault: FiberFault
+          PortDown: PortDown
+          LineCardFault: LineCardFault
+          CRCErrors: CRCErrors
+          PortFlapping: PortFlapping
+          LinkBundleDegraded: LinkBundleDegraded
+          NodeDown: NodeDown
+          InterfaceDown: InterfaceDown
+          InterfaceErrors: InterfaceErrors
+          IPLinkDown: IPLinkDown
+          LinkDown: LinkDown
+          ISISAdjacencyDown: ISISAdjacencyDown
+          AdjDown: AdjDown
+          OSPFAdjacencyDown: OSPFAdjacencyDown
+          BGPPeerDown: BGPPeerDown
+          RouteFlap: RouteFlap
+          LDPSessionDown: LDPSessionDown
+          LSPDown: LSPDown
+          FRRSwitchover: FRRSwitchover
+          TETunnelDown: TETunnelDown
+          VPNReachabilityLoss: VPNReachabilityLoss
+          ReachabilityLoss: ReachabilityLoss
+          ServiceDegraded: ServiceDegraded
+          Congestion: Congestion
+          QueueDrop: QueueDrop
+          HighLatency: HighLatency
+      vendorRawPassthrough: ["*"]  # carry the whole raw payload through unchanged
+    filterParams:
+      dedupWindow: 30s
+      selfClearHoldTime: 15s
+      flapN: 5
+      flapWindow: 60s
+      chatterList: []
+
   - source: default            # MANDATORY built-in fallback ruleset
     fieldMapping:
       defaultObjectType: Node

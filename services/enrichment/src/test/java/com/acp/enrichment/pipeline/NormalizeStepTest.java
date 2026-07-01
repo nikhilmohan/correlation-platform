@@ -77,6 +77,49 @@ class NormalizeStepTest {
     }
 
     @Test
+    void simulatorAlarmPassesThroughWithCanonicalAlarmTypePreserved() {
+        // FIX #1: a source=simulator alarm carries ALREADY-canonical fields (canonical
+        // managedObjectId, canonical alarmType token in the `alarmType` field, canonical eventType,
+        // lowercase perceivedSeverity). The identity ruleset must preserve them verbatim — in
+        // particular alarmType=InterfaceDown must NOT collapse to the fallback (the pre-fix bug where
+        // no simulator ruleset existed and everything fell back to ReachabilityLoss).
+        AlarmEvent a = step.normalize(raw(
+                "alarmId", "sim-1",
+                "managedObjectId", "Node:N5",
+                "eventType", "communicationsAlarm",
+                "probableCause", "interfaceDown",
+                "alarmType", "InterfaceDown",
+                "perceivedSeverity", "major",
+                "raisedAt", "2026-06-14T08:15:00Z",
+                "state", "raised"), TestRulesets.simulator());
+
+        assertThat(a.getAlarmType()).as("canonical alarmType preserved, not fallback")
+                .isEqualTo("InterfaceDown");
+        assertThat(a.getManagedObjectId()).isEqualTo("Node:N5");
+        assertThat(a.getEventType()).isEqualTo("communicationsAlarm");
+        assertThat(a.getProbableCause()).isEqualTo("interfaceDown");
+        assertThat(a.getPerceivedSeverity()).isEqualTo("major");
+        assertThat(a.getState()).isEqualTo(AlarmEvent.State.RAISED);
+    }
+
+    @Test
+    void simulatorVpnServiceAlarmPreservesTypeAndManagedObjectId() {
+        // FIX #1: another canonical simulator shape (VPNService object + a non-MVP 30-token type).
+        AlarmEvent a = step.normalize(raw(
+                "alarmId", "sim-2",
+                "managedObjectId", "VPNService:vpn-42",
+                "eventType", "communicationsAlarm",
+                "probableCause", "reachabilityLoss",
+                "alarmType", "VPNReachabilityLoss",
+                "perceivedSeverity", "critical",
+                "raisedAt", "2026-06-14T09:00:00Z",
+                "state", "raised"), TestRulesets.simulator());
+
+        assertThat(a.getAlarmType()).isEqualTo("VPNReachabilityLoss");
+        assertThat(a.getManagedObjectId()).isEqualTo("VPNService:vpn-42");
+    }
+
+    @Test
     void invalidManagedObjectIdRoutesToNormalizeFailure() {
         assertThatThrownBy(() -> step.normalize(raw("alarmId", "a-1", "rawSeverity", "CRIT",
                 "rawEventType", "LINK_DOWN", "state", "raised", "raisedAt",

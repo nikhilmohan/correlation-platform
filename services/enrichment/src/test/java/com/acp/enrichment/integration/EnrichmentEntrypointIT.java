@@ -142,6 +142,9 @@ class EnrichmentEntrypointIT {
         r.add("kafka.bootstrap-servers", () -> System.getProperty("spring.embedded.kafka.brokers"));
         r.add("trail-builder.base-url", wireMock::baseUrl);
         r.add("trail-builder.mode", () -> "mock");
+        // No live Knowledge here — the vocabulary degrades to the offline 30-token fallback quickly.
+        r.add("knowledge.base-url", () -> "http://localhost:1");
+        r.add("knowledge.connect-timeout-ms", () -> "200");
         r.add("enrichment.rulesets-file", () -> rulesetsFile.toString());
         r.add("enrichment.chatter-overlay-file", () -> overlayFile.toString());
         r.add("enrichment.self-clear-sweep-ms", () -> "300");

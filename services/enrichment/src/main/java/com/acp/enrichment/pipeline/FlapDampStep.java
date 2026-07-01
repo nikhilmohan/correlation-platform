@@ -17,6 +17,14 @@ import org.springframework.stereotype.Component;
  * window the burst is collapsed into exactly one <b>summary</b> {@code AlarmEvent} and the rest of
  * the burst is suppressed (an oscillation of {@code N} or fewer is not damped).
  *
+ * <p><b>Event-time windowing (raisedAt, not wall-clock).</b> Like {@link DedupStep}, the flap window
+ * is measured over the alarm's own {@code raisedAt} logical time. In P2 HISTORY batch-replay the
+ * corpus arrives in &lt;1s wall-clock while {@code raisedAt} spans hours, so wall-clock windowing
+ * would wrongly treat hours-apart raises as one flapping burst. Windowing on {@code raisedAt}
+ * correctly counts oscillations by alarm time; in P3 LIVE mode {@code raisedAt} ≈ arrival so the
+ * behaviour is identical. When {@code raisedAt} is absent/unparseable the injected {@link Clock} is
+ * the safe fallback.
+ *
  * <p>Flap-summary shape (resolves design open question #40 — existing fields only): the summary
  * reuses the <b>first</b> oscillation's identity ({@code alarmId}, {@code raisedAt},
  * {@code perceivedSeverity}, {@code eventType}, {@code probableCause}, {@code alarmType},
@@ -44,7 +52,7 @@ public class FlapDampStep {
                 alarm.getEventType());
         int n = ruleset.filterParams().flapN();
         Duration window = ruleset.filterParams().flapWindow();
-        Instant now = clock.instant();
+        Instant now = EventTime.of(alarm.getRaisedAt(), clock);
 
         Burst b = bursts.get(key);
         if (b == null || now.isAfter(b.windowStart().plus(window))) {

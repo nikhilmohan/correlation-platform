@@ -67,7 +67,7 @@ class ChatterServiceTest {
         registry = new RulesetRegistry();
         overlayStore = new ChatterOverlayStore(overlayFile, mapper);
         loader = new RulesetConfigLoader(rulesetsFile, overlayStore, registry,
-                AlarmTypeVocabulary.coreIp(), new SimpleMeterRegistry());
+                AlarmTypeVocabulary.coreIpFallback(), new SimpleMeterRegistry());
         loader.loadInitial();
         service = new ChatterService(registry, overlayStore, loader, new SimpleMeterRegistry());
     }
@@ -132,7 +132,7 @@ class ChatterServiceTest {
         RulesetRegistry registry2 = new RulesetRegistry();
         ChatterOverlayStore overlay2 = new ChatterOverlayStore(overlayFile, new ObjectMapper());
         RulesetConfigLoader loader2 = new RulesetConfigLoader(rulesetsFile, overlay2, registry2,
-                AlarmTypeVocabulary.coreIp(), new SimpleMeterRegistry());
+                AlarmTypeVocabulary.coreIpFallback(), new SimpleMeterRegistry());
         loader2.loadInitial();
 
         assertThat(registry2.forSource("nms-alpha").filterParams().chatterList())

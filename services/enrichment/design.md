@@ -161,6 +161,26 @@ flowchart TD
   domain's `alarmTypeVocabulary`; the codec re-validates `alarmType` is present on serialize
   (canonical-output invariant). The fallback token itself MUST be a valid vocabulary token, and
   config validation rejects an `alarmTypeMap` whose values/fallback are not vocabulary tokens.
+
+  > **UPDATE (FIX #2) — the `alarmTypeVocabulary` is now Knowledge-sourced, not hard-coded.** The
+  > validation vocabulary is fetched at startup from the Knowledge Service (the single source of
+  > truth for the authored domain vocabulary) via a read-only `KnowledgeClient`:
+  > `GET /domains/{domain}/alarm-type-vocabulary` — served by Knowledge's generic list endpoint
+  > `GET /domains/{domain}/{recordType}` (recordType = kebab `alarm-type-vocabulary`, NO `/api/v1`),
+  > returning a LIST of `RecordResponse` envelopes; Enrichment reads the current element's
+  > `payload.alarmTypes[]` (envelope-vs-payload lesson). This corrects the prior defect where the
+  > vocabulary was a hard-coded **8-token** set (`AlarmTypeVocabulary.CORE_IP`), which would have
+  > rejected the ~22 non-MVP tokens of the real **30-token** Core IP vocabulary and blocked a
+  > correct simulator identity ruleset. If Knowledge is unreachable at startup the client degrades
+  > to a documented offline **30-token** fallback (`AlarmTypeVocabulary.CORE_IP_FALLBACK`, mirroring
+  > `core-ip/alarm-type-vocabulary/default`) with a logged **warning** — it never silently runs on a
+  > truncated set. This is the domain **vocabulary** only; it does **not** reintroduce a Knowledge
+  > dependency for pipeline tuning params (dedup/flap/self-clear thresholds remain Enrichment-owned
+  > ruleset config per the Configuration-ownership invariant). The integration point is
+  > config-switchable (`KNOWLEDGE_BASE_URL`, `KNOWLEDGE_MODE=mock|real`, bounded timeouts) exactly
+  > like the Trail Builder point; its path is verified against Knowledge's published OpenAPI by
+  > `KnowledgeClientContractTest`. The eight-token list quoted above is now illustrative only — the
+  > authoritative value space is Knowledge's `alarm-type-vocabulary` record.
 - **`EnrichmentPipeline`** — ordered composition of `DedupStep`, `SelfClearStep`, `FlapDampStep`,
   `ChatterStep`, `TrailTagStep`. Each step reads the resolved `Ruleset.filterParams`. Each returns
   one of: pass-through, drop (emit nothing), or replace (a summary alarm). One shared bean used by
@@ -244,6 +264,22 @@ independently:
 > later clear (self-clear pairs the two; flap counts the oscillation across states). Criteria 1 and 2
 > are unaffected: two same-state duplicates still collapse, and two different `eventType`s still pass
 > separately.
+
+> **UPDATE (FIX #3) — windowing is over the alarm's logical `raisedAt` (event time), not
+> wall-clock arrival.** All three windowed stages (`DedupStep`, `SelfClearStep`, `FlapDampStep`)
+> measure their window against the alarm's own `raisedAt` timestamp, not the wall-clock arrival
+> time. The "timestamp" columns above are therefore the alarm's `raisedAt`, not `clock.instant()`.
+> Rationale: the spec's dedup is "repeated identical alarms **within the per-source dedup window**"
+> — the window is over *alarm time*. In **P2 HISTORY** mode the Simulator batch-replays the whole
+> corpus in &lt;1s wall-clock while the alarms' `raisedAt` span ~22h; wall-clock windowing wrongly
+> collapsed alarms hours apart as "duplicates" (observed: 2459 alarms, incl. 1642 signal, wrongly
+> deduped → whole-corpus signal retention 3.8%). Windowing on `raisedAt` dedups by logical alarm
+> time; in **P3 LIVE** mode `raisedAt` ≈ wall-clock arrival, so the behaviour is identical there.
+> The parsing helper `EventTime` resolves `raisedAt` (ISO-8601) and falls back to the injected
+> `Clock` if it is absent/unparseable (well-defined, never throws inside a stage). `SelfClearStep`
+> matches a clear to its held raise on **event time** (the clear's `clearedAt`/`raisedAt` vs the
+> raise's `raisedAt`), but its **release sweep** for an un-cleared held raise stays on the
+> **wall-clock** `Clock` so held state is flushed in bounded real time regardless of replay speed.
 
 ```mermaid
 classDiagram
@@ -450,6 +486,20 @@ rulesets:
     `vendorRaw` pass-through map.
 - **`filterParams`** are the per-source pipeline parameters consumed by the fixed filter stages.
 
+> **UPDATE (FIX #1) — shipped `simulator` identity profile.** The platform's own producer (the
+> Simulator) emits `AlarmEvent`s on `alarms.history`/`alarms.live` with envelope `source:
+> "simulator"` and **already-canonical** payload fields (managedObjectId in `Type:Id` form, a
+> canonical `alarmType` vocabulary token in the `alarmType` field, canonical `eventType`/
+> `probableCause`, canonical lowercase `perceivedSeverity`, ISO-8601 `raisedAt`, `state`
+> raised/cleared). The shipped `config/rulesets.yaml` therefore includes a `simulator` ruleset that
+> is an **identity / passthrough** profile: empty `severityMap`/`eventTypeMap`/`probableCauseMap`
+> (identity), and an `alarmTypeMap` with `rawField: alarmType` mapping each of the 30 canonical
+> tokens to itself. Without it, `source: simulator` fell through to the `default` ruleset whose
+> `alarmTypeMap.rawField` (`rawAlarmType`) is absent from the simulator payload, collapsing **every**
+> simulator alarm's `alarmType` to the fallback token (observed: everything became
+> `ReachabilityLoss`). This is Enrichment-owned config (not a contract or code change) but is part of
+> the shipped default profile so the platform's own source is handled out of the box.
+
 ### Loading and hot-reload
 
 - **Load at startup.** `RulesetConfigLoader` parses the YAML, validates it (see Error handling),
@@ -461,7 +511,10 @@ rulesets:
   snapshot (last-writer-wins), on validation failure it **keeps the last-good snapshot** and logs
   an error plus increments `ruleset_reload_failures_total` (never partially applies, never falls
   back to Knowledge). Reload affects only alarms processed after the swap. This is wholly internal
-  to Enrichment; there is no `knowledge.updated` consumer and no `KnowledgeClient`.
+  to Enrichment; there is no `knowledge.updated` consumer and **no Knowledge dependency for
+  pipeline params**. (FIX #2 adds a read-only `KnowledgeClient` used ONLY to fetch the domain
+  `alarmTypeVocabulary` at startup for validation — the vocabulary value space is authored in
+  Knowledge; this is not a filter-parameter dependency. See the "alarmType population rule" UPDATE.)
 
 ### Chatter edit persistence and hot-apply (NEW — the promote/manage write path)
 
@@ -1002,7 +1055,7 @@ topic's DLQ so reprocessing re-enters the pipeline from the original source.
 | Consideration | Alternatives considered | Chosen plus rationale |
 |---|---|---|
 | Source-identification mechanism (GH open question #3) | (a) envelope `source` field equality lookup, (b) match-rule predicate DSL over arbitrary alarm fields, (c) a dedicated new alarm `source` field | **(a) envelope `source` equality.** Already a required envelope field (no contract change), deterministically selects exactly one ruleset with a clean `default` fallback. A predicate DSL risks zero/multiple matches and adds config complexity; a new field is an unnecessary contract change. |
-| Where filter params / chatter live | Knowledge Service (prior design) vs. Enrichment-owned per-source config | **Enrichment-owned per-source rulesets.** Spec "Configuration ownership invariant": per-source pipeline adaptability is Enrichment's technical config, not authored domain knowledge. Removes the `knowledge.updated` consumer and `KnowledgeClient`. |
+| Where filter params / chatter live | Knowledge Service (prior design) vs. Enrichment-owned per-source config | **Enrichment-owned per-source rulesets.** Spec "Configuration ownership invariant": per-source pipeline adaptability is Enrichment's technical config, not authored domain knowledge. Removes the `knowledge.updated` consumer for filter params. (FIX #2: a read-only `KnowledgeClient` is re-introduced ONLY to fetch the domain `alarmTypeVocabulary` for validation — a vocabulary, not a tuning param — degrading to an offline fallback if Knowledge is down.) |
 | Ruleset config format | env-var soup vs. single mounted YAML file vs. per-source files | **One mounted YAML file** (`@ConfigurationProperties` plus SnakeYAML). Structured nested mappings/lists do not fit flat env vars; a single file is simplest to mount, validate, and hot-reload. |
 | Hot-reload | none (restart to change) vs. file-watch atomic swap vs. Knowledge-driven refresh | **Optional file-watch atomic swap, Knowledge-free.** Allows retuning without redeploy while keeping config ownership inside Enrichment; Knowledge-driven refresh is explicitly out per the spec invariant. |
 | Stream-processing model | Kafka Streams (DSL/Processor API plus RocksDB) vs. plain `spring-kafka` plus in-process windowed state | **Plain spring-kafka plus in-process state.** Windows are short and state is intentionally ephemeral; Kafka Streams adds RocksDB/changelog/repartition overhead for state we do not need to survive restarts. Two-listeners-one-pipeline (criterion 9) is simpler. |
@@ -1082,13 +1135,16 @@ failure/partial paths.
 | `ENRICHMENT_RULESETS_FILE` | path to the mounted per-source rulesets YAML (default `/config/rulesets.yaml`) |
 | `ENRICHMENT_RULESETS_RELOAD` (`true`/`false`) | enable file-watch hot-reload |
 | `ENRICHMENT_CHATTER_OVERLAY_FILE` | path to the writable chatter overlay file (default `/config/chatter-overlay.json`) where chatter-API promotions/removals are persisted |
-| `ENRICHMENT_DOMAIN` | domain passed to Trail Builder `getTrailsForObject` (default `core-ip`) |
+| `ENRICHMENT_DOMAIN` | domain passed to Trail Builder `getTrailsForObject` AND to the Knowledge vocabulary fetch (default `core-ip`) |
 | `ENRICHMENT_HISTORY_TOPIC`, `ENRICHMENT_LIVE_TOPIC`, output/dlq topic names | topic overrides (defaults match `architecture.md`) |
+| `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_MODE` | Knowledge integration point (FIX #2) — base URL + `mock\|real` for the startup `alarmTypeVocabulary` fetch (defaults `http://knowledge:8080`, `real`); bounded by `KNOWLEDGE_CONNECT_TIMEOUT_MS` / `KNOWLEDGE_READ_TIMEOUT_MS` so an unreachable Knowledge degrades to the offline fallback quickly |
 | `SERVER_PORT` | HTTP port serving the chatter API, `/openapi.json`, Swagger UI, and Actuator |
 
-Per-source filter parameters (dedup window, hold-time, flap N/window, chatter list) and field
+Per-source filter **parameters** (dedup window, hold-time, flap N/window, chatter list) and field
 mappings live **only** in the rulesets file owned by Enrichment — **not** env vars and **not**
-the Knowledge Service. There is no `KNOWLEDGE_*` config (removed from the prior design).
+the Knowledge Service. FIX #2 adds `KNOWLEDGE_*` config, but ONLY for fetching the domain
+`alarmTypeVocabulary` (the authored vocabulary value space, single-sourced in Knowledge) used to
+validate ruleset `alarmTypeMap` tokens — not for any pipeline tuning parameter.
 
 **Observability:**
 
