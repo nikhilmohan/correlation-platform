@@ -40,16 +40,25 @@ All DBSCAN parameters (`eps`, `minSamples`, `windowSize`, `algorithm`) and the a
 | `LOG_LEVEL` | structured-log level (JSON) |
 | `HTTP_PORT` | port for `/health`, `/metrics`, `/openapi.json`, read API (default 8080) |
 | `DEDUPE_TTL_SECONDS` | TTL of the `eventId` dedupe cache (default 900) |
-| `WINDOW_WATERMARK_LAG_BUCKETS` | Event-time watermark lag: extra whole buckets of event time to wait past a bucket before finalizing it (default 0 — finalize bucket B once an alarm in B+1 arrives for the trail). Tolerates out-of-order event time. |
-| `WINDOW_BACKSTOP_SECONDS` | Wall-clock idle/end-of-stream backstop for a bucket with no successor (default 60). Set ABOVE the max upstream release cadence (Enrichment self-clear hold ~15 s + sweep) so it never fires mid-trickle during history batch replay. |
+| `WINDOW_ALLOWED_LATENESS_BUCKETS` | DA-3c reorder tolerance in whole event-time buckets: a `(trailId, bucket)` finalizes only once the trail watermark has advanced this many buckets past the bucket's OWN last add (default 6). Absorbs cross-partition event-time skew. Alias `WINDOW_WATERMARK_LAG_BUCKETS` (old DA-3b name) retained. |
+| `WINDOW_IDLE_GRACE_SECONDS` | DA-3c wall-clock grace that must ALSO elapse since a bucket's last add before the allowed-lateness path finalizes it (default 15). Absorbs arrival-time skew (partition drain lag, Enrichment self-clear hold). |
+| `WINDOW_BACKSTOP_SECONDS` | Wall-clock idle/end-of-stream backstop and memory valve for a bucket with no new member (default 300). Set ABOVE the max upstream release cadence + reorder window so it never fires while a bucket is still collecting cross-partition siblings. |
+| `WINDOW_MAX_OPEN_WINDOWS` | DA-3c memory bound: max simultaneously-open `(trailId, bucket)` windows (default 200000). Exceeding it force-finalizes the least-recently-added windows (emitted, `nf_windows_force_finalized_total`, never dropped) so a pathological stream cannot OOM. |
 
-**Window finalization** is event-time-driven (a `(trailId, bucket)` closes when event time advances
-past it), NOT wall-clock-inactivity-driven — so a logical window's members stay grouped even when
-Enrichment dribbles its held raises into `alarms.enriched` over ~15-20 s wall-clock in history batch
-mode. In live mode event time ≈ wall clock, so the next real-time alarm closes the prior bucket
-promptly (no added latency); the wall-clock backstop only flushes a genuinely-final/idle bucket.
-A late alarm for an already-finalized bucket re-opens it (counted `nf_windows_reopened_total`) rather
-than forming a dropped singleton.
+**Window finalization (DA-3c — allowed-lateness / bounded reorder).** The real `alarms.enriched`
+topic is keyed by `managedObjectId` (Enrichment), so a single trail's alarms — spanning many managed
+objects (Node, LineCard, Port, Interface, IPLink, IGPAdjacency, LSP, FiberSpan…) — hash to DIFFERENT
+Kafka partitions and arrive **interleaved and out of `raisedAt` order**. A `(trailId, bucket)`
+therefore stays open until its OWN members stop arriving: it finalizes when EITHER (a) the trail
+event-time watermark has advanced `WINDOW_ALLOWED_LATENESS_BUCKETS` past the bucket's own last add
+AND `WINDOW_IDLE_GRACE_SECONDS` of wall-clock have elapsed since it, OR (b) `WINDOW_BACKSTOP_SECONDS`
+of wall-clock elapsed since its last add (end-of-stream / idle / memory valve). On finalize the
+retained alarms are sorted by `raisedAt` (buffer-and-sort) so out-of-order arrival never fragments or
+misorders a window. In live mode event time ≈ wall clock, so finalization is bounded by
+`allowed-lateness × windowSize + idle-grace` — far below the backstop, no live-latency regression.
+`WINDOW_MAX_OPEN_WINDOWS` bounds memory (force-finalize oldest, never drop). A late alarm for an
+already-finalized bucket re-opens it (`nf_windows_reopened_total`) rather than forming a dropped
+singleton.
 
 `eps`, `minSamples`, `windowSize`, `algorithm`, the attribute key set, and the hop-distance
 on/off flag + traversal bound are **Knowledge Service parameters** (loaded at startup, hot-refreshed

@@ -1,10 +1,17 @@
 """Event-time watermark finalization tests (Defect #5 — batch-replay windowing).
 
+NOTE: DA-3b's eager watermark is superseded by DA-3c (allowed-lateness / bounded-reorder — see
+``test_windowing_out_of_order.py`` and the DA-3c module docstring). These tests remain valid: they
+exercise the DA-3c model with the *zero-lateness* special case (``allowed_lateness_buckets=0``,
+``idle_grace_seconds=0``, via the ``watermark_lag_buckets`` back-compat alias), where per-bucket
+idleness reduces to "the bucket's own last add is behind the current watermark". They continue to
+prove same-bucket members never fragment mid-trickle over wall-clock.
+
 These tests prove the fix for the wall-clock-inactivity finalization defect: a single logical
 ``(trailId, bucket)`` window whose member alarms dribble into the windower over wall-clock LONGER
 than the old 5 s grace must still be grouped together (not finalized mid-trickle into DBSCAN-noise
-singletons). Finalization is now driven by event-time progress (a per-trail watermark) with a
-wall-clock backstop for idle/end-of-stream only.
+singletons). Finalization is driven by event-time progress with a wall-clock backstop for
+idle/end-of-stream only.
 
 The ``test_dribble_*`` cases are the NEGATIVE CONTROL for the old code: under the old
 wall-clock-grace TrailWindower (``grace_seconds=5``, finalize when
