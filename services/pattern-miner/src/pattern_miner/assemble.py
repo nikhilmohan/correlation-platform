@@ -71,7 +71,26 @@ def group_transactions(
 
 
 class PatternAssembler:
-    """Builds ``PatternMinedEvent`` envelopes for the sequences mined from a trail's sessions."""
+    """Builds ``PatternMinedEvent`` envelopes for the sequences mined from a trail's sessions.
+
+    Provenance vs timing scope (contract note for the Pattern Manager consumer)
+    --------------------------------------------------------------------------
+    A mined sequence can be an ordered subsequence of *several* of a trail's sessions. When it
+    is, the two derived fields are scoped differently — this is intentional and the consumer
+    must not assume they describe the same single window:
+
+    * ``provenance.sourceWindowId`` = the ``source_window_id`` of the **first** matching
+      session (deterministic given trail + snapshot + params). It is a stable, single-window
+      reference for lineage/back-tracing, **not** an exhaustive list of every window the
+      pattern appeared in.
+    * ``timing`` = statistics **aggregated over all** matching sessions (inter-arrival stats
+      pooled across every session that contains the sequence), so it reflects the pattern's
+      full observed tempo, not just the first window's.
+
+    So for a multi-session sequence, ``sourceWindowId`` points at one representative window
+    while ``timing`` summarises the whole matching set. Downstream (Pattern Manager) should
+    treat ``sourceWindowId`` as a first-window pointer, not as the sole source of the timing.
+    """
 
     def __init__(
         self,
@@ -133,10 +152,13 @@ class PatternAssembler:
         matching_sessions: list[Session],
         params: MiningParams,
     ) -> TypedEnvelope:
+        # timing aggregates over ALL matching sessions (full observed tempo of the pattern).
         timing = self._timing.compute([s.alarms for s in matching_sessions])
-        # sourceWindowId: the composite reference of the matching sessions. When a sequence spans
-        # multiple sessions we use the first matching session's id (stable per input+boundary); the
-        # window-set is fully determined by trail+snapshot+params.
+        # sourceWindowId uses only the FIRST matching session (stable per input+boundary): a
+        # single-window lineage pointer, deliberately narrower than `timing`'s multi-session
+        # aggregate. See the PatternAssembler class docstring — the Pattern Manager consumer must
+        # not read sourceWindowId as the exhaustive window-set behind `timing`. The full window-set
+        # is fully determined by trail+snapshot+params.
         source_window_id = matching_sessions[0].source_window_id
 
         provenance = Provenance(

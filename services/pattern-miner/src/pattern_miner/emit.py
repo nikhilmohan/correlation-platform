@@ -26,13 +26,22 @@ class PatternEmitter:
         self._metrics = metrics
 
     def emit(self, envelopes: list[TypedEnvelope]) -> int:
-        """Produce each envelope; return the count emitted."""
+        """Produce each envelope; return the count emitted.
+
+        Fail-fast on produce error (design.md "Failure handling & retry": a produce failure
+        means the run is *not* committed — offsets are not committed for the failed batch — so
+        the job surfaces the error and exits non-zero, letting the orchestrator restart and
+        re-consume. At-least-once redelivery + envelope ``eventId`` dedupe make that replay
+        safe, so mid-batch partial emission does not create duplicate patterns). We therefore
+        count the failure (``produce_failures``) and re-raise rather than swallowing it — a
+        silently-dropped ``PatternMinedEvent`` would be lost with no replay.
+        """
         emitted = 0
         for envelope in envelopes:
             try:
                 self._producer.publish(self._topic, envelope)
                 emitted += 1
-            except Exception as exc:  # noqa: BLE001 — surface produce failures, keep going
+            except Exception as exc:  # noqa: BLE001 — count + re-raise so the run fails and replays
                 if self._metrics is not None:
                     self._metrics.produce_failures.inc()
                 log.error("pattern_produce_failed", error=str(exc))

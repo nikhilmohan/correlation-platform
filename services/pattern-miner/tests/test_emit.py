@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from acp_event_model import deserialize
 
 from pattern_miner.assemble import group_transactions
@@ -18,6 +19,19 @@ class _FakeProducer:
         self.published = []
 
     def publish(self, topic, envelope):
+        self.published.append((topic, envelope))
+
+
+class _FailingProducer:
+    """Publishes ``fail_after`` envelopes, then raises on the next produce."""
+
+    def __init__(self, fail_after=0):
+        self.published = []
+        self._fail_after = fail_after
+
+    def publish(self, topic, envelope):
+        if len(self.published) >= self._fail_after:
+            raise RuntimeError("broker unavailable")
         self.published.append((topic, envelope))
 
 
@@ -60,3 +74,23 @@ def test_emitted_envelope_serializes_to_canonical_wire_and_round_trips():
         typed = deserialize(wire)
         assert typed.type == "PatternMinedEvent"
         assert typed.payload.trailId.startswith("t")
+
+
+def test_emit_fails_fast_and_counts_produce_failure():
+    """A produce failure re-raises (fail-fast) and increments the produce-failure counter.
+
+    Per design.md failure handling: a produce failure means the run is not committed and the
+    job exits non-zero for replay-safe re-consume; it must NOT be silently swallowed.
+    """
+    envelopes = _envelopes()
+    assert len(envelopes) >= 2
+    producer = _FailingProducer(fail_after=1)
+    metrics = Metrics()
+    emitter = PatternEmitter(producer, "patterns.mined", metrics=metrics)
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        emitter.emit(envelopes)
+
+    # First envelope produced before the failure; failure counted, not swallowed.
+    assert len(producer.published) == 1
+    assert metrics.produce_failures._value.get() == 1.0
