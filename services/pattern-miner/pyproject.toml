@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68,<81", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pattern-miner"
+version = "0.1.0"
+description = "ACP Pattern Miner Service — dynamic session windowing + PrefixSpan (Spark MLlib) sequence mining over transactions.clean → patterns.mined."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ACP Platform Team" }]
+dependencies = [
+    # Canonical event model (the frozen contract binding). Installed from the repo
+    # path in CI/Docker; declared here so a fresh editable install resolves it.
+    "acp-event-model",
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "fastapi>=0.110,<1",
+    "uvicorn>=0.29,<1",
+    "httpx>=0.27,<1",
+    "confluent-kafka>=2.3,<3",
+    "prometheus-client>=0.20,<1",
+    "structlog>=24.1,<26",
+]
+
+[project.optional-dependencies]
+# Spark/PySpark is CONTAINER-ONLY (not installed locally per CLAUDE.md). Declared as an extra so
+# the Docker image (and the in-container test/CI run) installs the pinned PySpark runtime, while
+# the local unit gate runs against the pure-Python reference PrefixSpan engine.
+spark = [
+    "pyspark>=3.5,<4",
+    # Spark MLlib (pyspark.ml) imports numpy at module load — required for PrefixSpan.
+    "numpy>=1.26,<3",
+    # PySpark 3.5 imports `distutils`, removed from the Python 3.13 stdlib; setuptools<81 still
+    # ships the `distutils` + `pkg_resources` shims (MIT-licensed).
+    "setuptools>=68,<81",
+]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5",
+    "respx>=0.21,<1",
+    "ruff>=0.5",
+    "black>=24",
+    "jsonschema>=4",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pattern_miner = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py313"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's dependency-injection idiom requires `Query(...)` as a parameter default; B008 (no
+# function calls in argument defaults) is a known false positive there.
+"src/pattern_miner/api.py" = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The unit gate runs everything EXCEPT the Spark-engine and integration-tagged tests (no Spark or
+# broker on the host). Spark tests run in-container: `pytest -m spark` after `pip install .[spark]`;
+# the real-entrypoint integration test runs in the integration stage: `pytest -m integration`.
+addopts = "--cov=pattern_miner --cov-report=term-missing -m 'not spark and not integration'"
+asyncio_mode = "auto"
+markers = [
+    "spark: exercises the real Spark MLlib PrefixSpan engine in local[*] (container-only; needs pyspark + a JRE)",
+    "integration: real broker/Spark end-to-end entrypoint tests (deselected by default; integration stage only)",
+]
+
+[tool.coverage.run]
+# The bare __main__ / asyncio.run shims and the real-Spark engine (container-only) are off the
+# local gate; both are exercised in-container (Spark marker + integration).
+omit = [
+    "src/pattern_miner/__main__.py",
+    "src/pattern_miner/mining/spark_engine.py",
+]

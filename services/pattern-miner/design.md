@@ -300,23 +300,31 @@ falls idle** — i.e. when the inter-arrival gap to the next alarm exceeds an **
 gap** computed for that burst.
 
 **Chosen adaptive-gap mechanism (the OQ#50 decision): a hybrid — Knowledge-supplied tempo-class
-floor plus data-driven per-burst derivation.** For each candidate burst the closing gap is:
+floor plus data-driven per-burst derivation. The split gap is sized from the burst's *median*
+(p50) inter-arrival; the Knowledge `tempoPercentile` is used to *classify* the burst's tempo, not
+to size the split gap.** For each candidate burst the closing gap is:
 
 ```text
 closingGap(burst) = clamp(
-    multiplier * percentile(interArrivals(burst), p),     # data-driven, tempo-tracking
-    lower = profileFloor(burst.tempoClass),               # Knowledge per-tempo-class floor
-    upper = maxClosingGap                                  # Knowledge ceiling
+    multiplier * median(interArrivals(burst)),            # split gap: robust p50 sizing
+    lower = profileFloor(tempoClass(burst)),              # Knowledge per-tempo-class floor
+    upper = maxClosingGap                                 # Knowledge ceiling
 )
+
+# tempoClass(burst) is selected from the burst's slow-tail percentile:
+tempoClass(burst) = classify( percentile(interArrivals(burst), tempoPercentile) )
 ```
 
 where, **all from Knowledge `WindowingParams`** (no literals in code):
-- `multiplier` and `p` (e.g. `multiplier=4`, `p=50` is "4 times the median intra-burst
-  inter-arrival");
+- `multiplier` — the median multiplier that sizes the split gap (e.g. `multiplier=4` is "4× the
+  median intra-burst inter-arrival"). **The split gap is sized on the median (p50), not on a high
+  percentile** (see "Why median sizes the split, percentile classifies" below);
+- `tempoPercentile` — the slow-tail percentile (e.g. p95) used **only to classify** the burst's
+  tempo class for floor/ceiling selection, **not** to size the split gap;
 - a small set of named **tempo-class profiles** (`fast`, `slow`, `default`) each giving a
-  `profileFloor` (and optional ceiling), keyed by the burst's observed tempo class;
+  `profileFloor` (and optional ceiling), keyed by the burst's classified tempo class;
 - `baseGap` — the **base/fallback gap** used when a burst has too few alarms to derive a stable
-  percentile (e.g. fewer than `minBurstSamples` inter-arrivals) **or** when no tempo-class profile
+  statistic (fewer than `minBurstSamples` inter-arrivals) **or** when no tempo-class profile
   matches; and `maxClosingGap` as the ceiling.
 
 **Why this hybrid.** A single fixed global gap (the old design) over-splits a slow-developing
@@ -329,10 +337,25 @@ gap from collapsing to noise on tiny bursts and lets operators bias `fast`/`slow
 `baseGap` fallback guarantees a defined, Knowledge-sourced boundary when there is insufficient data
 or no profile (so **no hard-coded default**, criteria 9 and 12). The clamp keeps it bounded.
 
-**Tempo-class assignment.** Each burst's tempo class is derived from its observed median
-inter-arrival against Knowledge-supplied class thresholds (also in `WindowingParams`); if a trail
-declares a class (a future Knowledge attribute) that declared class is honoured, else the observed
-one is used. No class is hard-coded.
+**Why median sizes the split, percentile classifies (criterion 11 constraint).** The split gap is
+sized on `multiplier × median(interArrivals)` — the **median (p50)** is the robust characterization
+of a burst's *typical* intra-burst cadence. Sizing the split gap on a high percentile (e.g. p95)
+instead is inflated by the single long idle gap that lives *inside* a coarse pass-1 candidate burst
+(pass 1 provisionally groups two real sub-bursts under the ceiling), so a p95-sized gap swallows
+that idle gap and the two-burst idle split **fails to occur** — breaking acceptance criterion AC11
+(the two-burst idle split) which is the whole point of adaptive windowing. The median ignores that
+lone slow tail and yields a gap tight enough that the genuine idle period between the two sub-bursts
+exceeds it and splits them. The Knowledge `tempoPercentile` is therefore **not** used to size the
+split gap; it is used only to read the burst's slow tail and *classify* its tempo (fast/slow/default
+profile selection), which selects the `profileFloor`/ceiling that clamp the median-sized gap. Median
+for **sizing** (robust, AC11-safe) + percentile for **classification** (operator-biasable tempo
+profile) are complementary and both load-bearing.
+
+**Tempo-class assignment.** Each burst's tempo class is derived from the burst's **slow-tail
+percentile** (`percentile(interArrivals, tempoPercentile)`) matched against Knowledge-supplied class
+thresholds (also in `WindowingParams`); if a trail declares a class (a future Knowledge attribute)
+that declared class is honoured, else the observed one is used. No class is hard-coded. This is the
+only place `tempoPercentile` is consumed — it does not size the split gap.
 
 **Idle split (criterion 11).** Because the closing gap is calibrated to the intra-burst tempo, a
 genuine idle period between two bursts — by construction longer than any intra-burst inter-arrival —
@@ -343,6 +366,14 @@ alarms inside a burst stay together.
 `sourceWindowId`** = deterministic hash of `trailId` plus session `start`/`end` `raisedAt` plus
 `snapshotId`, recorded in provenance. This is stable for a given input plus boundary and
 distinguishes the multiple sessions a single trail/transaction can yield.
+
+**Scope note — internal, not a contract change.** The median-sizing / percentile-classification of
+the closing gap is **entirely internal to pattern-miner's windowing**. It consumes existing
+Knowledge `WindowingParams` (`multiplier`, `tempoPercentile`, tempo profiles, `baseGap`,
+`maxClosingGap`) and produces the same `sourceWindowId`/`PatternMinedEvent` surface — **no new
+topic, payload, field, event-model type, or OpenAPI change**. This is a design clarification of the
+already-resolved OQ#50, reconciled to the tested implementation; it requires no `architecture.md` or
+`event-model` update.
 
 **Metrics.**
 - `support` = (count of sessions containing the ordered sequence) / (total sessions in scope) — the
@@ -455,7 +486,7 @@ Pattern Manager).
 | Unsupported major `schemaVersion` (codec rejects major at least 2) | Treated as poison, to `transactions.clean.dlq` with reason `unsupported_schema_version` | DLQ message + error log; no emit |
 | Duplicate envelope `eventId` (at-least-once redelivery) | `Dedup` drops it; message acked, no reprocessing (criterion 7) | Silent drop + debug log; no emit |
 | Knowledge Service unavailable / errors (transient) | `MiningParamsClient` retries with config-driven back-off; on exhaustion the run **fails fast** (does not mine with stale or default thresholds — no hard-coded fallback, incl. no hard-coded windowing gap) | Error log + run-failure metric; offsets not advanced past unmined transactions so the run can retry |
-| A burst has too few inter-arrivals to derive a stable percentile, or no tempo-class profile matches | The Knowledge-sourced `baseGap`/`profileFloor` fallback applies (defined behaviour, not an error); no hard-coded default | Debug log + fallback-gap-used metric |
+| A burst has too few inter-arrivals to derive a stable median, or no tempo-class profile matches | The Knowledge-sourced `baseGap`/`profileFloor` fallback applies (defined behaviour, not an error); no hard-coded default | Debug log + fallback-gap-used metric |
 | PrefixSpan yields no frequent sequence at the current `minSupport` | Emit nothing; log empty result; this is a valid outcome, not an error | Empty-result log + metric |
 | Spark job failure (executor/driver error mid-run) | The run is treated as not-committed: source offsets are not committed for the failed batch; the job exits non-zero so the orchestrator/container can restart and re-consume (at-least-once + `eventId` dedupe make replay safe) | Error log + non-zero exit + failure metric |
 
@@ -468,7 +499,7 @@ results; every other failure is logged and either DLQ-routed or fails the run.
 |---|---|---|
 | **Source of per-alarm detail (`alarmType` / `raisedAt`)** | (a) consume the typed `alarms[]` now carried in-band on `TransactionEvent`; (b) keep the old `AlarmDetailResolver` seam and resolve `alarmId` to detail out-of-band (lookup API / co-consume `alarms.enriched` / enrich the contract). | **(a) consume `alarms[]` in-band.** The contract gap that motivated the resolver (issue #99) is **closed** — `TransactionEvent` now carries ordered typed `alarms[]` (six fields incl. `alarmType`), populated by the Noise Filter. The resolver seam is therefore **removed**; the Miner reads `alarmType` (the sequence item) and `raisedAt` directly off the event. No new consumer, no extra phase-map dependency, no contract change. (b) is now dead weight and is deleted. |
 | **Mined-sequence token: `alarmType` vs. `eventType`** | (a) build the PrefixSpan `sequence` items from `alarms[].alarmType` (the canonical join token); (b) build them from `alarms[].eventType` (the X.733 category); (c) from `probableCause`. | **(a) `alarmType`.** `docs/architecture.md` and the frozen `TransactionEvent` make `alarmType` the **single canonical join key** — mining, codebook signatures, `rootCauseAlarmType`, and correlation matching all key off the domain's `alarmTypeVocabulary`. Building `sequence` from `eventType` (b) would emit X.733 *categories* (e.g. `communicationsAlarm`) that do **not** match codebook signatures or RCA tokens — breaking the shared token space and making mined patterns unusable downstream. (c) `probableCause` is likewise off the join key. Only (a) keeps `PatternMinedEvent.sequence` in the same token space as every downstream consumer. |
-| **Session-window finalize plus adaptive-gap mechanism (spec OQ#50)** | (a) single fixed global `sessionGap`; (b) Knowledge per-tempo-class gap profiles only; (c) data-driven gap from each burst's own inter-arrival distribution only; (d) **hybrid** — Knowledge tempo-class floor plus data-driven per-burst derivation, clamped, with a Knowledge `baseGap` fallback. | **(d) hybrid.** (a) cannot satisfy criterion 10/11 — one gap over-splits slow bursts and merges fast cascades. (b) alone is rigid (a burst off-profile is mis-cut and needs operator pre-classification). (c) alone is unstable on tiny bursts (a 2-alarm burst has no robust percentile) and ungoverned. The hybrid tracks each burst's own tempo (data-driven core), is floored/ceilinged and biasable by Knowledge tempo classes, and falls back to a Knowledge `baseGap` when data is insufficient — adaptive, fully Knowledge-parameterized, no hard-coded gap. `sourceWindowId` becomes a composite session reference. |
+| **Session-window finalize plus adaptive-gap mechanism (spec OQ#50)** | (a) single fixed global `sessionGap`; (b) Knowledge per-tempo-class gap profiles only; (c) data-driven gap from each burst's own inter-arrival distribution only; (d) **hybrid** — split gap sized on `multiplier × median(interArrivals)` with a Knowledge tempo-class floor (tempo *classified* via `tempoPercentile`), clamped, with a Knowledge `baseGap` fallback. | **(d) hybrid.** (a) cannot satisfy criterion 10/11 — one gap over-splits slow bursts and merges fast cascades. (b) alone is rigid (a burst off-profile is mis-cut and needs operator pre-classification). (c) alone is unstable on tiny bursts (a 2-alarm burst has no robust statistic) and ungoverned. The hybrid tracks each burst's own tempo via the **median (p50)** intra-burst inter-arrival (the robust split-gap size — a high-percentile split gap would swallow the lone idle gap inside a coarse candidate burst and **fail the AC11 two-burst idle split**), is floored/ceilinged and biasable by Knowledge tempo classes (the burst is *classified* by its `tempoPercentile` slow tail — classification, not sizing), and falls back to a Knowledge `baseGap` when data is insufficient — adaptive, fully Knowledge-parameterized, no hard-coded gap. `sourceWindowId` becomes a composite session reference. |
 | **Mining engine** | (a) Spark MLlib `PrefixSpan`; (b) SPMF or pure-Python sequence miner; (c) FP-Growth (unordered itemsets). | **(a) PrefixSpan (Spark MLlib).** The spec mandates PrefixSpan and ordered sequences; Spark gives scale-out for the historical corpus and is the cohort PySpark choice. (c) FP-Growth loses ordering (wrong algorithm class); (b) does not scale and is off-spec. PrefixSpan stays **pure sequence mining over sessions — no topology**. |
 | **Stateless job vs. long-running Streams app** | (a) batch Spark job run per learning window; (b) a long-running streaming windower. | **(a) stateless batch job.** The spec and architecture classify the Miner as a stateless, container-only Spark job active only in P2; batch matches the offline learning phase and keeps it stateless (no owned store). |
 | **Dedupe scope** | (a) per-run in-memory `eventId` set; (b) durable dedupe store. | **(a) in-memory.** The service owns no datastore (stateless); at-least-once replay safety comes from `eventId` dedupe within a run plus idempotent re-mining (same input yields same patterns). A durable store would violate the no-owned-store invariant for this service. |
@@ -537,8 +568,9 @@ alarm-detail collaborator.
   `local[*]` in tests; cluster in deployment), `LOG_LEVEL`. **No mining-threshold or
   windowing-gap env vars** — those come only from Knowledge.
 - **Mining params (from Knowledge, never code):** `minSupport`, `maxPatternLength`,
-  `WindowingParams` (tempo-class profiles with floors, `multiplier`, percentile `p`, class
-  thresholds, `baseGap` fallback, `maxClosingGap` ceiling, `minBurstSamples`), `maxSequenceCount`,
+  `WindowingParams` (tempo-class profiles with floors, `multiplier` for the median-sized split gap,
+  `tempoPercentile` for tempo classification, class thresholds, `baseGap` fallback, `maxClosingGap`
+  ceiling, `minBurstSamples`), `maxSequenceCount`,
   `codebookVersion`.
 - **Observability:** `GET /health` (liveness/readiness incl. Kafka + Knowledge reachability);
   `GET /metrics` (Prometheus): counters for consumed / deduped-dropped / DLQ-routed /
