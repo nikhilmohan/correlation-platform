@@ -89,6 +89,14 @@ public class EnrichmentPipeline {
 
         // Self-clear: a raised alarm is held (drop-for-now), released later by the sweep.
         StepResult sc = selfClearStep.apply(afterDedup, ruleset, path, occurredAt, traceId);
+
+        // Event-time release: this alarm may have advanced the event-time high-watermark past an
+        // earlier held raise's hold-time. Release those now so P2 HISTORY batch-replay (all raises,
+        // <1s wall-clock, raisedAt spanning hours) flushes as it processes instead of stranding
+        // every held raise until a scheduled wall-clock sweep that never fires within the batch.
+        selfClearStep.releaseEventExpired((raise, rs, p, occ, tr) ->
+                runFromFlapDamp(raise, rs, p, occ, tr, null));
+
         if (sc instanceof StepResult.Drop) {
             return;
         }
@@ -136,6 +144,16 @@ public class EnrichmentPipeline {
     /** Register the self-clear release sink: an expired held raise re-enters at FlapDamp. */
     public void sweepSelfClearReleases() {
         selfClearStep.releaseExpired((raise, ruleset, path, occurredAt, traceId) ->
+                runFromFlapDamp(raise, ruleset, path, occurredAt, traceId, null));
+    }
+
+    /**
+     * Flush EVERY remaining held self-clear raise into the pipeline, unconditionally. Called at
+     * shutdown (and usable at end-of-batch) so no un-cleared held raise is ever stranded in the
+     * hold store — the Defect #4 caution: history-mode replay must eventually release all holds.
+     */
+    public void drainSelfClearHolds() {
+        selfClearStep.drainAll((raise, ruleset, path, occurredAt, traceId) ->
                 runFromFlapDamp(raise, ruleset, path, occurredAt, traceId, null));
     }
 }

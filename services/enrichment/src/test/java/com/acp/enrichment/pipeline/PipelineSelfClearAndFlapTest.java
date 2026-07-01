@@ -85,6 +85,58 @@ class PipelineSelfClearAndFlapTest {
     }
 
     @Test
+    void defect4_multipleDistinctRaisesSameKeyAllReleased_noneDropped() {
+        // Defect #4: N raised alarms on the SAME (managedObjectId, eventType), each raisedAt more
+        // than the hold-time apart, NO clears -> ALL N must be released/emitted downstream. Under
+        // the old single-slot hold map, put() overwrote every earlier held raise so only the last
+        // survived (silent signal loss). With the list-backed hold + event-time release, each raise
+        // is released on its own expiry as later raises advance the event-time watermark.
+        //
+        // nms-alpha hold = 5s. Space raisedAt 60s apart (>> 5s) so each held raise's event-time
+        // hold has elapsed by the time the next raise arrives -> released as the batch replays.
+        PipelineHarness h = new PipelineHarness(List.of(TestRulesets.nmsAlpha(),
+                TestRulesets.defaultRuleset()));
+
+        int n = 8;
+        for (int i = 0; i < n; i++) {
+            Instant raiseAt = T0.plusSeconds(i * 60L);
+            // Same ne/ifIndex -> same managedObjectId Interface:edge1-1, same eventType -> same key.
+            h.process(nmsAlpha("r-" + i, "raised", raiseAt), "nms-alpha", Path.HISTORY);
+        }
+        // End-of-batch flush releases the final still-held raise (its hold-time never elapsed via a
+        // later alarm because it is the last one). Mirrors shutdown drain.
+        h.pipeline.drainSelfClearHolds();
+
+        assertThat(h.emitted)
+                .as("every distinct raise on the same key must be released — none silently dropped")
+                .hasSize(n);
+        // All are the same object, all RAISED, all survivors of the full pipeline.
+        assertThat(h.emitted).allSatisfy(e -> {
+            assertThat(e.alarm().getManagedObjectId()).isEqualTo("Interface:edge1-1");
+            assertThat(e.alarm().getState()).isEqualTo(
+                    com.acp.eventmodel.generated.AlarmEvent.State.RAISED);
+        });
+        // The distinct alarmIds all made it through (no collapse to one survivor).
+        assertThat(h.emitted.stream().map(e -> e.alarm().getAlarmId()).distinct().count())
+                .isEqualTo((long) n);
+    }
+
+    @Test
+    void defect4_twoDistinctRaisesSameKeyBothReleased_noOverwriteDrop() {
+        // Two distinct raises on the same (managedObjectId, eventType) that both pass dedup (spaced
+        // 25s apart > the 20s nms-alpha dedup window) must BOTH survive self-clear: the second must
+        // not overwrite/drop the first still-held raise. No clear arrives -> both emitted.
+        PipelineHarness h = new PipelineHarness(List.of(TestRulesets.nmsAlpha(),
+                TestRulesets.defaultRuleset()));
+
+        h.process(nmsAlpha("r-a", "raised", T0), "nms-alpha", Path.HISTORY);
+        h.process(nmsAlpha("r-b", "raised", T0.plusSeconds(25)), "nms-alpha", Path.HISTORY);
+        h.pipeline.drainSelfClearHolds();
+
+        assertThat(h.emitted).as("both distinct raises must survive — no overwrite drop").hasSize(2);
+    }
+
+    @Test
     void criterion3_flapBurstEmitsExactlyOneSummary() {
         // Criterion 3: a burst of raise/clear oscillations exceeding flapN within the flap window
         // collapses to exactly ONE summary AlarmEvent — driven through the REAL pipeline.
