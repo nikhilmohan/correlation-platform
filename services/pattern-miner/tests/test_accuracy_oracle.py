@@ -264,3 +264,123 @@ def test_unexplained_group_does_not_inflate_count():
     anchored = [e for e in envelopes if e.payload.provenance.anchorScenarioId is not None]
     bounds = _load_thresholds()
     assert len(anchored) <= bounds["distinct_patterns_max"]
+
+
+# ------------------------------------------------------------------ [BATCH-CAP] BC-9 with capping
+
+
+def _consolidate_by_anchor(envelopes):
+    """Downstream anchor-identity consolidation (pattern-manager's job), applied in-test.
+
+    The batch cap can emit the SAME anchorScenarioId in more than one sub-run (if a fault-origin's
+    trails spread across chunks). Consolidation collapses those into one pattern per anchor — this
+    is what makes the accuracy oracle hold WITH capping on (design [BATCH-CAP], BC-9). Unexplained
+    (null-anchor) events are consolidated together too. Representative sequence = the longest
+    emitted for that anchor (matches the single-run representative for the labeled corpus).
+    """
+    by_anchor: dict = {}
+    for e in envelopes:
+        key = e.payload.provenance.anchorScenarioId
+        prev = by_anchor.get(key)
+        if prev is None or len(e.payload.sequence) > len(prev.payload.sequence):
+            by_anchor[key] = e
+    return list(by_anchor.values())
+
+
+def _run_capped(cap: int):
+    """Run the SAME labeled oracle corpus, but chunked into sub-runs of at-most ``cap`` trails."""
+    transactions, scenarios, _ = _build_corpus()
+    params = _build_params()
+    metrics = Metrics()
+
+    from pattern_miner.assemble import chunk_trail_batches, group_transactions
+
+    from .helpers import build_pipeline
+
+    pipeline = build_pipeline(windowing=params.windowing, metrics=metrics)
+    trail_batches = group_transactions([(t, "trace-1") for t in transactions])
+    sub_runs = chunk_trail_batches(trail_batches, cap)
+    assert len(sub_runs) > 1, "cap must force MULTIPLE sub-runs to exercise the batch-cap path"
+
+    all_envelopes = []
+    for sub_run in sub_runs:
+        all_envelopes.extend(pipeline.run(sub_run, scenarios, params))
+    return all_envelopes, metrics
+
+
+def test_accuracy_oracle_preserved_with_capping():
+    """BC-9: with a small cap forcing MULTIPLE sub-runs, after consolidation the pattern set is
+
+    identical to the single-run oracle result — same anchored set, same spans, zero over-split /
+    over-merge, coverage in band. Capping must NOT change AC-19/AC-20 quality.
+    """
+    bounds = _load_thresholds()
+    # cap 5 with 6 trails/origin + 100 noise trails -> many sub-runs, and each origin's 6 trails
+    # straddle a chunk boundary (so the same anchor is emitted in >1 sub-run pre-consolidation).
+    envelopes, metrics = _run_capped(cap=5)
+
+    # Pre-consolidation: at least one anchor appears in more than one sub-run (proves the cap split
+    # a fault-origin's trails — the case consolidation must handle).
+    raw_anchors = [
+        e.payload.provenance.anchorScenarioId
+        for e in envelopes
+        if e.payload.provenance.anchorScenarioId
+    ]
+    assert len(raw_anchors) > len(set(raw_anchors)), "expected a repeated anchor across sub-runs"
+
+    consolidated = _consolidate_by_anchor(envelopes)
+    anchored = [e for e in consolidated if e.payload.provenance.anchorScenarioId is not None]
+
+    # AC-19 size + span after consolidation == the single-run oracle bands.
+    assert bounds["distinct_patterns_min"] <= len(anchored) <= bounds["distinct_patterns_max"]
+    for e in anchored:
+        span = len(e.payload.sequence)
+        assert bounds["per_pattern_type_span_min"] <= span <= bounds["per_pattern_type_span_max"]
+
+    # AC-20 zero over-split (1:1 anchors) + zero over-merge (each seq in exactly one GT chain).
+    anchors = [e.payload.provenance.anchorScenarioId for e in anchored]
+    assert len(anchors) == len(set(anchors)), f"over-split after consolidation: {anchors}"
+    gt_chains = {sid: set(chain) for sid, _, chain in _GT_TYPES}
+    for e in anchored:
+        seq_set = set(e.payload.sequence)
+        matching = [sid for sid, tokens in gt_chains.items() if seq_set <= tokens]
+        assert (
+            len(matching) == 1
+        ), f"over-merge: {e.payload.provenance.anchorScenarioId} -> {matching}"
+        assert matching[0] == e.payload.provenance.anchorScenarioId
+
+    # the anchored set equals the full ground-truth set (no fault-origin lost by chunking).
+    assert set(anchors) == {sid for sid, _, _ in _GT_TYPES}
+    # the run completed with no mining failure and the unexplained group survived consolidation.
+    assert metrics.mining_failures._value.get() == 0
+    assert any(e.payload.provenance.anchorScenarioId is None for e in consolidated)
+
+
+def test_capped_matches_uncapped_anchored_set():
+    """BC-9: the consolidated capped pattern set == the uncapped single-run anchored set."""
+    uncapped, _, _, _ = _run()
+    uncapped_anchored = {
+        e.payload.provenance.anchorScenarioId
+        for e in uncapped
+        if e.payload.provenance.anchorScenarioId is not None
+    }
+    uncapped_seqs = {
+        tuple(e.payload.sequence)
+        for e in uncapped
+        if e.payload.provenance.anchorScenarioId is not None
+    }
+
+    capped_envelopes, _ = _run_capped(cap=5)
+    capped_anchored = _consolidate_by_anchor(capped_envelopes)
+    capped_anchor_ids = {
+        e.payload.provenance.anchorScenarioId
+        for e in capped_anchored
+        if e.payload.provenance.anchorScenarioId is not None
+    }
+    capped_seqs = {
+        tuple(e.payload.sequence)
+        for e in capped_anchored
+        if e.payload.provenance.anchorScenarioId is not None
+    }
+    assert capped_anchor_ids == uncapped_anchored
+    assert capped_seqs == uncapped_seqs  # same representatives -> no over-split/over-merge

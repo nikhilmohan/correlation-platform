@@ -78,6 +78,23 @@ class Settings(BaseSettings):
     # and adaptive. Operational default only.
     batch_flush_seconds: float = Field(default=2.0, alias="BATCH_FLUSH_SECONDS")
 
+    # [BATCH-CAP] Max WHOLE trails per mining sub-run. An OPERATIONAL batching knob (like
+    # batch_flush_seconds) that bounds the Stage-3 Spark collect to at-most this many trails'
+    # sessions so it fits the driver heap — NOT a mining/anchoring threshold, so it is env-defaulted
+    # and never on the domain critical path. An optional Knowledge ``batching.maxTrailsPerBatch``
+    # overrides this at runtime (see MiningParams.max_trails_per_batch). Default 8: the verified
+    # busiest single trail (approx 90 txns / up to 76 sessions) mines fine alone, so 8 whole trails
+    # keep a sub-run's collect within a few hundred sessions — safely under the 2g driver heap —
+    # while the whole-flush of ~46 trails OOMs. See design [BATCH-CAP].
+    max_trails_per_batch: int = Field(default=8, alias="MAX_TRAILS_PER_BATCH")
+
+    # [BATCH-CAP] SparkContext resilience knobs (operational, not mining thresholds). On a detected
+    # driver/gateway death the engine is reset and a fresh SparkSession is recreated, bounded by
+    # these attempts + back-off; on exhaustion the run fails clean and /health reports Spark
+    # not-ready (self-heals — readiness never latches DOWN).
+    spark_recreate_max_attempts: int = Field(default=3, alias="SPARK_RECREATE_MAX_ATTEMPTS")
+    spark_recreate_backoff_ms: int = Field(default=2000, alias="SPARK_RECREATE_BACKOFF_MS")
+
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     http_port: int = Field(default=8080, alias="HTTP_PORT")
 
@@ -169,3 +186,8 @@ class MiningParams:
     windowing: WindowingParams
     anchoring: AnchoringParams
     codebook_version: str
+    # [BATCH-CAP] Optional Knowledge override of the operational trail-batch cap
+    # (``batching.maxTrailsPerBatch``). When present it wins over the ``MAX_TRAILS_PER_BATCH`` env
+    # default; when absent (``None``) the env default is used. It is an operational batching knob,
+    # NOT a mining threshold — hence optional here (the env supplies a deployable default).
+    max_trails_per_batch: int | None = None

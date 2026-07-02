@@ -39,3 +39,21 @@ class PrefixSpanEngine(Protocol):
         length of a returned subsequence.
         """
         ...
+
+    def reset(self) -> None:
+        """[BATCH-CAP] Drop any cached backing session so the next ``run`` recreates it.
+
+        After a driver/gateway death the cached ``SparkSession`` survives as a **dead handle** and
+        every later ``run`` fails until reset. Calling ``reset()`` nulls that handle so the next
+        ``run`` (via ``_get_spark``) builds a fresh session — the SparkContext self-heal. The local
+        engine has no backing session and implements this as a no-op.
+        """
+        ...
+
+    def is_healthy(self) -> bool:
+        """[BATCH-CAP] True iff the engine is ready to run (no known-dead backing session).
+
+        The local engine is always healthy; the Spark engine is healthy unless a death was detected
+        and the session not yet recreated. Drives the ``/health`` Spark-readiness flag.
+        """
+        ...

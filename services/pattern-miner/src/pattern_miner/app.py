@@ -23,9 +23,9 @@ import time
 import uvicorn
 
 from .api import ApiState, create_app
-from .assemble import ThreeStagePipeline, group_transactions
+from .assemble import ThreeStagePipeline, chunk_trail_batches, group_transactions
 from .codebook import CodebookClient, CodebookError, NoActiveCodebookError
-from .config import MiningEngineKind, Settings
+from .config import MiningEngineKind, MiningParams, Settings
 from .emit import PatternEmitter
 from .ingest import Dedup, DlqPublisher, MessageRouter, RouteDecision
 from .kafka_io import PatternProducer, make_consumer
@@ -38,6 +38,45 @@ from .timing import TimingComputer
 from .windowing import SessionWindower
 
 log = get_logger(__name__)
+
+
+class SparkRecreateExhaustedError(RuntimeError):
+    """[BATCH-CAP] Raised when a dead SparkSession cannot be recreated within the bounded attempts.
+
+    Signals the flush must fail **clean** (offsets not committed, replayable) — never a silent
+    permanent wedge; ``/health`` reports Spark not-ready until the next successful build.
+    """
+
+
+def is_gateway_death(exc: BaseException) -> bool:
+    """[BATCH-CAP] True iff ``exc`` looks like a Py4J/driver gateway death (recoverable by reset).
+
+    Matches ``Py4JNetworkError`` / ``Py4JError`` (by class name, so pyspark need not be importable
+    locally), the empty-answer message, and connection-refused ``OSError``/``ConnectionError`` — the
+    death classes the design lists. A recoverable death triggers ``engine.reset()`` + bounded
+    recreate; any other error fails the run without a recreate loop.
+    """
+    name = type(exc).__name__
+    if name in {"Py4JNetworkError", "Py4JError", "Py4JJavaError"}:
+        return True
+    if isinstance(exc, ConnectionError | ConnectionRefusedError):
+        return True
+    text = str(exc).lower()
+    if isinstance(exc, OSError) and ("connection refused" in text or "connection reset" in text):
+        return True
+    return "answer from java side is empty" in text or "connection refused" in text
+
+
+def effective_trail_cap(settings: Settings, params: MiningParams) -> int:
+    """[BATCH-CAP] The active whole-trail sub-run cap: Knowledge override else the env default.
+
+    The cap is an operational batching knob, so ``MAX_TRAILS_PER_BATCH`` (env) supplies a deployable
+    default and an optional Knowledge ``batching.maxTrailsPerBatch`` overrides it centrally — no cap
+    literal in mining/pipeline logic.
+    """
+    if params.max_trails_per_batch is not None:
+        return params.max_trails_per_batch
+    return settings.max_trails_per_batch
 
 
 def build_engine(settings: Settings) -> PrefixSpanEngine:
@@ -140,6 +179,46 @@ def consume_loop(
     pending: list = []  # list[(TransactionEvent, traceId)]
     last_flush = time.monotonic()
 
+    def run_sub_run(pipeline, group_batches, scenarios, params) -> list:
+        """[BATCH-CAP] Run one bounded sub-run with SparkContext resilience.
+
+        On a detected gateway-death error class (:func:`is_gateway_death`) drop the dead session
+        (``engine.reset()``) and retry, bounded by ``SPARK_RECREATE_MAX_ATTEMPTS`` with
+        ``SPARK_RECREATE_BACKOFF_MS`` back-off; on the next successful build Spark readiness
+        self-heals. On recreate exhaustion raise :class:`SparkRecreateExhaustedError` so the FLUSH
+        fails clean (offsets uncommitted). Non-gateway errors propagate unchanged (no recreate).
+        """
+        attempts = max(0, settings.spark_recreate_max_attempts)
+        for attempt in range(attempts + 1):
+            try:
+                envelopes = pipeline.run(group_batches, scenarios, params)
+                api_state.spark_ready = True  # a successful run proves the engine is healthy
+                return envelopes
+            except (
+                BaseException
+            ) as exc:  # noqa: BLE001 — only gateway deaths recreate; else re-raise
+                if not is_gateway_death(exc):
+                    raise
+                if attempt >= attempts:
+                    metrics.spark_recreate_failures.inc()
+                    api_state.spark_ready = False
+                    raise SparkRecreateExhaustedError(
+                        f"SparkSession recreate exhausted after {attempts} attempt(s): {exc}"
+                    ) from exc
+                metrics.spark_recreate_attempts.inc()
+                api_state.spark_ready = False
+                log.error(
+                    "spark_gateway_death_detected",
+                    attempt=attempt + 1,
+                    of=attempts,
+                    error=str(exc),
+                )
+                engine.reset()  # drop the dead session; next pipeline.run rebuilds via _get_spark
+                if settings.spark_recreate_backoff_ms:
+                    time.sleep((settings.spark_recreate_backoff_ms / 1000.0) * (2**attempt))
+                log.info("spark_session_recreated", attempt=attempt + 1)
+        return []  # unreachable (loop returns or raises)
+
     def flush() -> None:
         nonlocal pending, last_flush
         last_flush = time.monotonic()
@@ -163,18 +242,48 @@ def consume_loop(
                 if key not in scenarios_by_key:
                     scenarios_by_key[key] = codebook.scenarios_for(key[0], key[1])
 
-            envelopes = []
+            # [BATCH-CAP] Partition the flush's WHOLE trails into disjoint bounded sub-runs (never
+            # splitting a trail). Each sub-run anchors -> groups -> per-group PrefixSpan -> emits
+            # independently, bounding the Stage-3 collect. Offsets commit ONCE after ALL sub-runs.
+            cap = effective_trail_cap(settings, params)
+            emitted_total = 0
+            sub_run_index = 0
+            sub_run_total = 0
             for key, group_batches in _batches_by_key(
                 trail_batches, settings.knowledge_domain
             ).items():
-                envelopes.extend(pipeline.run(group_batches, scenarios_by_key[key], params))
-            emitter.emit(envelopes)
+                for sub_run in chunk_trail_batches(group_batches, cap):
+                    sub_run_total += 1
+                    envelopes = run_sub_run(pipeline, sub_run, scenarios_by_key[key], params)
+                    emitter.emit(envelopes)
+                    emitted_total += len(envelopes)
+                    metrics.mining_sub_runs.inc()
+                    log.info(
+                        "mining_sub_run_completed",
+                        sub_run_index=sub_run_index,
+                        trails_in_sub_run=len(sub_run),
+                        emitted=len(envelopes),
+                    )
+                    sub_run_index += 1
+            metrics.last_flush_sub_run_count.set(sub_run_total)
+
+            # Only after every sub-run succeeded do we advance offsets (replay unit = the flush).
             consumer.commit()
-            log.info("mining_run_completed", transactions=len(batch), emitted=len(envelopes))
+            log.info(
+                "mining_run_completed",
+                transactions=len(batch),
+                emitted=emitted_total,
+                sub_runs=sub_run_total,
+            )
         except CodebookError as exc:  # Stage-2 anchoring unavailable: fail fast, do NOT commit.
             metrics.mining_failures.inc()
             metrics.codebook_fetch_failures.inc()
             log.error("mining_run_failed", reason="codebook_unavailable", error=str(exc))
+        except (
+            SparkRecreateExhaustedError
+        ) as exc:  # Spark could not recover: fail clean, no commit.
+            metrics.mining_failures.inc()
+            log.error("mining_run_failed", reason="spark_recreate_exhausted", error=str(exc))
         except Exception as exc:  # noqa: BLE001 — fail the batch, do NOT commit; replay-safe
             metrics.mining_failures.inc()
             log.error("mining_run_failed", error=str(exc))

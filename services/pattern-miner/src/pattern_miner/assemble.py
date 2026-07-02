@@ -80,6 +80,34 @@ def group_transactions(
     return list(batches.values())
 
 
+def chunk_trail_batches(
+    trail_batches: list[TrailBatch],
+    max_trails_per_batch: int,
+) -> list[list[TrailBatch]]:
+    """[BATCH-CAP] Partition whole ``TrailBatch``es into disjoint sub-runs of at-most-cap trails.
+
+    The flush's ``group_transactions`` output is already **one whole ``TrailBatch`` per trailId**;
+    this splits that list into disjoint chunks of at most ``max_trails_per_batch`` WHOLE batches so
+    each mining sub-run's Stage-3 Spark collect is bounded to that many trails' sessions (fitting
+    the driver heap). A trail is **never** split across sub-runs — every input ``TrailBatch``
+    appears in exactly one chunk, byte-identically, so a cascade is never fragmented and its per-run
+    support is not diluted (design [BATCH-CAP]). A single trail larger than the cap still forms its
+    own undivided sub-run (the cap is a *max whole trails per sub-run*, not a record cap).
+
+    ``max_trails_per_batch`` must be >= 1 (a valid operational batching knob); the whole input is
+    one chunk when it fits. Empty input -> no sub-runs.
+    """
+    if max_trails_per_batch < 1:
+        raise ValueError(
+            f"max_trails_per_batch must be >= 1 (whole-trail batching cap); got "
+            f"{max_trails_per_batch}"
+        )
+    return [
+        trail_batches[i : i + max_trails_per_batch]
+        for i in range(0, len(trail_batches), max_trails_per_batch)
+    ]
+
+
 class ThreeStagePipeline:
     """Runs Stage 1 -> Stage 2 -> Stage 3 over a run's trail batches and assembles the events.
 
