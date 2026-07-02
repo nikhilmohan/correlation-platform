@@ -19,15 +19,21 @@ pyspark = pytest.importorskip("pyspark")
 
 from pyspark.sql import SparkSession  # noqa: E402
 
-from pattern_miner.assemble import PatternAssembler, group_transactions  # noqa: E402
+from pattern_miner.assemble import ThreeStagePipeline, group_transactions  # noqa: E402
 from pattern_miner.metrics import Metrics  # noqa: E402
-from pattern_miner.mining import PrefixSpanMiner  # noqa: E402
+from pattern_miner.mining import GroupedMiner, PrefixSpanMiner  # noqa: E402
 from pattern_miner.mining.local_engine import LocalPrefixSpanEngine  # noqa: E402
 from pattern_miner.mining.spark_engine import SparkPrefixSpanEngine  # noqa: E402
 from pattern_miner.timing import TimingComputer  # noqa: E402
 from pattern_miner.windowing import SessionWindower  # noqa: E402
 
-from .helpers import default_params, default_windowing, make_alarm, make_transaction  # noqa: E402
+from .helpers import (  # noqa: E402
+    default_params,
+    default_windowing,
+    make_alarm,
+    make_scenario,
+    make_transaction,
+)
 
 FIBER_CUT = ["FiberFault", "LinkDown", "AdjDown"]
 
@@ -64,11 +70,13 @@ def test_spark_prefixspan_matches_local_reference(spark):
 
 
 def test_spark_fiber_cut_mined_end_to_end_with_provenance(spark):
-    """Full window->Spark PrefixSpan->assemble path emits the fiber-cut PatternMinedEvent."""
+    """Full 3-stage window->anchor->Spark-PrefixSpan-per-group path emits the fiber-cut event."""
     metrics = Metrics()
     windower = SessionWindower(default_windowing(), metrics=metrics)
-    miner = PrefixSpanMiner(SparkPrefixSpanEngine(spark=spark), metrics=metrics)
-    assembler = PatternAssembler(windower, miner, TimingComputer(), metrics=metrics)
+    grouped = GroupedMiner(
+        PrefixSpanMiner(SparkPrefixSpanEngine(spark=spark), metrics=metrics), metrics=metrics
+    )
+    pipeline = ThreeStagePipeline(windower, grouped, TimingComputer(), metrics=metrics)
 
     # ONE trail, several idle-separated sessions all carrying the fiber-cut cascade.
     all_alarms = []
@@ -77,10 +85,12 @@ def test_spark_fiber_cut_mined_end_to_end_with_provenance(spark):
         for i, t in enumerate(FIBER_CUT):
             all_alarms.append(make_alarm(alarm_type=t, raised_offset_seconds=base + i))
     txn = make_transaction(trail_id="trail-fc", alarms=all_alarms)
-    batch = group_transactions([(txn, "trace-1")])[0]
+    batches = group_transactions([(txn, "trace-1")])
+    scenarios = [make_scenario(scenario_id="SC-FIBER", symptom_chain=FIBER_CUT)]
 
-    envelopes = assembler.mine_batch(batch, default_params(min_support=0.5))
+    envelopes = pipeline.run(batches, scenarios, default_params(min_support=0.5))
     fc = next((e for e in envelopes if e.payload.sequence == FIBER_CUT), None)
     assert fc is not None
     assert fc.payload.provenance.codebookVersion == "current"
+    assert fc.payload.provenance.anchorScenarioId == "SC-FIBER"
     assert fc.payload.provenance.sourceWindowId.startswith("sw:trail-fc:")

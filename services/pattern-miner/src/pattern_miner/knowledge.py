@@ -30,7 +30,7 @@ from urllib.parse import quote
 
 import httpx
 
-from .config import MiningParams, TempoProfile, WindowingParams
+from .config import AnchoringParams, MiningParams, TempoProfile, WindowingParams
 from .logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -50,6 +50,22 @@ KEY_MIN_BURST_SAMPLES = "window.adaptive.minBurstSamples"
 KEY_PROFILES = "window.adaptive.profiles"
 KEY_CLASS_THRESHOLDS = "window.adaptive.classThresholds"
 KEY_CODEBOOK_VERSION = "codebookVersion"
+
+# Stage-2 domain-knowledge anchoring keys (authored in the same model-params record).
+KEY_MATCH_CONFIDENCE_THRESHOLD = "anchoring.matchConfidenceThreshold"
+KEY_SCORING_METHOD = "anchoring.scoringMethod"
+KEY_GROUPING_KEYS = "anchoring.groupingKeys"
+KEY_TIE_BREAK = "anchoring.tieBreak"
+KEY_W_ORDER = "anchoring.weights.order"
+KEY_W_JACCARD = "anchoring.weights.jaccard"
+
+# Structural (non-threshold, non-domain) fallbacks for the anchoring scorer selection and grouping.
+# These are the reusable-template defaults — a scorer NAME, a tie-break RULE, and a grouping KEY
+# NAME — none is a correlation threshold or a domain literal, so authoring them in Knowledge is
+# optional. The confidence threshold and the scorer WEIGHTS are required and never defaulted.
+DEFAULT_SCORING_METHOD = "ordered_subsequence_jaccard"
+DEFAULT_TIE_BREAK = "chain_length_then_scenario_id"
+DEFAULT_GROUPING_KEYS: tuple[str, ...] = ("scenarioId",)
 
 
 class KnowledgeError(RuntimeError):
@@ -196,6 +212,35 @@ def _require(m: dict[str, Any], key: str) -> Any:
     return m[key]
 
 
+def _parse_grouping_keys(raw: Any) -> tuple[str, ...]:
+    """Parse ``anchoring.groupingKeys`` (list or comma-string) -> tuple; else structural default."""
+    if isinstance(raw, list) and raw:
+        return tuple(str(k) for k in raw)
+    if isinstance(raw, str) and raw.strip():
+        return tuple(part.strip() for part in raw.split(",") if part.strip())
+    return DEFAULT_GROUPING_KEYS
+
+
+def _parse_anchoring_params(m: dict[str, Any]) -> AnchoringParams:
+    """Map the ``anchoring.*`` dotted keys into typed :class:`AnchoringParams`.
+
+    The confidence threshold and the two scorer weights are **required** (fail fast, never a code
+    default — spec AC-7/AC-17). Scorer method, tie-break, and grouping keys have structural
+    (non-threshold, non-domain) template defaults, applied only when Knowledge does not author them.
+    """
+    threshold = float(_require(m, KEY_MATCH_CONFIDENCE_THRESHOLD))
+    w_order = float(_require(m, KEY_W_ORDER))
+    w_jaccard = float(_require(m, KEY_W_JACCARD))
+    return AnchoringParams(
+        match_confidence_threshold=threshold,
+        w_order=w_order,
+        w_jaccard=w_jaccard,
+        scoring_method=str(m.get(KEY_SCORING_METHOD) or DEFAULT_SCORING_METHOD),
+        tie_break=str(m.get(KEY_TIE_BREAK) or DEFAULT_TIE_BREAK),
+        grouping_keys=_parse_grouping_keys(m.get(KEY_GROUPING_KEYS)),
+    )
+
+
 def _parse_mining_params(payload: dict[str, Any]) -> MiningParams:
     """Map a model-params ``payload.params[]`` map into the typed :class:`MiningParams`.
 
@@ -248,5 +293,6 @@ def _parse_mining_params(payload: dict[str, Any]) -> MiningParams:
         max_pattern_length=int(_require(m, KEY_MAX_PATTERN_LENGTH)),
         max_sequence_count=int(_require(m, KEY_MAX_SEQUENCE_COUNT)),
         windowing=windowing,
+        anchoring=_parse_anchoring_params(m),
         codebook_version=str(_require(m, KEY_CODEBOOK_VERSION)),
     )

@@ -24,10 +24,32 @@ from pattern_miner.mining.local_engine import LocalPrefixSpanEngine
 from .helpers import make_alarm, make_transaction, wrap
 
 KNOWLEDGE_URL = "http://knowledge.test"
+CODEBOOK_URL = "http://codebook.test"
 DOMAIN = "core-ip"
 RECORD_ID = "core-ip/modelParams/pattern-miner"
 FIBER_CUT = ["FiberFault", "LinkDown", "AdjDown"]
 MP_PATH = f"/domains/{DOMAIN}/{MODEL_PARAMS_RECORD_TYPE}/{quote(RECORD_ID, safe='')}"
+CODEBOOK_ID = "cb-loop-1"
+
+
+def _scenarios_body() -> dict:
+    return {
+        "codebookId": CODEBOOK_ID,
+        "domain": DOMAIN,
+        "scenarios": [
+            {
+                "scenarioId": "SC-FIBER",
+                "faultOriginObjectId": "obj-fiber-1",
+                "faultOriginType": "FiberCut",
+                "predictedSymptoms": [
+                    {"alarmType": "FiberFault", "managedObjectId": "obj-fiber-1"},
+                    {"alarmType": "LinkDown", "managedObjectId": "obj-link-1"},
+                    {"alarmType": "AdjDown", "managedObjectId": "obj-rtr-1"},
+                ],
+                "trailIds": ["trail-loop"],
+            }
+        ],
+    }
 
 
 def _record_envelope() -> dict:
@@ -47,6 +69,9 @@ def _record_envelope() -> dict:
                 {"key": "window.adaptive.gapMultiplier", "value": 3.0},
                 {"key": "window.adaptive.tempoPercentile", "value": 95.0},
                 {"key": "window.adaptive.profiles", "value": {"fast": 0.5, "slow": 30.0}},
+                {"key": "anchoring.matchConfidenceThreshold", "value": 0.5},
+                {"key": "anchoring.weights.order", "value": 0.7},
+                {"key": "anchoring.weights.jaccard", "value": 0.3},
                 {"key": "codebookVersion", "value": "current"},
             ],
         },
@@ -110,7 +135,7 @@ class _CapturingProducer:
         pass
 
 
-def _run_loop(messages, monkeypatch, *, knowledge_up=True):
+def _run_loop(messages, monkeypatch, *, knowledge_up=True, codebook_up=True):
     captured = _CapturingProducer()
     consumer = _FakeConsumer(messages)
     monkeypatch.setattr(app_mod, "make_consumer", lambda *a, **k: consumer)
@@ -120,10 +145,13 @@ def _run_loop(messages, monkeypatch, *, knowledge_up=True):
         KNOWLEDGE_BASE_URL=KNOWLEDGE_URL,
         KNOWLEDGE_DOMAIN=DOMAIN,
         KNOWLEDGE_MODEL_PARAMS_RECORD_ID=RECORD_ID,
+        CODEBOOK_BASE_URL=CODEBOOK_URL,
         MINING_ENGINE="local",
         BATCH_FLUSH_SECONDS=0.0,  # flush eagerly
         KNOWLEDGE_RETRY_MAX=0,
         KNOWLEDGE_RETRY_BACKOFF_MS=0,
+        CODEBOOK_RETRY_MAX=0,
+        CODEBOOK_RETRY_BACKOFF_MS=0,
     )
     metrics = Metrics()
     api_state = app_mod.ApiState(metrics_registry=metrics.registry)
@@ -136,6 +164,15 @@ def _run_loop(messages, monkeypatch, *, knowledge_up=True):
         )
     else:
         router.get(f"{KNOWLEDGE_URL}{MP_PATH}").mock(return_value=httpx.Response(503))
+    if codebook_up:
+        router.get(f"{CODEBOOK_URL}/codebooks/active").mock(
+            return_value=httpx.Response(200, json={"codebookId": CODEBOOK_ID, "domain": DOMAIN})
+        )
+        router.get(f"{CODEBOOK_URL}/codebooks/{CODEBOOK_ID}/scenarios").mock(
+            return_value=httpx.Response(200, json=_scenarios_body())
+        )
+    else:
+        router.get(f"{CODEBOOK_URL}/codebooks/active").mock(return_value=httpx.Response(503))
 
     # Stop the loop right after it drains the fake consumer (poll returns None -> flush -> exit).
     original_poll = consumer.poll
@@ -153,6 +190,7 @@ def _run_loop(messages, monkeypatch, *, knowledge_up=True):
             settings=settings,
             engine=LocalPrefixSpanEngine(),
             knowledge=app_mod.build_knowledge_client(settings),
+            codebook=app_mod.build_codebook_client(settings),
             metrics=metrics,
             api_state=api_state,
             stop_event=stop,
@@ -165,8 +203,19 @@ def test_loop_mines_and_produces_fiber_cut(monkeypatch):
     assert api_state.kafka_connected is True
     mined = [e for t, e in captured.published if t == "patterns.mined"]
     assert mined
-    assert any(e.payload.sequence == FIBER_CUT for e in mined)
+    fiber = [e for e in mined if e.payload.sequence == FIBER_CUT]
+    assert fiber
+    # Stage 2 anchored the cascade to the codebook fiber scenario.
+    assert fiber[0].payload.provenance.anchorScenarioId == "SC-FIBER"
     assert metrics.mining_runs._value.get() >= 1
+
+
+def test_loop_codebook_down_fails_batch_no_emit(monkeypatch):
+    """Codebook unavailable -> Stage 2 cannot anchor -> run fails fast, nothing emitted."""
+    captured, metrics, _ = _run_loop([_Msg(_fiber_cut_bytes())], monkeypatch, codebook_up=False)
+    assert not [t for t, _ in captured.published if t == "patterns.mined"]
+    assert metrics.mining_failures._value.get() >= 1
+    assert metrics.codebook_fetch_failures._value.get() >= 1
 
 
 def test_loop_routes_poison_to_dlq(monkeypatch):

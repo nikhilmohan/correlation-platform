@@ -65,6 +65,14 @@ KnowledgeUpdatedEvent, AlarmStatusChange).
 Two bindings from one JSON Schema: Java (Spring services) + Python/Pydantic (Python services).
 Consumers reject unknown major `schemaVersion`.
 
+> **PatternMinedEvent provenance.** The `provenance` object carries lineage metadata for a mined
+> pattern (`sourceWindowId`, `snapshotId`, `codebookVersion`, and the optional `domain`). It also
+> carries the optional **`provenance.anchorScenarioId`** — the Codebook fault-origin scenario this
+> pattern was anchored to during the pattern-miner's domain-knowledge anchoring stage. It is
+> nullable/absent by design: **`null`/absent means the cascade was unexplained** (no confident
+> scenario match) — a first-class, valid outcome, not an error. Optional (not in `provenance.required`)
+> for backward-compat: existing PatternMinedEvent messages without the field still validate.
+
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
 alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,

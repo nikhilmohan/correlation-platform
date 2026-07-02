@@ -18,6 +18,7 @@ class HealthModel(BaseModel):
     status: str
     kafka: str
     knowledge: str
+    codebook: str
 
 
 @dataclass
@@ -27,6 +28,7 @@ class ApiState:
     metrics_registry: CollectorRegistry
     kafka_connected: bool = field(default=False)
     knowledge_ready: bool = field(default=False)
+    codebook_ready: bool = field(default=False)
 
 
 def create_app(state: ApiState) -> FastAPI:
@@ -39,11 +41,12 @@ def create_app(state: ApiState) -> FastAPI:
 
     @app.get("/health", response_model=HealthModel)
     def health() -> HealthModel:  # pragma: no cover - exercised via TestClient/integration
-        ok = state.kafka_connected and state.knowledge_ready
+        ok = state.kafka_connected and state.knowledge_ready and state.codebook_ready
         return HealthModel(
             status="ok" if ok else "starting",
             kafka="up" if state.kafka_connected else "down",
             knowledge="up" if state.knowledge_ready else "down",
+            codebook="up" if state.codebook_ready else "down",
         )
 
     @app.get("/metrics")

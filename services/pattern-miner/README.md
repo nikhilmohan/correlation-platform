@@ -4,17 +4,31 @@
 **Owned datastore:** — (stateless Spark job; emits and forgets)
 **Phase:** P2 — Pattern learning (Active). Idle in P1/P3.
 
-The ML-execution service for the Pattern Learning phase. It consumes trail-scoped,
-DBSCAN-cleaned `TransactionEvent`s from `transactions.clean`, re-windows the typed `alarms[]`
-into **dynamic activity/idle sessions per trail** (the closing gap adapts to each burst's tempo),
-runs **PrefixSpan (Spark MLlib)** over the session-windowed `alarmType`-token sequences, computes
-**support / confidence / lift**, and emits **one `PatternMinedEvent` per discovered sequence** on
-`patterns.mined`.
+The ML-execution service for the Pattern Learning phase. It discovers **recurring fault cascades**
+from trail-scoped, DBSCAN-cleaned `TransactionEvent`s on `transactions.clean` through a
+**three-stage pipeline**, emitting a small, accurate set of root-cause-grounded patterns as
+`PatternMinedEvent`s on `patterns.mined` — **one per anchored fault-origin group** (plus one for the
+unexplained group):
+
+1. **Stage 1 — time + space correlation.** Re-window the typed `alarms[]` into **dynamic
+   activity/idle sessions per trail** (the closing gap adapts to each burst's tempo) → candidate
+   cascades. (Retained from the prior design; see "Adaptive session windowing".)
+2. **Stage 2 — domain-knowledge anchoring.** Fetch the domain's fault-origin scenarios from the
+   **Codebook Service** and assign each candidate cascade to the scenario it best matches (the
+   anchor) using a weighted **LCS-ratio (ordered chain coverage) + Jaccard (union set overlap)**
+   scorer, thresholded by a Knowledge-sourced `matchConfidenceThreshold`. LCS-ratio prevents
+   over-split; Jaccard-union + single-anchor argmax prevents over-merge. Cascades below the
+   threshold are **unexplained** (`provenance.anchorScenarioId = null`) — a first-class outcome.
+3. **Stage 3 — bounded PrefixSpan per anchored group.** Run **PrefixSpan (Spark MLlib) within each
+   anchored group** (not globally) to learn that fault-origin's canonical ordered `alarmType`
+   signature, support, confidence, lift. Bounded scope removes the prior global-mining OOM and the
+   frequency-lattice explosion.
 
 It holds **no pattern state** — no RCA, no `rootCauseAlarmType`, no `patternId`, no lifecycle, no
-codebook reconciliation, no explainability, no Pattern Store, no topology access. Those belong
-exclusively to the **Pattern Manager**. The boundary is enforced by the frozen `PatternMinedEvent`
-schema (`extra="forbid"`).
+codebook *reconciliation* (Stage 2 only *anchors* against the codebook), no explainability, no
+Pattern Store, and **no topology-graph access** (the Codebook client reads scenarios only). Those
+belong exclusively to the **Pattern Manager** / **Topology Service**. The boundary is enforced by the
+frozen `PatternMinedEvent` schema (`extra="forbid"`).
 
 ## Contract
 
@@ -28,7 +42,9 @@ schema (`extra="forbid"`).
   `SessionWindowDeriver` consumes: `timeframeMs`, `medianInterArrivalMs`, `maxInterArrivalMs`,
   `stddevInterArrivalMs` (median, not mean; ms, not seconds).
 - **`provenance`**: `sourceWindowId` (composite session ref), `snapshotId` (from the source
-  transaction), `codebookVersion` (from the Knowledge mining-params response), `domain`.
+  transaction), `codebookVersion` (from the Knowledge mining-params response — kept verbatim, e.g.
+  `"current"`), `domain`, and **`anchorScenarioId`** (the matched Codebook `scenarioId`, or
+  null/absent for the unexplained group — landed in `libs/event-model` via PR #331).
 - **Idempotency:** dedupe on the envelope `eventId`.
 
 ## Knowledge integration (mining params — config-switchable mock/real)
@@ -45,9 +61,34 @@ GET /domains/{domain}/model-params/{recordId}
 - The response is a **RecordResponse envelope**; params live under `.payload.params[]` as
   `{key, value}` entries with dotted keys: `prefixspan.minSupport`, `prefixspan.maxPatternLength`,
   `prefixspan.maxSequenceCount`, `window.adaptive.baseGapSeconds`, `window.adaptive.gapMultiplier`,
-  `window.adaptive.tempoPercentile`, `window.adaptive.profiles`, `codebookVersion`.
+  `window.adaptive.tempoPercentile`, `window.adaptive.profiles`, `codebookVersion`, and the
+  **Stage-2 anchoring** keys `anchoring.matchConfidenceThreshold`, `anchoring.weights.order`,
+  `anchoring.weights.jaccard` (required — no code default), plus optional `anchoring.scoringMethod`,
+  `anchoring.tieBreak`, `anchoring.groupingKeys` (structural template defaults).
 - Unit tests mock this with `respx` (enveloped shape); integration points at the real Knowledge
   Service. Base URL + mock/real toggle come from env — no hard-coded URLs.
+
+## Codebook integration (Stage-2 fault-origin scenarios — config-switchable mock/real)
+
+Stage 2 fetches the domain's fault-origin scenarios from the **Codebook Service** via a client built
+against its **published `/openapi.json`** (never its source). Endpoints (verified live; no `/api/v1`):
+
+```
+GET /codebooks/active?domain={domain}&snapshotId={snapshotId}   # BOTH params required -> codebookId
+GET /codebooks/{codebookId}/scenarios                           # -> ScenarioListResponse
+```
+
+- The miner already has `domain` + `snapshotId` at mining time; it resolves the active codebook by
+  snapshot (OQ-3 path). The symbolic `codebookVersion="current"` is kept verbatim in provenance —
+  the concrete `codebookId` is a runtime detail, not a schema field.
+- Each scenario carries `{scenarioId, faultOriginObjectId, faultOriginType,
+  predictedSymptoms:[{alarmType, managedObjectId}], trailIds:[...]}`; the ordered
+  `predictedSymptoms[].alarmType` list is the canonical fault-origin **symptom chain** matched
+  against each cascade.
+- If the Codebook is unavailable (or no active codebook for the snapshot), the run **fails fast**
+  (offsets not committed, retried later) — it **never** falls back to unanchored global mining.
+- Unit tests mock this with `respx` against the published spec; integration points at the real
+  Codebook Service. Base URL + mock/real toggle + retry policy come from env — no hard-coded URLs.
 
 ## Adaptive session windowing (spec OQ#50 — hybrid)
 
@@ -73,13 +114,17 @@ installed on the host). The engine is a config toggle:
 `KAFKA_BOOTSTRAP_SERVERS`, `TRANSACTIONS_CLEAN_TOPIC`, `PATTERNS_MINED_TOPIC`, `DLQ_TOPIC`,
 `CONSUMER_GROUP_ID`, `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_CLIENT_MODE` (`mock`/`real`),
 `KNOWLEDGE_DOMAIN`, `KNOWLEDGE_MODEL_PARAMS_RECORD_ID`, `KNOWLEDGE_RETRY_MAX`,
-`KNOWLEDGE_RETRY_BACKOFF_MS`, `SPARK_MASTER`, `MINING_ENGINE`, `BATCH_FLUSH_SECONDS`, `HTTP_PORT`,
-`LOG_LEVEL`. **No mining-threshold or windowing-gap env vars** — those come only from Knowledge.
+`KNOWLEDGE_RETRY_BACKOFF_MS`, `CODEBOOK_BASE_URL`, `CODEBOOK_CLIENT_MODE` (`mock`/`real`),
+`CODEBOOK_RETRY_MAX`, `CODEBOOK_RETRY_BACKOFF_MS`, `SPARK_MASTER`, `MINING_ENGINE`,
+`BATCH_FLUSH_SECONDS`, `HTTP_PORT`, `LOG_LEVEL`. **No mining/anchoring-threshold or windowing-gap
+env vars** — those come only from Knowledge; the scenario set comes only from the Codebook.
 
 ## Observability
 
-`GET /health` (liveness/readiness incl. Kafka + Knowledge reachability); `GET /metrics`
-(Prometheus). Structured JSON logs. No business HTTP surface, no published OpenAPI spec.
+`GET /health` (liveness/readiness incl. Kafka + Knowledge + **Codebook** reachability);
+`GET /metrics` (Prometheus — incl. `pm_cascades_anchored_total`, `pm_cascades_unexplained_total`,
+`pm_codebook_fetch_failures_total`, `pm_anchored_group_count`). Structured JSON logs (incl. the
+per-cascade anchoring outcome). No business HTTP surface, no published OpenAPI spec.
 
 ## Build / test / run
 

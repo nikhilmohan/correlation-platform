@@ -3,7 +3,9 @@ package com.acp.eventmodel;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.acp.eventmodel.generated.PatternMinedEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -85,5 +87,33 @@ class PatternMinedEventTest {
         PatternMinedEvent mined = (PatternMinedEvent) env.getPayload();
         assertEquals("TRAIL-0001", mined.getTrailId());
         assertEquals("TXN-0001", mined.getProvenance().getSourceWindowId());
+    }
+
+    // Optional provenance.anchorScenarioId — present + absent (backward-compat), mirroring `domain`.
+
+    @Test
+    void anchorScenarioIdPresentRoundTrips() {
+        TypedEnvelope<Object> env =
+                assertDoesNotThrow(() -> codec.deserialize(Fixtures.read("PatternMinedEvent")));
+        PatternMinedEvent mined = (PatternMinedEvent) env.getPayload();
+        assertEquals(
+                "CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1",
+                mined.getProvenance().getAnchorScenarioId());
+        String wire = codec.serialize(env);
+        assertTrue(wire.contains("CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1"));
+    }
+
+    @Test
+    void anchorScenarioIdAbsentIsOptional() {
+        // Backward-compat: a provenance WITHOUT anchorScenarioId still deserializes (null =
+        // "unexplained" cascade, a first-class outcome). anchorScenarioId is not in
+        // provenance.required, so removing it must NOT raise.
+        TypedEnvelope<Object> env = assertDoesNotThrow(() -> codec.deserialize(
+                mutate(p -> ((ObjectNode) p.get("provenance")).remove("anchorScenarioId"))));
+        PatternMinedEvent mined = (PatternMinedEvent) env.getPayload();
+        assertNull(mined.getProvenance().getAnchorScenarioId());
+        // And it does not leak into the wire when absent (NON_NULL inclusion).
+        String wire = codec.serialize(env);
+        assertFalse(wire.contains("anchorScenarioId"));
     }
 }

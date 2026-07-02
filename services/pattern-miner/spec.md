@@ -238,7 +238,7 @@ Consistent with the canonical phase map in `docs/architecture.md`.
   installed locally; all Spark execution occurs inside the service's Docker container. Python
   cohort; test framework is **pytest**.
 - **Pattern count non-functional target.** On the Simulator's P2 historical corpus (~1,500
-  alarms, 7 ground-truth fault-origin types), the three-stage approach must yield a small,
+  alarms, 8-10 ground-truth fault-origin types), the three-stage approach must yield a small,
   accurate pattern set: 8-10 distinct anchored patterns (per `integration-thresholds.yaml`
   `distinct_patterns_min/max`), each covering 10-20 alarm-type tokens (`per_pattern_type_span_min/max`),
   with 50-60% alarm coverage (`pattern_coverage_min/max`). These numeric bounds flow from

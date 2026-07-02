@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from pattern_miner.app import build_engine, build_knowledge_client
+from pattern_miner.app import build_codebook_client, build_engine, build_knowledge_client
 from pattern_miner.assemble import group_transactions
+from pattern_miner.codebook import CodebookClient
 from pattern_miner.config import MiningEngineKind, Settings
 from pattern_miner.mining.engine import PrefixSpanEngine
 from pattern_miner.mining.local_engine import LocalPrefixSpanEngine
@@ -37,6 +38,20 @@ def test_build_knowledge_client_uses_env_config_no_hardcoded_url():
     assert client.record_id == "core-ip/modelParams/pattern-miner"
     url = client._record_url("model-params", client.record_id)
     assert url.startswith("http://kb.example:8080/domains/core-ip/model-params/")
+
+
+def test_build_codebook_client_uses_env_config_no_hardcoded_url():
+    settings = Settings(
+        CODEBOOK_BASE_URL="http://cb.example:8080",
+        CODEBOOK_RETRY_MAX="2",
+        CODEBOOK_RETRY_BACKOFF_MS="10",
+    )
+    client = build_codebook_client(settings)
+    assert isinstance(client, CodebookClient)
+    # active/scenarios URLs are built off the env base URL, with no /api/v1 prefix.
+    assert client._active_url() == "http://cb.example:8080/codebooks/active"
+    assert client._scenarios_url("cb-1") == "http://cb.example:8080/codebooks/cb-1/scenarios"
+    assert "/api/v1/" not in client._active_url()
 
 
 def test_group_transactions_pools_per_trail():
