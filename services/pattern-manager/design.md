@@ -1,5 +1,38 @@
 # pattern-manager — Design
 
+> **EVOLUTION (P2 live-verified P2 blocker fix — ANCHOR-IDENTITY consolidation).** The Pattern Miner
+> now processes a P2 corpus in **multiple bounded sub-runs** (its trail-aligned batch-cap fix,
+> `design/pattern-miner-batch-cap`), so the **same fault-origin** (same
+> `provenance.anchorScenarioId`) can be mined in more than one sub-run and emit **more than one
+> `PatternMinedEvent`** for one real pattern. Pattern Manager currently dedupes only on `eventId`
+> (idempotency) and mints `patternId` as a UUIDv5 over `(trailId, sequence, sourceWindowId,
+> snapshotId)` — i.e. **per mined event** — so two mined events for one `anchorScenarioId` would
+> persist as **two draft patterns** (an over-count). This evolution adds **anchor-identity
+> consolidation**: mined patterns sharing the same `anchorScenarioId` (within a
+> `(domain, snapshotId, codebookVersion)` scope) **consolidate into ONE Pattern Store pattern**,
+> aggregating occurrences/support across the contributing mined events; **unexplained**
+> (`anchorScenarioId` null/absent) patterns do **not** consolidate by anchor (each stays distinct).
+> It **replaces** the "one draft per mined event" behaviour for anchored patterns, is **idempotent and
+> replay-safe** (a re-delivered mined event never double-counts), and also fixes a **latent** over-count
+> that exists even without batching (multiple mined sequences for one fault-origin collapse to one
+> discovered pattern). NEW/CHANGED sections are tagged **[ANCHOR-CONSOL]**. **No contract change:** the
+> `anchorScenarioId` field already exists on `PatternMinedEvent.provenance` (merged, PR #331);
+> consolidation is internal to the Pattern Store + read API — no new topic/payload/field (see the
+> no-contract-change note below).
+
+> **[ANCHOR-CONSOL] No contract change; relationship to ReconciliationService MERGED.** Consolidation
+> is **internal**: it changes how many Pattern Store rows one fault-origin produces and how their
+> occurrences/support aggregate — the frozen `PatternDiscoveredEvent`/`PatternApprovedEvent` shapes and
+> topics are **unchanged**, and `anchorScenarioId` is already on the frozen `PatternMinedEvent`. It is
+> **distinct from** codebook `MERGED` reconciliation: `MERGED` merges a mined pattern's *complementary
+> appendage* into a matched **codebook scenario** at the *symptom-chain* level (a reconciliation
+> classification about codebook explanation); **anchor-consolidation** collapses *multiple mined events
+> for the same fault-origin anchor* into one *Pattern Store identity* (a persistence-identity concern,
+> upstream of and orthogonal to reconciliation). A consolidated pattern is still reconciled and
+> classified `CONFIRMED`/`MERGED`/`UNEXPLAINED` exactly as before — consolidation decides *which row*
+> the mined event folds into; reconciliation decides *that row's codebook explanation*. They do not
+> overlap and neither replaces the other.
+
 Buildable design for the Pattern Manager — the single owner of the full pattern domain. It
 consumes mined sequences (`patterns.mined`), enriches them with RCA, **structural validation**,
 codebook reconciliation and explainability metadata, **derives a per-pattern session-window rule
@@ -98,15 +131,15 @@ steps; the emit/serve tasks now additionally carry/serve `sessionWindow`.
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
-| 1. Consume `patterns.mined`: validate, dedupe on `eventId`, extract sequence/metrics/`trailId`/timing/provenance | `MinedPatternConsumer` (Spring Kafka listener) calls `EventCodec.deserialize` (envelope plus payload validation plus schemaVersion policy); `IdempotencyService` checks the `processed_event` table on `eventId`; on success the typed `PatternMinedEvent` (including its `timing`) is handed to `PatternEnrichmentService`. |
+| 1. Consume `patterns.mined`: validate, dedupe on `eventId`, extract sequence/metrics/`trailId`/timing/provenance | `MinedPatternConsumer` (Spring Kafka listener) calls `EventCodec.deserialize` (envelope plus payload validation plus schemaVersion policy); `IdempotencyService` checks the `processed_event` table on `eventId`; on success the typed `PatternMinedEvent` (including its `timing` and `provenance.anchorScenarioId`) is handed to `PatternEnrichmentService`. **[ANCHOR-CONSOL]** the `eventId` dedupe is retained unchanged (Kafka at-least-once idempotency — a *re-delivered* mined event is dropped before any aggregation, so consolidation never double-counts a redelivery); anchor-identity consolidation is a **distinct, second** collapse over *different* mined events that share one `anchorScenarioId` (see the two-level model in [ANCHOR-CONSOL] Algorithm). |
 | 2. Perform RCA (graph ordering): map alarm types to graph objects via Topology API, designate lowest-in-dependency plus earliest-timestamp as `rootCauseAlarmType` | `RcaService.graphOrderingRca(...)` resolves each sequence alarm type to a graph object and bounded dependency position via `TopologyClient`, then applies the ordering algorithm (see Algorithm logical flow). Parameters from `KnowledgeClient`. **RCA is unchanged** — structural-first, as before. The set of resolved objects (`ResolvedObject[]`) it produces is captured and **handed to the structural-validation step** so no Topology call is repeated. |
 | 3. **Perform structural validation:** using the objects already resolved during RCA, verify they form a connected dependency path; flag-and-persist on failure; params from Knowledge | `StructuralValidationService.validate(resolvedObjects, params)` runs **after** RCA and **before** persistence. It reuses the `ResolvedObject[]` from RCA (no redundant Topology fetch) and, via the **same** `TopologyClient` bounded-traversal operation, checks connectivity under Knowledge-sourced params (max-hops, strictness, flag-vs-reject). Outputs `structurallyValidated` (boolean) + `structuralValidationReason` (null on pass). MVP policy = **FLAG** (always persist). This is a **separate step from RCA**. |
 | 4. Apply codebook RCA override: test sequence overlap via Codebook API, replace RCA plus record `codebookMatchId` | `ReconciliationService.matchCodebook(...)` (via `CodebookClient`) finds an overlapping scenario; if present, `RcaService` takes the scenario's designated root cause as the authoritative `rootCauseAlarmType` and records `codebookMatchId`. Unchanged by this rework. |
 | 5. Reconcile against codebook: confirm match, merge complementary appendages, flag no-model-explanation | `ReconciliationService` classifies the result as `CONFIRMED` (scenario match), `MERGED` (complementary appendage merged) or `UNEXPLAINED` (no scenario, so `codebookMatchId` null, `reconcileStatus = unexplained`). Unchanged. |
 | 6. Assemble explainability metadata: instanceCount, support/confidence/lift, timing stats, codebook overlap ref, **structural-validation status**, supporting example instances | `ExplainabilityAssembler` builds the `XaiMetadata` value object (instanceCount, metrics, `timing`, `codebookMatchId`, `reconcileStatus`, `structurallyValidated`, `structuralValidationReason`, **`sessionWindow`**, `supportingInstances` from the event provenance). `sessionWindow` is folded into XAI so the read API exposes it (criterion 21). |
 | 7. **Derive session window (NEW):** from the mined `timing` statistics compute `sessionWindow` ({`windowMs` integer greater than 0, `type` gap-based or fixed); deterministic, data-driven, no Knowledge input, no undocumented magic numbers | `SessionWindowDeriver.derive(timing)` runs once at intake (before persist), reading **only** `PatternMinedEvent.timing` (no `KnowledgeClient` call). It computes `windowMs` as a documented margin over the observed timeframe, clamped to documented bounds, and selects `type` from the inter-arrival regularity (see Algorithm logical flow / OQ-5). Pure function: same `timing` in gives same `sessionWindow` out. The result is attached to the pattern record (and to XAI) and persisted; `timing` itself is left unchanged. |
-| 8. Persist to Pattern Store with lifecycle `draft`; assign stable `patternId` | `PatternStoreService.persistDraft(...)` writes the `pattern` row (lifecycle `draft`, including the structural-validation columns and the two new **`session_window_ms`** / **`session_window_type`** columns), its `supporting_instance` rows, and a `lifecycle_transition` audit row; `patternId` is a deterministic UUIDv5 over `(trailId, sequence, sourceWindowId, snapshotId)` for upsert idempotency. The persisted `sessionWindow` is the single source reused by both emitted events. |
-| 9. Emit `patterns.discovered`: one `PatternDiscoveredEvent` per persisted draft, carrying `sessionWindow` | `PatternEventPublisher.publishDiscovered(...)` builds a `TypedEnvelope` of `PatternDiscoveredEvent` (`lifecycle = draft`, **`sessionWindow = {windowMs, type}`** read from the persisted record) via `EventCodec.serialize` and sends to `patterns.discovered`. `EventCodec.serialize` validates `sessionWindow` against the merged schema before send (criterion 19). The event **does not** carry the structural-validation flag (frozen schema). |
+| 8. Persist to Pattern Store with lifecycle `draft`; assign stable `patternId` | `PatternStoreService.persistDraft(...)` writes the `pattern` row (lifecycle `draft`, including the structural-validation columns and the two new **`session_window_ms`** / **`session_window_type`** columns), its `supporting_instance` rows, and a `lifecycle_transition` audit row. **[ANCHOR-CONSOL] `patternId` derivation changes for anchored patterns:** for a mined event with a non-null `provenance.anchorScenarioId`, `patternId` is a deterministic UUIDv5 over the **anchor-identity key** `(domain, snapshotId, codebookVersion, anchorScenarioId)` — so **all** mined events for one fault-origin (across sub-runs) map to the **same** `pattern` row, which the new `PatternConsolidationService` **upserts + aggregates** (see [ANCHOR-CONSOL] Algorithm). For an **unexplained** event (`anchorScenarioId` null/absent) `patternId` keeps the per-event UUIDv5 over `(trailId, sequence, sourceWindowId, snapshotId)` — each unexplained cascade stays distinct. The persisted `sessionWindow` is the single source reused by both emitted events (recomputed on aggregation from the combined timing — see below). |
+| 9. Emit `patterns.discovered`: one `PatternDiscoveredEvent` per persisted draft, carrying `sessionWindow` | `PatternEventPublisher.publishDiscovered(...)` builds a `TypedEnvelope` of `PatternDiscoveredEvent` (`lifecycle = draft`, **`sessionWindow = {windowMs, type}`** read from the persisted record) via `EventCodec.serialize` and sends to `patterns.discovered`. `EventCodec.serialize` validates `sessionWindow` against the merged schema before send (criterion 19). The event **does not** carry the structural-validation flag (frozen schema). **[ANCHOR-CONSOL] emit-once-per-identity for anchored patterns:** `publishDiscovered` fires **only when the consolidation upsert CREATED a new `pattern` row** (first contributing mined event for that anchor identity). When a later sub-run's mined event **aggregates into an existing** anchored row, the row is updated (occurrences/support recomputed) but **no** duplicate `PatternDiscoveredEvent` is emitted for the same `patternId` — so one fault-origin yields exactly one discovered event. (A re-emit-on-material-change policy is a documented alternative; MVP emits once on create — see [ANCHOR-CONSOL] Design alternatives.) Unexplained patterns emit one discovered event per distinct pattern as before. |
 | 10. Serve the pattern read API (list draft with XAI incl. `sessionWindow`, get by id incl. `sessionWindow`, list approved incl. `sessionWindow`, filter by lifecycle); serve approved to Correlation Engine | `PatternQueryController` — `GET /patterns` (filter `lifecycle`, pagination), `GET /patterns/{patternId}`; backed by `PatternQueryService` reading the Pattern Store. The response and XAI metadata now include `structurallyValidated` + `structuralValidationReason` and **`sessionWindow`** ({`windowMs`, `type`}) (criterion 21). The same `GET /patterns?lifecycle=approved` serves the Correlation Engine the `sessionWindow` it uses to govern correlation-instance lifetime. |
 | 11. Process approval intent (`decision: approve or reject`): validate `draft`; on **approve** transition to `approved` and record timestamp; on **reject** transition to the terminal `rejected` state and record timestamp (Q1) | `POST /patterns/{patternId}/approve` calls `LifecycleService.decide(...)` which validates current state `draft`. On `decision = approve` it transitions to `approved`, writes a `lifecycle_transition` audit row (`draft` to `approved`), then triggers task 13 (emit `PatternApprovedEvent`). On `decision = reject` (Q1) it transitions to the distinct terminal state **`rejected`**, writes a `lifecycle_transition` audit row (`draft` to `rejected`, with `reviewer`/`notes`), and **emits no event** — the reject is an internal Pattern-Store + read-API outcome only. A rejected pattern is never served by `GET /patterns?lifecycle=approved`. Either decision on a non-`draft` pattern is `409`. |
 | 12. Process operator edits (placeholder): per-position `optional` flags on a `draft` pattern via the **frozen** `PatternEdit` body `{ sequenceFlags: [{ index, optional }], reviewer, notes? }` | `PATCH /patterns/{patternId}` calls `PatternEditService.applyEdit(...)` which validates `draft`, maps each `sequenceFlags[].index` to a `sequence_element.position` and sets that element's `optional` (plus reviewer/notes into edit metadata), returns the updated record. Out-of-range `index` gives `422`. Edit metadata stays internal — never added to `PatternApprovedEvent`. **`sessionWindow` is read-only — this endpoint never edits it** (OQ-6 post-MVP). |
@@ -121,7 +154,7 @@ Passive) and the spec's Phase applicability table.
 | Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
 |---|---|---|---|
 | P1 — Topology onboarding | Idle | None. The Kafka consumer is subscribed but `patterns.mined` carries no traffic in P1 and no patterns exist; the HTTP read API returns empty result sets. The service is deployed and healthy but drives and serves no domain work. | In: — . Out: — |
-| P2 — Pattern learning | Active | `MinedPatternConsumer`, `IdempotencyService`, `PatternEnrichmentService` (`RcaService`, **`StructuralValidationService`**, `ReconciliationService`, `ExplainabilityAssembler`, **`SessionWindowDeriver`**), `PatternStoreService`, `PatternEventPublisher` (discovered plus approved, both carrying `sessionWindow`); HTTP: `PatternQueryController`, `LifecycleService` (approve/deprecate), `PatternEditService`. Calls `TopologyClient` (RCA plus structural validation, same client), `CodebookClient`, `KnowledgeClient`. `SessionWindowDeriver` calls **no** collaborator (pure over `timing`). | In: `patterns.mined` (Kafka, with `timing`); approval-intent / edit / deprecate via HTTP API. Out: `patterns.discovered`, `patterns.approved` (Kafka, both with `sessionWindow`). Serves: read API (web-ui, incl. `sessionWindow`). Calls: Topology, Codebook Generator, Knowledge APIs. |
+| P2 — Pattern learning | Active | `MinedPatternConsumer`, `IdempotencyService`, `PatternEnrichmentService` (`RcaService`, **`StructuralValidationService`**, `ReconciliationService`, `ExplainabilityAssembler`, **`SessionWindowDeriver`**), **`PatternConsolidationService`**, `PatternStoreService`, `PatternEventPublisher` (discovered plus approved, both carrying `sessionWindow`); HTTP: `PatternQueryController`, `LifecycleService` (approve/deprecate), `PatternEditService`. Calls `TopologyClient` (RCA plus structural validation, same client), `CodebookClient`, `KnowledgeClient`. `SessionWindowDeriver` calls **no** collaborator (pure over `timing`). | In: `patterns.mined` (Kafka, with `timing`); approval-intent / edit / deprecate via HTTP API. Out: `patterns.discovered`, `patterns.approved` (Kafka, both with `sessionWindow`). Serves: read API (web-ui, incl. `sessionWindow`). Calls: Topology, Codebook Generator, Knowledge APIs. |
 | P3 — Real-time correlation | Passive | `PatternQueryController` only (read path; serves the structural-validation flag and `sessionWindow` in XAI metadata). No Kafka consumption or production; no enrichment, no derivation, no lifecycle changes driven internally. | In: — . Out: read API responses (`GET /patterns?lifecycle=approved` to Correlation Engine at startup/refresh, carrying `sessionWindow`; web-ui pattern reads). No topic I/O. |
 
 ## Module breakdown
@@ -137,6 +170,7 @@ flowchart TB
     REC["ReconciliationService"]
     SWD["SessionWindowDeriver from timing only"]
     XAI["ExplainabilityAssembler"]
+    CONS["PatternConsolidationService anchor-identity upsert and aggregate NEW"]
   end
   subgraph http["HTTP surface"]
     QRY["PatternQueryController"]
@@ -166,9 +200,10 @@ flowchart TB
   SV --> TOPO
   SV --> KN
   REC --> CB
-  ENR --> PSS
+  ENR --> CONS
+  CONS --> PSS
   PSS --> DB
-  ENR --> PUB
+  CONS --> PUB
   QRY --> PSS
   LIFE --> PSS
   LIFE --> PUB
@@ -206,6 +241,20 @@ flowchart TB
 - **PatternStoreService** — the **sole writer** to the Pattern Store; upserts patterns
   (including the two new columns), supporting instances, sequence elements, lifecycle-transition
   audit rows.
+- **PatternConsolidationService (NEW [ANCHOR-CONSOL])** — decides the **pattern identity** for an
+  enriched mined event and folds it into the Pattern Store:
+  - **Anchored** (`anchorScenarioId != null`): computes the **anchor-identity `patternId`**
+    (UUIDv5 over `(domain, snapshotId, codebookVersion, anchorScenarioId)`) and does an
+    **atomic upsert-with-aggregation** on that row inside the same DB transaction as the
+    `processed_event` insert. First contributing event **creates** the `draft` row and records
+    which mined `eventId`s contributed (a `contributing_event` set); each subsequent event with the
+    same identity **aggregates** — sums occurrences, combines support/confidence/lift, unions
+    supporting instances, keeps the representative sequence — **without** re-counting an already
+    contributing `eventId` (replay-safe). Emits `patterns.discovered` only on create.
+  - **Unexplained** (`anchorScenarioId == null/absent`): no anchor consolidation — falls back to the
+    existing per-event UUIDv5 identity so each unexplained cascade persists as its own distinct
+    draft. (Sole owner rule preserved — still only PatternStoreService writes; consolidation is the
+    identity/aggregation policy in front of it.)
 - **PatternEventPublisher** — sole producer of `PatternDiscoveredEvent` and
   `PatternApprovedEvent`. **Both events carry `sessionWindow` ({`windowMs`, `type`}) read from the
   persisted Pattern Store record** (the approved value equals the value emitted at discovery);
@@ -223,9 +272,21 @@ flowchart TB
 ## Data model / DB schema
 
 Owned datastore: **PostgreSQL Pattern Store** (logical schema `pattern`). Pattern Manager is the
-**sole writer**. `patternId` is the upsert key (UUIDv5 over the mining provenance, so a
-redelivered mined event maps to the same row); `processed_event` carries the `eventId` dedupe
-set.
+**sole writer**. `patternId` is the upsert key; `processed_event` carries the `eventId` dedupe set.
+
+**[ANCHOR-CONSOL] `patternId` derivation is now anchor-aware:**
+- **Anchored** patterns — `patternId = UUIDv5(namespace, "{domain}|{snapshotId}|{codebookVersion}|{anchorScenarioId}")`,
+  the **anchor identity**. Every mined event for one fault-origin (across sub-runs) maps to this one
+  row, which is upserted-and-aggregated.
+- **Unexplained** patterns — `patternId = UUIDv5(namespace, "{trailId}|{sequence}|{sourceWindowId}|{snapshotId}")`,
+  the **per-event identity** (the previous scheme), so each unexplained cascade stays a distinct row.
+
+Two structures support consolidation:
+- The **`pattern`** row gains an aggregate view: `instance_count`, `support`, `confidence`, `lift`
+  and `timing` become **running aggregates** over the contributing mined events (see the aggregation
+  rules in [ANCHOR-CONSOL] Algorithm). No new column is needed for the aggregate metrics (they reuse
+  the existing metric columns), but a small **`contributing_event`** child table records which mined
+  `eventId`s have already been folded in (so re-aggregation is idempotent and auditable).
 
 The structural-validation rework added two columns to `pattern`:
 **`structurally_validated BOOLEAN NOT NULL`** and **`structural_validation_reason TEXT NULL`**
@@ -246,6 +307,7 @@ erDiagram
   PATTERN ||--o{ SEQUENCE_ELEMENT : has
   PATTERN ||--o{ SUPPORTING_INSTANCE : has
   PATTERN ||--o{ LIFECYCLE_TRANSITION : audits
+  PATTERN ||--o{ CONTRIBUTING_EVENT : aggregates
   PROCESSED_EVENT {
     uuid event_id PK
     text source
@@ -279,6 +341,14 @@ erDiagram
     int position
     text alarm_type
     boolean optional
+  }
+  CONTRIBUTING_EVENT {
+    uuid event_id PK
+    uuid pattern_id FK
+    text anchor_scenario_id
+    int occurrences
+    double support
+    timestamptz folded_at
   }
   SUPPORTING_INSTANCE {
     uuid id PK
@@ -328,6 +398,20 @@ Concrete columns, keys, constraints and indexes:
   outcome of a reject decision (Q1).
 - **`processed_event`** — `event_id UUID PK` is the idempotency set; written in the same
   transaction as the `pattern` upsert so a redelivered `eventId` is a no-op (criterion 10).
+- **[ANCHOR-CONSOL] `pattern` additions** — a nullable **`anchor_scenario_id TEXT NULL`** column
+  (the fault-origin anchor; null for unexplained patterns) with index `idx_pattern_anchor
+  (anchor_scenario_id)`; the metric columns (`support`, `confidence`, `lift`, `instance_count`,
+  `timing`) are **running aggregates** for anchored rows (recomputed on each fold-in). The anchor
+  identity `(domain, snapshot_id, codebook_version, anchor_scenario_id)` is unique per anchored row
+  by construction of `patternId` — enforced by the `pattern_id` PK (so concurrent folds of the same
+  anchor serialize on the row via `SELECT ... FOR UPDATE`).
+- **[ANCHOR-CONSOL] `contributing_event`** — `event_id UUID PK`, `pattern_id UUID FK -> pattern`,
+  `anchor_scenario_id TEXT`, `occurrences INT`, `support DOUBLE PRECISION`, `folded_at TIMESTAMPTZ
+  NOT NULL`. One row per mined `eventId` that has been folded into an anchored pattern. **Idempotency
+  guard:** an `INSERT ... ON CONFLICT (event_id) DO NOTHING` before aggregating means a re-delivered
+  or replayed mined event whose `eventId` is already present is **not folded again** — the aggregate
+  is left unchanged (no double-count), complementing the `processed_event` gate. `idx_contrib_pattern
+  (pattern_id)` supports re-aggregation/audit.
 
 The `structurally_validated` / `structural_validation_reason`, `optional` markers and `edit_meta`
 are all **internal** — they feed the read API (and Correlation matching considerations post-MVP),
@@ -594,8 +678,12 @@ sequenceDiagram
       C->>W: derive sessionWindow from timing only, no collaborator call
       W-->>C: sessionWindow windowMs and type
       C->>X: assemble XaiMetadata incl structural validation status and sessionWindow
-      C->>S: upsert draft pattern incl sessionWindow, sequence, instances, audit, processed_event
-      C->>P: emit PatternDiscoveredEvent lifecycle draft with sessionWindow, no struct flag
+      C->>S: consolidate by anchor identity, upsert-and-aggregate draft (or per-event draft if unexplained), incl sessionWindow, sequence, instances, audit, contributing_event, processed_event
+      alt anchored row CREATED (first contributor) or unexplained
+        C->>P: emit ONE PatternDiscoveredEvent lifecycle draft with sessionWindow, no struct flag
+      else anchored row aggregated (later sub-run, same anchorScenarioId)
+        Note over C,P: fold occurrences, support and timing into existing pattern, NO duplicate discovered event
+      end
       C->>C: commit offset
     end
   end
@@ -954,6 +1042,113 @@ optional escape hatch for a hypothetical non-conformant producer; under the live
 no-op. The insufficient-timing fallback (below) still covers thin `timing`. This fully resolves
 OQ-5.
 
+### [ANCHOR-CONSOL] Anchor-identity consolidation (NEW — the P2 over-count fix)
+
+**Problem restated.** With the Miner's trail-aligned batch cap, one fault-origin (one
+`provenance.anchorScenarioId`) can be mined in **several sub-runs** and emit several
+`PatternMinedEvent`s. Under the previous per-event `patternId`, each became its own draft — an
+over-count. (This latent over-count exists even without batching: any run that emits more than one
+mined sequence for one fault-origin over-counts.) Consolidation collapses them to **one** Pattern
+Store pattern per fault-origin identity.
+
+**Two independent levels of collapse — do not conflate them.**
+1. **`eventId` idempotency (unchanged).** A *re-delivered copy of the same mined event* (same
+   `eventId`, Kafka at-least-once) is dropped by the `processed_event` gate *before* enrichment —
+   never counted at all.
+2. **[ANCHOR-CONSOL] anchor consolidation (new).** *Different* mined events (distinct `eventId`s)
+   that share one `anchorScenarioId` within a `(domain, snapshotId, codebookVersion)` scope are
+   folded into one anchored `pattern` row and their occurrences/support aggregated.
+
+**Identity + scope.** The consolidation key is `(domain, snapshotId, codebookVersion,
+anchorScenarioId)`. Scoping to `snapshotId` + `codebookVersion` means a **new topology snapshot or a
+recompiled codebook** re-mints identity — patterns learned under different graph/codebook contexts do
+**not** silently merge (correct: they are different fault models). Unexplained events
+(`anchorScenarioId == null/absent`) are **excluded** from anchor consolidation and keep the per-event
+identity — an unexplained cascade has no fault-origin to consolidate on, and merging distinct
+unexplained cascades would fabricate a pattern.
+
+```mermaid
+flowchart TD
+  E["enriched mined event (rootCauseAlarmType, reconcileStatus, sessionWindow, metrics, timing, provenance)"] --> DUP{"eventId already in processed_event"}
+  DUP -- yes --> DROP["drop (at-least-once redelivery); no aggregation; ack"]
+  DUP -- no --> ANC{"provenance.anchorScenarioId present"}
+  ANC -- no --> UNEXP["per-event patternId over (trailId, sequence, sourceWindowId, snapshotId); insert distinct draft; emit PatternDiscoveredEvent"]
+  ANC -- yes --> KEY["patternId = UUIDv5(domain, snapshotId, codebookVersion, anchorScenarioId)"]
+  KEY --> LOCK["SELECT pattern FOR UPDATE by patternId (serialize concurrent folds)"]
+  LOCK --> EXIST{"row exists"}
+  EXIST -- no --> CREATE["INSERT draft row (first contributor); insert contributing_event(eventId); write processed_event; emit ONE PatternDiscoveredEvent"]
+  EXIST -- yes --> GUARD{"contributing_event already has this eventId"}
+  GUARD -- yes --> NOOP["no-op fold (replay-safe): aggregate unchanged; write processed_event; ack; NO emit"]
+  GUARD -- no --> AGG["aggregate: sum occurrences, combine support/confidence/lift, union supporting instances, combine timing, keep representative sequence; insert contributing_event(eventId); write processed_event; NO second emit"]
+```
+
+**Aggregation rules (define exactly how).** Let the row already aggregate `n` contributing events
+with instance count `N = sum occurrences`; a new event `e` contributes `n_e` occurrences (its
+`instanceCount` from provenance/supporting-instances, at least 1).
+- **occurrences / instanceCount:** `instance_count := N + n_e` (a plain **sum** — the total observed
+  occurrences of the fault-origin across sub-runs).
+- **support:** the Miner's `support` is a per-sub-run fraction, so raw fractions are **not** additively
+  comparable. Aggregate as an **occurrence-weighted mean**: `support := (support_old * N + support_e *
+  n_e) / (N + n_e)` — the corpus-level support of the fault-origin, weight by how many occurrences each
+  contributor saw. Deterministic and order-independent for the final value.
+- **confidence:** same **occurrence-weighted mean** as support (a probability-like ratio; weight by
+  occurrences).
+- **lift:** **occurrence-weighted mean** as well (a ratio metric; a weighted mean keeps it comparable
+  and avoids double-counting). Documented rationale: for MVP a weighted mean is a defensible,
+  order-independent combiner; a full re-derivation of lift from joint/marginal counts is a post-MVP
+  refinement (the raw per-sub-run counts are not carried on the frozen event, so exact re-derivation
+  is not available without a contract change — explicitly **not** requested).
+- **timing:** combine the ms `timing` sub-keys as an **occurrence-weighted mean** of
+  `timeframeMs`/`medianInterArrivalMs`/`maxInterArrivalMs`(**max** for max)/`stddevInterArrivalMs`, then
+  re-run `SessionWindowDeriver.derive(combinedTiming)` so the persisted `sessionWindow` reflects the
+  **combined** tempo. Because the deriver is a pure function of `timing`, the recomputed `sessionWindow`
+  is deterministic for a given final aggregate.
+- **supporting instances:** **union** the `supportingInstances[]` across contributors (dedup on
+  `sourceWindowId`), so XAI shows all observed occurrences.
+- **representative sequence:** keep **one** representative — the sequence from the contributor with the
+  highest occurrence-weighted support, tie-broken by longest sequence then lexicographic (deterministic).
+  All contributors share the same `anchorScenarioId`, so their sequences are variants of one cascade;
+  the representative is that fault-origin's canonical signature. The alternative (union/superset sequence)
+  is rejected — see Design alternatives.
+- **rootCauseAlarmType / codebookMatchId / reconcileStatus / structurallyValidated:** taken from the
+  **first (create) contributor** and left stable across folds (they are properties of the fault-origin
+  identity, already agreed across contributors since they share the anchor + snapshot + codebook); a
+  later fold does not flip them. (If a later contributor disagrees — should not happen within one
+  anchor+snapshot+codebook scope — the create value wins and the divergence is logged at WARN for audit.)
+
+**Idempotency + replay safety (the crux).** The fold is guarded by `contributing_event.event_id`
+(`INSERT ... ON CONFLICT DO NOTHING`) **and** the enclosing `processed_event.event_id` gate, both in
+**one DB transaction** with the `SELECT ... FOR UPDATE` on the pattern row. So:
+- a **re-delivered** mined event (same `eventId`) is dropped by `processed_event` — never folded;
+- even if it slipped past (belt-and-braces), `contributing_event` `ON CONFLICT DO NOTHING` makes the
+  fold a **no-op** — the aggregate is unchanged;
+- because occurrences are a **sum over the distinct contributing `eventId` set**, and each `eventId`
+  can contribute **at most once**, the final aggregate is a deterministic function of the *set* of
+  contributing events — **order-independent and double-count-free** under any at-least-once replay.
+
+This satisfies "same `anchorScenarioId` across sub-runs consolidates to ONE Pattern Store pattern with
+summed occurrences" and "idempotent re-delivery does not double-count".
+
+```mermaid
+sequenceDiagram
+  participant SR1 as sub-run 1 mined event (anchor SC-FIBER)
+  participant SR2 as sub-run 2 mined event (anchor SC-FIBER)
+  participant EN as PatternEnrichmentService
+  participant CO as PatternConsolidationService
+  participant DB as Pattern Store (one txn each)
+  participant P as patterns.discovered
+  SR1->>EN: PatternMinedEvent eventId E1, anchorScenarioId SC-FIBER
+  EN->>CO: enriched (rca, sessionWindow, metrics)
+  CO->>DB: patternId = uuid5(domain, snap, cbver, SC-FIBER), row absent, CREATE draft plus contributing_event E1 plus processed_event E1
+  CO->>P: emit ONE PatternDiscoveredEvent for that patternId
+  SR2->>EN: PatternMinedEvent eventId E2, anchorScenarioId SC-FIBER
+  EN->>CO: enriched
+  CO->>DB: same patternId, row exists, FOR UPDATE then fold E2 (sum occurrences, weighted support, union instances, recompute sessionWindow) plus contributing_event E2 plus processed_event E2
+  Note over CO,P: no second discovered event (already emitted on create), one Pattern Store pattern, occurrences summed
+  SR1->>EN: REDELIVERY of E1 (at-least-once)
+  EN->>CO: processed_event has E1, drop, no fold, ack
+```
+
 ## Seed data & examples
 
 N/A — the Pattern Manager owns no seed/fixture/sample-data generation. Test fixtures
@@ -973,7 +1168,10 @@ statistical artifact). The Pattern Manager only serves the structured data
 |---|---|---|
 | Unparseable/poison `patterns.mined` (bad JSON, missing required field e.g. `sequence`, `additionalProperties` violation, bind failure) | `EventCodec.deserialize` throws; consumer publishes original bytes plus an `error` header to **`patterns.mined.dlq`**, then acks and continues to the next message — never restarts, never silently drops | DLQ record; ERROR log with `eventId` if extractable |
 | Unknown major `schemaVersion` (2 and above) | `SchemaVersionPolicy.check` rejects in the codec, treated as poison, routed to `patterns.mined.dlq` | DLQ record; ERROR log |
-| Duplicate `eventId` (Kafka at-least-once redelivery) | `IdempotencyService` finds the `eventId` in `processed_event`, skips enrichment, no second pattern row, acks | INFO log duplicate eventId skipped; exactly one pattern row |
+| Duplicate `eventId` (Kafka at-least-once redelivery) | `IdempotencyService` finds the `eventId` in `processed_event`, skips enrichment, no second pattern row, no fold, acks | INFO log duplicate eventId skipped; exactly one pattern row; aggregate unchanged |
+| **[ANCHOR-CONSOL] Same `anchorScenarioId` in a later sub-run (distinct `eventId`)** | Not an error — `PatternConsolidationService` folds it into the existing anchored row: `SELECT ... FOR UPDATE`, `contributing_event ON CONFLICT DO NOTHING`, aggregate occurrences/support/timing, recompute `sessionWindow`; **no** duplicate `PatternDiscoveredEvent`. Concurrent folds of one anchor serialize on the row lock | INFO log `pattern_consolidated` (patternId, anchorScenarioId, contributors, instanceCount); one pattern row |
+| **[ANCHOR-CONSOL] Contributing event races / partial-txn failure mid-fold** | The fold (row lock + `contributing_event` insert + aggregate + `processed_event` insert) is **one DB transaction**; a failure rolls it back, the offset is not committed, and the mined event is redelivered and re-folded safely (the `contributing_event` guard makes the retry idempotent) | ERROR log; no offset commit; safe replay |
+| **[ANCHOR-CONSOL] Enriched anchored event whose create-contributor metadata (rootCause/reconcile) would diverge on a later fold** | Create-contributor values win and are held stable across folds (they are properties of the shared anchor+snapshot+codebook identity); a divergent later fold is logged for audit but does not flip persisted RCA | WARN log `anchor_fold_divergence`; aggregate metrics still fold; RCA/reconcile stable |
 | Topology / Codebook / Knowledge **unavailable or 5xx** for a well-formed event (including the structural-validation traversal call) | Retry with bounded exponential backoff (RestClient plus retry policy); on exhaustion **do not DLQ** (the event is valid) — leave the offset uncommitted so the message is redelivered after the dependency recovers; metric `pm_collaborator_failures_total` increments | WARN/ERROR log; no offset commit; consumer lag visible in metrics |
 | Codebook returns **no overlapping scenario** (algorithm no-match) | Not an error — `reconcileStatus = unexplained`, `codebookMatchId` null, graph-ordering RCA retained | INFO log; pattern persisted as draft |
 | Topology cannot resolve an alarm type to an object | RCA falls back to **earliest-timestamp** tie-break alone for that element; if no object resolves at all, the graph-ordering candidate defaults to the earliest-timestamp alarm type; logged. Structural validation treats an unresolved object as **not connected** (it cannot be in the visited set), contributing `structurallyValidated = false` with a reason naming it | WARN log; pattern still persisted |
@@ -1005,7 +1203,14 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | **Insufficient-timing fallback** (OQ-5) | (A) fail/DLQ the event; (B) emit a non-positive/zero window; (C) documented `SESSION_WINDOW_MIN_MS` fallback | **C** — a valid mined pattern must not be lost just because its timeframe is unobservable; emitting a zero/negative window would violate the schema (`windowMs` must be a positive integer in practice). The MIN-MS fallback always yields a usable, schema-valid window and the event still flows. |
 | **When derivation runs / event consistency** (criterion 20) | (A) derive at intake and persist, reuse for both events; (B) re-derive at approval time | **A** — deriving once at intake and persisting guarantees the approved event's `sessionWindow` is byte-identical to the discovered event's (criterion 20), avoids a second computation, and makes the persisted record the single source of truth. (B) risks drift if derivation params change between discovery and approval. |
 | **sessionWindow editability** (OQ-6) | (A) operator-editable via `PATCH`; (B) derived and read-only in MVP | **B** — the spec fixes `sessionWindow` as derived and read-only for MVP; making it editable would add an editable field and likely a new contract on `PatternApprovedEvent`, a spec-level change requiring human approval (OQ-6). The `PATCH` placeholder edits only `optional` markers; it never touches `sessionWindow`. |
-| `patternId` assignment | (A) random UUIDv4 per consume; (B) DB sequence; (C) deterministic UUIDv5 over mining provenance `(trailId, sequence, sourceWindowId, snapshotId)` | **C** — a deterministic id makes the consume-plus-persist idempotent under Kafka redelivery without a separate lookup (criterion 10) and ties a pattern stably to its mining origin. |
+| `patternId` assignment | (A) random UUIDv4 per consume; (B) DB sequence; (C) deterministic UUIDv5 over mining provenance `(trailId, sequence, sourceWindowId, snapshotId)`; (D) **[ANCHOR-CONSOL] anchor-aware**: UUIDv5 over `(domain, snapshotId, codebookVersion, anchorScenarioId)` for anchored patterns, UUIDv5 over `(trailId, sequence, sourceWindowId, snapshotId)` for unexplained | **D** (evolves C) — (C) mints a distinct id per mined event, so one fault-origin mined in several sub-runs over-counts as several drafts. Keying anchored patterns on the **anchor identity** makes all sub-runs of one fault-origin map to one row (consolidation) while still being deterministic + redelivery-idempotent (criterion 10). Unexplained patterns keep the per-event identity (no anchor to collapse on). |
+| **[ANCHOR-CONSOL] consolidation scope** | (A) by `anchorScenarioId` alone; (B) by `(domain, snapshotId, codebookVersion, anchorScenarioId)`; (C) global by `anchorScenarioId` across all snapshots/codebooks | **B** — scenario ids are only unique within a codebook/snapshot; (A)/(C) would merge fault models learned under different topology snapshots or recompiled codebooks — different fault contexts that must stay distinct. Scoping to snapshot + codebook version re-mints identity correctly when the graph/codebook changes. |
+| **[ANCHOR-CONSOL] unexplained consolidation** | (A) also consolidate unexplained by some key; (B) each unexplained cascade stays distinct (per-event identity) | **B** — an unexplained cascade has no fault-origin anchor; merging distinct unexplained cascades would fabricate a pattern that no scenario explains and hide genuinely different unexplained shapes. Each stays its own draft for operator review. |
+| **[ANCHOR-CONSOL] metric aggregation** | (A) sum raw per-sub-run support/confidence/lift; (B) occurrence-weighted mean (sum only occurrences/instances); (C) re-derive lift/confidence from raw joint/marginal counts | **B** — occurrences/instances are additive (a plain sum = total observed), but support/confidence/lift are *ratios* — summing them is meaningless. An occurrence-weighted mean gives the corpus-level value and is order-independent (deterministic on the final contributor set). (C) needs raw counts not carried on the frozen event — unavailable without a contract change we explicitly do **not** request. |
+| **[ANCHOR-CONSOL] representative sequence on aggregation** | (A) keep one representative (highest weighted-support contributor, tie longest then lexicographic); (B) union/superset of all contributors' sequences | **A** — all contributors share one `anchorScenarioId`, so their sequences are variants of one canonical cascade; a single representative is that fault-origin's signature. (B) risks manufacturing a superset chain never actually observed, distorting RCA and CE matching. Deterministic tie-break keeps it stable under any arrival order. |
+| **[ANCHOR-CONSOL] emit policy on aggregation** | (A) emit `PatternDiscoveredEvent` only on create (first contributor); (B) re-emit on every material aggregate change; (C) emit per mined event (status quo, over-counts) | **A** for MVP — one fault-origin yields exactly one discovered event (the review unit is the pattern, not each sub-run). (C) is the bug being fixed. (B) (re-emit on material change) is noted as a post-MVP option if the UI needs live occurrence updates; it needs consumer-side idempotency on `patternId` and is not required for MVP. |
+| **[ANCHOR-CONSOL] relationship to codebook MERGED** | (A) treat anchor-consolidation as the same mechanism as `ReconciliationService.MERGED`; (B) keep them distinct | **B** — `MERGED` is a *reconciliation classification* (a mined pattern's complementary appendage folded into a matched **codebook scenario** at the symptom-chain level, deciding codebook explanation). Anchor-consolidation is a *persistence-identity* collapse (multiple mined events for one fault-origin folded into one Pattern Store row), upstream of and orthogonal to reconciliation. A consolidated row is still independently classified CONFIRMED/MERGED/UNEXPLAINED. Conflating them would wrongly gate consolidation on a codebook match (anchored-but-unreconciled patterns still need consolidating). |
+| **[ANCHOR-CONSOL] fold idempotency mechanism** | (A) `processed_event` (`eventId`) only; (B) `processed_event` + `contributing_event` guard + row lock, one txn | **B** — `processed_event` already stops a re-delivered *same* event, but the fold must also be double-count-safe against any belt-and-braces replay: `contributing_event ON CONFLICT DO NOTHING` guarantees each `eventId` folds at most once, so the aggregate is a deterministic function of the distinct contributing-event set; the `SELECT ... FOR UPDATE` serializes concurrent folds of one anchor. |
 | Idempotency mechanism | (A) `eventId` set only; (B) deterministic `patternId` upsert only; (C) both | **C** — `processed_event` short-circuits re-processing (avoids re-calling collaborators and re-emitting `patterns.discovered`); the UUIDv5 upsert makes the DB write itself idempotent as a safety net. |
 | RCA override precedence | (A) graph ordering wins; (B) codebook always wins when present; (C) confidence-weighted blend | **B** — the spec mandates the codebook scenario is authoritative when the sequence overlaps; graph ordering is the default only when no scenario matches. |
 | DLQ vs retry for collaborator-down | (A) DLQ on any failure; (B) retry-and-redeliver for transient, DLQ only for poison | **B** — a valid event blocked by a transient dependency outage (including the structural-validation traversal) is not poison; DLQ would lose it. |
@@ -1036,7 +1241,7 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | 22 (Q1) | `POST /approve` with `decision = reject` on a `draft` pattern transitions it to the terminal `rejected` state, records the transition timestamp, emits **no** `PatternApprovedEvent`, the pattern is **not** returned by `GET /patterns?lifecycle=approved`, and is returned by `GET /patterns?lifecycle=rejected` | `LifecycleServiceTest.rejectTransitionsToRejectedTerminalNoEventNotServed` | After `decision = reject` on a draft, store `lifecycle` is `rejected`; a `lifecycle_transition` row `draft` to `rejected` with non-null `transitioned_at`; **zero** records on `patterns.approved` (mock producer captor); `GET ?lifecycle=approved` excludes the `patternId`; `GET ?lifecycle=rejected` includes it; a subsequent approve/reject/deprecate/edit on the rejected pattern returns `409` (terminal) |
 | 8 | Emitted `PatternApprovedEvent` deserializes via Java binding; `lifecycle` is approved; required fields non-null incl. `sessionWindow` (and carries no structural-validation field) | `PatternEventPublisherTest.approvedEventRoundTripsAndIsApprovedNoStructField` | `EventCodec.deserialize` succeeds; `lifecycle` equals approved; all required fields non-null incl. `sessionWindow`; serialized JSON has no `structurallyValidated` key |
 | 9 | `POST /deprecate` on an approved pattern gives deprecated plus non-null transition timestamp; subsequent `GET ?lifecycle=approved` excludes it | `LifecycleServiceTest.deprecateApprovedRemovesFromApprovedListing` | Store `lifecycle` is deprecated; `lifecycle_transition.transitioned_at` non-null; not in approved query result |
-| 10 | Two identical `patterns.mined` with the same `eventId` give exactly one pattern row after both | `MinedPatternConsumerIdempotencyTest.duplicateEventIdProducesSingleRow` | Pattern row count for that mining origin is 1; the second message acked without re-emit |
+| 10 | Two identical `patterns.mined` with the same `eventId` give exactly one pattern row after both | `MinedPatternConsumerIdempotencyTest.duplicateEventIdProducesSingleRow` | Pattern row count for that mining origin is 1; the second message acked without re-emit; **[ANCHOR-CONSOL]** the aggregate (occurrences/support) is unchanged by the redelivery (no fold), and no `contributing_event` row is added twice |
 | 11 | Malformed `patterns.mined` (`sequence` absent) is routed to `patterns.mined.dlq`, processing continues | `MinedPatternConsumerDlqTest.malformedEventGoesToDlqAndConsumerContinues` | One record on `patterns.mined.dlq`; the next valid message is processed; no consumer restart |
 | 12 | `GET /patterns` plus `GET /patterns/{id}` responses validate against published OpenAPI 3.1; unknown id gives 404 | `OpenApiContractTest.listAndGetValidateAgainstSchemaAndUnknownIdIs404` | List body validates as the **`PatternPage` envelope** `{ items, total, limit, offset }` (P2-GAP-08 — NOT a bare array) and `get` body as a `PatternView`, both against `openapi.json` (incl. `trailId`, `rootCauseAlarmType`, `structurallyValidated`/`structuralValidationReason`, `sessionWindow`); GET unknown id returns 404 |
 | 12b (P2-GAP-08) | `GET /patterns` returns the `PatternPage` envelope object, not a top-level array | `PatternQueryControllerTest.listReturnsPatternPageEnvelopeNotBareArray` | The 200 body is a JSON object with `items` (array of `PatternView`), `total`, `limit`, `offset`; it is NOT a JSON array; `total` reflects the filtered count and `limit`/`offset` are echoed; validates against the `PatternPage` schema in `openapi.json` |
@@ -1054,6 +1259,24 @@ pattern is persisted-and-flagged (never discarded) for MVP.
 | 19 | Any processed `PatternMinedEvent` gives a `PatternDiscoveredEvent` carrying `sessionWindow` ({`windowMs` integer greater than 0, `type` gap-based or fixed) that validates against the frozen `PatternDiscoveredEvent` JSON Schema | `PatternEventPublisherTest.discoveredEventCarriesValidSessionWindow` | Emitted event has non-null `sessionWindow` with `windowMs greater than 0` and valid `type`; `EventCodec.serialize`/schema validation against `PatternDiscoveredEvent.schema.json` (and `common/sessionWindow.schema.json`) passes |
 | 20 | An approved pattern's emitted `PatternApprovedEvent` `sessionWindow` equals the persisted Pattern Store value (`windowMs greater than 0`, valid `type`) and validates against the frozen `PatternApprovedEvent` JSON Schema | `PatternEventPublisherTest.approvedEventSessionWindowEqualsPersistedAndValidates` | The `sessionWindow` on the approved event equals the row's `session_window_ms`/`session_window_type` (also equal to the value on the discovered event for the same pattern); `windowMs greater than 0`, valid `type`; schema validation against `PatternApprovedEvent.schema.json` passes |
 | 21 | `GET /patterns/{id}` for an existing pattern returns `sessionWindow` ({`windowMs`, `type`}) in the record and XAI metadata; response validates against the published OpenAPI 3.1 schema | `PatternQueryControllerTest.getByIdReturnsSessionWindowAndValidatesAgainstOpenApi` | The 200 body includes `sessionWindow` with `windowMs` and `type` (and it appears in the XAI metadata block) plus `trailId` and a vocab-token `rootCauseAlarmType`; the body validates against the published `openapi.json` `PatternView` schema |
+
+### [ANCHOR-CONSOL] New/changed behavior to test (unit/contract)
+
+The consolidation fix adds no new spec AC (the emitted event shapes and lifecycle ACs are unchanged);
+its new behaviours are covered by these tests. AC-10 above is **extended** to assert the aggregate is
+untouched by redelivery.
+
+| # | New/changed behavior | Test | Asserts |
+|---|---|---|---|
+| AC-C1 | Same `anchorScenarioId` across two sub-runs (distinct `eventId`s) consolidates to **ONE** Pattern Store pattern with **summed occurrences**. | `PatternConsolidationServiceTest.sameAnchorAcrossSubRunsConsolidatesToOneRowSumsOccurrences` | Feed two enriched mined events with the same `(domain, snapshotId, codebookVersion, anchorScenarioId)` but different `eventId`/`sourceWindowId`; exactly **one** `pattern` row exists; its `patternId == UUIDv5(anchor identity)`; `instance_count == occ1 + occ2`; two `contributing_event` rows; support is the occurrence-weighted mean of the two. |
+| AC-C2 | Consolidation emits exactly **one** `PatternDiscoveredEvent` for the fault-origin (on create, not on fold). | `PatternConsolidationServiceTest.onlyOneDiscoveredEventPerAnchorIdentity` | After both sub-run events, a mock producer captor has exactly one `PatternDiscoveredEvent` for that `patternId` (emitted on the first/create event); the second (fold) emits none. |
+| AC-C3 | **Idempotent re-delivery does not double-count** (the crux). | `PatternConsolidationServiceTest.redeliveredMinedEventDoesNotDoubleCount` | Deliver event E1 (anchor A), then **re-deliver E1** (same `eventId`); `instance_count`/support are identical to the single-delivery value; `contributing_event` has one row for E1; `processed_event` gate + `ON CONFLICT DO NOTHING` both proven (belt-and-braces: even bypassing the `processed_event` gate, the `contributing_event` guard keeps the fold a no-op). |
+| AC-C4 | **Unexplained** (`anchorScenarioId` null/absent) patterns do **not** consolidate by anchor — each stays distinct. | `PatternConsolidationServiceTest.unexplainedPatternsStayDistinctNotConsolidated` | Two enriched events with `anchorScenarioId == null` and different `sourceWindowId` produce **two** distinct `pattern` rows (per-event UUIDv5), each with its own discovered event; no anchor fold occurs. |
+| AC-C5 | Consolidation scope re-mints identity across snapshot/codebook. | `PatternConsolidationServiceTest.differentSnapshotOrCodebookVersionDoesNotMerge` | Same `anchorScenarioId` but different `snapshotId` (or different `codebookVersion`) produces **two** distinct rows — fault models from different contexts are not merged. |
+| AC-C6 | Aggregation rules are correct + deterministic + order-independent. | `PatternConsolidationServiceTest.aggregationRulesWeightedMeanSumAndOrderIndependent` | occurrences summed; support/confidence/lift are occurrence-weighted means; `maxInterArrivalMs` is the max; supporting instances unioned (dedup on `sourceWindowId`); the representative sequence is the highest-weighted-support contributor (deterministic tie-break); folding the same set of events in the reverse order yields byte-identical final aggregates. |
+| AC-C7 | `sessionWindow` is recomputed from the combined timing on aggregation. | `PatternConsolidationServiceTest.sessionWindowRecomputedFromCombinedTiming` | After a fold, the persisted `session_window_ms`/`type` equals `SessionWindowDeriver.derive(combinedTiming)` for the aggregated `timing`; both emitted-event paths would read this recomputed value; deterministic. |
+| AC-C8 | Concurrent folds of one anchor serialize (no lost update). | `PatternConsolidationServiceIT.concurrentFoldsOfOneAnchorSerializeNoLostUpdate` (Testcontainers Postgres) | Two threads fold two distinct events for one anchor concurrently; the row lock (`SELECT ... FOR UPDATE`) serializes them; final `instance_count == occ1 + occ2` (no lost update); both `contributing_event` rows present. |
+| AC-C9 | End-to-end pattern-set (~8-10, 50-60% coverage) preserved **after** consolidation. | `PatternManagerConsolidationIT.p2CorpusConsolidatesToGroundTruthPatternSet` (integration, with the sub-run-emitting Miner) | Feeding the full P2 corpus's `patterns.mined` (emitted across sub-runs by the batch-capped Miner) yields a consolidated Pattern Store whose **distinct anchored patterns map 1:1 to ground-truth fault-origins** (8-10), with coverage 50-60% — i.e. sub-run splitting + consolidation reproduces the single-run pattern set; over-count is gone. |
 
 Supporting (non-1:1) unit tests: `KnowledgeParamsClientTest` (RCA **and** structural-validation
 params resolved from Knowledge, not hard-coded), `TopologyClientMockTest` /
@@ -1103,6 +1326,10 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
 | 15 | Frozen PATCH body + PatternPage envelope (P2-GAP-06 / P2-GAP-08) | `GET /patterns?lifecycle=draft` then `PATCH /patterns/{id}` with `{ sequenceFlags:[{index,optional}], reviewer, notes }` | List response is the `PatternPage` envelope (`items`/`total`/`limit`/`offset`); the PATCH with the frozen `sequenceFlags` body is accepted and reflected on a subsequent `GET /patterns/{id}`; both bodies validate against the checked-in `openapi.json` |
 | 16 | Real Miner ms timing keys read directly (Q11) | `patterns.mined` whose `timing` is the canonical Miner shape — the four ms keys `{ timeframeMs, medianInterArrivalMs, maxInterArrivalMs, stddevInterArrivalMs }` (as the merged `PatternMinedEvent.json` fixture / live Pattern Miner emit) — with the **default empty** alias map | The deriver reads the four ms keys **directly, with no aliasing and no seconds-to-ms conversion**, derives a deterministic valid `sessionWindow` (`cv = stddev/median`), persists and emits it; pattern flows end-to-end with no DLQ — confirming producer/consumer byte-alignment on the real ms keys (no alias remap needed) |
 | 17 | Reject decision lifecycle (Q1, partial path) | After scenario 1: `POST /patterns/{id}/approve` with `decision = reject` | `lifecycle` becomes `rejected` (terminal); a `draft` to `rejected` audit row is written; **no `PatternApprovedEvent`** is emitted; `GET ?lifecycle=approved` does not list it (never served to the Correlation Engine); `GET ?lifecycle=rejected` lists it for audit; a subsequent approve/reject/deprecate/edit returns `409` |
+| 18 | **[ANCHOR-CONSOL] Same fault-origin mined in two sub-runs consolidates to one pattern** | Publish two `patterns.mined` events (distinct `eventId`s, same `(domain, snapshotId, codebookVersion, anchorScenarioId)`, different `sourceWindowId`) — the batch-cap sub-run shape | Exactly one draft `pattern` row with `patternId == UUIDv5(anchor identity)`, `instance_count` = sum of the two occurrences, support/timing aggregated, `sessionWindow` recomputed; exactly one `PatternDiscoveredEvent` on the bus; `GET /patterns/{id}` shows the aggregated occurrences and unioned supporting instances |
+| 19 | **[ANCHOR-CONSOL] Idempotent redelivery does not double-count (partial path)** | Redeliver one of scenario-18's mined events (same `eventId`) | The aggregate is unchanged (no extra fold, no extra `contributing_event`); still one pattern row; no duplicate discovered event; nothing DLQ-ed |
+| 20 | **[ANCHOR-CONSOL] Unexplained cascades stay distinct (partial path)** | Publish two `patterns.mined` with `anchorScenarioId` null/absent and different `sourceWindowId` | Two distinct draft rows (per-event identity), two discovered events; no anchor consolidation applied to unexplained patterns |
+| 21 | **[ANCHOR-CONSOL] End-to-end pattern set preserved after consolidation** | Run the full P2 corpus through the batch-capped Miner (sub-runs) into the Pattern Manager | The consolidated Pattern Store's distinct anchored patterns map 1:1 to ground-truth fault-origins (8-10), coverage 50-60% — the sub-run split does not inflate the pattern count; AC-19/AC-20 quality (Miner) is reproduced post-consolidation |
 
 ## Config & observability
 
@@ -1137,9 +1364,16 @@ PostgreSQL; real Topology/Codebook/Knowledge or their compose stand-ins).
   `pm_structural_validation_total{result=pass|flag}` (structural-validation outcomes),
   `pm_session_window_derived_total{type=gap-based|fixed,fallback=true|false}` (session-window
   derivation outcomes by type and whether the timing fallback was used), enrichment latency timer.
+  **[ANCHOR-CONSOL]** `pm_pattern_consolidated_total{action=create|fold}` (anchored patterns created
+  vs folded into an existing anchor), `pm_anchor_fold_noop_total` (redelivery/replay folds skipped by
+  the `contributing_event` guard — proving no double-count), `pm_unexplained_patterns_total`
+  (distinct unexplained drafts).
 - **Logging:** structured JSON (Logback), every line carries `traceId` and where applicable
   `patternId`; lifecycle transitions and structural-validation outcomes logged at INFO, the
   session-window derivation result (`windowMs`, `type`, fallback flag) at DEBUG, errors at ERROR.
+  **[ANCHOR-CONSOL]** `pattern_consolidated` (patternId, anchorScenarioId, action create/fold,
+  contributors, instanceCount) at INFO; `anchor_fold_noop` (redelivery skipped) at DEBUG;
+  `anchor_fold_divergence` (create-vs-later RCA/reconcile mismatch within one anchor scope) at WARN.
 
 ## Build & run
 
