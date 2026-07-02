@@ -1,5 +1,33 @@
 # pattern-miner — Design
 
+> **EVOLUTION (P2 live-verified P2 blocker fix — trail-aligned batch cap + SparkContext resilience).**
+> The 3-stage redesign below is algorithmically validated live (at anchoring threshold 0.3 cascades
+> anchor to the correct fault-origin scenarios and Stage-3 per-group PrefixSpan produces accurate
+> grounded patterns), **but the miner cannot EMIT on real batches**: the mining run pools the WHOLE
+> flush's transactions (all ~46 trails) into one Spark collect, OOM-killing the 2g driver JVM
+> (`Py4JNetworkError: Answer from Java side is empty` / connection refused, java process count to 0);
+> after the OOM the cached `SparkSession` does **not** self-heal, so every subsequent run fails until
+> container restart. Only tiny batches (1 and 9 transactions) ever emitted. This evolution adds two
+> coordinated fixes, both **internal** (no contract change — see the batch-cap note below): a
+> **trail-aligned batch cap** that bounds each mining RUN by a max number of WHOLE TRAILS (never
+> splitting a trail across runs, so a fault cascade is never fragmented and per-run support is not
+> diluted), processing a larger flush as multiple bounded **sub-runs** (each = a disjoint set of whole
+> trails, each doing anchor to group to PrefixSpan to emit to commit independently, replay-safe under
+> at-least-once + eventId dedupe); and **SparkContext resilience** so a driver OOM/death recreates the
+> Spark session before the next run (or fails the run cleanly and surfaces it) — never a silent
+> permanent wedge. The relevant NEW/CHANGED sections are tagged **[BATCH-CAP]** throughout; the
+> 3-stage discovery logic (Stages 1/2/3, anchoring, output contract) is **unchanged**.
+
+> **[BATCH-CAP] No contract change.** The trail cap is an operational batching knob (like the existing
+> `BATCH_FLUSH_SECONDS`), sourced from env/config with an optional Knowledge override — NOT a mining
+> threshold, so it is **not** on the mining/anchoring critical path and needs no new required field.
+> The emitted `PatternMinedEvent` shape (incl. `provenance.anchorScenarioId`) is **unchanged**;
+> sub-runs emit the **same event shape** the single run did — just in bounded batches. Because the same
+> `anchorScenarioId` can now appear in more than one sub-run's `patterns.mined` output,
+> **pattern-manager** gains **anchor-identity consolidation** (its own design evolution,
+> `design/pattern-manager-anchor-consolidation`) to collapse those into one Pattern Store pattern. No
+> new topic, payload, or field is introduced by either part. This part flags **no** contract change.
+
 > **Based on the not-yet-merged resolved spec (PR #332).** This design is authored against
 > `services/pattern-miner/spec.md` as it stands on `spec/pattern-miner-3stage-resolved` (OQ-1/OQ-2
 > resolved; OQ-3 resolved here). It should merge **after** spec PR #332 merges into `pattern-miner`.
@@ -64,6 +92,14 @@ adds Stage 2 (anchoring) and re-scopes Stage 3 (bounded PrefixSpan per group).
 | 6. Assemble one `PatternMinedEvent` per anchored group carrying `sequence`, `support`, `confidence`, `lift`, `trailId`(s), `timing` (ms inter-arrival stats), `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`, **`anchorScenarioId`**). Unexplained group to `anchorScenarioId` null/absent. | `assemble.PatternAssembler` (**EXTENDED**) sets `provenance.anchorScenarioId` = the group's matched `scenarioId` (or `None` for the unexplained group). `timing` via `metrics.TimingComputer` (ms keys, unchanged). |
 | 7. Emit each `PatternMinedEvent` on `patterns.mined` (one per anchored group + one unexplained if non-empty). | `emit.Producer` envelopes each event (`type="PatternMinedEvent"`, `schemaVersion=1`, `source="pattern-miner"`, propagated `traceId`) and produces to `patterns.mined`. |
 | 8. Route any unprocessable (poison) message to `transactions.clean.dlq`. | `ingest.DlqRouter` catches deserialize/validation failures + unknown major `schemaVersion`, publishes raw bytes + structured error header to `transactions.clean.dlq`, continues. **Unchanged.** |
+
+**[BATCH-CAP] New realizations (evolve tasks 3-7's batching; the discovery logic per task is unchanged).**
+
+| Spec task (batching aspect) | Realized by (modules / flow) — [BATCH-CAP] |
+|---|---|
+| 3-7 (per-run scope). A mining RUN must be bounded so its Spark collect fits the driver heap, **without splitting any trail** across runs. | **NEW** `assemble.chunk_trail_batches(trail_batches, max_trails_per_batch)` in `assemble.py` partitions the run's `list[TrailBatch]` (already one whole `TrailBatch` per `trailId` from the existing `group_transactions`) into **disjoint sub-runs**, each holding **at most `maxTrailsPerBatch` WHOLE `TrailBatch`es** (never a fraction of one). `app.py`'s `flush()` iterates the sub-run chunks and runs the **existing** `ThreeStagePipeline.run(...)` + `emitter.emit(...)` **per sub-run**, committing offsets only after all sub-runs of the flush succeed (at-least-once + `eventId` dedupe keep replay safe). Each sub-run does anchor to group to PrefixSpan to emit independently; the Codebook scenario set is fetched once per `(domain, snapshotId)` and reused across that flush's sub-runs. |
+| 2 (config source). The trail cap is a batching knob, not a mining threshold. | `Settings.max_trails_per_batch` (env `MAX_TRAILS_PER_BATCH`, default **8**) in `config.py`, plus an **optional** Knowledge override `batching.maxTrailsPerBatch` mapped by `MiningParamsClient` into `MiningParams.max_trails_per_batch` (env is the fallback when Knowledge omits it). Justified default (see Config): busiest single trail approx 90 txns / up to 76 sessions mines fine; 8 whole trails keeps the per-sub-run collect within a few hundred sessions, safely under the 2g driver envelope, with headroom below the ~46-trail whole-flush that OOMs. |
+| 3-7 (resilience). A driver OOM/gateway death must not wedge the service forever. | **NEW** SparkContext resilience: `mining/spark_engine.py` gains a `reset()` (drops the cached dead session); `mining/engine.py`'s `PrefixSpanEngine` protocol gains `reset()`/`is_healthy()`; the local engine implements them as no-ops. `app.py`'s per-sub-run `try/except` detects a **gateway-death** class error (`Py4JNetworkError`, `Py4JError`, connection-refused `OSError`) and, before the next sub-run/flush, calls `engine.reset()` so `_get_spark()` recreates a fresh `SparkSession` (bounded recreate attempts from config). If recreation cannot succeed within the deadline, the run **fails cleanly** (offsets not committed, non-zero health) — surfaced on `/health` and a `spark-recreate-failures` metric — never a silent permanent wedge. |
 
 ## Phase applicability (design view)
 
@@ -451,6 +487,71 @@ occurrences yield `0` for the affected keys; the schema `timing` object stays op
 (`additionalProperties:true`) — **no event-model schema change**. These are the exact keys/units the
 Pattern Manager `SessionWindowDeriver` consumes (AC-18).
 
+### [BATCH-CAP] Trail-aligned batch cap + SparkContext resilience (the P2 blocker fix)
+
+**Why the OOM happens (verified corpus shape).** The flush pools all transactions, `group_transactions`
+returns one `TrailBatch` per `trailId` (46 distinct trails, 18-90 txns/trail, median 48), and the
+**existing** `flush()` runs `ThreeStagePipeline.run(ALL 46 trail_batches)` in one pass — so the Stage-3
+per-group PrefixSpan `.collect()` (in `spark_engine.run`) materializes sessions pooled from all 46
+trails at once, blowing the 2g driver heap. The busiest single trail (approx 90 txns / up to 76
+sessions) mines fine alone — it is the **pooling of all trails** that OOMs. The cap bounds each collect
+to at-most-`maxTrailsPerBatch` trails' sessions (a few hundred), well inside the driver envelope.
+
+**Why the cap is by WHOLE TRAILS, not record count.** A trail is the natural mining unit: one trail's
+sessions carry one fault cascade's full symptom chain. A **record cap** could cut a trail mid-cascade,
+fragmenting a cascade across two runs — that would dilute per-run support (a cascade's freq/sessions
+would be split), corrupt Stage-2 anchoring (a partial chain scores lower and may fall to "unexplained"),
+and violate the accuracy target. Capping by **whole trails** means every trail's sessions stay intact
+in exactly one sub-run, so for that trail the cascade is never fragmented and its per-run support is
+**not diluted**. A single trail that alone exceeds the cap is still processed **whole** in its own
+sub-run (the cap is a *max whole trails per sub-run*, and the verified busiest trail fits the heap).
+
+```mermaid
+flowchart TD
+  F["flush() with pending transactions"] --> GT["group_transactions -> list of TrailBatch, one per trailId (EXISTING)"]
+  GT --> RES["resolve Codebook scenarios once per (domain, snapshotId) for the flush"]
+  RES --> CH["chunk_trail_batches(trail_batches, maxTrailsPerBatch) -> disjoint sub-runs of WHOLE TrailBatches (NEW)"]
+  CH --> LOOP{"for each sub-run (a disjoint set of whole trails)"}
+  LOOP --> RUN["ThreeStagePipeline.run(sub-run trails, scenarios, params): anchor, group, bounded PrefixSpan (EXISTING)"]
+  RUN --> HEALTH{"gateway-death error (Py4JNetworkError / connection refused)"}
+  HEALTH -- no --> EMIT["emitter.emit(sub-run envelopes) to patterns.mined"]
+  HEALTH -- yes --> RECOV["engine.reset(): drop dead SparkSession, recreate on next _get_spark (bounded attempts)"]
+  RECOV --> FAILRUN["recreate ok: retry this sub-run, else fail run cleanly, do not commit, surface on /health"]
+  EMIT --> LOOP
+  LOOP -->|all sub-runs done| COMMIT["consumer.commit() once for the whole flush (replay-safe: eventId dedupe)"]
+```
+
+**Offset commit + replay safety.** Offsets for the flush are committed **once, after all sub-runs
+succeed**. If a middle sub-run fails (Codebook down, Spark death that cannot recreate), the flush is
+not committed and the whole flush replays; already-emitted sub-run events are harmless because
+`eventId` dedupe (miner-side) drops re-consumed transactions and pattern-manager's **anchor-identity
+consolidation** (companion design) collapses any re-emitted anchored patterns — so at-least-once
+redelivery never double-counts. (Committing per-sub-run is an alternative considered and rejected —
+see Design alternatives — because it complicates partial-flush bookkeeping for no correctness gain
+given downstream consolidation.)
+
+**Support is per-sub-run but NOT diluted per cascade.** `support`/sessions-in-run for an anchored
+group are computed over that sub-run's sessions. Because a trail is never split, every session of a
+given cascade that lands in a sub-run is present for that cascade's support in that sub-run — the
+cascade is intact. What changes vs. the single-run design is only that the **same fault-origin may be
+anchored in more than one sub-run** (if its trails are spread across chunks), producing more than one
+`PatternMinedEvent` for one real pattern. That is resolved **downstream** by pattern-manager
+anchor-consolidation (which sums occurrences and combines support across the contributing mined
+events) — the miner deliberately does **not** try to re-pool trails to force one event, because that
+would re-introduce the unbounded collect the cap exists to prevent.
+
+**SparkContext resilience (no silent wedge).** The cached `SparkSession` in `spark_engine` survives a
+driver OOM as a **dead handle** — the current code keeps using it, so every later run fails until
+container restart. The fix: on a detected gateway-death error class the per-sub-run handler calls
+`engine.reset()` (nulls the cached session); the next `_get_spark()` builds a fresh session (bounded by
+`SPARK_RECREATE_MAX_ATTEMPTS` with `SPARK_RECREATE_BACKOFF_MS`). If recreation succeeds the sub-run is
+retried; if it exhausts attempts the run **fails cleanly** — offsets uncommitted, `spark-recreate-failures`
+metric incremented, and `/health` reflects the Spark subsystem as not-ready (self-heals to ready on the
+next successful session build; readiness never latches DOWN, per the Startup-Robustness Standard). The
+container process stays up and keeps consuming; nothing is silently swallowed. The cap is the **primary**
+fix (it prevents the OOM); resilience is the **safety net** for any residual death (e.g. an unusually
+dense single trail or an external kill) — we do not "design around" the OOM by only catching it.
+
 ## Seed data & examples
 
 **N/A — pattern-miner generates no seed corpus.** Test inputs are synthetic `TransactionEvent`
@@ -510,6 +611,8 @@ Manager).
 | A burst has too few inter-arrivals for a stable median, or no tempo-class profile matches | Knowledge `baseGap`/`profileFloor` fallback applies (defined behaviour, not an error) | Debug log + fallback-gap-used metric |
 | PrefixSpan yields no frequent sequence for a group at the current `minSupport` | Group emits no pattern; log empty-group result; valid outcome | Empty-group log + metric |
 | Spark job failure (executor/driver error mid-run) | Run treated as not-committed: source offsets not committed; job exits non-zero so the container restarts and re-consumes (`eventId` dedupe makes replay safe) | Error log + non-zero exit + failure metric |
+| **[BATCH-CAP] Driver OOM / Py4J gateway death mid-sub-run** (`Py4JNetworkError`, `Py4JError`, connection-refused `OSError`) | Detected as a gateway-death class error; `engine.reset()` drops the dead cached `SparkSession`; the next `_get_spark()` recreates it (bounded by `SPARK_RECREATE_MAX_ATTEMPTS`/`SPARK_RECREATE_BACKOFF_MS`). On success the sub-run is retried; the flush's offsets stay uncommitted until all sub-runs succeed. On recreate exhaustion the run **fails cleanly** — uncommitted, replayable — and `/health` marks Spark not-ready (self-heals on next successful build). **Never** a silent permanent wedge and **never** unanchored/unbounded fallback. | Error log + `spark-recreate-attempts` / `spark-recreate-failures` metrics + `/health` Spark-not-ready; process stays up and keeps consuming |
+| **[BATCH-CAP] A flush accumulates more than `maxTrailsPerBatch` trails' worth** | `chunk_trail_batches` splits it into disjoint whole-trail sub-runs; each sub-run mines + emits + is counted; offsets commit once after the last sub-run. Not an error — the designed bounded path. | INFO log per sub-run (`sub_run_index`, `trails_in_sub_run`) + `mining-sub-runs` metric |
 
 Nothing is **silently** dropped except confirmed duplicates (AC-15) and explicit empty results;
 every other failure is logged and either DLQ-routed or fails the run.
@@ -527,6 +630,11 @@ every other failure is logged and either DLQ-routed or fails the run.
 | **Grouping key** | (a) fixed `scenarioId`; (b) Knowledge-sourced `anchoring.groupingKeys` (default `["scenarioId"]`). | **(b).** Keeps grouping domain-agnostic and future-flexible (e.g. group by `faultOriginType` for a domain that authors multiple scenarios per type) with no code change. Default is `scenarioId` to one group per fault-origin scenario. |
 | **Source of per-alarm detail / mined-sequence token / windowing (carried from merged design)** | consume typed `alarms[]` in-band; token = `alarmType`; hybrid median-sized adaptive gap. | **Unchanged** — already resolved in the merged design (issue #99 closed; `alarmType` is the canonical join token; hybrid adaptive windowing). Retained verbatim. |
 | **`timing` keys/units** | keep as-is (ms canonical keys on the open object). | **Unchanged** — the P2-GAP-10 alignment stands; no schema change. |
+| **[BATCH-CAP] Batch-cap unit** | (a) **whole trails** per sub-run (chosen); (b) raw record/transaction count; (c) session count; (d) no cap, raise driver memory only. | **(a).** (b)/(c) can cut a trail mid-cascade — fragmenting a fault cascade across sub-runs, diluting its per-run support and mis-anchoring a partial chain (accuracy regression). (a) keeps each trail's sessions intact in one sub-run (cascade never fragmented, support not diluted) while bounding the collect. (d) is fragile on a 7.7GB host and leaves the unbounded-batch design gap (a bigger corpus OOMs again). The natural mining unit is the trail. |
+| **[BATCH-CAP] Cap parameter source** | (a) env/config with optional Knowledge override (chosen); (b) Knowledge-only (a mining threshold); (c) hard-coded. | **(a).** The cap is an **operational batching knob** (like `BATCH_FLUSH_SECONDS`) that trades throughput vs. driver-heap safety — not a domain mining threshold. Env default keeps it deployable without a Knowledge round-trip; an optional Knowledge `batching.maxTrailsPerBatch` lets an operator tune it centrally. (c) is forbidden (magic number). (b) would wrongly couple an infra knob to domain params and block startup on Knowledge for a non-domain value. |
+| **[BATCH-CAP] Offset commit granularity** | (a) once per flush after all sub-runs (chosen); (b) once per sub-run. | **(a).** Per-flush commit keeps the replay unit = the flush (simple, matches the existing single-run commit). (b) would advance offsets mid-flush, needing extra bookkeeping to avoid re-mining committed sub-runs on a later failure — no correctness benefit because downstream anchor-consolidation + `eventId` dedupe already make re-emit harmless. |
+| **[BATCH-CAP] Spark-death recovery** | (a) recreate the SparkSession on detected gateway death, retry bounded, else fail clean + surface on /health (chosen); (b) only catch + swallow the error; (c) let the container crash and rely on restart. | **(a).** (b) leaves the dead cached session and silently drops the run (a wedge) — explicitly disallowed. (c) loses in-flight uncommitted work each time and is slow on a memory-constrained host. (a) self-heals within the process (readiness never latches DOWN), retries bounded, and only fails clean (uncommitted, replayable) when recreation truly cannot succeed — no silent permanent wedge. The cap is still the primary fix; this is the safety net. |
+| **[BATCH-CAP] Forcing one event per fault-origin in the miner** | (a) let sub-runs each emit for a shared anchor + consolidate in pattern-manager (chosen); (b) re-pool all trails of a fault-origin into one run so the miner emits once. | **(a).** (b) re-introduces an unbounded collect (a busy fault-origin could span many trails), defeating the cap. Consolidation is a Pattern-Store concern (single owner = pattern-manager) and also fixes a **latent** over-count that exists even without batching. The miner stays a stateless emitter. |
 
 ## Test plan
 
@@ -565,6 +673,24 @@ Every spec acceptance criterion (AC-1 through AC-21) maps to a named pytest test
 unit tests retained from the merged design: `test_sequence_built_from_alarm_type_not_event_type`,
 `test_sequences_and_timing_built_from_typed_alarms`, and the Codebook-client contract tests below.
 
+### [BATCH-CAP] New/changed behavior to test (unit/contract)
+
+The batch-cap fix adds no spec AC (the emitted output shape and the AC-1..21 discovery behaviour are
+unchanged); its new behaviours are covered by these tests. AC-10 (bounded event count) and AC-19/AC-20
+(pattern-set quality) remain the correctness anchors — the cap must **not** change them.
+
+| # | New/changed behavior | Test | Asserts |
+|---|---|---|---|
+| BC-1 | A flush of more than `maxTrailsPerBatch` trails produces multiple **bounded sub-runs**, each of which mines and emits (no OOM). | `test_chunk_produces_multiple_bounded_subruns_each_emits` | Given 46 `TrailBatch`es and `maxTrailsPerBatch=8`, `chunk_trail_batches` yields ceil(46/8)=6 sub-runs; running the pipeline per sub-run (local engine) emits from each non-empty sub-run; every sub-run's session pool size is at-most-cap-trails' sessions (bounded-collect assertion). |
+| BC-2 | **A trail is never split across sub-runs** (whole-trail integrity). | `test_chunk_never_splits_a_trail` | Every `TrailBatch` from the input appears in **exactly one** sub-run and byte-identically (same `trail_id`, same pooled `alarms`); the union of sub-runs equals the input set; intersection of any two sub-runs is empty. |
+| BC-3 | Per-cascade support is **not diluted** by chunking (whole-trail keeps a cascade intact). | `test_support_not_diluted_when_trail_kept_whole` | For a fault-origin whose trails all land in one sub-run, the emitted event's `support`/session count equals the single-run value on the same trails; a would-be record-split control (record cap) is shown to change it — proving the whole-trail choice preserves support. |
+| BC-4 | Cap is Knowledge-overridable but env-defaulted; no hard-coded magic number. | `test_max_trails_per_batch_config_and_knowledge_override` | Default comes from `MAX_TRAILS_PER_BATCH` env; when Knowledge returns `batching.maxTrailsPerBatch`, that value is used for chunking; no integer cap literal exists in mining/pipeline source (scan). |
+| BC-5 | Offsets commit **once per flush after all sub-runs**; replay-safe. | `test_offsets_committed_once_after_all_subruns` | With a stubbed consumer, `commit()` is called exactly once per flush and only after the last sub-run emits; a forced mid-flush failure leaves `commit()` uncalled (whole flush replays). |
+| BC-6 | Gateway-death mid-sub-run **recreates** the Spark session before the next run (no wedge). | `test_spark_gateway_death_triggers_reset_and_recreate` | A `SparkPrefixSpanEngine` whose `run` raises `Py4JNetworkError` once: the handler calls `engine.reset()`, the next `_get_spark()` builds a new session, and the sub-run then succeeds; `spark-recreate-attempts` increments. Companion `test_engine_reset_nulls_cached_session`. |
+| BC-7 | Recreate exhaustion **fails the run cleanly** and surfaces on `/health` (no silent wedge). | `test_spark_recreate_exhaustion_fails_clean_and_health_not_ready` | With recreation always failing (bounded attempts), the run does not commit offsets, `spark-recreate-failures` increments, `/health` reports Spark not-ready; the process keeps consuming; a later successful build flips `/health` back to ready (readiness never latches DOWN). |
+| BC-8 | A single trail larger than the cap is still processed **whole** in its own sub-run. | `test_oversized_single_trail_processed_whole` | A `TrailBatch` bigger than `maxTrailsPerBatch`-equivalent forms its own sub-run undivided; it still mines + emits; no split. |
+| BC-9 | Bounded sub-runs preserve AC-10/AC-19/AC-20 (accuracy unchanged). | `test_subruns_preserve_bounded_count_and_quality` (unit-level over a small corpus) + reuse `test_int_pattern_set_size_span_coverage`, `test_int_zero_over_split_zero_over_merge` (integration, post-consolidation) | Over a corpus split into sub-runs, the union of emitted events (before consolidation) covers every fault-origin; per-sub-run event count is still at-most-(anchored groups + unexplained); pattern-set quality holds after downstream consolidation. |
+
 ### Codebook client contract tests (respx against Codebook `openapi.json`)
 
 | Test | Asserts |
@@ -588,6 +714,9 @@ Compose). `alarms[]` arrive in-band on `transactions.clean`.
 | 5 | Anchoring threshold change re-shapes output | Change Knowledge `anchoring.matchConfidenceThreshold`, re-run same input | Cascades move between anchored and unexplained across runs, with no code change (AC-7). |
 | 6 | Codebook scenario change re-shapes anchoring | Change the Codebook's scenarios (different `scenarioId`s/chains), re-run | Cascades anchor to different fault-origins / become unexplained, no code change (AC-8). |
 | 7 | Bounded mining removes OOM | Run a dense corpus that previously OOM-killed global PrefixSpan | Per-group bounded PrefixSpan completes without OOM; small accurate pattern set emitted. |
+| 7a | **[BATCH-CAP] Larger-than-cap flush emits via multiple bounded sub-runs (no driver OOM)** | Publish the full 46-trail / ~1,500-alarm P2 corpus in one flush window (the shape that OOM-killed the single collect) with `maxTrailsPerBatch=8` | The flush is chunked into 6 whole-trail sub-runs; each anchors to groups to PrefixSpan to emit independently; `patterns.mined` grows (`patterns.mined` counter increments); no `Py4JNetworkError`/driver OOM; offsets commit once after the last sub-run. |
+| 7b | **[BATCH-CAP] No trail split, no support dilution end to end** | Same run, inspect emitted events vs. the corpus | Every trail's alarms appear under a single sub-run; each fault-origin's per-sub-run support matches the whole-trail expectation (not a diluted fraction); after pattern-manager consolidation the pattern set stays ~8-10 with 50-60% coverage (AC-19/AC-20 hold). |
+| 7c | **[BATCH-CAP] SparkContext self-heals after a forced driver death** | Inject a driver OOM/kill (e.g. constrain memory / kill the java child) during a sub-run, then continue publishing | The service recreates the Spark session on the next run and resumes emitting without a container restart; `/health` dips Spark-not-ready then recovers; `spark-recreate-*` metrics move; no permanent wedge. |
 | 8 | Codebook down (failure path) | Stop Codebook, publish a transaction | Run fails fast with retries/back-off; no event emitted; offsets not advanced so it retries when Codebook returns; never falls back to unanchored global mining. |
 | 9 | No active codebook for snapshot | Publish a transaction under a `snapshotId` with no compiled codebook | Run fails fast with `no_active_codebook`; retries after the codebook is compiled; no unanchored mining. |
 | 10 | Knowledge down (failure path) | Stop Knowledge, publish a transaction | Run fails fast with retries/back-off; no event under stale/default thresholds; offsets not advanced. |
@@ -606,6 +735,20 @@ Compose). `alarms[]` arrive in-band on `transactions.clean`.
   `http://codebook-generator:8080`), `CODEBOOK_CLIENT_MODE` (`mock`/`real`), `CODEBOOK_RETRY_MAX`,
   `CODEBOOK_RETRY_BACKOFF_MS`. **No mining/anchoring-threshold or windowing-gap env vars** — those
   come only from Knowledge/Codebook.
+  **NEW [BATCH-CAP]:** `MAX_TRAILS_PER_BATCH` (default **8**), `SPARK_RECREATE_MAX_ATTEMPTS`
+  (default `3`), `SPARK_RECREATE_BACKOFF_MS` (default `2000`). `MAX_TRAILS_PER_BATCH` is an
+  **operational batching knob** (like `BATCH_FLUSH_SECONDS`), NOT a mining threshold; an optional
+  Knowledge `batching.maxTrailsPerBatch` overrides the env default when present. **Default-8
+  justification:** the verified busiest single trail (approx 90 txns / up to 76 sessions) mines fine
+  alone; 8 whole trails keeps a sub-run's Stage-3 collect within a few hundred sessions — safely under
+  the 2g driver heap — while the whole-flush of ~46 trails OOMs. 8 gives headroom below that boundary
+  without over-fragmenting into too many tiny sub-runs (throughput). No cap literal lives in mining/
+  pipeline logic.
+- **[BATCH-CAP] observability additions:** counters `mining-sub-runs`, `spark-recreate-attempts`,
+  `spark-recreate-failures`; gauge `last-flush-sub-run-count`; `/health` reports a **Spark subsystem
+  readiness** flag (not-ready after recreate exhaustion, self-heals to ready on the next successful
+  session build — never latches DOWN). Structured logs add `sub_run_index`, `trails_in_sub_run` per
+  sub-run and a `spark_session_recreated` event on recovery.
 - **Mining + anchoring params (from Knowledge, never code):** `minSupport`, `maxPatternLength`,
   `maxSequenceCount`, `WindowingParams` (tempo profiles/floors, `gapMultiplier`, `tempoPercentile`,
   class thresholds, `baseGap`, `maxClosingGap`, `minBurstSamples`), **`AnchoringParams`**
