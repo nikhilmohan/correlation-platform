@@ -140,14 +140,28 @@ export interface PatternTiming {
   stddevInterArrivalMs?: number;
 }
 /**
- * One supporting-instance / provenance reference behind a pattern — a window + snapshot handle,
- * NOT a member alarm. Per-alarm detail (timestamps, node/object) is not yet served by the store.
- * Extra occurrence keys are preserved via the index signature.
+ * One supporting-instance / provenance reference behind a pattern — a window + snapshot handle.
+ * These are the source-window / snapshot provenance handles (demoted to a sub-section now that
+ * the store serves real member alarms on `PatternView.sampleAlarms`). Extra occurrence keys are
+ * preserved via the index signature.
  */
 export interface SupportingInstance {
   sourceWindowId?: string;
   snapshotId?: string;
   occurrence?: { anchorScenarioId?: string | null; [k: string]: unknown };
+}
+/**
+ * A concrete member alarm supporting a pattern — the REAL per-alarm evidence now served by the
+ * Pattern Store (Pattern Manager OpenAPI `SampleAlarmView`). Bounded by K (miner-side, ~10) and
+ * may be absent/empty for older patterns that predate the feature.
+ */
+export interface SampleAlarmView {
+  alarmId: string;
+  alarmType: string;
+  /** ISO-8601 date-time string. */
+  raisedAt: string;
+  managedObjectId: string;
+  perceivedSeverity: string;
 }
 export interface PatternView {
   patternId: string;
@@ -165,6 +179,7 @@ export interface PatternView {
   structuralValidationReason?: string | null;
   instanceCount: number;
   supportingInstances?: SupportingInstance[];
+  sampleAlarms?: SampleAlarmView[];
   lifecycle: PatternLifecycle;
   domain?: string | null;
   createdAt?: string;

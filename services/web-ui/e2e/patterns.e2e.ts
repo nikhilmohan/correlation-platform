@@ -54,6 +54,18 @@ test.describe('Pattern review & XAI [AC 39]', () => {
     // Session-window line is present in the XAI panel.
     await expect(xai).toContainText(/session window:\s*\d+\s*ms/i);
 
+    // Real member-alarm evidence: when the pattern carries sampleAlarms (bounded by K, may be
+    // empty for older patterns), the sample-alarms list renders one row per member alarm.
+    // DATA-AGNOSTIC: assert row structure only when the list is present — never a fixed count.
+    const sampleList = xai.getByTestId('sample-alarms');
+    if (await sampleList.count()) {
+      const firstAlarm = sampleList.getByTestId('sample-alarm-row').first();
+      await expect(firstAlarm).toBeVisible();
+      // Each row carries a node/object id (managedObjectId, monospace) and a severity badge.
+      await expect(firstAlarm.locator('.sa-node')).not.toBeEmpty();
+      await expect(firstAlarm.locator('.sev-badge')).toBeVisible();
+    }
+
     // Approve → real POST /api/pattern-manager/patterns/{uuid}/approve.
     // The store sends { decision: 'approve', reviewer: 'operator', notes? } (== real ApprovalIntent).
     await firstPattern.getByTestId('approve-btn').click();
