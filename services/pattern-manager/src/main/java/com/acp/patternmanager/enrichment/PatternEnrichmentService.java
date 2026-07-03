@@ -8,7 +8,8 @@ import com.acp.patternmanager.rca.RcaResult;
 import com.acp.patternmanager.rca.RcaService;
 import com.acp.patternmanager.reconcile.CodebookMatch;
 import com.acp.patternmanager.reconcile.ReconciliationService;
-import com.acp.patternmanager.store.PatternStoreService;
+import com.acp.patternmanager.store.ConsolidationOutcome;
+import com.acp.patternmanager.store.PatternConsolidationService;
 import com.acp.patternmanager.store.entity.PatternEntity;
 import com.acp.patternmanager.store.repo.PatternRepository;
 import com.acp.patternmanager.structural.StructuralResult;
@@ -45,7 +46,7 @@ public class PatternEnrichmentService {
     private final ReconciliationService reconciliationService;
     private final SessionWindowDeriver sessionWindowDeriver;
     private final ExplainabilityAssembler explainabilityAssembler;
-    private final PatternStoreService patternStoreService;
+    private final PatternConsolidationService consolidationService;
     private final PatternRepository patternRepository;
     private final com.acp.patternmanager.event.PatternEventPublisher eventPublisher;
 
@@ -53,7 +54,7 @@ public class PatternEnrichmentService {
             StructuralValidationService structuralValidationService,
             ReconciliationService reconciliationService, SessionWindowDeriver sessionWindowDeriver,
             ExplainabilityAssembler explainabilityAssembler,
-            PatternStoreService patternStoreService, PatternRepository patternRepository,
+            PatternConsolidationService consolidationService, PatternRepository patternRepository,
             com.acp.patternmanager.event.PatternEventPublisher eventPublisher) {
         this.knowledgeClient = knowledgeClient;
         this.rcaService = rcaService;
@@ -61,7 +62,7 @@ public class PatternEnrichmentService {
         this.reconciliationService = reconciliationService;
         this.sessionWindowDeriver = sessionWindowDeriver;
         this.explainabilityAssembler = explainabilityAssembler;
-        this.patternStoreService = patternStoreService;
+        this.consolidationService = consolidationService;
         this.patternRepository = patternRepository;
         this.eventPublisher = eventPublisher;
     }
@@ -106,12 +107,27 @@ public class PatternEnrichmentService {
                 xai.structuralValidationReason(),
                 xai.instanceCount(),
                 xai.supportingInstances(),
-                mined.domain() != null ? mined.domain() : DEFAULT_DOMAIN);
+                mined.domain() != null ? mined.domain() : DEFAULT_DOMAIN,
+                mined.snapshotId(),
+                mined.codebookVersion(),
+                mined.anchorScenarioId(),
+                mined.sourceWindowId());
 
-        UUID patternId = patternStoreService.persistDraft(enriched, eventId, source);
-        PatternEntity persisted = patternRepository.findById(patternId)
-                .orElseThrow(() -> new IllegalStateException("pattern vanished after persist: " + patternId));
-        eventPublisher.publishDiscovered(persisted, traceId);
+        // [ANCHOR-CONSOL] consolidate by anchor identity (or per-event identity for unexplained).
+        // The whole upsert-and-aggregate + processed_event write is one DB transaction.
+        ConsolidationOutcome outcome = consolidationService.consolidate(enriched, eventId, source);
+
+        // Emit-once-per-identity: only the CREATING contributor emits a PatternDiscoveredEvent; a
+        // later sub-run folding into an existing anchored row (or a replay no-op) emits nothing.
+        if (outcome.created()) {
+            PatternEntity persisted = patternRepository.findById(outcome.patternId())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "pattern vanished after persist: " + outcome.patternId()));
+            eventPublisher.publishDiscovered(persisted, traceId);
+        } else {
+            log.info("no discovered event emitted for patternId={} (created={}, folded={})",
+                    outcome.patternId(), outcome.created(), outcome.folded());
+        }
     }
 
     /**
@@ -126,6 +142,10 @@ public class PatternEnrichmentService {
             String trailId,
             Map<String, Object> timing,
             String domain,
+            String snapshotId,
+            String codebookVersion,
+            String anchorScenarioId,
+            String sourceWindowId,
             List<SupportingInstance> supportingInstances) {
 
         /** Build a view from a raw envelope-payload JsonNode (post schema validation). */
@@ -138,9 +158,13 @@ public class PatternEnrichmentService {
                     new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
 
             JsonNode prov = payload.path("provenance");
-            String domain = prov.path("domain").asText(null);
-            String sourceWindowId = prov.path("sourceWindowId").asText(null);
-            String snapshotId = prov.path("snapshotId").asText(null);
+            String domain = text(prov, "domain");
+            String sourceWindowId = text(prov, "sourceWindowId");
+            String snapshotId = text(prov, "snapshotId");
+            // [ANCHOR-CONSOL] anchorScenarioId + codebookVersion already on the FROZEN provenance
+            // (PR #331). null/absent anchorScenarioId => unexplained (never consolidated by anchor).
+            String codebookVersion = text(prov, "codebookVersion");
+            String anchorScenarioId = text(prov, "anchorScenarioId");
 
             List<SupportingInstance> instances = new ArrayList<>();
             // The mined event's provenance is a single window reference (no occurrence list in the
@@ -157,7 +181,21 @@ public class PatternEnrichmentService {
                     payload.path("trailId").asText(),
                     timing != null ? timing : Map.of(),
                     domain,
+                    snapshotId,
+                    codebookVersion,
+                    anchorScenarioId,
+                    sourceWindowId,
                     instances);
+        }
+
+        /** @return the trimmed text at {@code field}, or null when absent/blank/JSON-null. */
+        private static String text(JsonNode node, String field) {
+            JsonNode v = node.path(field);
+            if (v.isMissingNode() || v.isNull()) {
+                return null;
+            }
+            String s = v.asText(null);
+            return (s == null || s.isBlank()) ? null : s;
         }
     }
 }

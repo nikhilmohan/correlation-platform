@@ -24,6 +24,10 @@ import java.util.Map;
  * @param instanceCount the number of supporting instances (always > 0)
  * @param supportingInstances example occurrences from provenance (may be empty)
  * @param domain the domain (from provenance; null defaults to MVP domain)
+ * @param snapshotId the topology snapshot the mining ran under (anchor-identity scope)
+ * @param codebookVersion the codebook version the mining ran under (anchor-identity scope)
+ * @param anchorScenarioId the fault-origin anchor ([ANCHOR-CONSOL]); null/absent => unexplained
+ * @param sourceWindowId the mining window (per-event identity component for unexplained patterns)
  */
 public record EnrichedPattern(
         String trailId,
@@ -40,5 +44,14 @@ public record EnrichedPattern(
         String structuralValidationReason,
         int instanceCount,
         List<SupportingInstance> supportingInstances,
-        String domain) {
+        String domain,
+        String snapshotId,
+        String codebookVersion,
+        String anchorScenarioId,
+        String sourceWindowId) {
+
+    /** @return true when this pattern is anchored to a fault-origin scenario (consolidation applies). */
+    public boolean isAnchored() {
+        return anchorScenarioId != null && !anchorScenarioId.isBlank();
+    }
 }
