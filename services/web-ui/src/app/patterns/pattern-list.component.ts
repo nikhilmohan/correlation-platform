@@ -4,7 +4,13 @@ import { FormsModule } from '@angular/forms';
 import { PatternStore, LifecycleFilter } from './pattern.store';
 import { NavigationService } from '../core/navigation.service';
 import { ErrorBannerService } from '../core/error-banner.service';
-import { PatternView, PatternLifecycle, SequenceElement, SupportingInstance } from '../api/models';
+import {
+  PatternView,
+  PatternLifecycle,
+  SequenceElement,
+  SupportingInstance,
+  SampleAlarmView,
+} from '../api/models';
 import { alarmTypeLabel, derivePatternName } from './alarm-type-labels';
 
 /** A cascade chip: readable label + whether it is the root cause + whether it is optional. */
@@ -17,12 +23,14 @@ interface Chip {
 /**
  * Pattern review & XAI (spec tasks 10-12, AC 34-38, 54). Lists discovered/active patterns as
  * polished, scannable cards: a logical name, the constituent-alarm cascade, humanized metrics +
- * timing, the discovery timestamp, and an evidence list of the REAL supporting-instance
- * (window/provenance) references. Expand for full XAI; approve/reject/edit a draft.
+ * timing, the discovery timestamp, and an evidence section. Expand for full XAI;
+ * approve/reject/edit a draft.
  *
- * Real-data-only: every field shown comes off the Pattern Manager wire. Per-alarm detail
- * (timestamps, node/object) is NOT yet served by the Pattern Store — evidence lists the window
- * and provenance handles that DO exist and flags the gap in-line rather than inventing rows.
+ * Real-data-only: every field shown comes off the Pattern Manager wire. The evidence section
+ * leads with the REAL member alarms served on `PatternView.sampleAlarms[]` (alarmType, raisedAt,
+ * managedObjectId/node, perceivedSeverity) — the concrete "these alarms, on these nodes, at these
+ * times" evidence — and keeps the source-window / snapshot provenance handles as a demoted
+ * sub-section. Older patterns without sampleAlarms get a graceful empty state.
  */
 @Component({
   selector: 'app-pattern-list',
@@ -173,32 +181,31 @@ interface Chip {
                 </section>
 
                 <section class="xai-section">
-                  <h2 class="xai-h">Evidence · sample references</h2>
-                  <p class="xai-p">
-                    supporting instances: {{ instances(p).length }}
-                    @if (evidenceSummary(p); as es) {
-                      <span class="xai-muted"> · {{ es }}</span>
-                    }
-                  </p>
-                  @if (instances(p).length) {
-                    <ul class="evidence-list">
-                      @for (inst of shownInstances(p); track $index) {
-                        <li class="evidence-item">
-                          <code class="ev-id" [attr.title]="inst.sourceWindowId ?? '—'"
-                            >{{ shortId(inst.sourceWindowId) }}</code
+                  <h2 class="xai-h">Evidence · sample alarms</h2>
+                  @if (sampleAlarms(p).length) {
+                    <p class="xai-p xai-muted">
+                      {{ sampleAlarms(p).length }} member alarm{{ sampleAlarms(p).length === 1 ? '' : 's' }}
+                      that evidence this pattern — concrete alarms, on these nodes, at these times.
+                    </p>
+                    <ul class="evidence-list" data-testid="sample-alarms">
+                      @for (a of shownSampleAlarms(p); track a.alarmId) {
+                        <li class="sample-alarm-row" data-testid="sample-alarm-row">
+                          <span
+                            class="badge sev-badge"
+                            [class]="'tone-' + severityTone(a.perceivedSeverity)"
+                            [attr.title]="'severity: ' + a.perceivedSeverity"
+                            >{{ a.perceivedSeverity }}</span
                           >
-                          @if (inst.occurrence?.anchorScenarioId) {
-                            <span class="ev-sep" aria-hidden="true">·</span>
-                            <span
-                              class="ev-anchor"
-                              [attr.title]="inst.occurrence?.anchorScenarioId"
-                              >{{ readableTail(inst.occurrence?.anchorScenarioId) }}</span
-                            >
-                          }
+                          <span class="sa-type">{{ alarmLabel(a.alarmType) }}</span>
+                          <code class="sa-node" [attr.title]="a.managedObjectId">{{ a.managedObjectId }}</code>
+                          <span class="sa-time" [attr.title]="a.raisedAt | date: 'medium'">
+                            {{ a.raisedAt | date: 'HH:mm:ss' }}
+                            <span class="xai-muted">· {{ raisedRelative(a) }}</span>
+                          </span>
                         </li>
                       }
                     </ul>
-                    @if (instances(p).length > evidencePreview) {
+                    @if (sampleAlarms(p).length > evidencePreview) {
                       <button
                         type="button"
                         class="evidence-toggle"
@@ -207,16 +214,47 @@ interface Chip {
                         (click)="toggleEvidence()"
                       >
                         @if (evidenceExpanded()) {
-                          Show fewer references
+                          Show fewer alarms
                         } @else {
-                          Show all {{ instances(p).length }} references
+                          Show all {{ sampleAlarms(p).length }} alarms
                         }
                       </button>
                     }
+                  } @else {
+                    <p class="xai-p xai-muted">No sample alarms captured for this pattern.</p>
                   }
-                  <p class="xai-note">
-                    Per-alarm detail (timestamps, node/object) is not yet served by the Pattern Store.
-                  </p>
+
+                  <!-- Demoted provenance: source-window / snapshot handles. -->
+                  <details class="provenance">
+                    <summary>
+                      Provenance · source windows
+                      <span class="xai-muted">(supporting instances: {{ instances(p).length }})</span>
+                    </summary>
+                    @if (instances(p).length) {
+                      @if (evidenceSummary(p); as es) {
+                        <p class="xai-p xai-muted prov-summary">{{ es }}</p>
+                      }
+                      <ul class="evidence-list">
+                        @for (inst of instances(p); track $index) {
+                          <li class="evidence-item">
+                            <code class="ev-id" [attr.title]="inst.sourceWindowId ?? '—'"
+                              >{{ shortId(inst.sourceWindowId) }}</code
+                            >
+                            @if (inst.occurrence?.anchorScenarioId) {
+                              <span class="ev-sep" aria-hidden="true">·</span>
+                              <span
+                                class="ev-anchor"
+                                [attr.title]="inst.occurrence?.anchorScenarioId"
+                                >{{ readableTail(inst.occurrence?.anchorScenarioId) }}</span
+                              >
+                            }
+                          </li>
+                        }
+                      </ul>
+                    } @else {
+                      <p class="xai-p xai-muted prov-summary">No source-window references recorded.</p>
+                    }
+                  </details>
                 </section>
 
                 <section class="xai-section meta">
@@ -521,11 +559,56 @@ interface Chip {
         cursor: pointer;
         text-decoration: underline;
       }
-      .xai-note {
-        margin: 0.1rem 0 0;
-        font-size: 0.8rem;
-        font-style: italic;
+      /* ── Sample-alarm rows (real member-alarm evidence) ── */
+      .sample-alarm-row {
+        display: grid;
+        grid-template-columns: auto minmax(6rem, 1fr) minmax(0, 1.4fr) auto;
+        align-items: center;
+        gap: 0.55rem;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.28rem 0.6rem;
+        font-size: 0.82rem;
+      }
+      .sev-badge {
+        justify-self: start;
+        text-transform: capitalize;
+        font-size: 0.72rem;
+        letter-spacing: 0.02em;
+      }
+      .sa-type {
+        font-weight: 600;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sa-node {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: var(--accent);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .sa-time {
+        justify-self: end;
         color: var(--text-muted);
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .provenance {
+        margin-top: 0.35rem;
+        font-size: 0.82rem;
+      }
+      .provenance > summary {
+        cursor: pointer;
+        color: var(--text-muted);
+        list-style-position: inside;
+      }
+      .prov-summary {
+        margin: 0.3rem 0;
       }
       .meta {
         flex-direction: row;
@@ -646,10 +729,59 @@ export class PatternListComponent implements OnInit {
     return p.supportingInstances ?? [];
   }
 
-  /** The evidence rows currently shown: first `evidencePreview`, or all when expanded. */
-  shownInstances(p: PatternView): SupportingInstance[] {
-    const all = this.instances(p);
+  /** REAL member alarms served on PatternView.sampleAlarms — the headline evidence. */
+  sampleAlarms(p: PatternView): SampleAlarmView[] {
+    return p.sampleAlarms ?? [];
+  }
+
+  // (supporting-instance provenance list is shown in full inside a collapsed <details>.)
+
+  /** The sample-alarm rows currently shown: first `evidencePreview`, or all when expanded. */
+  shownSampleAlarms(p: PatternView): SampleAlarmView[] {
+    const all = this.sampleAlarms(p);
     return this.evidenceExpanded() ? all : all.slice(0, this.evidencePreview);
+  }
+
+  /**
+   * Map a perceivedSeverity to the shared badge tone: critical/major -> error, minor/warning ->
+   * warn, cleared -> ok, indeterminate/unknown -> muted. Case-insensitive.
+   */
+  severityTone(severity: string | null | undefined): 'ok' | 'warn' | 'error' | 'muted' {
+    switch ((severity ?? '').toLowerCase()) {
+      case 'critical':
+      case 'major':
+        return 'error';
+      case 'minor':
+      case 'warning':
+        return 'warn';
+      case 'cleared':
+        return 'ok';
+      default:
+        return 'muted';
+    }
+  }
+
+  /** Relative time for a member alarm's raisedAt (dependency-free). */
+  raisedRelative(a: SampleAlarmView): string {
+    const then = Date.parse(a.raisedAt);
+    if (Number.isNaN(then)) {
+      return '—';
+    }
+    const diffMs = then - Date.now();
+    const abs = Math.abs(diffMs);
+    const units: ReadonlyArray<[Intl.RelativeTimeFormatUnit, number]> = [
+      ['year', 31536000000],
+      ['month', 2592000000],
+      ['day', 86400000],
+      ['hour', 3600000],
+      ['minute', 60000],
+    ];
+    for (const [unit, ms] of units) {
+      if (abs >= ms) {
+        return this.relTime.format(Math.round(diffMs / ms), unit);
+      }
+    }
+    return this.relTime.format(Math.round(diffMs / 1000), 'second');
   }
 
   onExpand(patternId: string): void {
