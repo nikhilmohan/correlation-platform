@@ -288,6 +288,7 @@ class PatternConsolidationServiceIT {
                 new DerivedSessionWindow(30_000, DerivedSessionWindow.WindowType.GAP_BASED),
                 "CB-1", "confirmed", true, null, occ,
                 List.of(new com.acp.patternmanager.enrichment.SupportingInstance(windowId, "snap-1", null)),
+                List.of(),
                 "core-ip", "snap-1", "cb-1", anchor, windowId);
     }
 
@@ -299,6 +300,7 @@ class PatternConsolidationServiceIT {
                 new DerivedSessionWindow(30_000, DerivedSessionWindow.WindowType.GAP_BASED),
                 "CB-1", "confirmed", true, null, occ,
                 List.of(new com.acp.patternmanager.enrichment.SupportingInstance(windowId, snap, null)),
+                List.of(),
                 "core-ip", snap, cb, anchor, windowId);
     }
 }

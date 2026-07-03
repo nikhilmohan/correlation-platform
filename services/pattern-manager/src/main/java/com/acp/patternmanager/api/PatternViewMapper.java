@@ -1,10 +1,12 @@
 package com.acp.patternmanager.api;
 
 import com.acp.patternmanager.api.dto.PatternView;
+import com.acp.patternmanager.api.dto.SampleAlarmView;
 import com.acp.patternmanager.api.dto.SequenceElementView;
 import com.acp.patternmanager.api.dto.SessionWindowView;
 import com.acp.patternmanager.api.dto.SupportingInstanceView;
 import com.acp.patternmanager.store.entity.PatternEntity;
+import com.acp.patternmanager.store.entity.SampleAlarmEntity;
 import com.acp.patternmanager.store.entity.SupportingInstanceEntity;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,6 +34,10 @@ public class PatternViewMapper {
         List<SupportingInstanceView> instances = e.getSupportingInstances().stream()
                 .map(this::toInstance)
                 .toList();
+        // [SAMPLE-ALARMS] Ordered by position (entity @OrderBy); always non-null (empty [] when none).
+        List<SampleAlarmView> sampleAlarms = e.getSampleAlarms().stream()
+                .map(this::toSampleAlarm)
+                .toList();
         return new PatternView(
                 e.getPatternId().toString(),
                 e.getTrailId(),
@@ -48,6 +54,7 @@ public class PatternViewMapper {
                 e.getStructuralValidationReason(),
                 e.getInstanceCount(),
                 instances,
+                sampleAlarms,
                 e.getLifecycle(),
                 e.getDomain(),
                 e.getCreatedAt(),
@@ -57,6 +64,11 @@ public class PatternViewMapper {
     private SupportingInstanceView toInstance(SupportingInstanceEntity si) {
         return new SupportingInstanceView(si.getSourceWindowId(), si.getSnapshotId(),
                 readJson(si.getOccurrence()));
+    }
+
+    private SampleAlarmView toSampleAlarm(SampleAlarmEntity sa) {
+        return new SampleAlarmView(sa.getAlarmId(), sa.getAlarmType(), sa.getRaisedAt(),
+                sa.getManagedObjectId(), sa.getPerceivedSeverity());
     }
 
     private JsonNode readJson(String json) {

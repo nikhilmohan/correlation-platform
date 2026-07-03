@@ -175,7 +175,7 @@ class PatternConsolidationServiceTest {
                 Map.of("timeframeMs", 9000, "medianInterArrivalMs", 4500,
                         "maxInterArrivalMs", 6000, "stddevInterArrivalMs", 1200),
                 new DerivedSessionWindow(30_000, DerivedSessionWindow.WindowType.GAP_BASED),
-                "CB-1", "confirmed", true, null, occ, List.of(),
+                "CB-1", "confirmed", true, null, occ, List.of(), List.of(),
                 "core-ip", snapshotId, codebookVersion, anchorScenarioId, "w-" + occ);
     }
 
@@ -185,7 +185,7 @@ class PatternConsolidationServiceTest {
                 trailId, seq, seq.get(0), 0.3, 0.7, 2.0,
                 Map.of("timeframeMs", 5000),
                 new DerivedSessionWindow(20_000, DerivedSessionWindow.WindowType.GAP_BASED),
-                null, "unexplained", true, null, 5, List.of(),
+                null, "unexplained", true, null, 5, List.of(), List.of(),
                 "core-ip", snapshotId, "cb-1", null, windowId);
     }
 

@@ -25,6 +25,8 @@ import java.util.List;
  * @param structuralValidationReason non-null exactly when {@code structurallyValidated} is false
  * @param instanceCount number of supporting instances (> 0)
  * @param supportingInstances example occurrences (may be empty)
+ * @param sampleAlarms bounded sample of real member alarms for operator XAI (always present; {@code []}
+ *     when none captured — spec-sample-alarms AC-SA-4/5b)
  * @param lifecycle draft / approved / deprecated / rejected
  * @param domain the domain (may be null)
  * @param createdAt creation timestamp
@@ -46,6 +48,7 @@ public record PatternView(
         String structuralValidationReason,
         int instanceCount,
         List<SupportingInstanceView> supportingInstances,
+        List<SampleAlarmView> sampleAlarms,
         String lifecycle,
         String domain,
         OffsetDateTime createdAt,
