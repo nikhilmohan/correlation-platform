@@ -256,6 +256,9 @@ export interface RunStatsRow {
   alarmsDropped: number;
   noiseRatio: number;
   stormReductionRatio?: number;
+  stormMaxClusterSize?: number;
+  retentionVsOracle?: number | null;
+  hopFeatureEnabled?: boolean;
 }
 export type RunStatsPage = Page<RunStatsRow>;
 export interface ObservedChatterSignature {
