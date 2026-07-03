@@ -91,6 +91,7 @@ def _record_envelope() -> dict:
                 {"key": "anchoring.weights.order", "value": 0.7},
                 {"key": "anchoring.weights.jaccard", "value": 0.3},
                 {"key": "codebookVersion", "value": "current"},
+                {"key": "sample.maxAlarms", "value": 10},
             ],
         },
     }

@@ -247,6 +247,7 @@ def test_max_trails_per_batch_config_and_knowledge_override():
             {"key": "anchoring.weights.order", "value": 0.7},
             {"key": "anchoring.weights.jaccard", "value": 0.3},
             {"key": "codebookVersion", "value": "current"},
+            {"key": "sample.maxAlarms", "value": 10},
             {"key": "batching.maxTrailsPerBatch", "value": 3},
         ]
     }

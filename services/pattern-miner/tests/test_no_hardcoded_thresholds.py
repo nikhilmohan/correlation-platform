@@ -24,6 +24,8 @@ THRESHOLD_FILES = [
     SRC / "mining" / "miner.py",
     SRC / "mining" / "grouped_miner.py",
     SRC / "anchoring.py",
+    # [SAMPLE] the sample selector must carry NO K/cap literal — K is Knowledge-sourced (AC-26).
+    SRC / "sampling.py",
 ]
 
 # Structural constants that are NOT correlation thresholds (indices, unit conversions, math,
@@ -84,6 +86,9 @@ def test_config_declares_no_default_mining_thresholds():
     assert "SESSION_GAP" not in src
     assert "MATCH_CONFIDENCE" not in src
     assert "MATCHCONFIDENCE" not in src
+    # [SAMPLE] AC-26: the sample cap K carries no code default and no env var — Knowledge-sourced.
+    assert "sample_max_alarms: int = " not in src  # MiningParams field has NO default
+    assert "SAMPLE_MAX_ALARMS" not in src  # no Settings env var for the cap
 
 
 # Domain-specific tokens that MUST NOT appear as literals in source/default config (they belong to

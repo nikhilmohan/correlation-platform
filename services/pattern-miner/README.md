@@ -45,6 +45,15 @@ frozen `PatternMinedEvent` schema (`extra="forbid"`).
   transaction), `codebookVersion` (from the Knowledge mining-params response — kept verbatim, e.g.
   `"current"`), `domain`, and **`anchorScenarioId`** (the matched Codebook `scenarioId`, or
   null/absent for the unexplained group — landed in `libs/event-model` via PR #331).
+- **`sampleAlarms[]`** (optional, **[SAMPLE]** XAI): a bounded (`sample.maxAlarms` = K), deterministic
+  set of the pattern's **real** member alarms — one entry per selected alarm, each with the 5 fields
+  `{alarmId, alarmType, raisedAt, managedObjectId, perceivedSeverity}`. Drawn from the group's
+  **representative session** (earliest by window start; sorted `(windowStart, trailId,
+  sourceWindowId)`), deduped by `alarmId`, ordered by `(raisedAt, alarmId)`, capped at K. Every
+  sampled `alarmType` is a member of `sequence` by construction. Absent/empty when no alarm is
+  capturable (valid). Derived from in-run sessions at emit time, persisted nowhere (stateless
+  "emit and forget"); replay-safe (same input -> byte-identical sample). Landed in
+  `libs/event-model` via PR #349 (optional, not in `required`).
 - **Idempotency:** dedupe on the envelope `eventId`.
 
 ## Knowledge integration (mining params — config-switchable mock/real)
@@ -64,7 +73,11 @@ GET /domains/{domain}/model-params/{recordId}
   `window.adaptive.tempoPercentile`, `window.adaptive.profiles`, `codebookVersion`, and the
   **Stage-2 anchoring** keys `anchoring.matchConfidenceThreshold`, `anchoring.weights.order`,
   `anchoring.weights.jaccard` (required — no code default), plus optional `anchoring.scoringMethod`,
-  `anchoring.tieBreak`, `anchoring.groupingKeys` (structural template defaults).
+  `anchoring.tieBreak`, `anchoring.groupingKeys` (structural template defaults), and the **[SAMPLE]**
+  cap `sample.maxAlarms` (integer, **required — no code default**): the max number of member alarms
+  attached to each emitted `PatternMinedEvent.sampleAlarms[]` (XAI evidence). Swapping this value in
+  Knowledge changes the emitted sample length with no code change. The live `core-ip` record must
+  author `sample.maxAlarms` (recommended value `10`) before a real P2 run.
 - Unit tests mock this with `respx` (enveloped shape); integration points at the real Knowledge
   Service. Base URL + mock/real toggle come from env — no hard-coded URLs.
 

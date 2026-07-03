@@ -156,10 +156,15 @@ def default_params(
     max_pattern_length: int = 10,
     max_sequence_count: int = 1000,
     codebook_version: str = "current",
+    sample_max_alarms: int = 10,
     windowing: WindowingParams | None = None,
     anchoring: AnchoringParams | None = None,
 ) -> MiningParams:
-    """A MiningParams mirroring the live Knowledge record."""
+    """A MiningParams mirroring the live Knowledge record.
+
+    ``sample_max_alarms`` mirrors the Knowledge ``sample.maxAlarms`` cap (injected here, never a
+    source/default-config literal); tests that assert the K-cap pass an explicit value.
+    """
     return MiningParams(
         min_support=min_support,
         max_pattern_length=max_pattern_length,
@@ -167,6 +172,7 @@ def default_params(
         windowing=windowing or default_windowing(),
         anchoring=anchoring or default_anchoring(),
         codebook_version=codebook_version,
+        sample_max_alarms=sample_max_alarms,
     )
 
 

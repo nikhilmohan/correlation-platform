@@ -51,6 +51,12 @@ KEY_PROFILES = "window.adaptive.profiles"
 KEY_CLASS_THRESHOLDS = "window.adaptive.classThresholds"
 KEY_CODEBOOK_VERSION = "codebookVersion"
 
+# [SAMPLE] The Knowledge-sourced cap K for the XAI ``sampleAlarms[]`` array (max member alarms per
+# emitted PatternMinedEvent). Authored in the SAME model-params record as the other dotted keys.
+# REQUIRED (no code default) — there is no cap literal anywhere in source/default config, so
+# swapping the Knowledge value changes the emitted array length with no code change (spec AC-26).
+KEY_SAMPLE_MAX_ALARMS = "sample.maxAlarms"
+
 # Stage-2 domain-knowledge anchoring keys (authored in the same model-params record).
 KEY_MATCH_CONFIDENCE_THRESHOLD = "anchoring.matchConfidenceThreshold"
 KEY_SCORING_METHOD = "anchoring.scoringMethod"
@@ -304,5 +310,7 @@ def _parse_mining_params(payload: dict[str, Any]) -> MiningParams:
         windowing=windowing,
         anchoring=_parse_anchoring_params(m),
         codebook_version=str(_require(m, KEY_CODEBOOK_VERSION)),
+        # [SAMPLE] K read like every other required param — no code default (spec AC-26).
+        sample_max_alarms=int(_require(m, KEY_SAMPLE_MAX_ALARMS)),
         max_trails_per_batch=max_trails_per_batch,
     )
