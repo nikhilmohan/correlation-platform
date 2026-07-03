@@ -70,6 +70,9 @@
           "required" : true
         },
         "responses" : {
+          "409" : {
+            "description" : "Pattern is not in a lifecycle state that permits approval/rejection"
+          },
           "200" : {
             "description" : "Decision applied; updated PatternView returned",
             "content" : {
@@ -85,9 +88,6 @@
           },
           "404" : {
             "description" : "No pattern with the given id"
-          },
-          "409" : {
-            "description" : "Pattern is not in a lifecycle state that permits approval/rejection"
           }
         }
       }
@@ -154,11 +154,11 @@
               }
             }
           },
-          "422" : {
-            "description" : "Edit body is un-processable (e.g. out-of-range position index)"
-          },
           "404" : {
             "description" : "No pattern with the given id"
+          },
+          "422" : {
+            "description" : "Edit body is un-processable (e.g. out-of-range position index)"
           }
         }
       }
@@ -285,6 +285,12 @@
               "$ref" : "#/components/schemas/SupportingInstanceView"
             }
           },
+          "sampleAlarms" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SampleAlarmView"
+            }
+          },
           "lifecycle" : {
             "type" : "string"
           },
@@ -298,6 +304,26 @@
           "updatedAt" : {
             "type" : "string",
             "format" : "date-time"
+          }
+        }
+      },
+      "SampleAlarmView" : {
+        "properties" : {
+          "alarmId" : {
+            "type" : "string"
+          },
+          "alarmType" : {
+            "type" : "string"
+          },
+          "raisedAt" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "managedObjectId" : {
+            "type" : "string"
+          },
+          "perceivedSeverity" : {
+            "type" : "string"
           }
         }
       },

@@ -149,6 +149,12 @@ public class PatternConsolidationService {
         // Union supporting instances (dedup on sourceWindowId).
         storeService.addSupportingInstances(row, e.supportingInstances());
 
+        // [SAMPLE-ALARMS DA-1] The fold DELIBERATELY does NOT touch the sample_alarm collection: the
+        // pattern keeps ONE bounded sample = the FIRST/creating contributor's (written once in
+        // createDraftRow). No clear()/re-add/append here — this keeps the sample deterministic +
+        // bounded across folds, makes it idempotent/replay-safe, and sidesteps the sequence_element
+        // INSERT-before-DELETE dup-key trap (#342) entirely for this collection.
+
         row.setUpdatedAt(OffsetDateTime.now());
         storeService.save(row);
     }

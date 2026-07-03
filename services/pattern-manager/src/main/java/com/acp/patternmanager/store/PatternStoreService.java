@@ -1,10 +1,13 @@
 package com.acp.patternmanager.store;
 
+import com.acp.patternmanager.config.SampleAlarmProperties;
 import com.acp.patternmanager.enrichment.EnrichedPattern;
+import com.acp.patternmanager.enrichment.SampleAlarm;
 import com.acp.patternmanager.enrichment.SupportingInstance;
 import com.acp.patternmanager.store.entity.LifecycleTransitionEntity;
 import com.acp.patternmanager.store.entity.PatternEntity;
 import com.acp.patternmanager.store.entity.ProcessedEventEntity;
+import com.acp.patternmanager.store.entity.SampleAlarmEntity;
 import com.acp.patternmanager.store.entity.SequenceElementEntity;
 import com.acp.patternmanager.store.entity.SupportingInstanceEntity;
 import com.acp.patternmanager.store.repo.LifecycleTransitionRepository;
@@ -43,6 +46,7 @@ public class PatternStoreService {
     private final LifecycleTransitionRepository transitionRepository;
     private final ProcessedEventRepository processedEventRepository;
     private final ObjectMapper objectMapper;
+    private final SampleAlarmProperties sampleAlarmProperties;
 
     @PersistenceContext
     private EntityManager entityManager;
@@ -50,11 +54,12 @@ public class PatternStoreService {
     public PatternStoreService(PatternRepository patternRepository,
             LifecycleTransitionRepository transitionRepository,
             ProcessedEventRepository processedEventRepository,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper, SampleAlarmProperties sampleAlarmProperties) {
         this.patternRepository = patternRepository;
         this.transitionRepository = transitionRepository;
         this.processedEventRepository = processedEventRepository;
         this.objectMapper = objectMapper;
+        this.sampleAlarmProperties = sampleAlarmProperties;
     }
 
     /** @return whether this {@code eventId} was already processed (idempotency gate). */
@@ -114,8 +119,13 @@ public class PatternStoreService {
 
         replaceSequence(entity, enriched.sequence());
         addSupportingInstances(entity, enriched.supportingInstances());
+        // [SAMPLE-ALARMS] Write the bounded sample ONLY at create (the first/creating contributor's
+        // sample). The consolidation fold (aggregate) never touches this collection, so it stays
+        // deterministic + bounded across folds and sidesteps the sequence_element INSERT-before-DELETE
+        // dup-key trap (there is no clear()+re-add of this collection). Defensively capped at K (DA-5).
+        setSampleAlarms(entity, enriched.sampleAlarms());
 
-        // Single save (cascades sequence + supporting instances exactly once).
+        // Single save (cascades sequence + supporting instances + sample alarms exactly once).
         patternRepository.save(entity);
         transitionRepository.save(new LifecycleTransitionEntity(
                 UUID.randomUUID(), patternId, "-", "draft", null, "pattern discovered", now));
@@ -161,6 +171,28 @@ public class PatternStoreService {
             String occ = si.occurrence() != null ? si.occurrence().toString() : null;
             entity.getSupportingInstances().add(new SupportingInstanceEntity(
                     UUID.randomUUID(), entity, si.sourceWindowId(), si.snapshotId(), occ));
+        }
+    }
+
+    /**
+     * Set the bounded sample-alarm child rows on {@code entity} from the mined event's sample,
+     * defensively capped to the first {@code K} entries (AC-SA-6, DA-5) with {@code position}
+     * preserving the miner's received order (deterministic serve order). Called ONLY on create — the
+     * consolidation fold never touches this collection (DA-1), keeping the sample bounded, deterministic,
+     * and replay-safe across folds. Empty/absent sample -> zero rows (backward-compat, AC-SA-4/5b).
+     */
+    void setSampleAlarms(PatternEntity entity, List<SampleAlarm> samples) {
+        entity.getSampleAlarms().clear();
+        if (samples == null || samples.isEmpty()) {
+            return;
+        }
+        int cap = sampleAlarmProperties.capK();
+        int limit = Math.min(cap, samples.size());
+        for (int i = 0; i < limit; i++) {
+            SampleAlarm sa = samples.get(i);
+            entity.getSampleAlarms().add(new SampleAlarmEntity(
+                    UUID.randomUUID(), entity, sa.alarmId(), sa.alarmType(), sa.raisedAt(),
+                    sa.managedObjectId(), sa.perceivedSeverity(), i));
         }
     }
 

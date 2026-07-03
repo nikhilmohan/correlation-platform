@@ -65,6 +65,18 @@ All config is supplied from the environment — no hard-coded URLs, credentials,
 | `SESSION_WINDOW_MAX_MS` | `1800000` | Session-window derivation: ceiling (ms). |
 | `SESSION_WINDOW_GAP_FLOOR_FACTOR` | `2.0` | Session-window derivation: gap-floor multiplier. |
 | `SESSION_WINDOW_CV_FIXED_THRESHOLD` | `0.5` | Session-window derivation: CV threshold for fixed vs gap-based. |
+| `SAMPLE_ALARMS_CAP_K` | `10` | Per-pattern cap `K` on the bounded member-alarm sample served on `PatternView.sampleAlarms[]` (operator XAI). |
+
+### Sample alarms (`PatternView.sampleAlarms[]`)
+
+Each mined `PatternMinedEvent` may carry an optional, bounded `sampleAlarms[]` — a representative
+sample of the real member alarms the pattern was mined from (`alarmId`, `alarmType`, `raisedAt`,
+`managedObjectId`, `perceivedSeverity`). The Pattern Manager persists these (child table
+`pattern.sample_alarm`, migration `V3`), defensively capped at `SAMPLE_ALARMS_CAP_K`, and serves them
+as `sampleAlarms[]` on `PatternView` in both `GET /patterns` and `GET /patterns/{patternId}` — always
+present, `[]` when none captured. On anchor-consolidation the pattern keeps ONE bounded sample = the
+first/creating contributor's; the fold never re-writes the sample (deterministic, bounded,
+replay-safe). Events without `sampleAlarms[]` persist normally with zero sample rows (backward-compat).
 
 ## Kafka semantics
 

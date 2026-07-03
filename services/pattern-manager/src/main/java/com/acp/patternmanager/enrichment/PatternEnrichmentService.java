@@ -92,6 +92,18 @@ public class PatternEnrichmentService {
         XaiMetadata xai = explainabilityAssembler.assemble(mined.support(), mined.confidence(),
                 mined.lift(), mined.timing(), rca, structural, window, mined.supportingInstances());
 
+        // [SAMPLE-ALARMS AC-SA-8] Reconcile anchorScenarioId -> codebookMatchId: when the standard
+        // codebook-override found no match but the mined provenance carries a populated
+        // anchorScenarioId, propagate it into codebookMatchId so the UI's fault-origin display is
+        // consistent. Internal to the existing enrichment pipeline; no contract change.
+        String codebookMatchId = xai.codebookMatchId();
+        if ((codebookMatchId == null || codebookMatchId.isBlank())
+                && mined.anchorScenarioId() != null && !mined.anchorScenarioId().isBlank()) {
+            codebookMatchId = mined.anchorScenarioId();
+            log.info("propagated anchorScenarioId={} to codebookMatchId (no codebook match)",
+                    mined.anchorScenarioId());
+        }
+
         EnrichedPattern enriched = new EnrichedPattern(
                 mined.trailId(),
                 mined.sequence(),
@@ -101,12 +113,13 @@ public class PatternEnrichmentService {
                 xai.lift(),
                 xai.timing(),
                 xai.sessionWindow(),
-                xai.codebookMatchId(),
+                codebookMatchId,
                 xai.reconcileStatus(),
                 xai.structurallyValidated(),
                 xai.structuralValidationReason(),
                 xai.instanceCount(),
                 xai.supportingInstances(),
+                mined.sampleAlarms(),
                 mined.domain() != null ? mined.domain() : DEFAULT_DOMAIN,
                 mined.snapshotId(),
                 mined.codebookVersion(),
@@ -146,7 +159,8 @@ public class PatternEnrichmentService {
             String codebookVersion,
             String anchorScenarioId,
             String sourceWindowId,
-            List<SupportingInstance> supportingInstances) {
+            List<SupportingInstance> supportingInstances,
+            List<SampleAlarm> sampleAlarms) {
 
         /** Build a view from a raw envelope-payload JsonNode (post schema validation). */
         public static MinedPatternView from(JsonNode payload,
@@ -173,6 +187,10 @@ public class PatternEnrichmentService {
                 instances.add(new SupportingInstance(sourceWindowId, snapshotId, prov));
             }
 
+            // [SAMPLE-ALARMS] Best-effort parse of the optional frozen sampleAlarms[] (DA-4); absent /
+            // null / malformed -> empty (backward-compat, pattern still persists).
+            List<SampleAlarm> sampleAlarms = SampleAlarm.parse(payload);
+
             return new MinedPatternView(
                     seq,
                     payload.path("support").asDouble(),
@@ -185,7 +203,8 @@ public class PatternEnrichmentService {
                     codebookVersion,
                     anchorScenarioId,
                     sourceWindowId,
-                    instances);
+                    instances,
+                    sampleAlarms);
         }
 
         /** @return the trimmed text at {@code field}, or null when absent/blank/JSON-null. */

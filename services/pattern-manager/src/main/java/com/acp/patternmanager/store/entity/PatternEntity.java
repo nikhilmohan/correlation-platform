@@ -112,6 +112,15 @@ public class PatternEntity {
             fetch = FetchType.EAGER)
     private List<SupportingInstanceEntity> supportingInstances = new ArrayList<>();
 
+    // [SAMPLE-ALARMS] The bounded, representative sample of real member alarms (operator XAI). Written
+    // ONLY at draft creation (createDraftRow) with the first contributor's sample; the consolidation
+    // fold never touches this collection, so it stays deterministic + bounded across folds. Ordered by
+    // the miner's received position for a deterministic serve order.
+    @OneToMany(mappedBy = "pattern", cascade = CascadeType.ALL, orphanRemoval = true,
+            fetch = FetchType.EAGER)
+    @OrderBy("position ASC")
+    private List<SampleAlarmEntity> sampleAlarms = new ArrayList<>();
+
     public PatternEntity() {
     }
 
@@ -315,5 +324,13 @@ public class PatternEntity {
 
     public void setSupportingInstances(List<SupportingInstanceEntity> supportingInstances) {
         this.supportingInstances = supportingInstances;
+    }
+
+    public List<SampleAlarmEntity> getSampleAlarms() {
+        return sampleAlarms;
+    }
+
+    public void setSampleAlarms(List<SampleAlarmEntity> sampleAlarms) {
+        this.sampleAlarms = sampleAlarms;
     }
 }

@@ -23,6 +23,7 @@ import java.util.Map;
  * @param structuralValidationReason non-null exactly when {@code structurallyValidated} is false
  * @param instanceCount the number of supporting instances (always > 0)
  * @param supportingInstances example occurrences from provenance (may be empty)
+ * @param sampleAlarms bounded sample of real member alarms from the mined event (may be empty)
  * @param domain the domain (from provenance; null defaults to MVP domain)
  * @param snapshotId the topology snapshot the mining ran under (anchor-identity scope)
  * @param codebookVersion the codebook version the mining ran under (anchor-identity scope)
@@ -44,6 +45,7 @@ public record EnrichedPattern(
         String structuralValidationReason,
         int instanceCount,
         List<SupportingInstance> supportingInstances,
+        List<SampleAlarm> sampleAlarms,
         String domain,
         String snapshotId,
         String codebookVersion,

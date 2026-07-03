@@ -78,3 +78,7 @@ pattern-manager:
     gap-floor-factor: ${SESSION_WINDOW_GAP_FLOOR_FACTOR:2.0}
     cv-fixed-threshold: ${SESSION_WINDOW_CV_FIXED_THRESHOLD:0.5}
     # timing-aliases default EMPTY (identity) — the Pattern Miner emits the canonical ms keys.
+  sample-alarms:
+    # [SAMPLE-ALARMS] Per-pattern cap K on the bounded member-alarm sample served on PatternView
+    # (spec OQ-SA-4 / design DA-2). Env-overridable; documented default 10. NOT a hard-coded value.
+    cap-k: ${SAMPLE_ALARMS_CAP_K:10}
