@@ -70,6 +70,7 @@ def _live_payload() -> dict:
             {"key": "anchoring.weights.order", "type": "number", "value": 0.7},
             {"key": "anchoring.weights.jaccard", "type": "number", "value": 0.3},
             {"key": "codebookVersion", "type": "string", "value": "current"},
+            {"key": "sample.maxAlarms", "type": "integer", "value": 10},
         ],
     }
 
@@ -101,6 +102,33 @@ def test_fetch_parses_live_enveloped_shape():
     assert params.anchoring.match_confidence_threshold == 0.6
     assert params.anchoring.w_order == 0.7
     assert params.anchoring.w_jaccard == 0.3
+    # [SAMPLE] AC-26: the sample cap K is read from the same record's ``sample.maxAlarms`` key.
+    assert params.sample_max_alarms == 10
+
+
+@respx.mock
+def test_fetch_sample_max_alarms_sourced_from_knowledge_no_code_change():
+    """AC-23/AC-26: changing the Knowledge ``sample.maxAlarms`` changes K with no code change."""
+    payload = _live_payload()
+    for entry in payload["params"]:
+        if entry["key"] == "sample.maxAlarms":
+            entry["value"] = 3
+    respx.get(f"{KNOWLEDGE_URL}{MODEL_PARAMS_PATH}").mock(
+        return_value=httpx.Response(200, json=_record_envelope(payload))
+    )
+    assert _client().fetch().sample_max_alarms == 3
+
+
+@respx.mock
+def test_fetch_missing_sample_max_alarms_raises():
+    """AC-26: ``sample.maxAlarms`` is required (no code default) — a missing key fails fast."""
+    payload = _live_payload()
+    payload["params"] = [p for p in payload["params"] if p["key"] != "sample.maxAlarms"]
+    respx.get(f"{KNOWLEDGE_URL}{MODEL_PARAMS_PATH}").mock(
+        return_value=httpx.Response(200, json=_record_envelope(payload))
+    )
+    with pytest.raises(KnowledgeError):
+        _client().fetch()
 
 
 @respx.mock

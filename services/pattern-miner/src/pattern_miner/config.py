@@ -186,6 +186,11 @@ class MiningParams:
     windowing: WindowingParams
     anchoring: AnchoringParams
     codebook_version: str
+    # [SAMPLE] Knowledge-sourced cap K for the XAI ``sampleAlarms[]`` evidence array (the max number
+    # of member alarms attached to each emitted PatternMinedEvent). From the Knowledge dotted
+    # key ``sample.maxAlarms`` — REQUIRED, no code default here (there is no cap literal anywhere in
+    # source or default config; spec AC-26). Onboarding a new domain re-authors it in Knowledge.
+    sample_max_alarms: int
     # [BATCH-CAP] Optional Knowledge override of the operational trail-batch cap
     # (``batching.maxTrailsPerBatch``). When present it wins over the ``MAX_TRAILS_PER_BATCH`` env
     # default; when absent (``None``) the env default is used. It is an operational batching knob,

@@ -72,6 +72,7 @@ def _record_envelope(cap: int | None = None) -> dict:
         {"key": "anchoring.weights.order", "value": 0.7},
         {"key": "anchoring.weights.jaccard", "value": 0.3},
         {"key": "codebookVersion", "value": "current"},
+        {"key": "sample.maxAlarms", "value": 10},
     ]
     if cap is not None:
         params.append({"key": "batching.maxTrailsPerBatch", "value": cap})

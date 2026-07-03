@@ -28,6 +28,7 @@ def _base_params(extra: list[dict] | None = None) -> list[dict]:
         {"key": "anchoring.weights.order", "value": 0.7},
         {"key": "anchoring.weights.jaccard", "value": 0.3},
         {"key": "codebookVersion", "value": "current"},
+        {"key": "sample.maxAlarms", "value": 10},
     ]
     if extra:
         params.extend(extra)
@@ -52,6 +53,19 @@ def test_profiles_non_dict_returns_empty():
 
 def test_missing_required_key_raises():
     params = [p for p in _base_params() if p["key"] != "codebookVersion"]
+    with pytest.raises(KnowledgeError):
+        _parse_mining_params(_payload(params))
+
+
+def test_sample_max_alarms_parsed_from_knowledge():
+    """[SAMPLE] AC-26: the sample cap K is mapped from the ``sample.maxAlarms`` dotted key."""
+    params = _parse_mining_params(_payload(_base_params()))
+    assert params.sample_max_alarms == 10
+
+
+def test_missing_sample_max_alarms_raises():
+    """[SAMPLE] AC-26: ``sample.maxAlarms`` is required — no code default, fail fast."""
+    params = [p for p in _base_params() if p["key"] != "sample.maxAlarms"]
     with pytest.raises(KnowledgeError):
         _parse_mining_params(_payload(params))
 

@@ -37,6 +37,7 @@ from .codebook import Scenario
 from .config import MiningParams
 from .logging_setup import get_logger
 from .mining import GroupedMiner, GroupPattern
+from .sampling import SampleAlarmSelector
 from .timing import TimingComputer
 from .windowing import Session, SessionWindower
 
@@ -128,6 +129,8 @@ class ThreeStagePipeline:
         self._grouped_miner = grouped_miner
         self._timing = timing_computer
         self._metrics = metrics
+        # [SAMPLE] Pure-Python XAI member-alarm selector (no Spark); the K cap is Knowledge-sourced.
+        self._sample_selector = SampleAlarmSelector()
 
     def run(
         self,
@@ -215,12 +218,17 @@ class ThreeStagePipeline:
             codebookVersion=params.codebook_version,
             anchorScenarioId=gp.scenario_id,
         )
+        # [SAMPLE] Bounded, deterministic XAI evidence — real member alarms from the group's
+        # representative session, capped at K (Knowledge-sourced). Empty when no alarm is
+        # capturable (AC-25). Applies uniformly to anchored AND unexplained groups.
+        sample_alarms = self._sample_selector.select(gp, params.sample_max_alarms)
         payload = PatternMinedEvent(
             sequence=list(gp.mined.sequence),
             support=gp.mined.support,
             confidence=gp.mined.confidence,
             lift=gp.mined.lift,
             trailId=first.trail_id,
+            sampleAlarms=sample_alarms,
             timing=timing.to_dict(),
             provenance=provenance,
         )

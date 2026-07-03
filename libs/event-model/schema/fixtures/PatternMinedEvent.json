@@ -15,6 +15,22 @@
     "confidence": 0.87,
     "lift": 3.1,
     "trailId": "TRAIL-0001",
+    "sampleAlarms": [
+      {
+        "alarmId": "ALM-0001262",
+        "alarmType": "lossOfSignal",
+        "raisedAt": "2026-06-08T12:38:51Z",
+        "managedObjectId": "IPLink:N6_N7",
+        "perceivedSeverity": "major"
+      },
+      {
+        "alarmId": "ALM-0001263",
+        "alarmType": "linkDown",
+        "raisedAt": "2026-06-08T12:38:57Z",
+        "managedObjectId": "IPLink:N6_N7",
+        "perceivedSeverity": "major"
+      }
+    ],
     "timing": {
       "timeframeMs": 9000,
       "medianInterArrivalMs": 4500,
