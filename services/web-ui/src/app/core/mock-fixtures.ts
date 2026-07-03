@@ -430,6 +430,10 @@ const PATTERNS: PatternPage = {
       structurallyValidated: true,
       structuralValidationReason: null,
       instanceCount: 18,
+      occurrenceCount: 12,
+      trailCount: 11,
+      firstSeen: '2026-05-01T09:14:02Z',
+      lastSeen: '2026-05-10T18:02:41Z',
       supportingInstances: [
         { sourceWindowId: 'win-3f2a', snapshotId: 'current', occurrence: { anchorScenarioId: 'Port:N0-LC1-P1' } },
         { sourceWindowId: 'win-9c17', snapshotId: 'current', occurrence: { anchorScenarioId: 'Port:N0-LC1-P1' } },
@@ -463,6 +467,10 @@ const PATTERNS: PatternPage = {
       structurallyValidated: false,
       structuralValidationReason: 'no codebook overlap',
       instanceCount: 30,
+      occurrenceCount: 1,
+      trailCount: 1,
+      firstSeen: '2026-04-20T02:11:00Z',
+      lastSeen: '2026-04-20T02:11:00Z',
       supportingInstances: [
         { sourceWindowId: 'win-a44b', snapshotId: 'current', occurrence: {} },
       ],

@@ -122,7 +122,13 @@ interface Chip {
               <span class="chip metric" data-testid="support">Support {{ p.support | percent: '1.0-0' }}</span>
               <span class="chip metric" data-testid="confidence">Confidence {{ p.confidence | percent: '1.0-0' }}</span>
               <span class="chip metric" data-testid="lift">Lift {{ p.lift | number: '1.1-1' }}x</span>
-              <span class="chip metric">{{ p.instanceCount }} occurrences</span>
+              <span
+                class="chip metric popularity"
+                data-testid="pattern-popularity"
+                [attr.title]="popularityTitle(p)"
+              >
+                <span class="star" aria-hidden="true">◎</span> {{ popularityText(p) }}
+              </span>
               <span class="chip metric"><span class="star" aria-hidden="true">◷</span> {{ discoveredRelative(p) }}</span>
               <span class="chip metric origin" [attr.title]="faultOrigin(p)">
                 <span class="star" aria-hidden="true">⚑</span> {{ faultOriginShort(p) }}
@@ -255,6 +261,14 @@ interface Chip {
                       <p class="xai-p xai-muted prov-summary">No source-window references recorded.</p>
                     }
                   </details>
+                </section>
+
+                <section class="xai-section">
+                  <h2 class="xai-h">Extent &amp; popularity</h2>
+                  <p class="xai-p" data-testid="pattern-popularity-detail">{{ extentText(p) }}</p>
+                  <p class="xai-p xai-muted">
+                    {{ p.instanceCount }} member alarm{{ p.instanceCount === 1 ? '' : 's' }} (total volume)
+                  </p>
                 </section>
 
                 <section class="xai-section meta">
@@ -468,6 +482,13 @@ interface Chip {
       }
       .chip.origin {
         color: var(--text);
+      }
+      .chip.popularity {
+        color: var(--text);
+        border-color: var(--accent);
+      }
+      .chip.popularity .star {
+        color: var(--accent);
       }
       /* ── Expanded XAI ── */
       .xai {
@@ -931,6 +952,74 @@ export class PatternListComponent implements OnInit {
   windowHuman(p: PatternView): string {
     const ms = p.sessionWindow?.windowMs;
     return typeof ms === 'number' ? this.humanMs(ms) : '';
+  }
+
+  // ── Impact / popularity (Pattern Manager PR #360) ──
+
+  /** Safe non-negative integer read; 0 when the field is missing/NaN so the UI never shows NaN. */
+  private count(v: number | undefined): number {
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
+  }
+
+  /**
+   * Compact collapsed-card popularity signal: occurrence count + distinct-trail spread — the
+   * cross-trail significance of a pattern ("seen Nx across M trails"). Singular/plural aware; when
+   * both counts are 0/absent (older responses) it falls back to member-alarm volume so the chip is
+   * never empty or NaN.
+   */
+  popularityText(p: PatternView): string {
+    const occ = this.count(p.occurrenceCount);
+    const trails = this.count(p.trailCount);
+    if (occ > 0 || trails > 0) {
+      const occPart = occ > 0 ? `seen ${occ}x` : 'seen';
+      const trailPart = trails > 0 ? ` across ${trails} trail${trails === 1 ? '' : 's'}` : '';
+      return `${occPart}${trailPart}`;
+    }
+    return `${p.instanceCount} member alarm${p.instanceCount === 1 ? '' : 's'}`;
+  }
+
+  /** Hover title for the collapsed popularity chip — spells out the two counts. */
+  popularityTitle(p: PatternView): string {
+    const occ = this.count(p.occurrenceCount);
+    const trails = this.count(p.trailCount);
+    return `Observed ${occ}x across ${trails} distinct trail${trails === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * Expanded-panel extent line: occurrence count, distinct-trail spread, and the firstSeen ->
+   * lastSeen observation span. Only the present parts are joined with " · " so older/edge
+   * responses (missing fields) degrade gracefully with no undefined text.
+   */
+  extentText(p: PatternView): string {
+    const occ = this.count(p.occurrenceCount);
+    const trails = this.count(p.trailCount);
+    const parts: string[] = [];
+    if (occ > 0 || trails > 0) {
+      const trailStr = trails > 0 ? ` across ${trails} distinct trail${trails === 1 ? '' : 's'}` : '';
+      parts.push(`Observed ${occ}x${trailStr}`);
+    }
+    const first = this.formatSeen(p.firstSeen);
+    const last = this.formatSeen(p.lastSeen);
+    if (first && last) {
+      parts.push(`first ${first} · last ${last}`);
+    } else if (first) {
+      parts.push(`first ${first}`);
+    } else if (last) {
+      parts.push(`last ${last}`);
+    }
+    return parts.length ? parts.join(' · ') : 'No occurrence metrics recorded.';
+  }
+
+  /** Medium-format an ISO-8601 seen timestamp; empty string if absent/unparseable. */
+  private formatSeen(iso: string | undefined): string {
+    if (!iso) {
+      return '';
+    }
+    const ms = Date.parse(iso);
+    if (Number.isNaN(ms)) {
+      return '';
+    }
+    return new Date(ms).toLocaleString();
   }
 
   // ── Edit placeholder ──

@@ -47,6 +47,10 @@ test.describe('Pattern review & XAI [AC 39]', () => {
     expect(metricsText).toMatch(/confidence\s+\d+(\.\d+)?/i);
     expect(metricsText).toMatch(/lift\s+\d+(\.\d+)?/i);
 
+    // Popularity/impact chip (occurrenceCount + distinct-trail spread) is present and non-empty —
+    // data-agnostic: assert the chip renders meaningful text, never a fixed count.
+    await expect(firstPattern.getByTestId('pattern-popularity')).not.toBeEmpty();
+
     // RCA is present and non-empty (rootCauseAlarmType), but NOT used as a selector — it isn't unique.
     const rcaText = (await firstPattern.getByTestId('rca').innerText()).trim();
     expect(rcaText).toMatch(/^RCA\s+\S+/); // e.g. "RCA AdjDown" — non-empty rootCauseAlarmType
