@@ -65,4 +65,59 @@ class UuidV5Test {
         UUID perEvent = UuidV5.perEventIdentity("trail-1", List.of("LOS"), "w1", "snap-1");
         assertThat(anchored).isNotEqualTo(perEvent);
     }
+
+    // --- [SIG-FOLD] cascade-signature identity ---
+
+    @Test
+    void signatureIsDeterministicAndDropsTrailAndWindow() {
+        // Same (sequence, domain, snapshotId) -> same id REGARDLESS of trailId / sourceWindowId.
+        // (trailId/sourceWindowId are simply not arguments — the fold key is the signature.)
+        UUID a = UuidV5.signatureIdentity(List.of("IPLinkDown", "LinkDown", "LinkBundleDegraded"),
+                "core-ip", "snap-1");
+        UUID b = UuidV5.signatureIdentity(List.of("IPLinkDown", "LinkDown", "LinkBundleDegraded"),
+                "core-ip", "snap-1");
+        assertThat(a).isEqualTo(b);
+        assertThat(a.version()).isEqualTo(5);
+        assertThat(a.variant()).isEqualTo(2);
+    }
+
+    // AC-SF-4 (unit half): sequence order is significant.
+    @Test
+    void signatureIsOrderSignificant() {
+        assertThat(UuidV5.signatureIdentity(List.of("A", "B", "C"), "core-ip", "snap-1"))
+                .isNotEqualTo(UuidV5.signatureIdentity(List.of("B", "A", "C"), "core-ip", "snap-1"));
+    }
+
+    // AC-SF-5 (unit half): sequence repeats are significant (no consecutive-repeat collapse).
+    @Test
+    void signatureRepeatsSignificant() {
+        assertThat(UuidV5.signatureIdentity(List.of("A", "B", "A"), "core-ip", "snap-1"))
+                .isNotEqualTo(UuidV5.signatureIdentity(List.of("A", "B"), "core-ip", "snap-1"));
+    }
+
+    // AC-SF-10 (unit half): different snapshotId -> different signature id (snapshot-scoped).
+    @Test
+    void signatureSnapshotScoped() {
+        UUID s1 = UuidV5.signatureIdentity(List.of("A", "B"), "core-ip", "snap-1");
+        UUID s2 = UuidV5.signatureIdentity(List.of("A", "B"), "core-ip", "snap-2");
+        assertThat(s1).isNotEqualTo(s2);
+    }
+
+    // AC-SF-3 (unit half): different sequences -> different id.
+    @Test
+    void signatureDifferentSequencesDiffer() {
+        assertThat(UuidV5.signatureIdentity(List.of("IPLinkDown", "LinkDown"), "core-ip", "snap-1"))
+                .isNotEqualTo(UuidV5.signatureIdentity(
+                        List.of("IPLinkDown", "LinkDown", "LinkBundleDegraded"), "core-ip", "snap-1"));
+    }
+
+    // Identity-space separation: signature id collides with neither the anchor nor the per-event id.
+    @Test
+    void signatureAndAnchorAndPerEventDoNotCollide() {
+        UUID signature = UuidV5.signatureIdentity(List.of("LOS", "LinkDown"), "core-ip", "snap-1");
+        UUID anchor = UuidV5.anchorIdentity("core-ip", "snap-1", "cb-1", "SC-FIBER");
+        UUID perEvent = UuidV5.perEventIdentity("trail-1", List.of("LOS", "LinkDown"), "w1", "snap-1");
+        assertThat(signature).isNotEqualTo(anchor);
+        assertThat(signature).isNotEqualTo(perEvent);
+    }
 }

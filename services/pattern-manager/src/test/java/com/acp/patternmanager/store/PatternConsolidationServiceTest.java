@@ -115,33 +115,63 @@ class PatternConsolidationServiceTest {
         verify(storeService, never()).save(existing);
     }
 
-    // AC-C4: unexplained patterns (null anchorScenarioId) use the per-event identity, never the
-    // anchor path -> each stays distinct, and no anchor lock/fold is taken.
+    // [SIG-FOLD] AC-SF-1: unexplained patterns (null anchorScenarioId) fold by the cascade SIGNATURE
+    // (sequence, domain, snapshotId) via the SAME row-lock + contributing_event guard path as anchored
+    // — trailId/sourceWindowId are NOT in the identity.
     @Test
-    void unexplainedUsesPerEventIdentityNotAnchor() {
+    void unexplainedUsesSignatureIdentityAndRowLock() {
         EnrichedPattern e = unexplained("trail-1", List.of("LOS", "LinkDown"), "w1", "snap-1");
-        UUID expectedId = UuidV5.perEventIdentity("trail-1", List.of("LOS", "LinkDown"), "w1", "snap-1");
-        when(patternRepository.findById(expectedId)).thenReturn(Optional.empty());
+        UUID expectedId = UuidV5.signatureIdentity(List.of("LOS", "LinkDown"), "core-ip", "snap-1");
+        when(patternRepository.findByIdForUpdate(expectedId)).thenReturn(Optional.empty());
 
         ConsolidationOutcome outcome = service.consolidate(e, randomEventId(), "pattern-miner");
 
         assertThat(outcome.patternId()).isEqualTo(expectedId);
         assertThat(outcome.created()).isTrue();
-        verify(patternRepository, never()).findByIdForUpdate(any());
-        verify(contributingEventRepository, never())
-                .insertIgnoreConflict(any(), any(), any(), anyInt(), anyDouble(), any());
+        // Signature-folded via the row lock (mirrors anchored); the retired per-event id is not used.
+        verify(patternRepository).findByIdForUpdate(expectedId);
+        verify(patternRepository, never()).findById(any());
+        verify(storeService).recordTrail(eq(expectedId), eq("trail-1"), any());
     }
 
+    // [SIG-FOLD] AC-SF-1: same signature, DIFFERENT trail + window -> the SAME row (folds, not a new
+    // draft). The old per-window/per-trail identity minted distinct rows; the signature does not.
     @Test
-    void twoUnexplainedDifferentWindowsAreDistinctRows() {
+    void twoUnexplainedDifferentTrailsSameSignatureFoldToOneRow() {
         EnrichedPattern e1 = unexplained("trail-1", List.of("LOS"), "w1", "snap-1");
-        EnrichedPattern e2 = unexplained("trail-1", List.of("LOS"), "w2", "snap-1");
-        when(patternRepository.findById(any())).thenReturn(Optional.empty());
+        EnrichedPattern e2 = unexplained("trail-2", List.of("LOS"), "w2", "snap-1");
+        UUID sigId = UuidV5.signatureIdentity(List.of("LOS"), "core-ip", "snap-1");
+        // First: no row -> create. Second: row exists -> fold.
+        PatternEntity existing = stubRow(sigId, e1);
+        when(patternRepository.findByIdForUpdate(sigId))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(existing));
+        when(contributingEventRepository.insertIgnoreConflict(any(), eq(sigId), any(), anyInt(),
+                anyDouble(), any())).thenReturn(1);
 
-        UUID id1 = service.consolidate(e1, randomEventId(), "pattern-miner").patternId();
-        UUID id2 = service.consolidate(e2, randomEventId(), "pattern-miner").patternId();
+        ConsolidationOutcome o1 = service.consolidate(e1, randomEventId(), "pattern-miner");
+        ConsolidationOutcome o2 = service.consolidate(e2, randomEventId(), "pattern-miner");
 
-        assertThat(id1).isNotEqualTo(id2);
+        assertThat(o1.patternId()).isEqualTo(sigId);
+        assertThat(o2.patternId()).isEqualTo(sigId); // SAME row
+        assertThat(o1.created()).isTrue();
+        assertThat(o2.folded()).isTrue();
+    }
+
+    // [SIG-FOLD] AC-SF-3/AC-SF-10: different sequence OR different snapshot -> distinct signature ids.
+    @Test
+    void differentSequenceOrSnapshotAreDistinctSignatures() {
+        EnrichedPattern seqA = unexplained("trail-1", List.of("LOS", "LinkDown"), "w1", "snap-1");
+        EnrichedPattern seqB = unexplained("trail-1", List.of("LOS"), "w1", "snap-1");
+        EnrichedPattern snap2 = unexplained("trail-1", List.of("LOS", "LinkDown"), "w1", "snap-2");
+        when(patternRepository.findByIdForUpdate(any())).thenReturn(Optional.empty());
+
+        UUID ida = service.consolidate(seqA, randomEventId(), "pattern-miner").patternId();
+        UUID idb = service.consolidate(seqB, randomEventId(), "pattern-miner").patternId();
+        UUID idSnap2 = service.consolidate(snap2, randomEventId(), "pattern-miner").patternId();
+
+        assertThat(ida).isNotEqualTo(idb);
+        assertThat(ida).isNotEqualTo(idSnap2);
     }
 
     // AC-C5: same anchorScenarioId but different snapshot/codebook version -> distinct identities.

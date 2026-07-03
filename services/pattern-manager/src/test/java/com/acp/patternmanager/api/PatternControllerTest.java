@@ -47,6 +47,7 @@ class PatternControllerTest {
                 "LOS", 0.4, 0.9, 3.2, null,
                 new SessionWindowView(5000, "gap-based"),
                 null, "unexplained", true, null, 2,
+                3, 2, OffsetDateTime.now(), OffsetDateTime.now(),
                 List.of(new SupportingInstanceView("w1", "s1", null)),
                 List.of(),
                 lifecycle, "core-ip", OffsetDateTime.now(), OffsetDateTime.now());

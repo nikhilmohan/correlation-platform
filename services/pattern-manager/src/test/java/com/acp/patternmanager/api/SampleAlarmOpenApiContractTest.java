@@ -59,6 +59,7 @@ class SampleAlarmOpenApiContractTest {
                 // sampleAlarms[]/SampleAlarmView surface validates; null-typing of other fields is a
                 // separate springdoc concern, not part of AC-SA-9/10).
                 "scenario-42", "unexplained", true, "connected", 1,
+                4, 3, OffsetDateTime.now(), OffsetDateTime.now(),
                 List.of(new SupportingInstanceView("sw:1", "snap-9", null)),
                 samples,
                 "draft", "core-ip", OffsetDateTime.now(), OffsetDateTime.now());

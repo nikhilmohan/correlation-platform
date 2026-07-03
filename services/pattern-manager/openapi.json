@@ -154,11 +154,11 @@
               }
             }
           },
-          "404" : {
-            "description" : "No pattern with the given id"
-          },
           "422" : {
             "description" : "Edit body is un-processable (e.g. out-of-range position index)"
+          },
+          "404" : {
+            "description" : "No pattern with the given id"
           }
         }
       }
@@ -277,7 +277,28 @@
           },
           "instanceCount" : {
             "type" : "integer",
-            "format" : "int32"
+            "format" : "int32",
+            "description" : "total number of individual alarm instances across all folded occurrences (sum of per-occurrence mined support counts); see also occurrenceCount for the number of distinct occurrences folded"
+          },
+          "occurrenceCount" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "number of mined occurrences (distinct PatternMinedEvent eventIds) folded into this pattern; counts events, not alarms"
+          },
+          "trailCount" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "number of DISTINCT trails from which this cascade signature has been observed (cross-trail spread / significance)"
+          },
+          "firstSeen" : {
+            "type" : "string",
+            "format" : "date-time",
+            "description" : "timestamp of the first occurrence folded (earliest contributing event)"
+          },
+          "lastSeen" : {
+            "type" : "string",
+            "format" : "date-time",
+            "description" : "timestamp of the most recent occurrence folded (bumped on each fold)"
           },
           "supportingInstances" : {
             "type" : "array",

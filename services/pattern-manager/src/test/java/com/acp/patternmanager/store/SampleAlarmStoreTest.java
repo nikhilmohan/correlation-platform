@@ -21,7 +21,7 @@ import org.junit.jupiter.api.Test;
 class SampleAlarmStoreTest {
 
     private PatternStoreService store(int capK) {
-        return new PatternStoreService(null, null, null, new ObjectMapper(),
+        return new PatternStoreService(null, null, null, null, new ObjectMapper(),
                 new SampleAlarmProperties(capK));
     }
 

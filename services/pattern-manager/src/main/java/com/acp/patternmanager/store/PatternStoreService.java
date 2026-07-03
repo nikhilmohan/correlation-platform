@@ -9,9 +9,11 @@ import com.acp.patternmanager.store.entity.PatternEntity;
 import com.acp.patternmanager.store.entity.ProcessedEventEntity;
 import com.acp.patternmanager.store.entity.SampleAlarmEntity;
 import com.acp.patternmanager.store.entity.SequenceElementEntity;
+import com.acp.patternmanager.store.entity.PatternTrailEntity;
 import com.acp.patternmanager.store.entity.SupportingInstanceEntity;
 import com.acp.patternmanager.store.repo.LifecycleTransitionRepository;
 import com.acp.patternmanager.store.repo.PatternRepository;
+import com.acp.patternmanager.store.repo.PatternTrailRepository;
 import com.acp.patternmanager.store.repo.ProcessedEventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -45,6 +47,7 @@ public class PatternStoreService {
     private final PatternRepository patternRepository;
     private final LifecycleTransitionRepository transitionRepository;
     private final ProcessedEventRepository processedEventRepository;
+    private final PatternTrailRepository patternTrailRepository;
     private final ObjectMapper objectMapper;
     private final SampleAlarmProperties sampleAlarmProperties;
 
@@ -54,10 +57,12 @@ public class PatternStoreService {
     public PatternStoreService(PatternRepository patternRepository,
             LifecycleTransitionRepository transitionRepository,
             ProcessedEventRepository processedEventRepository,
+            PatternTrailRepository patternTrailRepository,
             ObjectMapper objectMapper, SampleAlarmProperties sampleAlarmProperties) {
         this.patternRepository = patternRepository;
         this.transitionRepository = transitionRepository;
         this.processedEventRepository = processedEventRepository;
+        this.patternTrailRepository = patternTrailRepository;
         this.objectMapper = objectMapper;
         this.sampleAlarmProperties = sampleAlarmProperties;
     }
@@ -85,6 +90,17 @@ public class PatternStoreService {
     }
 
     /**
+     * [SIG-FOLD] Record a contributing {@code trailId} on the pattern's distinct-trail set with an
+     * atomic {@code INSERT ... ON CONFLICT (pattern_id, trail_id) DO NOTHING}.
+     *
+     * @return the number of rows actually inserted — 1 iff {@code trailId} is genuinely NEW for this
+     *     pattern (the caller bumps {@code trail_count} by that), 0 if the trail was already recorded.
+     */
+    int recordTrail(UUID patternId, String trailId, OffsetDateTime at) {
+        return patternTrailRepository.insertIgnoreConflict(patternId, trailId, at);
+    }
+
+    /**
      * Build (or reuse) the pattern entity for {@code patternId} and populate the create-time fields
      * from the enriched pattern (used for a NEW row; aggregation of an existing row is done in
      * {@link PatternConsolidationService}). Writes the ordered sequence, supporting instances, and a
@@ -108,6 +124,12 @@ public class PatternStoreService {
         entity.setSessionWindowMs(enriched.sessionWindow().windowMs());
         entity.setSessionWindowType(enriched.sessionWindow().type().wire());
         entity.setInstanceCount(enriched.instanceCount());
+        // [SIG-FOLD] Impact metrics at create: first occurrence -> occurrenceCount=1, trailCount=1
+        // (the creating contributor's trail is recorded via recordTrail), firstSeen=lastSeen=now.
+        entity.setOccurrenceCount(1);
+        entity.setTrailCount(1);
+        entity.setFirstSeen(now);
+        entity.setLastSeen(now);
         entity.setDomain(enriched.domain());
         entity.setAnchorScenarioId(enriched.anchorScenarioId());
         entity.setSnapshotId(enriched.snapshotId());
