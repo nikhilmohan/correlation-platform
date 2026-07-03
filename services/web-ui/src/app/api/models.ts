@@ -178,6 +178,17 @@ export interface PatternView {
   structurallyValidated?: boolean;
   structuralValidationReason?: string | null;
   instanceCount: number;
+  /**
+   * Pattern impact / popularity metrics (Pattern Manager PR #360). `occurrenceCount` = times the
+   * signature was observed (mined); `trailCount` = number of DISTINCT trails the signature spans
+   * (the cross-trail significance signal); `firstSeen`/`lastSeen` = ISO-8601 observation span.
+   * The producer serves these always-present now; kept optional for backward-compat with older
+   * responses that predate the feature (the UI degrades gracefully — no NaN/undefined shown).
+   */
+  occurrenceCount?: number;
+  trailCount?: number;
+  firstSeen?: string;
+  lastSeen?: string;
   supportingInstances?: SupportingInstance[];
   sampleAlarms?: SampleAlarmView[];
   lifecycle: PatternLifecycle;
