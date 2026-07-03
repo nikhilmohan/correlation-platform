@@ -473,7 +473,6 @@ const MODEL_PARAMS: ModelParamsRecord = {
       { key: 'dbscan.epsilon', type: 'number', value: 0.5, min: 0, max: 100 },
       { key: 'dbscan.minSamples', type: 'number', value: 3, min: 1, max: 1000 },
       { key: 'window.sizeSeconds', type: 'number', value: 60, min: 1, max: 86400, unit: 's' },
-      { key: 'prefixspan.minSupport', type: 'number', value: 0.3, min: 0, max: 1 },
     ],
   },
 };
