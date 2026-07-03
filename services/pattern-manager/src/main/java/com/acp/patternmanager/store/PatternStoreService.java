@@ -12,6 +12,8 @@ import com.acp.patternmanager.store.repo.PatternRepository;
 import com.acp.patternmanager.store.repo.ProcessedEventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -41,6 +43,9 @@ public class PatternStoreService {
     private final LifecycleTransitionRepository transitionRepository;
     private final ProcessedEventRepository processedEventRepository;
     private final ObjectMapper objectMapper;
+
+    @PersistenceContext
+    private EntityManager entityManager;
 
     public PatternStoreService(PatternRepository patternRepository,
             LifecycleTransitionRepository transitionRepository,
@@ -117,9 +122,26 @@ public class PatternStoreService {
         return entity;
     }
 
-    /** Replace the ordered sequence elements on {@code entity} with {@code seq}. */
+    /**
+     * Replace the ordered sequence elements on {@code entity} with {@code seq}.
+     *
+     * <p>When the pattern is ALREADY persisted with sequence rows (the representative-sequence
+     * replacement during an anchor fold), a plain {@code clear()} + re-add lets Hibernate order the
+     * SQL as INSERT-before-DELETE: the new position-0..n rows collide with the old rows at the same
+     * positions, violating {@code UNIQUE (pattern_id, position)} and rolling back the whole fold.
+     * We therefore delete the existing rows (via {@code orphanRemoval}) and {@code flush} that DELETE
+     * BEFORE inserting the replacements, guaranteeing DELETE-before-INSERT ordering within the single
+     * consolidation transaction. On the create path the collection is empty, the flush is a cheap
+     * no-op, and the row lock / {@code contributing_event} guard the caller holds are unaffected.
+     */
     void replaceSequence(PatternEntity entity, List<String> seq) {
+        boolean hadExisting = !entity.getSequenceElements().isEmpty();
         entity.getSequenceElements().clear();
+        if (hadExisting) {
+            // Force the orphan DELETEs to hit the DB before the replacement INSERTs so the new rows
+            // never collide with the old ones on UNIQUE (pattern_id, position).
+            entityManager.flush();
+        }
         for (int i = 0; i < seq.size(); i++) {
             entity.getSequenceElements().add(
                     new SequenceElementEntity(UUID.randomUUID(), entity, i, seq.get(i), false));
