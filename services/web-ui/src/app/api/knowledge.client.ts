@@ -6,31 +6,39 @@ import { ModelParamsRecord } from './models';
 
 /**
  * Knowledge Service model-params read/edit (frozen Knowledge OpenAPI, P2). The frozen path is
- * the generic versioned-record API `GET|PUT /domains/{domain}/{recordType}/{recordId}` with
- * `recordType = modelParams` and the versioned payload `{ paramSet, params[] }` (dotted keys).
+ * the generic versioned-record API `GET|PUT /domains/{domain}/{recordType}/{recordId}`.
+ *
+ * Two Knowledge-specific quirks the real service enforces (and which we match exactly):
+ *  - the URL recordType path SEGMENT is kebab-case `model-params`;
+ *  - the `{recordId}` is the FULL, percent-encoded record id `{domain}/modelParams/{paramSet}`
+ *    (its middle segment is camelCase `modelParams` — yes, it differs from the kebab URL
+ *    segment). Callers pass the short `paramSet` (e.g. `noise-filter`); this client composes
+ *    the full id. The versioned payload is `{ paramSet, params[] }` (dotted keys).
  */
 @Injectable({ providedIn: 'root' })
 export class KnowledgeClient extends HttpBaseClient {
   protected readonly serviceName = 'Knowledge Service';
   protected readonly serviceKey: ServiceKey = 'knowledge';
 
-  private readonly recordType = 'modelParams';
+  /** Kebab URL path segment for the record type (frozen Knowledge REST path). */
+  private readonly recordTypeSegment = 'model-params';
 
-  getModelParams(recordId: string, domain = this.config.domain): Observable<ModelParamsRecord> {
-    return this.get<ModelParamsRecord>(
-      `/domains/${encodeURIComponent(domain)}/${this.recordType}/${encodeURIComponent(recordId)}`,
-    );
+  /** Compose + encode the frozen full record id `{domain}/modelParams/{paramSet}`. */
+  private recordPath(paramSet: string, domain: string): string {
+    const recordId = `${domain}/modelParams/${paramSet}`;
+    return `/domains/${encodeURIComponent(domain)}/${this.recordTypeSegment}/${encodeURIComponent(recordId)}`;
+  }
+
+  getModelParams(paramSet: string, domain = this.config.domain): Observable<ModelParamsRecord> {
+    return this.get<ModelParamsRecord>(this.recordPath(paramSet, domain));
   }
 
   updateModelParams(
-    recordId: string,
+    paramSet: string,
     payload: ModelParamsRecord['payload'],
     author: string,
     domain = this.config.domain,
   ): Observable<ModelParamsRecord> {
-    return this.put<ModelParamsRecord>(
-      `/domains/${encodeURIComponent(domain)}/${this.recordType}/${encodeURIComponent(recordId)}`,
-      { payload, author },
-    );
+    return this.put<ModelParamsRecord>(this.recordPath(paramSet, domain), { payload, author });
   }
 }
