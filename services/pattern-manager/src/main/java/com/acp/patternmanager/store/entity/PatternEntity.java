@@ -75,6 +75,24 @@ public class PatternEntity {
     @Column(name = "domain")
     private String domain;
 
+    // [ANCHOR-CONSOL] Anchor-identity columns. anchorScenarioId is null for unexplained patterns
+    // (per-event identity, never consolidated). snapshotId + codebookVersion scope the identity so a
+    // new topology snapshot / recompiled codebook re-mints it (a different fault context).
+    @Column(name = "anchor_scenario_id")
+    private String anchorScenarioId;
+
+    @Column(name = "snapshot_id")
+    private String snapshotId;
+
+    @Column(name = "codebook_version")
+    private String codebookVersion;
+
+    // [ANCHOR-CONSOL] Occurrence-weighted support (support * occurrences) of the contributor that
+    // currently owns the representative sequence; used only to break the representative tie on a
+    // later fold. Internal — never served on API/events.
+    @Column(name = "representative_weight")
+    private Double representativeWeight;
+
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "edit_meta", columnDefinition = "jsonb")
     private String editMeta;
@@ -225,6 +243,38 @@ public class PatternEntity {
 
     public void setDomain(String domain) {
         this.domain = domain;
+    }
+
+    public String getAnchorScenarioId() {
+        return anchorScenarioId;
+    }
+
+    public void setAnchorScenarioId(String anchorScenarioId) {
+        this.anchorScenarioId = anchorScenarioId;
+    }
+
+    public String getSnapshotId() {
+        return snapshotId;
+    }
+
+    public void setSnapshotId(String snapshotId) {
+        this.snapshotId = snapshotId;
+    }
+
+    public String getCodebookVersion() {
+        return codebookVersion;
+    }
+
+    public void setCodebookVersion(String codebookVersion) {
+        this.codebookVersion = codebookVersion;
+    }
+
+    public Double getRepresentativeWeight() {
+        return representativeWeight;
+    }
+
+    public void setRepresentativeWeight(Double representativeWeight) {
+        this.representativeWeight = representativeWeight;
     }
 
     public String getEditMeta() {

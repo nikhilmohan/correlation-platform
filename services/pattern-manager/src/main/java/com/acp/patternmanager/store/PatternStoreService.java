@@ -13,7 +13,9 @@ import com.acp.patternmanager.store.repo.ProcessedEventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,11 +23,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * The SOLE writer to the Pattern Store. Persists an enriched draft pattern (row + sequence elements
- * + supporting instances + a draft lifecycle-transition audit row + the {@code processed_event}
- * dedupe row) atomically in ONE DB transaction — so a redelivered {@code eventId} is a no-op
- * (criterion 10). {@code patternId} is a deterministic UUIDv5 over the mining provenance for upsert
- * idempotency.
+ * The SOLE writer to the Pattern Store — every JPA save routes through here (or the
+ * consolidation-aware {@code PatternConsolidationService} that delegates its row builds to these
+ * helpers). Provides the primitive write operations the consolidation fold composes into ONE DB
+ * transaction: the {@code processed_event} idempotency gate, a fresh draft row, the ordered
+ * sequence elements, the (union of) supporting instances, and the lifecycle-transition audit row.
+ *
+ * <p>[ANCHOR-CONSOL] identity is decided by {@link PatternConsolidationService}: anchored patterns
+ * upsert-and-aggregate on the anchor identity, unexplained patterns keep the per-event identity.
  */
 @Service
 public class PatternStoreService {
@@ -53,22 +58,32 @@ public class PatternStoreService {
         return processedEventRepository.existsByEventId(UUID.fromString(eventId));
     }
 
-    /**
-     * Persist an enriched pattern as {@code draft} and record the {@code eventId} — atomically.
-     *
-     * @param enriched the fully-enriched pattern
-     * @param eventId the consumed event id (idempotency dedupe key)
-     * @param source the consumed event source
-     * @return the persisted pattern id
-     */
+    /** Record only the {@code eventId} for a duplicate/skip (no pattern write). */
     @Transactional
-    public UUID persistDraft(EnrichedPattern enriched, String eventId, String source) {
-        UUID patternId = deterministicPatternId(enriched);
-        OffsetDateTime now = OffsetDateTime.now();
+    public void recordProcessed(String eventId, String source) {
+        UUID id = UUID.fromString(eventId);
+        if (!processedEventRepository.existsByEventId(id)) {
+            processedEventRepository.save(
+                    new ProcessedEventEntity(id, source, OffsetDateTime.now(), null));
+        }
+    }
 
-        PatternEntity entity = patternRepository.findById(patternId).orElseGet(PatternEntity::new);
-        boolean isNew = entity.getPatternId() == null;
+    /** Record the {@code eventId} against a persisted pattern (dedupe set + audit link). */
+    void recordProcessedFor(String eventId, String source, UUID patternId, OffsetDateTime at) {
+        processedEventRepository.save(
+                new ProcessedEventEntity(UUID.fromString(eventId), source, at, patternId));
+    }
 
+    /**
+     * Build (or reuse) the pattern entity for {@code patternId} and populate the create-time fields
+     * from the enriched pattern (used for a NEW row; aggregation of an existing row is done in
+     * {@link PatternConsolidationService}). Writes the ordered sequence, supporting instances, and a
+     * {@code draft} lifecycle-transition audit row. Does NOT write {@code processed_event} (the
+     * consolidation composes that into the same transaction).
+     */
+    PatternEntity createDraftRow(UUID patternId, EnrichedPattern enriched, double representativeWeight,
+            OffsetDateTime now) {
+        PatternEntity entity = new PatternEntity();
         entity.setPatternId(patternId);
         entity.setTrailId(enriched.trailId());
         entity.setRootCauseAlarmType(enriched.rootCauseAlarmType());
@@ -84,72 +99,62 @@ public class PatternStoreService {
         entity.setSessionWindowType(enriched.sessionWindow().type().wire());
         entity.setInstanceCount(enriched.instanceCount());
         entity.setDomain(enriched.domain());
-        if (isNew) {
-            entity.setLifecycle("draft");
-            entity.setCreatedAt(now);
-        }
+        entity.setAnchorScenarioId(enriched.anchorScenarioId());
+        entity.setSnapshotId(enriched.snapshotId());
+        entity.setCodebookVersion(enriched.codebookVersion());
+        entity.setRepresentativeWeight(representativeWeight);
+        entity.setLifecycle("draft");
+        entity.setCreatedAt(now);
         entity.setUpdatedAt(now);
 
-        // Rebuild ordered sequence elements.
+        replaceSequence(entity, enriched.sequence());
+        addSupportingInstances(entity, enriched.supportingInstances());
+
+        // Single save (cascades sequence + supporting instances exactly once).
+        patternRepository.save(entity);
+        transitionRepository.save(new LifecycleTransitionEntity(
+                UUID.randomUUID(), patternId, "-", "draft", null, "pattern discovered", now));
+        return entity;
+    }
+
+    /** Replace the ordered sequence elements on {@code entity} with {@code seq}. */
+    void replaceSequence(PatternEntity entity, List<String> seq) {
         entity.getSequenceElements().clear();
-        List<String> seq = enriched.sequence();
         for (int i = 0; i < seq.size(); i++) {
             entity.getSequenceElements().add(
                     new SequenceElementEntity(UUID.randomUUID(), entity, i, seq.get(i), false));
         }
-        // Rebuild supporting instances.
-        entity.getSupportingInstances().clear();
-        for (SupportingInstance si : enriched.supportingInstances()) {
+    }
+
+    /** Append supporting instances not already present (dedup on {@code sourceWindowId}). */
+    void addSupportingInstances(PatternEntity entity, List<SupportingInstance> instances) {
+        Set<String> existing = new LinkedHashSet<>();
+        for (SupportingInstanceEntity e : entity.getSupportingInstances()) {
+            existing.add(String.valueOf(e.getSourceWindowId()));
+        }
+        for (SupportingInstance si : instances) {
+            if (!existing.add(String.valueOf(si.sourceWindowId()))) {
+                continue; // already present — union semantics
+            }
             String occ = si.occurrence() != null ? si.occurrence().toString() : null;
             entity.getSupportingInstances().add(new SupportingInstanceEntity(
                     UUID.randomUUID(), entity, si.sourceWindowId(), si.snapshotId(), occ));
         }
-
-        patternRepository.save(entity);
-
-        if (isNew) {
-            transitionRepository.save(new LifecycleTransitionEntity(
-                    UUID.randomUUID(), patternId, "-", "draft", null, "pattern discovered", now));
-        }
-
-        processedEventRepository.save(new ProcessedEventEntity(
-                UUID.fromString(eventId), source, now, patternId));
-
-        log.info("persisted draft pattern {} (new={}, lifecycle={})", patternId, isNew,
-                entity.getLifecycle());
-        return patternId;
     }
 
-    /** Record only the {@code eventId} for a duplicate/skip (no pattern write). */
-    @Transactional
-    public void recordProcessed(String eventId, String source) {
-        UUID id = UUID.fromString(eventId);
-        if (!processedEventRepository.existsByEventId(id)) {
-            processedEventRepository.save(
-                    new ProcessedEventEntity(id, source, OffsetDateTime.now(), null));
-        }
+    PatternEntity save(PatternEntity entity) {
+        return patternRepository.save(entity);
     }
 
-    private UUID deterministicPatternId(EnrichedPattern enriched) {
-        String name = enriched.trailId() + "|" + String.join(",", enriched.sequence()) + "|"
-                + firstSupporting(enriched);
-        return UuidV5.from(name);
-    }
-
-    private String firstSupporting(EnrichedPattern enriched) {
-        if (enriched.supportingInstances().isEmpty()) {
-            return "";
-        }
-        SupportingInstance si = enriched.supportingInstances().get(0);
-        return (si.sourceWindowId() != null ? si.sourceWindowId() : "") + "|"
-                + (si.snapshotId() != null ? si.snapshotId() : "");
-    }
-
-    private String writeJson(Object value) {
+    String writeJson(Object value) {
         try {
             return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("failed to serialize JSON column", e);
         }
+    }
+
+    ObjectMapper objectMapper() {
+        return objectMapper;
     }
 }
