@@ -62,8 +62,16 @@ public class SequenceElementEntity {
         return position;
     }
 
+    public void setPosition(int position) {
+        this.position = position;
+    }
+
     public String getAlarmType() {
         return alarmType;
+    }
+
+    public void setAlarmType(String alarmType) {
+        this.alarmType = alarmType;
     }
 
     public boolean isOptional() {
