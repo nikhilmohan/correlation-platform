@@ -114,6 +114,62 @@ class PatternConsolidationServiceIT {
         assertThat(contributingEventRepository.countByPatternId(pid)).isEqualTo(2);
     }
 
+    // Regression (sequence_element dup-key): a fold whose contributor becomes the new representative
+    // REPLACES the persisted sequence. The old clear()+re-add let Hibernate flush the new position-0..n
+    // INSERTs before the orphan DELETEs, colliding on UNIQUE (pattern_id, position) and rolling back
+    // the fold. This asserts the fold persists cleanly and the row ends with exactly the new sequence
+    // (right positions, no duplicates). FAILS on the pre-fix code (duplicate key), PASSES after.
+    @Test
+    void foldThatReplacesRepresentativeSequencePersistsWithoutDuplicateKey() {
+        String anchor = "SC-SEQ-" + UUID.randomUUID();
+        // E1: lower weight, short sequence -> creates the row + representative ["LOS","LinkDown"].
+        EnrichedPattern e1 = anchoredSeq(anchor, 10, 0.2, List.of("LOS", "LinkDown"), "w1");
+        // E2: higher weight AND longer sequence -> must REPLACE the representative on the fold.
+        EnrichedPattern e2 = anchoredSeq(
+                anchor, 40, 0.9, List.of("LOS", "LinkDown", "bgpPeerDown", "ospfNbrDown"), "w2");
+
+        UUID pid = consolidationService.consolidate(e1, id(), "pattern-miner").patternId();
+        List<String> afterCreate = seqOf(pid);
+        assertThat(afterCreate).containsExactly("LOS", "LinkDown");
+
+        // The fold that replaces the sequence — this is the operation that threw the dup-key before.
+        ConsolidationOutcome folded = consolidationService.consolidate(e2, id(), "pattern-miner");
+
+        assertThat(folded.folded()).isTrue();
+        PatternEntity row = patternRepository.findById(pid).orElseThrow();
+        // The persisted sequence is EXACTLY the replacement — correct positions, no leftover/dup rows.
+        assertThat(seqOf(pid))
+                .containsExactly("LOS", "LinkDown", "bgpPeerDown", "ospfNbrDown");
+        assertThat(row.getSequenceElements()).hasSize(4);
+        // Positions are 0..3 with no duplicates.
+        assertThat(row.getSequenceElements().stream()
+                .map(com.acp.patternmanager.store.entity.SequenceElementEntity::getPosition).toList())
+                .containsExactly(0, 1, 2, 3);
+        assertThat(row.getInstanceCount()).isEqualTo(50); // 10 + 40, the fold committed
+    }
+
+    // Regression companion: a fold whose contributor does NOT win the representative leaves the
+    // persisted sequence untouched (no-op on sequence, fold still commits its aggregates).
+    @Test
+    void foldThatDoesNotReplaceRepresentativeLeavesSequenceUnchanged() {
+        String anchor = "SC-SEQ-NOOP-" + UUID.randomUUID();
+        EnrichedPattern e1 = anchoredSeq(anchor, 40, 0.9, List.of("LOS", "LinkDown", "bgpPeerDown"), "w1");
+        EnrichedPattern e2 = anchoredSeq(anchor, 5, 0.1, List.of("LOS"), "w2"); // lower weight -> no replace
+
+        UUID pid = consolidationService.consolidate(e1, id(), "pattern-miner").patternId();
+        consolidationService.consolidate(e2, id(), "pattern-miner");
+
+        PatternEntity row = patternRepository.findById(pid).orElseThrow();
+        assertThat(seqOf(pid)).containsExactly("LOS", "LinkDown", "bgpPeerDown");
+        assertThat(row.getInstanceCount()).isEqualTo(45); // fold still committed its occurrences
+    }
+
+    private List<String> seqOf(UUID patternId) {
+        return patternRepository.findById(patternId).orElseThrow().getSequenceElements().stream()
+                .map(com.acp.patternmanager.store.entity.SequenceElementEntity::getAlarmType)
+                .toList();
+    }
+
     // AC-C6: fold the SAME set of events in reverse order -> byte-identical final aggregates.
     @Test
     void aggregateIsOrderIndependent() {
@@ -219,6 +275,20 @@ class PatternConsolidationServiceIT {
     private static EnrichedPattern anchoredTiming(String anchor, int occ, Map<String, Object> timing,
             String windowId) {
         return anchoredTiming(anchor, occ, timing, windowId, "snap-1", "cb-1", 0.5);
+    }
+
+    /** Anchored pattern with a caller-chosen sequence (drives the representative-replacement path). */
+    private static EnrichedPattern anchoredSeq(String anchor, int occ, double support,
+            List<String> sequence, String windowId) {
+        return new EnrichedPattern(
+                "trail-1", sequence, sequence.get(0),
+                support, 0.8, 3.0,
+                Map.of("timeframeMs", 9000, "medianInterArrivalMs", 4500,
+                        "maxInterArrivalMs", 6000, "stddevInterArrivalMs", 1200),
+                new DerivedSessionWindow(30_000, DerivedSessionWindow.WindowType.GAP_BASED),
+                "CB-1", "confirmed", true, null, occ,
+                List.of(new com.acp.patternmanager.enrichment.SupportingInstance(windowId, "snap-1", null)),
+                "core-ip", "snap-1", "cb-1", anchor, windowId);
     }
 
     private static EnrichedPattern anchoredTiming(String anchor, int occ, Map<String, Object> timing,
