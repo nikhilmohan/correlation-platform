@@ -8,13 +8,14 @@ from pattern_miner.api import ApiState, create_app
 from pattern_miner.metrics import Metrics
 
 
-def _client(kafka=False, knowledge=False, codebook=False) -> TestClient:
+def _client(kafka=False, knowledge=False, codebook=False, spark=True) -> TestClient:
     metrics = Metrics()
     state = ApiState(
         metrics_registry=metrics.registry,
         kafka_connected=kafka,
         knowledge_ready=knowledge,
         codebook_ready=codebook,
+        spark_ready=spark,
     )
     return TestClient(create_app(state))
 
@@ -44,6 +45,22 @@ def test_health_starting_when_codebook_down():
     body = client.get("/health").json()
     assert body["status"] == "starting"
     assert body["codebook"] == "down"
+
+
+def test_health_ok_reports_spark_up_by_default():
+    """[BATCH-CAP] Spark subsystem starts ready (never latches DOWN before a real death)."""
+    client = _client(kafka=True, knowledge=True, codebook=True, spark=True)
+    body = client.get("/health").json()
+    assert body["status"] == "ok"
+    assert body["spark"] == "up"
+
+
+def test_health_starting_when_spark_not_ready():
+    """[BATCH-CAP] After recreate exhaustion /health dips Spark not-ready (self-heals later)."""
+    client = _client(kafka=True, knowledge=True, codebook=True, spark=False)
+    body = client.get("/health").json()
+    assert body["status"] == "starting"
+    assert body["spark"] == "down"
 
 
 def test_metrics_endpoint_serves_prometheus():

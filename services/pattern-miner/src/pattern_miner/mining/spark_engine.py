@@ -13,18 +13,28 @@ sequence (single-item element sets) back to an ordered token tuple.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 from .engine import FreqSequence
 
 
 class SparkPrefixSpanEngine:
-    """Runs Spark MLlib ``PrefixSpan`` over the session sequences (pure sequence mining)."""
+    """Runs Spark MLlib ``PrefixSpan`` over the session sequences (pure sequence mining).
+
+    [BATCH-CAP] The cached ``SparkSession`` survives a driver/gateway death as a **dead handle**, so
+    every later ``run`` fails until the session is recreated. :meth:`reset` drops that handle (the
+    next ``_get_spark`` builds a fresh session) and :meth:`is_healthy` reports whether a session is
+    currently present — together these give the SparkContext self-heal the entrypoint drives on a
+    detected gateway-death error class.
+    """
 
     def __init__(self, master: str = "local[*]", spark: Any | None = None) -> None:
         self._master = master
         self._spark = spark
         self._owns_spark = spark is None
+        # A caller-injected session is fixed (not recreatable): reset must not null it.
+        self._recreatable = spark is None
 
     def _get_spark(self) -> Any:
         if self._spark is not None:
@@ -39,6 +49,24 @@ class SparkPrefixSpanEngine:
             .getOrCreate()
         )
         return self._spark
+
+    def reset(self) -> None:
+        """[BATCH-CAP] Drop the cached (possibly dead) session so the next ``run`` recreates it.
+
+        Best-effort ``stop()`` first (a dead handle may raise — suppressed), then null the cache so
+        ``_get_spark`` rebuilds. When the session was **injected** by a caller (tests) it is not
+        recreatable, so reset is a no-op to avoid nulling a fixture the caller still owns.
+        """
+        if not self._recreatable:
+            return
+        if self._spark is not None:
+            with contextlib.suppress(Exception):
+                self._spark.stop()
+        self._spark = None
+
+    def is_healthy(self) -> bool:
+        """[BATCH-CAP] True iff a session is currently cached (not reset after a detected death)."""
+        return self._spark is not None
 
     def run(
         self,

@@ -96,3 +96,10 @@ class LocalPrefixSpanEngine:
                 total=total,
                 results=results,
             )
+
+    def reset(self) -> None:
+        """[BATCH-CAP] No-op: the pure-Python engine holds no backing session to recreate."""
+
+    def is_healthy(self) -> bool:
+        """[BATCH-CAP] Always healthy: no external gateway/JVM to die."""
+        return True

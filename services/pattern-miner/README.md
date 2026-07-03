@@ -119,12 +119,29 @@ installed on the host). The engine is a config toggle:
 `BATCH_FLUSH_SECONDS`, `HTTP_PORT`, `LOG_LEVEL`. **No mining/anchoring-threshold or windowing-gap
 env vars** — those come only from Knowledge; the scenario set comes only from the Codebook.
 
+**[BATCH-CAP] operational batching + Spark-resilience knobs (NOT mining thresholds):**
+`MAX_TRAILS_PER_BATCH` (default `8`) caps a mining **sub-run** to at-most that many WHOLE trails so
+the Stage-3 Spark collect fits the driver heap — a larger flush is processed as multiple bounded
+sub-runs, each anchoring→grouping→PrefixSpan→emitting independently, with offsets committed **once**
+after all sub-runs (at-least-once + `eventId` dedupe keep replay safe). A trail is **never** split
+across sub-runs (the cascade stays intact, per-run support not diluted). An optional Knowledge
+`batching.maxTrailsPerBatch` overrides the env default. `SPARK_RECREATE_MAX_ATTEMPTS` (default `3`)
+and `SPARK_RECREATE_BACKOFF_MS` (default `2000`) bound the SparkSession recreate on a detected
+driver/gateway death (`Py4JNetworkError` / connection-refused / empty-answer): the engine resets and
+rebuilds a fresh session before retrying; on exhaustion the run fails **clean** (offsets uncommitted,
+replayable) and `/health` reports Spark not-ready, self-healing on the next successful build (never a
+silent permanent wedge).
+
 ## Observability
 
 `GET /health` (liveness/readiness incl. Kafka + Knowledge + **Codebook** reachability);
 `GET /metrics` (Prometheus — incl. `pm_cascades_anchored_total`, `pm_cascades_unexplained_total`,
-`pm_codebook_fetch_failures_total`, `pm_anchored_group_count`). Structured JSON logs (incl. the
-per-cascade anchoring outcome). No business HTTP surface, no published OpenAPI spec.
+`pm_codebook_fetch_failures_total`, `pm_anchored_group_count`, and the [BATCH-CAP] counters
+`pm_mining_sub_runs_total`, `pm_spark_recreate_attempts_total`, `pm_spark_recreate_failures_total`
++ gauge `pm_last_flush_sub_run_count`). `/health` also reports a Spark-subsystem readiness flag
+(`spark`) that dips only after recreate exhaustion and self-heals (never latches DOWN). Structured
+JSON logs (incl. the per-cascade anchoring outcome and per-sub-run `sub_run_index`,
+`trails_in_sub_run`). No business HTTP surface, no published OpenAPI spec.
 
 ## Build / test / run
 

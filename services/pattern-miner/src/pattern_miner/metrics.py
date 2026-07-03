@@ -77,3 +77,24 @@ class Metrics:
             "Distinct anchored fault-origin groups in the last mining run",
             registry=r,
         )
+        # [BATCH-CAP] trail-aligned batch-cap + SparkContext resilience observability.
+        self.mining_sub_runs = Counter(
+            "pm_mining_sub_runs_total",
+            "Bounded whole-trail mining sub-runs executed (batch-cap)",
+            registry=r,
+        )
+        self.spark_recreate_attempts = Counter(
+            "pm_spark_recreate_attempts_total",
+            "SparkSession recreate attempts after a detected gateway/driver death",
+            registry=r,
+        )
+        self.spark_recreate_failures = Counter(
+            "pm_spark_recreate_failures_total",
+            "Runs failed clean after SparkSession recreate exhaustion",
+            registry=r,
+        )
+        self.last_flush_sub_run_count = Gauge(
+            "pm_last_flush_sub_run_count",
+            "Number of bounded sub-runs the last flush was chunked into",
+            registry=r,
+        )

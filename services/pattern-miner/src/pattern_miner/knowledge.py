@@ -59,6 +59,10 @@ KEY_TIE_BREAK = "anchoring.tieBreak"
 KEY_W_ORDER = "anchoring.weights.order"
 KEY_W_JACCARD = "anchoring.weights.jaccard"
 
+# [BATCH-CAP] Optional operational batching override (NOT a mining threshold). When Knowledge
+# authors it the value overrides the MAX_TRAILS_PER_BATCH env default; when absent the env wins.
+KEY_MAX_TRAILS_PER_BATCH = "batching.maxTrailsPerBatch"
+
 # Structural (non-threshold, non-domain) fallbacks for the anchoring scorer selection and grouping.
 # These are the reusable-template defaults — a scorer NAME, a tie-break RULE, and a grouping KEY
 # NAME — none is a correlation threshold or a domain literal, so authoring them in Knowledge is
@@ -288,6 +292,11 @@ def _parse_mining_params(payload: dict[str, Any]) -> MiningParams:
         class_thresholds=class_thresholds,
     )
 
+    # [BATCH-CAP] Optional operational override of the trail-batch cap. Absent -> None (the env
+    # MAX_TRAILS_PER_BATCH default applies). Not required, never a mining threshold.
+    raw_cap = m.get(KEY_MAX_TRAILS_PER_BATCH)
+    max_trails_per_batch = int(raw_cap) if raw_cap is not None else None
+
     return MiningParams(
         min_support=float(_require(m, KEY_MIN_SUPPORT)),
         max_pattern_length=int(_require(m, KEY_MAX_PATTERN_LENGTH)),
@@ -295,4 +304,5 @@ def _parse_mining_params(payload: dict[str, Any]) -> MiningParams:
         windowing=windowing,
         anchoring=_parse_anchoring_params(m),
         codebook_version=str(_require(m, KEY_CODEBOOK_VERSION)),
+        max_trails_per_batch=max_trails_per_batch,
     )
