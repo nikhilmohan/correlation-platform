@@ -473,7 +473,6 @@ const MODEL_PARAMS: ModelParamsRecord = {
       { key: 'dbscan.epsilon', type: 'number', value: 0.5, min: 0, max: 100 },
       { key: 'dbscan.minSamples', type: 'number', value: 3, min: 1, max: 1000 },
       { key: 'window.sizeSeconds', type: 'number', value: 60, min: 1, max: 86400, unit: 's' },
-      { key: 'prefixspan.minSupport', type: 'number', value: 0.3, min: 0, max: 1 },
     ],
   },
 };
@@ -590,8 +589,8 @@ export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => has(r.url, '/patterns') && r.method === 'PATCH', respond: () => ({ ...PATTERNS.items[0], sequence: PATTERNS.items[0].sequence.map((s, i) => (i === 1 ? { ...s, optional: true } : s)) }) },
   { matches: (r) => has(r.url, '/approve'), respond: (r) => approvePattern(r) },
   { matches: (r) => has(r.url, '/patterns'), respond: (r) => filterPatterns(r) },
-  { matches: (r) => has(r.url, '/model-params') || (has(r.url, '/modelParams') && r.method !== 'PUT'), respond: () => MODEL_PARAMS },
-  { matches: (r) => has(r.url, '/modelParams') && r.method === 'PUT', respond: (r) => ({ ...MODEL_PARAMS, version: 'v4', payload: (r.body as { payload?: ModelParamsRecord['payload'] }).payload ?? MODEL_PARAMS.payload }) },
+  { matches: (r) => (has(r.url, '/model-params') || has(r.url, '/modelParams')) && r.method !== 'PUT', respond: () => MODEL_PARAMS },
+  { matches: (r) => (has(r.url, '/model-params') || has(r.url, '/modelParams')) && r.method === 'PUT', respond: (r) => ({ ...MODEL_PARAMS, version: 'v4', payload: (r.body as { payload?: ModelParamsRecord['payload'] }).payload ?? MODEL_PARAMS.payload }) },
   { matches: (r) => /\/incidents\/[^/?]+$/.test(r.url.split('?')[0]), respond: (r) => incidentById(r) },
   { matches: (r) => has(r.url, '/incidents'), respond: () => INCIDENT_PAGE },
   { matches: (r) => has(r.url, '/stats'), respond: () => STATS },

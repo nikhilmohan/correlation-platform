@@ -50,12 +50,13 @@ test.describe('Config — Knowledge model-params [AC 43]', () => {
     await page.goto('/config');
     await expect(page.getByRole('heading', { name: /Model parameters/i })).toBeVisible();
 
-    const minSupport = page.getByTestId('param-prefixspan.minSupport'); // bounds 0..1
-    await expect(minSupport).toBeVisible();
-    await minSupport.fill('5'); // out of bounds (> max 1)
-    await minSupport.blur();
+    // dbscan.minSamples is a REAL noise-filter param (bounds min 1, max 1000). 9999 > max 1000.
+    const minSamples = page.getByTestId('param-dbscan.minSamples');
+    await expect(minSamples).toBeVisible();
+    await minSamples.fill('9999'); // out of bounds (> max 1000)
+    await minSamples.blur();
 
-    await expect(page.getByTestId('error-prefixspan.minSupport')).toBeVisible();
+    await expect(page.getByTestId('error-dbscan.minSamples')).toBeVisible();
     await expect(page.getByTestId('save-btn')).toBeDisabled();
   });
 });
