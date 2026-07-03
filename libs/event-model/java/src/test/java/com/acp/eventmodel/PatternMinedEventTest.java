@@ -116,4 +116,48 @@ class PatternMinedEventTest {
         String wire = codec.serialize(env);
         assertFalse(wire.contains("anchorScenarioId"));
     }
+
+    // Optional top-level sampleAlarms[] — a bounded sample of the real member alarms a pattern
+    // was mined from (operator review / XAI). Present + absent (backward-compat).
+
+    @Test
+    void sampleAlarmsPresentRoundTrips() {
+        // (a) The fixture carries a 2-entry sample; all 5 fields of each item survive.
+        TypedEnvelope<Object> env =
+                assertDoesNotThrow(() -> codec.deserialize(Fixtures.read("PatternMinedEvent")));
+        PatternMinedEvent mined = (PatternMinedEvent) env.getPayload();
+        assertEquals(2, mined.getSampleAlarms().size());
+        var first = mined.getSampleAlarms().get(0);
+        assertEquals("ALM-0001262", first.getAlarmId());
+        assertEquals("lossOfSignal", first.getAlarmType());
+        assertEquals("2026-06-08T12:38:51Z", first.getRaisedAt());
+        assertEquals("IPLink:N6_N7", first.getManagedObjectId());
+        assertEquals("major", first.getPerceivedSeverity());
+        String wire = codec.serialize(env);
+        assertTrue(wire.contains("ALM-0001262"));
+        assertTrue(wire.contains("IPLink:N6_N7"));
+    }
+
+    @Test
+    void sampleAlarmsAbsentIsOptional() {
+        // (b) Backward-compat: a PatternMinedEvent WITHOUT sampleAlarms still deserializes.
+        // sampleAlarms is not in the payload's required list, so removing it must NOT raise.
+        TypedEnvelope<Object> env = assertDoesNotThrow(
+                () -> codec.deserialize(mutate(p -> p.remove("sampleAlarms"))));
+        PatternMinedEvent mined = (PatternMinedEvent) env.getPayload();
+        assertNull(mined.getSampleAlarms());
+        // And it does not leak into the wire when absent (NON_NULL inclusion).
+        String wire = codec.serialize(env);
+        assertFalse(wire.contains("sampleAlarms"));
+    }
+
+    @Test
+    void sampleAlarmItemFieldsRequired() {
+        // (c) A present-but-incomplete sample alarm is rejected (5 fields required within the item);
+        // an unknown field inside an item is rejected (additionalProperties:false).
+        assertThrows(CodecException.class, () -> codec.deserialize(mutate(p ->
+                ((ObjectNode) p.get("sampleAlarms").get(0)).remove("perceivedSeverity"))));
+        assertThrows(CodecException.class, () -> codec.deserialize(mutate(p ->
+                ((ObjectNode) p.get("sampleAlarms").get(0)).put("bogus", "x"))));
+    }
 }

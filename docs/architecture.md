@@ -73,6 +73,15 @@ Consumers reject unknown major `schemaVersion`.
 > scenario match) — a first-class, valid outcome, not an error. Optional (not in `provenance.required`)
 > for backward-compat: existing PatternMinedEvent messages without the field still validate.
 
+> **PatternMinedEvent sampleAlarms.** PatternMinedEvent also carries the optional top-level
+> **`sampleAlarms[]`** — a bounded, representative sample of the real member alarms this pattern was
+> mined from, for pattern-review evidence / XAI (so the web-ui pattern card can show the actual member
+> alarms with their timestamps + node). Each item is `{alarmId, alarmType, raisedAt, managedObjectId,
+> perceivedSeverity}` (the 5 fields required within an item; `additionalProperties:false`). The array is
+> **producer-bounded** by a pattern-miner-side cap (K) — not a schema `maxItems`. Optional (not in the
+> payload `required` list) and absent/empty when no sample was captured, so existing PatternMinedEvent
+> messages without it still validate (backward-compat).
+
 ## Kafka topics
 topology.changed, trails.built, codebook.generated, knowledge.updated,
 alarms.history, alarms.live, alarms.enriched, alarms.enriched.live, alarms.persisted.live,
