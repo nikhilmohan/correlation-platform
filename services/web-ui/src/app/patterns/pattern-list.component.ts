@@ -51,7 +51,7 @@ import { PatternView, SequenceFlag } from '../api/models';
     } @else if (store.visiblePatterns().length) {
       <ul class="pattern-list">
         @for (p of store.visiblePatterns(); track p.patternId) {
-          <li class="card" data-testid="pattern-row">
+          <li class="card" data-testid="pattern-row" [attr.data-pattern-id]="p.patternId">
             <div class="pattern-head">
               <button
                 type="button"
