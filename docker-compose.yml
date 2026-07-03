@@ -136,11 +136,63 @@ services:
     networks:
       - cp-net
 
+  # --- Pattern Manager — sole owner of the Pattern Store + pattern lifecycle. Consumes
+  #     `patterns.mined`, runs RCA (Topology query API), structural validation, codebook
+  #     reconciliation (Codebook read API), session-window derivation and explainability, then
+  #     persists a DRAFT pattern in its own `pattern` PostgreSQL schema and emits
+  #     `patterns.discovered`. Human approval (REST) promotes DRAFT→APPROVED and emits
+  #     `patterns.approved`. Reads Topology/Codebook/Knowledge via their published APIs only —
+  #     never their stores. Flyway auto-creates the `pattern` schema in the shared `correlation`
+  #     DB (same shared-DB / per-service-schema model as knowledge + topology). All config from
+  #     env; consumer is idempotent (dedupe on eventId) with a patterns.mined.dlq. ---
+  pattern-manager:
+    build:
+      context: .
+      dockerfile: services/pattern-manager/Dockerfile
+    image: acp/pattern-manager:0.1.0
+    container_name: cp-pattern-manager
+    ports:
+      - "8090:8080"      # /health + /metrics + /openapi.json (8081-8089 taken by prior services)
+    environment:
+      SERVER_PORT: "8080"
+      DB_URL: "jdbc:postgresql://postgres:5432/correlation"
+      DB_USER: "correlation"
+      DB_PASSWORD: "correlation"
+      # Use the INTERNAL listener kafka:29092 (all services do); kafka:9092 advertises
+      # localhost:9092 and is unreachable from inside a container.
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KAFKA_ENABLED: "true"
+      # Real collaborator wiring (in-compose service names). mock|real is config-switchable.
+      INTEGRATION_MODE: "real"
+      TOPOLOGY_BASE_URL: "http://topology:8080"
+      CODEBOOK_BASE_URL: "http://codebook-api:8000"
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      knowledge:
+        condition: service_healthy
+      topology:
+        condition: service_healthy
+      codebook-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # JVM Spring Boot context init can take ~100-140s on a busy host; allow the startup window.
+      start_period: 180s
+    networks:
+      - cp-net
+
 # -----------------------------------------------------------------------------------------
 # DEFERRED — added as services are built (each needs a real Dockerfile + image):
 #
 #   simulator, topology, knowledge, trail-builder, codebook-generator, enrichment,
-#   noise-filter, pattern-manager, correlation-engine, web-ui
+#   noise-filter, correlation-engine, web-ui
 #
 #   Also deferred:
 #     - kafka-init: one-shot container creating the architecture.md topic catalog
