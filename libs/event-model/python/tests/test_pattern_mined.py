@@ -88,3 +88,37 @@ def test_provenance_domain_absent_is_optional() -> None:
     del env["payload"]["provenance"]["domain"]
     typed = m.deserialize(env)
     assert typed.payload.provenance.domain is None
+
+
+def test_provenance_anchor_scenario_id_present_round_trips() -> None:
+    """(a) Optional `anchorScenarioId` lives in provenance and round-trips (fixture carries it)."""
+    env = m.deserialize(_mined())
+    assert env.payload.provenance.anchorScenarioId == "CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1"
+    out = json.loads(m.serialize(env))
+    assert (
+        out["payload"]["provenance"]["anchorScenarioId"]
+        == "CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1"
+    )
+
+
+def test_provenance_anchor_scenario_id_absent_is_optional() -> None:
+    """(b) Backward-compat: a provenance lacking anchorScenarioId still validates -> None.
+
+    null/absent = "unexplained" cascade (a first-class outcome, not an error).
+    """
+    env = _mined()
+    del env["payload"]["provenance"]["anchorScenarioId"]
+    typed = m.deserialize(env)
+    assert typed.payload.provenance.anchorScenarioId is None
+    # And it does not leak into the wire when absent (NON_NULL inclusion).
+    out = json.loads(m.serialize(typed))
+    assert "anchorScenarioId" not in out["payload"]["provenance"]
+
+
+def test_provenance_anchor_scenario_id_not_required() -> None:
+    """(c) anchorScenarioId is optional — NOT in provenance.required."""
+    from acp_event_model import _generated
+
+    fields = _generated.Provenance.model_fields
+    assert "anchorScenarioId" in fields
+    assert fields["anchorScenarioId"].is_required() is False
