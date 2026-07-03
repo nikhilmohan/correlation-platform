@@ -72,7 +72,7 @@ interface Chip {
                 class="expand"
                 data-testid="pattern-expand"
                 [attr.aria-expanded]="store.expandedId() === p.patternId"
-                (click)="store.toggleExpand(p.patternId)"
+                (click)="onExpand(p.patternId)"
               >
                 <span class="chevron" aria-hidden="true">{{ store.expandedId() === p.patternId ? '▾' : '▸' }}</span>
                 <span class="pattern-name">{{ patternName(p) }}</span>
@@ -116,8 +116,8 @@ interface Chip {
               <span class="chip metric" data-testid="lift">Lift {{ p.lift | number: '1.1-1' }}x</span>
               <span class="chip metric">{{ p.instanceCount }} occurrences</span>
               <span class="chip metric"><span class="star" aria-hidden="true">◷</span> {{ discoveredRelative(p) }}</span>
-              <span class="chip metric origin">
-                <span class="star" aria-hidden="true">⚑</span> {{ faultOrigin(p) }}
+              <span class="chip metric origin" [attr.title]="faultOrigin(p)">
+                <span class="star" aria-hidden="true">⚑</span> {{ faultOriginShort(p) }}
               </span>
             </div>
 
@@ -174,22 +174,45 @@ interface Chip {
 
                 <section class="xai-section">
                   <h2 class="xai-h">Evidence · sample references</h2>
-                  <p class="xai-p">supporting instances: {{ instances(p).length }}</p>
+                  <p class="xai-p">
+                    supporting instances: {{ instances(p).length }}
+                    @if (evidenceSummary(p); as es) {
+                      <span class="xai-muted"> · {{ es }}</span>
+                    }
+                  </p>
                   @if (instances(p).length) {
                     <ul class="evidence-list">
-                      @for (inst of instances(p); track $index) {
+                      @for (inst of shownInstances(p); track $index) {
                         <li class="evidence-item">
-                          <span class="ev-k">window</span>
-                          <code>{{ inst.sourceWindowId ?? '—' }}</code>
-                          <span class="ev-k">snapshot</span>
-                          <code>{{ inst.snapshotId ?? '—' }}</code>
+                          <code class="ev-id" [attr.title]="inst.sourceWindowId ?? '—'"
+                            >{{ shortId(inst.sourceWindowId) }}</code
+                          >
                           @if (inst.occurrence?.anchorScenarioId) {
-                            <span class="ev-k">fault origin</span>
-                            <code>{{ inst.occurrence?.anchorScenarioId }}</code>
+                            <span class="ev-sep" aria-hidden="true">·</span>
+                            <span
+                              class="ev-anchor"
+                              [attr.title]="inst.occurrence?.anchorScenarioId"
+                              >{{ readableTail(inst.occurrence?.anchorScenarioId) }}</span
+                            >
                           }
                         </li>
                       }
                     </ul>
+                    @if (instances(p).length > evidencePreview) {
+                      <button
+                        type="button"
+                        class="evidence-toggle"
+                        data-testid="evidence-toggle"
+                        [attr.aria-expanded]="evidenceExpanded()"
+                        (click)="toggleEvidence()"
+                      >
+                        @if (evidenceExpanded()) {
+                          Show fewer references
+                        } @else {
+                          Show all {{ instances(p).length }} references
+                        }
+                      </button>
+                    }
                   }
                   <p class="xai-note">
                     Per-alarm detail (timestamps, node/object) is not yet served by the Pattern Store.
@@ -453,26 +476,50 @@ interface Chip {
       }
       .evidence-item {
         display: flex;
-        flex-wrap: wrap;
         align-items: center;
-        gap: 0.35rem;
+        gap: 0.4rem;
         background: var(--surface-2);
         border: 1px solid var(--border);
         border-radius: 6px;
-        padding: 0.3rem 0.55rem;
+        padding: 0.25rem 0.55rem;
         font-size: 0.82rem;
+        white-space: nowrap;
+        overflow: hidden;
       }
-      .ev-k {
+      .ev-id {
+        flex: 0 0 auto;
+        max-width: 12ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .ev-sep {
         color: var(--text-muted);
-        text-transform: uppercase;
-        font-size: 0.68rem;
-        letter-spacing: 0.03em;
+      }
+      .ev-anchor {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text-muted);
       }
       .evidence-item code,
       .meta code {
         background: transparent;
         color: var(--accent);
         font-size: 0.82rem;
+      }
+      .evidence-toggle {
+        align-self: flex-start;
+        margin-top: 0.15rem;
+        background: none;
+        border: none;
+        padding: 0;
+        color: var(--accent);
+        font-size: 0.8rem;
+        cursor: pointer;
+        text-decoration: underline;
       }
       .xai-note {
         margin: 0.1rem 0 0;
@@ -525,6 +572,10 @@ export class PatternListComponent implements OnInit {
   readonly editing = signal<string | null>(null);
   readonly optionalFlags = signal<boolean[]>([]);
   reviewer = 'operator';
+
+  /** Evidence list is progressively disclosed: preview N rows, toggle reveals the rest. */
+  readonly evidencePreview = 3;
+  readonly evidenceExpanded = signal(false);
 
   private readonly relTime = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
@@ -595,7 +646,42 @@ export class PatternListComponent implements OnInit {
     return p.supportingInstances ?? [];
   }
 
-  /** Fault origin / codebook status chip text. */
+  /** The evidence rows currently shown: first `evidencePreview`, or all when expanded. */
+  shownInstances(p: PatternView): SupportingInstance[] {
+    const all = this.instances(p);
+    return this.evidenceExpanded() ? all : all.slice(0, this.evidencePreview);
+  }
+
+  onExpand(patternId: string): void {
+    this.evidenceExpanded.set(false);
+    this.store.toggleExpand(patternId);
+  }
+
+  toggleEvidence(): void {
+    this.evidenceExpanded.update((v) => !v);
+  }
+
+  /**
+   * Readable tail of an anchor / fault-origin id: strips a leading `cb-<uuid>:` codebook prefix
+   * so `cb-ad0970bc-…:Port:N0-LC1-P1` reads as `Port:N0-LC1-P1`. Non-prefixed values pass through.
+   */
+  readableTail(id: string | null | undefined): string {
+    if (!id) {
+      return '';
+    }
+    return id.replace(/^cb-[0-9a-f-]+:/i, '');
+  }
+
+  /** Short, monospace-friendly id: the last path/dash segment, capped so long UUIDs don't sprawl. */
+  shortId(id: string | null | undefined): string {
+    if (!id) {
+      return '—';
+    }
+    const tail = id.includes('-') ? (id.split('-').pop() ?? id) : id;
+    return tail.length > 10 ? `…${tail.slice(-8)}` : tail;
+  }
+
+  /** Fault origin / codebook status chip text (full value, used in title=). */
   faultOrigin(p: PatternView): string {
     const anchored = this.instances(p).find((i) => i.occurrence?.anchorScenarioId)?.occurrence
       ?.anchorScenarioId;
@@ -606,6 +692,40 @@ export class PatternListComponent implements OnInit {
       return p.codebookMatchId;
     }
     return 'Unexplained (novel)';
+  }
+
+  /** Readable-tail form of the fault-origin chip (strips the cb-<uuid>: codebook prefix). */
+  faultOriginShort(p: PatternView): string {
+    return this.readableTail(this.faultOrigin(p)) || this.faultOrigin(p);
+  }
+
+  /**
+   * Human one-liner for the evidence header: the distinct fault-origins (readable tails, deduped,
+   * capped) and the count of distinct source windows. Empty when there's nothing meaningful to say.
+   */
+  evidenceSummary(p: PatternView): string {
+    const all = this.instances(p);
+    if (!all.length) {
+      return '';
+    }
+    const origins = [
+      ...new Set(
+        all
+          .map((i) => this.readableTail(i.occurrence?.anchorScenarioId))
+          .filter((t): t is string => t.length > 0),
+      ),
+    ];
+    const windows = new Set(all.map((i) => i.sourceWindowId).filter((w): w is string => !!w));
+    const parts: string[] = [];
+    if (origins.length) {
+      const shown = origins.slice(0, 2).join(', ');
+      const label = origins.length === 1 ? 'fault origin' : 'fault origins';
+      parts.push(`${label} ${shown}${origins.length > 2 ? ` +${origins.length - 2} more` : ''}`);
+    }
+    if (windows.size) {
+      parts.push(`across ${windows.size} source window${windows.size === 1 ? '' : 's'}`);
+    }
+    return parts.join(' · ');
   }
 
   /** Relative discovery time (dependency-free) from createdAt. */
