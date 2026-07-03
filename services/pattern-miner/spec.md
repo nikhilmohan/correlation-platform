@@ -61,10 +61,23 @@ and Codebook scenarios — no code change to pattern-miner.
   token signature, support, confidence, and lift. Emit one `PatternMinedEvent` per distinct
   anchored fault-origin pattern. Emit a separate `PatternMinedEvent` for the unexplained cascade
   group (if non-empty), with `provenance.anchorScenarioId` null/absent.
+- **Sample alarms — representative evidence for operator review (XAI).** When assembling each
+  `PatternMinedEvent`, populate the optional `sampleAlarms[]` field with a bounded, representative
+  subset of the real member alarms drawn from the pattern's supporting session(s). Each entry
+  carries the five fields already present on `TransactionEvent.alarms[]` items: `alarmId`,
+  `alarmType`, `raisedAt` (ISO-8601), `managedObjectId` (`<objectType>:<id>` scheme), and
+  `perceivedSeverity`. The purpose is XAI: downstream (pattern-manager -> web-ui) surfaces these
+  concrete alarm instances as evidence behind the abstract alarm-type sequence, so operators can
+  assess pattern trustworthiness during review/approval. The sample is bounded by a cap K sourced
+  from the Knowledge Service (no hardcoded value). When no sample can be captured (edge case),
+  `sampleAlarms` may be absent or empty without failing the event. No new Kafka input or topic is
+  required — the alarm detail is already present in the `TransactionEvent.alarms[]` the miner
+  already holds. The `PatternMinedEvent.sampleAlarms[]` contract field is already landed in
+  `libs/event-model` on `main` (PR #349), backward-compatible (not in `required`).
 - Source all configuration — minimum support threshold, maximum pattern length, session-windowing
   adaptation parameters (including base/fallback gap), maximum sequence count, domain-anchoring
-  matching confidence threshold, and grouping keys — from the Knowledge Service per domain. No
-  hardcoded thresholds anywhere.
+  matching confidence threshold, grouping keys, and the sample-alarm cap K — from the Knowledge
+  Service per domain. No hardcoded thresholds anywhere.
 - Attach mining provenance to each result: source `trailId`(s), `sourceWindowId`, `snapshotId`,
   `codebookVersion`, and `provenance.anchorScenarioId` (the `scenarioId` of the matched
   fault-origin scenario, or null/absent for the unexplained group). `provenance.anchorScenarioId`
@@ -141,10 +154,12 @@ and Codebook scenarios — no code change to pattern-miner.
 6. Assemble one `PatternMinedEvent` per anchored group, carrying: the discovered `sequence`
    (alarmType tokens), `support`, `confidence`, `lift`, `trailId`(s) in scope, `timing`
    (inter-arrival statistics in milliseconds: `timeframeMs`, `medianInterArrivalMs`,
-   `maxInterArrivalMs`, `stddevInterArrivalMs`), and `provenance` (`sourceWindowId`,
-   `snapshotId`, `codebookVersion`, and `anchorScenarioId`). The "unexplained" group produces a
-   `PatternMinedEvent` with `provenance.anchorScenarioId` null/absent — a first-class correct
-   outcome.
+   `maxInterArrivalMs`, `stddevInterArrivalMs`), `provenance` (`sourceWindowId`, `snapshotId`,
+   `codebookVersion`, and `anchorScenarioId`), and `sampleAlarms[]` (a bounded sample of real
+   member alarms drawn from the pattern's supporting session(s) — see scope item above). The
+   "unexplained" group produces a `PatternMinedEvent` with `provenance.anchorScenarioId`
+   null/absent — a first-class correct outcome. If no sample can be captured, `sampleAlarms` may
+   be absent or empty without failing the event.
 
 7. Emit each `PatternMinedEvent` onto `patterns.mined` (one event per anchored fault-origin
    group, plus one for the unexplained group if non-empty).
@@ -168,9 +183,12 @@ Consistent with the canonical phase map in `docs/architecture.md`.
   `managedObjectId`, `perceivedSeverity`. The Miner builds each mined `sequence` item from
   `alarmType` (the canonical join token) and its timing/windowing from `raisedAt`.
 - **Produces (Kafka):** `patterns.mined` (`PatternMinedEvent`). Every emitted event carries
-  `provenance.anchorScenarioId` (optional string, null/absent for the "unexplained" group). This
-  field is already present in `libs/event-model` as an optional, nullable field in `provenance`
-  (not in `provenance.required`), landed via PR #331, backward-compatible.
+  `provenance.anchorScenarioId` (optional string, null/absent for the "unexplained" group) and
+  an optional `sampleAlarms[]` array of up to K entries, each with `{alarmId, alarmType,
+  raisedAt, managedObjectId, perceivedSeverity}`. Both fields are optional in the frozen schema
+  (not in `required`), backward-compatible, and already landed in `libs/event-model` on `main`
+  (`provenance.anchorScenarioId` via PR #331; `sampleAlarms[]` via PR #349). K is
+  Knowledge-sourced; the field may be absent when no sample is available.
 - **APIs exposed:** None (pattern-miner is a stateless Spark job; no HTTP API surface beyond
   `/health` and `/metrics`; no OpenAPI spec is published).
 - **APIs/data consumed from other services:**
@@ -210,12 +228,12 @@ Consistent with the canonical phase map in `docs/architecture.md`.
   each `TransactionEvent`.
 - **Config:** All mining thresholds and tunable parameters (minimum support, maximum pattern
   length, session-windowing adaptation parameters including the base/fallback gap, maximum
-  sequence count, domain-anchoring matching confidence threshold, grouping keys) are sourced from
-  the Knowledge Service at runtime — not from code or static config files. No windowing gap
-  literal, no domain-specific alarm type token, no fault-origin name exists as a hardcoded value
-  anywhere in the service's source or default configuration. Integration URLs (Knowledge Service
-  base URL, Codebook Service base URL) and mock/real toggles are provided via environment
-  variables.
+  sequence count, domain-anchoring matching confidence threshold, grouping keys, and the
+  sample-alarm cap K) are sourced from the Knowledge Service at runtime — not from code or static
+  config files. No windowing gap literal, no domain-specific alarm type token, no fault-origin
+  name, and no sample-alarm cap literal exists as a hardcoded value anywhere in the service's
+  source or default configuration. Integration URLs (Knowledge Service base URL, Codebook Service
+  base URL) and mock/real toggles are provided via environment variables.
 - **Domain-agnostic requirement (hard — per CLAUDE.md and stakeholder-stated).** No
   domain-specific alarm types, cascade shapes, fault-origin names, or thresholds appear as
   literals in source or config. All domain-specific inputs flow from Knowledge (params) and
@@ -352,6 +370,33 @@ changed values and observing changed behaviour, with no code change).
 milliseconds, computed from `alarms[].raisedAt`); the previous `meanInterArrivalSeconds` /
 `stdDevSeconds` keys are absent.
 
+### Sample alarms (XAI member-alarm evidence)
+
+**AC-22.** Given a `PatternMinedEvent` emitted for an anchored group whose supporting session
+contains at least one alarm, the `sampleAlarms[]` field is present and non-empty, and every
+entry carries all five required fields: `alarmId` (non-empty string), `alarmType` (non-empty
+string), `raisedAt` (ISO-8601 date-time string), `managedObjectId` (non-empty string in
+`<objectType>:<id>` format), and `perceivedSeverity` (non-empty string). The event validates
+against the `PatternMinedEvent` Pydantic model from `libs/event-model/python` with
+`sampleAlarms` present.
+
+**AC-23.** When the supporting session contains more than K alarms (K sourced from the Knowledge
+mock), the `sampleAlarms[]` array contains at most K entries — never more. When it contains K
+or fewer alarms, all are included. The value of K is confirmed by replacing the Knowledge mock
+to return a different K value and observing the array length change with no code change.
+
+**AC-24.** Every `alarmType` value present in `sampleAlarms[]` is a member of the pattern's
+`sequence[]` — the sampled alarms come from the same session(s) used to derive the pattern and
+carry only alarm types that appear in that session.
+
+**AC-25.** When no member alarms can be captured for a pattern (edge case: session data
+unavailable or empty), the emitted `PatternMinedEvent` either omits `sampleAlarms` or sets it to
+an empty array; the event still validates against the schema and no error is raised.
+
+**AC-26.** The sample-alarm cap K is read exclusively from the Knowledge Service and is not
+present as a literal anywhere in the service's source or default configuration; replacing the
+Knowledge mock to return a different K changes the maximum array length, with no code change.
+
 ### Pattern-set quality (integration-level assertions against integration-thresholds.yaml)
 
 **AC-19.** On the Simulator's P2 historical alarm corpus, the three-stage approach yields a
@@ -466,4 +511,49 @@ mining runs under a topology `snapshotId` in scope -> `GET /codebooks/active?sna
 
 **The designer must confirm the `codebookVersion="current"` -> `codebookId` resolution path with
 the Codebook Service owner and, if a Codebook API change is required, raise that as a contract
-change PR before Stage 2 build begins.** This is the only remaining open item.
+change PR before Stage 2 build begins.**
+
+---
+
+### OQ-SA-1 — Sample cap K: default value and per-pattern vs. per-occurrence bound (for the designer)
+
+The spec requires K to be Knowledge-sourced (no hardcoded default). The designer must decide and
+document in `design.md`:
+- What default value does the Knowledge Service return for K when no explicit value has been
+  authored for the domain? (Needs confirmation with the Knowledge Service owner — if Knowledge
+  does not yet carry this param, a Knowledge record addition is required before build.)
+- Is the bound applied per emitted `PatternMinedEvent` (per anchored group / per pattern
+  identity), or per occurrence / per supporting session individually? The contract field is a
+  flat array on the event, so the bound applies to the final assembled array; the designer must
+  specify how it is applied when multiple sessions support the same pattern.
+
+This is a design decision with no contract implication (the contract field shape is fixed on
+`main`). The designer resolves it; no human approval needed unless Knowledge Service record
+addition triggers a contract change.
+
+---
+
+### OQ-SA-2 — Which supporting session(s) to sample from; ordering within the sample (for the designer)
+
+When a pattern has multiple supporting sessions/occurrences (e.g. the same fault-origin scenario
+anchors several cascades across different trail windows), the designer must specify:
+- Which session(s) are used as the source for `sampleAlarms[]` — e.g. the first/earliest
+  matching session, the session with highest match confidence, a spread across sessions, or the
+  most recent.
+- How alarms within the selected source are ordered before applying the K-cap — e.g. by
+  `raisedAt` ascending (chronological within the cascade), or another order.
+- Whether duplicate alarm instances (same `alarmId` appearing in multiple sessions) are deduped
+  before the K-cap is applied.
+
+These are pattern-miner design details with no contract implication. The designer decides and
+records the rationale in `design.md`.
+
+---
+
+### Implementation prerequisite note (for the designer/dev — not a spec decision)
+
+The `pattern-miner` branch's bundled `libs/event-model` is currently behind `main` and does NOT
+yet include the `sampleAlarms[]` field on `PatternMinedEvent` (landed on `main` via PR #349).
+The design/build must sync `libs/event-model` to `main` before the `sampleAlarms` field can be
+referenced in code or tests — the same sync that was performed for `pattern-manager` via PR
+#341. This is an implementation prerequisite, not a spec or contract decision.
