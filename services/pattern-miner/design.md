@@ -28,6 +28,34 @@
 > `design/pattern-manager-anchor-consolidation`) to collapse those into one Pattern Store pattern. No
 > new topic, payload, or field is introduced by either part. This part flags **no** contract change.
 
+> **EVOLUTION (sampleAlarms[] XAI member-alarm evidence — focused ADD).** This design adds one
+> capability on top of the 3-stage pipeline: when the miner assembles each `PatternMinedEvent` per
+> anchored group it now also populates the optional `sampleAlarms[]` field with a **bounded,
+> representative subset of the real member alarms** of the pattern's supporting session, so operators
+> downstream (pattern-manager to web-ui) can see the concrete alarm instances behind the abstract
+> alarm-type sequence (XAI). Each sample carries the five fields already present on
+> `TransactionEvent.alarms[]` items: `{alarmId, alarmType, raisedAt, managedObjectId,
+> perceivedSeverity}`. The sample is drawn from alarms the run **already holds in memory** (the
+> `Session.alarms` of the group's representative session) — **no new Kafka input, no new topic, no
+> fabrication, no new state**. The cap **K** is Knowledge-sourced (a new dotted key
+> `sample.maxAlarms`; no hard-coded literal). Sampling is **deterministic** (same input to same
+> sample) so re-mining is replay-safe. The NEW/CHANGED sections for this are tagged **[SAMPLE]**
+> throughout; Stages 1/2/3 discovery, anchoring, batch-cap, and the emitted event shape are otherwise
+> **unchanged**.
+
+> **[SAMPLE] No contract change; event-model branch-sync is a build prerequisite.**
+> `PatternMinedEvent.sampleAlarms[]` (an optional array of `SampleAlarm{alarmId, alarmType, raisedAt,
+> managedObjectId, perceivedSeverity}`, `extra="forbid"`, NOT in `required`) is **already landed in
+> `libs/event-model` on `main` via PR #349**, backward-compatible. This design **emits** it and
+> introduces **no new event-model/contract change** — no new topic, payload shape, or required field.
+> **Build prerequisite (not a contract decision):** the `pattern-miner` branch's *bundled*
+> `libs/event-model` is currently BEHIND `main` and does **not** yet carry `sampleAlarms`/`SampleAlarm`
+> on the Python `PatternMinedEvent` binding. The build must **sync `libs/event-model` to `main`** — the
+> same surgical event-model sync done for pattern-manager via PR #341 — **before** the field can be
+> referenced in code or tests (so `acp_event_model.PatternMinedEvent` has `sampleAlarms` and
+> `SampleAlarm` importable and the emitted field validates). This is an implementation step, not a new
+> contract change; the contract is already frozen on `main`.
+
 > **Based on the not-yet-merged resolved spec (PR #332).** This design is authored against
 > `services/pattern-miner/spec.md` as it stands on `spec/pattern-miner-3stage-resolved` (OQ-1/OQ-2
 > resolved; OQ-3 resolved here). It should merge **after** spec PR #332 merges into `pattern-miner`.
@@ -67,7 +95,9 @@
 - **Kafka client:** `confluent-kafka` / `kafka-python` (Apache-2.0) for the consumer/producer/DLQ loop.
 - **Event model:** `acp-event-model` (Python/Pydantic binding) — source of truth for
   `TransactionEvent` (typed `alarms[]`), `PatternMinedEvent`, `Provenance` (incl.
-  `anchorScenarioId`), the envelope, and the codec.
+  `anchorScenarioId`), **`SampleAlarm`** (the `sampleAlarms[]` item type — 5 fields, `extra="forbid"`),
+  the envelope, and the codec. **[SAMPLE]** requires the `main`-synced event-model (PR #349 field;
+  synced onto this branch per the build prerequisite above).
 - **HTTP clients (integration points):** `httpx` (permissive) for the **Knowledge client**
   (`knowledge.MiningParamsClient`, existing) and the **new Codebook client** (`codebook.CodebookClient`);
   `respx` (BSD) for both unit-test mocks, generated against each collaborator's published
@@ -85,11 +115,11 @@ adds Stage 2 (anchoring) and re-scopes Stage 3 (bounded PrefixSpan per group).
 | Spec task | Realized by (modules / flow) |
 |---|---|
 | 1. Consume `transactions.clean`, dedupe `TransactionEvent` on envelope `eventId` (at-least-once). | `ingest.Consumer` reads `transactions.clean`, deserializes via `acp_event_model.codec`; `ingest.Dedup` tracks processed `eventId`s for the current run and silently acks+drops duplicates. **Unchanged.** |
-| 2. Fetch mining **and anchoring** params from Knowledge before each run (min-support, max-pattern-length, windowing adaptation params incl. base/fallback gap, max-sequence-count, **domain-anchoring matching confidence threshold**, **grouping keys**, `codebookVersion` in scope); no hard-coded thresholds. | `knowledge.MiningParamsClient` calls the frozen `GET /domains/{domain}/model-params/{recordId}`, maps `payload.params[]` dotted keys into typed `MiningParams`. **Extended:** `MiningParams` gains an `AnchoringParams` block (`anchoring.matchConfidenceThreshold`, `anchoring.groupingKeys`, `anchoring.scoringMethod`, `anchoring.tieBreak`, scorer weights) + `codebookVersion`. No threshold literal in source/default config. |
+| 2. Fetch mining **and anchoring** params from Knowledge before each run (min-support, max-pattern-length, windowing adaptation params incl. base/fallback gap, max-sequence-count, **domain-anchoring matching confidence threshold**, **grouping keys**, `codebookVersion` in scope); no hard-coded thresholds. | `knowledge.MiningParamsClient` calls the frozen `GET /domains/{domain}/model-params/{recordId}`, maps `payload.params[]` dotted keys into typed `MiningParams`. **Extended:** `MiningParams` gains an `AnchoringParams` block (`anchoring.matchConfidenceThreshold`, `anchoring.groupingKeys`, `anchoring.scoringMethod`, `anchoring.tieBreak`, scorer weights) + `codebookVersion`. **[SAMPLE] also extended:** `MiningParams` gains a typed `sample_max_alarms: int` field mapped from the new Knowledge dotted key **`sample.maxAlarms`** (K, the sample-alarm cap). Parsed by `MiningParamsClient` exactly like the other dotted keys (`_require(m, KEY_SAMPLE_MAX_ALARMS)` — required, no code default, so replacing the Knowledge mock's K changes behaviour with no code change). No threshold/cap literal in source/default config. |
 | 3. **Stage 1 — Time + space correlation.** Dynamic activity/idle session window per trail: pool per-trail alarms ordered by `raisedAt`, split at idle gaps; the closing gap adapts to each burst's tempo; all params Knowledge-sourced incl. base/fallback gap. | `windowing.SessionWindower` + `windowing.AdaptiveGap` (**EXISTS, kept as-is** — see Algorithm logical flow → Stage 1). Output = per-trail **candidate cascades** (`Session`s), each an ordered `alarmType`-token sequence with a composite `sourceWindowId`. This output feeds Stage 2. |
 | 4. **Stage 2 — Domain-knowledge anchoring.** For each candidate cascade, fetch domain fault-origin scenarios from the Codebook (via pattern-miner's Codebook client, built against Codebook OpenAPI), resolve the active codebook (OQ-3), call `GET /codebooks/{codebookId}/scenarios`, match the cascade's ordered `alarmType` sequence against each scenario's `predictedSymptoms[].alarmType` chain, assign the best match if confidence at/above the Knowledge threshold else "unexplained"; group cascades by anchor. | **NEW** `codebook.CodebookClient` (resolves `codebookVersion="current"` to `codebookId` via `GET /codebooks/active?domain=&snapshotId=` then `GET /codebooks/{id}/scenarios`) + `anchoring.CascadeMatcher` (scores each cascade against each scenario chain, applies the Knowledge threshold + tie-break) + `anchoring.AnchorGrouper` (groups by `scenarioId`, with the null/unexplained group). Records `provenance.anchorScenarioId`. See Algorithm logical flow → Stage 2. |
 | 5. **Stage 3 — ML pattern definition.** Run PrefixSpan (Spark MLlib) **within each anchored group** (bounded, not globally) to learn the group's canonical ordered `alarmType` signature, support, confidence, lift; also within the unexplained group if non-empty. | `mining.PrefixSpanMiner` (**EXISTS**) is **re-scoped**: `mining.GroupedMiner` iterates anchored groups and runs `PrefixSpanMiner` **per group** over that group's sessions only. `metrics.MetricsComputer` computes support/confidence/lift **relative to the group**. Bounded scope removes the global-mining OOM (JVM kernel-kill on dense global sessions). |
-| 6. Assemble one `PatternMinedEvent` per anchored group carrying `sequence`, `support`, `confidence`, `lift`, `trailId`(s), `timing` (ms inter-arrival stats), `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`, **`anchorScenarioId`**). Unexplained group to `anchorScenarioId` null/absent. | `assemble.PatternAssembler` (**EXTENDED**) sets `provenance.anchorScenarioId` = the group's matched `scenarioId` (or `None` for the unexplained group). `timing` via `metrics.TimingComputer` (ms keys, unchanged). |
+| 6. Assemble one `PatternMinedEvent` per anchored group carrying `sequence`, `support`, `confidence`, `lift`, `trailId`(s), `timing` (ms inter-arrival stats), `provenance` (`sourceWindowId`, `snapshotId`, `codebookVersion`, **`anchorScenarioId`**), **and [SAMPLE] `sampleAlarms[]`**. Unexplained group to `anchorScenarioId` null/absent. | `assemble.PatternAssembler` (**EXTENDED**) sets `provenance.anchorScenarioId` = the group's matched `scenarioId` (or `None`). `timing` via `metrics.TimingComputer` (ms keys, unchanged). **[SAMPLE] NEW:** a `sampling.SampleAlarmSelector` derives `sampleAlarms[]` from the group's **representative session** (`GroupPattern.matching_sessions[0]`, chosen deterministically — see [SAMPLE] flow), maps each `Alarm` to a `SampleAlarm{alarmId, alarmType, raisedAt, managedObjectId, perceivedSeverity}`, orders by `(raisedAt, alarmId)` ascending, dedups by `alarmId`, and applies the Knowledge cap K (`params.sample_max_alarms`). The result (possibly empty) is passed to `PatternMinedEvent(sampleAlarms=...)`; empty gives `sampleAlarms=[]` (or omitted) — still valid. |
 | 7. Emit each `PatternMinedEvent` on `patterns.mined` (one per anchored group + one unexplained if non-empty). | `emit.Producer` envelopes each event (`type="PatternMinedEvent"`, `schemaVersion=1`, `source="pattern-miner"`, propagated `traceId`) and produces to `patterns.mined`. |
 | 8. Route any unprocessable (poison) message to `transactions.clean.dlq`. | `ingest.DlqRouter` catches deserialize/validation failures + unknown major `schemaVersion`, publishes raw bytes + structured error header to `transactions.clean.dlq`, continues. **Unchanged.** |
 
@@ -109,7 +139,7 @@ Active / Idle).
 | Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
 |---|---|---|---|
 | P1 — Topology onboarding | Idle | All modules dormant; only `/health` answers. | — |
-| P2 — Pattern learning | **Active** | `ingest.Consumer`+`Dedup`+`DlqRouter`; `knowledge.MiningParamsClient`; **`codebook.CodebookClient`**; `windowing.SessionWindower`+`AdaptiveGap` (Stage 1); **`anchoring.CascadeMatcher`+`AnchorGrouper` (Stage 2)**; `mining.GroupedMiner`+`PrefixSpanMiner` (Stage 3); `metrics.MetricsComputer`+`TimingComputer`; `assemble.PatternAssembler`; `emit.Producer`. | In: `transactions.clean` (`TransactionEvent`); Knowledge mining+anchoring params API; **Codebook scenarios API** (`GET /codebooks/active`, `GET /codebooks/{id}/scenarios`). Out: `patterns.mined` (`PatternMinedEvent`), `transactions.clean.dlq`. |
+| P2 — Pattern learning | **Active** | `ingest.Consumer`+`Dedup`+`DlqRouter`; `knowledge.MiningParamsClient`; **`codebook.CodebookClient`**; `windowing.SessionWindower`+`AdaptiveGap` (Stage 1); **`anchoring.CascadeMatcher`+`AnchorGrouper` (Stage 2)**; `mining.GroupedMiner`+`PrefixSpanMiner` (Stage 3); `metrics.MetricsComputer`+`TimingComputer`; **`sampling.SampleAlarmSelector`**; `assemble.PatternAssembler`; `emit.Producer`. | In: `transactions.clean` (`TransactionEvent`); Knowledge mining+anchoring params API; **Codebook scenarios API** (`GET /codebooks/active`, `GET /codebooks/{id}/scenarios`). Out: `patterns.mined` (`PatternMinedEvent`), `transactions.clean.dlq`. |
 | P3 — Real-time correlation | Idle | All mining/anchoring modules dormant — mining is offline/learning-only; approved patterns are served by the Pattern Manager. Only `/health` + `/metrics` answer. | — |
 
 ## Module breakdown
@@ -137,7 +167,8 @@ flowchart TD
   end
   MET["metrics.MetricsComputer (support, confidence, lift per group)"]
   TC["metrics.TimingComputer (ms timing from raisedAt)"]
-  A["assemble.PatternAssembler (PatternMinedEvent plus provenance.anchorScenarioId)"]
+  SAMP["sampling.SampleAlarmSelector (bounded sampleAlarms from representative session)"]
+  A["assemble.PatternAssembler (PatternMinedEvent plus anchorScenarioId plus sampleAlarms)"]
   E["emit.Producer (patterns.mined)"]
 
   C --> D
@@ -158,6 +189,9 @@ flowchart TD
   TC --> A
   K --> A
   GRP --> A
+  GM --> SAMP
+  K --> SAMP
+  SAMP --> A
   A --> E
 ```
 
@@ -181,8 +215,15 @@ flowchart TD
   invoked per group.
 - **metrics.MetricsComputer / TimingComputer** — support/confidence/lift computed **within the group**;
   ms `timing` from `alarms[].raisedAt` (keys unchanged).
+- **sampling.SampleAlarmSelector** (**[SAMPLE] NEW**) — pure Python, no Spark. Given a `GroupPattern`
+  and the Knowledge cap K, selects the group's **representative session** deterministically
+  (`matching_sessions[0]` — the earliest by window start, see [SAMPLE] flow), maps its `Session.alarms`
+  (typed `Alarm`s) into `SampleAlarm`s, orders by `(raisedAt, alarmId)` ascending, dedups by `alarmId`,
+  truncates to the first K, and returns `list[SampleAlarm]` (empty when the session has no alarms). No
+  fabrication, no persistence, no HTTP — derives entirely from in-run session data.
 - **assemble.PatternAssembler** (extended) — builds `PatternMinedEvent` + `Provenance`; sets
-  `provenance.anchorScenarioId` from the group's anchor.
+  `provenance.anchorScenarioId` from the group's anchor; **[SAMPLE]** sets `sampleAlarms=` the
+  `SampleAlarmSelector` output.
 - **emit.Producer** — envelopes + produces to `patterns.mined`.
 
 ## Data model / DB schema
@@ -221,12 +262,33 @@ classDiagram
     +str scenarioId
     +list~Session~ sessions
   }
+  class GroupPattern {
+    +str scenarioId
+    +MinedSequence mined
+    +list~Session~ matching_sessions
+  }
+  class SampleAlarm {
+    +str alarmId
+    +str alarmType
+    +datetime raisedAt
+    +str managedObjectId
+    +str perceivedSeverity
+  }
   Session --> MatchResult
   Scenario --> MatchResult
   MatchResult --> AnchoredGroup
+  AnchoredGroup --> GroupPattern
+  GroupPattern --> SampleAlarm : representative session alarms, bounded by K
 ```
 
-(`MatchResult.scenarioId` / `AnchoredGroup.scenarioId` are `None` for the unexplained group.)
+(`MatchResult.scenarioId` / `AnchoredGroup.scenarioId` / `GroupPattern.scenarioId` are `None` for the
+unexplained group.)
+
+**[SAMPLE]** `SampleAlarm` is the `libs/event-model` payload item type (5 fields, `extra="forbid"`);
+it is **not** an owned persisted entity — it is derived in-memory at emit time from the
+`GroupPattern.matching_sessions[0].alarms` (real `Alarm`s already held in the run) and carried on the
+emitted `PatternMinedEvent.sampleAlarms[]`. Nothing about the sample is stored — the miner stays
+"emit and forget".
 
 ## Event handling
 
@@ -240,7 +302,12 @@ classDiagram
 - **Producers:**
   - `patterns.mined` from `emit.Producer`. Payload: **`PatternMinedEvent`**, **one per anchored
     group** (plus one unexplained if non-empty) — AC-10. Envelope: `type="PatternMinedEvent"`,
-    `schemaVersion=1`, `source="pattern-miner"`, `traceId` propagated where available.
+    `schemaVersion=1`, `source="pattern-miner"`, `traceId` propagated where available. **[SAMPLE]**
+    each event may carry an optional **`sampleAlarms[]`** (up to K `SampleAlarm` items, each with
+    `{alarmId, alarmType, raisedAt, managedObjectId, perceivedSeverity}`) — a bounded, representative
+    subset of the pattern's real member alarms for downstream XAI. Optional (not in `required`);
+    absent/empty when no sample could be captured (AC-25). The field is already frozen on `main`
+    (PR #349) — no contract change.
   - `transactions.clean.dlq` from `ingest.DlqRouter` (poison messages; raw bytes + structured error
     header).
 - **Provenance:** `sourceWindowId` = the group's representative session reference; `snapshotId` =
@@ -306,7 +373,8 @@ sequenceDiagram
   MA->>PS: one bounded PrefixSpan job per anchored group (group sessions only)
   PS-->>AS: per-group frequent ordered sequence plus support, confidence, lift
   MA->>AS: group anchor (scenarioId or null) plus ms timing
-  AS->>P: one PatternMinedEvent per group (provenance.anchorScenarioId set or null)
+  AS->>AS: SAMPLE, take representative session alarms, map to SampleAlarm, order by raisedAt then alarmId, dedup by alarmId, cap at K from Knowledge
+  AS->>P: one PatternMinedEvent per group (anchorScenarioId set or null, sampleAlarms up to K)
 ```
 
 ### OQ-3 resolution — codebookVersion "current" to concrete codebookId
@@ -361,8 +429,9 @@ flowchart TD
   GROUP --> S3["STAGE 3: run PrefixSpan within EACH group (bounded), minSupport plus maxPatternLength"]
   S3 --> METR["compute support, confidence, lift within the group"]
   METR --> TIM["compute ms timing (timeframeMs, medianInterArrivalMs, maxInterArrivalMs, stddevInterArrivalMs)"]
-  TIM --> PROV["assemble provenance (sourceWindowId, snapshotId, codebookVersion, domain, anchorScenarioId)"]
-  PROV --> EMIT["emit one PatternMinedEvent per group (at most N anchored plus 1 unexplained)"]
+  TIM --> SAMP["SAMPLE, derive sampleAlarms from representative session, order by raisedAt then alarmId, dedup by alarmId, cap at K from Knowledge"]
+  SAMP --> PROV["assemble provenance (sourceWindowId, snapshotId, codebookVersion, domain, anchorScenarioId)"]
+  PROV --> EMIT["emit one PatternMinedEvent per group (at most N anchored plus 1 unexplained), each with sampleAlarms up to K"]
 ```
 
 ### Stage 1 — Time + space correlation (EXISTING, retained unchanged)
@@ -487,6 +556,96 @@ occurrences yield `0` for the affected keys; the schema `timing` object stays op
 (`additionalProperties:true`) — **no event-model schema change**. These are the exact keys/units the
 Pattern Manager `SessionWindowDeriver` consumes (AC-18).
 
+### [SAMPLE] Sample-alarm selection (bounded XAI member-alarm evidence)
+
+**Goal.** For each emitted `PatternMinedEvent`, attach a small, deterministic, representative set of
+the pattern's **real member alarms** — concrete evidence behind the abstract `sequence` — bounded by
+a Knowledge-sourced cap **K**. The sample is derived entirely from alarms the run already holds
+(`GroupPattern.matching_sessions[*].alarms`, real `Alarm`s from the consumed `TransactionEvent`s);
+there is **no new input, no fabrication, no persistence**.
+
+**Where the alarms come from (source of truth).** Stage 3 already returns, per anchored group, a
+`GroupPattern` whose `matching_sessions: list[Session]` are the sessions whose ordered `alarmType`
+token list contains the group's representative `sequence`. Each `Session` holds the full typed
+`alarms: tuple[Alarm, ...]` (5 fields available on each — `alarmId`, `alarmType`, `raisedAt`,
+`managedObjectId`, `perceivedSeverity`). The sample is drawn from these. Because the sampled alarms
+come from a session whose token list contains the representative `sequence`, **every sampled
+`alarmType` is a member of the session's sequence, hence a member of the pattern's `sequence`** —
+this holds **by construction** (AC-24), no filtering needed.
+
+**Which session/occurrence to sample (OQ-SA-2 resolved — deterministic, single occurrence).** A
+pattern may have several supporting sessions across trails/windows. The selector samples from **one
+deterministically-chosen representative session** — `GroupPattern.matching_sessions[0]` — so the
+sample corresponds to **one real, single occurrence** of the cascade (coherent evidence, not a
+cross-occurrence mash-up) and is **reproducible**. To make "[0]" stable regardless of iteration
+order, the selector first sorts `matching_sessions` by `(session_window_start_raisedAt, trailId,
+sourceWindowId)` ascending and takes the earliest — i.e. the **earliest-by-window-start** supporting
+occurrence. Rationale: (a) determinism/replay-safety — the same input always yields the same
+representative session and therefore the same sample (idempotent re-mining, AC-"deterministic"); (b)
+the earliest occurrence is the least likely to be a truncated tail of a longer burst; (c) it is a
+single real occurrence, so the operator sees a coherent cascade, not alarms stitched from different
+times/trails.
+
+**Ordering + dedup + cap (OQ-SA-2 resolved).** Within the chosen session:
+1. **Map** each `Alarm` to a `SampleAlarm{alarmId, alarmType, raisedAt, managedObjectId,
+   perceivedSeverity}` (the 5 event-model fields; drop `eventType` which is not on `SampleAlarm`).
+2. **Dedup** by `alarmId` (keep first occurrence) — guards against any repeated `alarmId` before the
+   cap so K distinct alarms are shown.
+3. **Order** ascending by `(raisedAt, alarmId)` — chronological within the occurrence, `alarmId` as a
+   stable deterministic tie-break for equal timestamps.
+4. **Cap** to the first **K** entries (`params.sample_max_alarms`). When the session has K or fewer
+   distinct alarms, all are included; when more, exactly K.
+
+**K — the Knowledge cap (OQ-SA-1 resolved).**
+- **Dotted key:** `sample.maxAlarms` (integer), authored in the same Knowledge model-params record
+  (`core-ip/modelParams/pattern-miner`) that already carries `prefixspan.*`, `window.adaptive.*`,
+  and `anchoring.*`. Mapped by `MiningParamsClient` into a typed `MiningParams.sample_max_alarms:
+  int` via a new `KEY_SAMPLE_MAX_ALARMS = "sample.maxAlarms"` constant. Read like every other param
+  (`int(_require(m, KEY_SAMPLE_MAX_ALARMS))`) — **required, no code default** (AC-26). There is **no
+  `K` / cap literal anywhere in source or default config**; a `test_no_hardcoded_thresholds`-style
+  scan asserts this, and swapping the Knowledge mock's `sample.maxAlarms` changes the emitted array
+  length with no code change (AC-23/AC-26).
+- **Recommended authored default (Knowledge record value, not a code default):** **`10`**. Rationale:
+  the sample is evidence for a human reviewer — roughly 5-15 concrete alarms is enough to judge a
+  cascade's plausibility without flooding the web-ui card; 10 aligns with the per-pattern type-span
+  band (10-20 in `integration-thresholds.yaml`) so a typical pattern's distinct member alarms are
+  representable. This value lives **only** in the Knowledge record (the Knowledge owner authors
+  `sample.maxAlarms=10` for `core-ip`); if Knowledge does not yet carry the key, the build adds it to
+  the Knowledge model-params record — a Knowledge-record data change, **not** a pattern-miner code
+  default and **not** a contract change.
+- **Bound scope (OQ-SA-1 resolved — per emitted event):** K bounds the **final assembled
+  `sampleAlarms[]` on each emitted `PatternMinedEvent`** (i.e. per anchored group / per pattern
+  identity), **not** per session. The contract field is a single flat array that is the pattern's
+  evidence, so one bounded list per pattern is the natural unit; and since the sample is drawn from a
+  single representative session, "per event" and "per that session" coincide — the cap is applied
+  once, to the final array. Justification: the operator reviews one pattern and wants one bounded,
+  coherent evidence list for it, not K-per-session multiplied across occurrences.
+
+**Empty / edge case (AC-25).** If the representative session has no alarms (or, defensively, no
+matching session exists), the selector returns `[]`. `PatternMinedEvent(sampleAlarms=[])` (or
+omitting the field) is valid — `sampleAlarms` is optional and not in `required`. The event still
+emits; no error is raised.
+
+**Determinism / replay-safety.** Every step above is a pure, order-stable function of the in-run
+session data: representative-session choice (sorted, earliest), dedup (first-by-alarmId), ordering
+(`(raisedAt, alarmId)`), and cap (first K). Re-mining the same input therefore yields a
+**byte-identical `sampleAlarms[]`** — consistent with the miner's stateless "emit and forget" and
+at-least-once + `eventId`-dedupe replay model. No Spark is involved: selection is pure Python over
+`Session.alarms`, so it is fully testable without a Spark runtime.
+
+```mermaid
+flowchart TD
+  G["GroupPattern (scenarioId, mined sequence, matching_sessions)"] --> HAS{"any matching session with alarms"}
+  HAS -- no --> EMPTY["sampleAlarms = empty (valid, AC-25)"]
+  HAS -- yes --> PICK["sort matching_sessions by (windowStart, trailId, sourceWindowId), take earliest = representative session"]
+  PICK --> MAP["map each Alarm to SampleAlarm (alarmId, alarmType, raisedAt, managedObjectId, perceivedSeverity)"]
+  MAP --> DEDUP["dedup by alarmId (keep first)"]
+  DEDUP --> ORDER["order ascending by (raisedAt, alarmId)"]
+  ORDER --> CAP["take first K (K = params.sample_max_alarms from Knowledge sample.maxAlarms)"]
+  CAP --> OUT["sampleAlarms on PatternMinedEvent (each alarmType is a member of sequence by construction, AC-24)"]
+  EMPTY --> OUT2["PatternMinedEvent validates with empty/absent sampleAlarms"]
+```
+
 ### [BATCH-CAP] Trail-aligned batch cap + SparkContext resilience (the P2 blocker fix)
 
 **Why the OOM happens (verified corpus shape).** The flush pools all transactions, `group_transactions`
@@ -591,6 +750,33 @@ no chain well (confidence below threshold) to **unexplained**. Result: two ancho
 gives gaps `4000, 5000` ms, span `9000` ms, so
 `{timeframeMs:9000, medianInterArrivalMs:4500, maxInterArrivalMs:5000, stddevInterArrivalMs:500}`.
 
+**[SAMPLE] Worked sample-alarm example.** The fiber-cut group's representative session (earliest by
+window start) holds real member alarms:
+
+```text
+Alarm(alarmId=a-3, alarmType=AdjDown,    raisedAt=12:00:09Z, managedObjectId=router:r1,  perceivedSeverity=major)
+Alarm(alarmId=a-1, alarmType=FiberFault, raisedAt=12:00:00Z, managedObjectId=fiber:f1,   perceivedSeverity=critical)
+Alarm(alarmId=a-2, alarmType=LinkDown,   raisedAt=12:00:04Z, managedObjectId=link:l1,    perceivedSeverity=major)
+Alarm(alarmId=a-1, alarmType=FiberFault, raisedAt=12:00:00Z, managedObjectId=fiber:f1,   perceivedSeverity=critical)  # dup alarmId
+```
+
+With Knowledge `sample.maxAlarms = 10` (K): dedup by `alarmId` drops the repeated `a-1`; order by
+`(raisedAt, alarmId)` gives `a-1, a-2, a-3`; 3 <= K so all are kept. Emitted:
+
+```json
+"sampleAlarms": [
+  {"alarmId": "a-1", "alarmType": "FiberFault", "raisedAt": "2026-01-01T12:00:00Z", "managedObjectId": "fiber:f1", "perceivedSeverity": "critical"},
+  {"alarmId": "a-2", "alarmType": "LinkDown",   "raisedAt": "2026-01-01T12:00:04Z", "managedObjectId": "link:l1",  "perceivedSeverity": "major"},
+  {"alarmId": "a-3", "alarmType": "AdjDown",    "raisedAt": "2026-01-01T12:00:09Z", "managedObjectId": "router:r1","perceivedSeverity": "major"}
+]
+```
+
+Every `alarmType` here (`FiberFault`, `LinkDown`, `AdjDown`) is a member of the pattern `sequence`
+`[FiberFault, LinkDown, AdjDown]` — by construction (AC-24). Change the mock's `sample.maxAlarms` to
+`2` and re-mine the same input: the array becomes exactly `[a-1, a-2]` (first K in the same order),
+no code change (AC-23/AC-26). Re-mining the same input always reproduces the identical array
+(deterministic).
+
 ## UI wireframes
 
 **N/A.** pattern-miner has no UI; pattern review/approve/edit belong to web-ui (against the Pattern
@@ -608,6 +794,8 @@ Manager).
 | **Codebook Service unavailable/erroring (transient)** (NEW) | `CodebookClient` retries with config-driven back-off (`CODEBOOK_RETRY_*`); on exhaustion the **run fails fast** — Stage 2 cannot anchor without scenarios, and mining must not proceed unanchored (that would re-introduce the global-mining defect the respec corrects). Per OQ-1 con: if Codebook is down during a P2 run, the run fails/degrades by design. | Error log + run-failure metric; offsets not advanced; retries when Codebook returns |
 | **No active codebook for `(domain, snapshotId)`** (`GET /codebooks/active` returns 404) (NEW) | Run **fails fast** with a clear `no_active_codebook` reason — anchoring cannot proceed; the P2 run is retried once the codebook is compiled for that snapshot. **Never** falls back to unanchored global mining. | Error log + run-failure metric; offsets not advanced |
 | **A cascade matches no scenario at/above threshold** (NEW) | **Not an error** — assigned to the unexplained group and emitted as a `PatternMinedEvent` with `anchorScenarioId` null/absent (AC-6, AC-21). | Info log (unexplained count) + `unexplained-cascades` metric |
+| **[SAMPLE] No member alarms capturable for a pattern** (representative session empty, or no matching session) | **Not an error** — `SampleAlarmSelector` returns `[]`; the event emits with `sampleAlarms=[]` (or the field omitted). Optional field, not in `required`; validates fine (AC-25). | Debug log (`sample_alarms_empty`) + `sample-alarms-empty` metric; event still emitted |
+| **[SAMPLE] Knowledge model-params record missing `sample.maxAlarms`** | `MiningParamsClient._require` raises `KnowledgeError` — the **run fails fast** (same fail-fast as any missing required param; never substitute a code default for K, AC-26). Fixed by authoring `sample.maxAlarms` in the Knowledge record. | Error log + run-failure metric; offsets not advanced |
 | A burst has too few inter-arrivals for a stable median, or no tempo-class profile matches | Knowledge `baseGap`/`profileFloor` fallback applies (defined behaviour, not an error) | Debug log + fallback-gap-used metric |
 | PrefixSpan yields no frequent sequence for a group at the current `minSupport` | Group emits no pattern; log empty-group result; valid outcome | Empty-group log + metric |
 | Spark job failure (executor/driver error mid-run) | Run treated as not-committed: source offsets not committed; job exits non-zero so the container restarts and re-consumes (`eventId` dedupe makes replay safe) | Error log + non-zero exit + failure metric |
@@ -635,6 +823,11 @@ every other failure is logged and either DLQ-routed or fails the run.
 | **[BATCH-CAP] Offset commit granularity** | (a) once per flush after all sub-runs (chosen); (b) once per sub-run. | **(a).** Per-flush commit keeps the replay unit = the flush (simple, matches the existing single-run commit). (b) would advance offsets mid-flush, needing extra bookkeeping to avoid re-mining committed sub-runs on a later failure — no correctness benefit because downstream anchor-consolidation + `eventId` dedupe already make re-emit harmless. |
 | **[BATCH-CAP] Spark-death recovery** | (a) recreate the SparkSession on detected gateway death, retry bounded, else fail clean + surface on /health (chosen); (b) only catch + swallow the error; (c) let the container crash and rely on restart. | **(a).** (b) leaves the dead cached session and silently drops the run (a wedge) — explicitly disallowed. (c) loses in-flight uncommitted work each time and is slow on a memory-constrained host. (a) self-heals within the process (readiness never latches DOWN), retries bounded, and only fails clean (uncommitted, replayable) when recreation truly cannot succeed — no silent permanent wedge. The cap is still the primary fix; this is the safety net. |
 | **[BATCH-CAP] Forcing one event per fault-origin in the miner** | (a) let sub-runs each emit for a shared anchor + consolidate in pattern-manager (chosen); (b) re-pool all trails of a fault-origin into one run so the miner emits once. | **(a).** (b) re-introduces an unbounded collect (a busy fault-origin could span many trails), defeating the cap. Consolidation is a Pattern-Store concern (single owner = pattern-manager) and also fixes a **latent** over-count that exists even without batching. The miner stays a stateless emitter. |
+| **[SAMPLE] Which supporting session to sample from** | (a) **the group's representative session, earliest by window start** (chosen); (b) union alarms across all supporting sessions; (c) the session with highest anchor confidence; (d) the most recent session. | **(a).** (b) mixes alarms from different times/trails into one list — the "evidence" is no longer a real single occurrence and its ordering is ambiguous. (c) requires threading per-session confidence into `GroupPattern` (extra plumbing) for no operator benefit and is less obviously reproducible. (d) picks a tail that may be truncated. (a) yields one **coherent real occurrence**, is trivially **deterministic** (sort + earliest), and needs no new per-session metadata — the representative session is already `GroupPattern.matching_sessions[0]` after a stable sort. |
+| **[SAMPLE] Bound scope of K** | (a) **per emitted event / per pattern** (chosen); (b) per supporting session; (c) per occurrence then merged. | **(a).** The contract field is one flat array = the pattern's evidence, so the operator wants one bounded list per pattern. Since the sample comes from a single representative session, per-event and per-session coincide — K is applied once to the final array. (b)/(c) would over-produce (K x sessions) then need re-truncation, adding complexity for no benefit. |
+| **[SAMPLE] Ordering + dedup of the sample** | (a) **dedup by alarmId, then order by (raisedAt, alarmId), then cap** (chosen); (b) cap first then order; (c) no dedup; (d) order by severity. | **(a).** Dedup-before-cap guarantees K **distinct** alarms are shown (a repeated `alarmId` would otherwise waste a slot). Chronological `(raisedAt, alarmId)` shows the cascade as it unfolded (most useful for XAI) with a stable tie-break for equal timestamps (determinism). (b) could truncate before ordering, dropping the earliest alarms. (c) risks duplicate evidence. (d) loses the cascade's temporal story and severity is not a stable total order. |
+| **[SAMPLE] Cap K parameter source** | (a) **Knowledge dotted key `sample.maxAlarms`, required, no code default** (chosen); (b) env var; (c) hard-coded constant. | **(a).** K governs how much domain evidence is surfaced — a domain/knowledge concern, so it belongs in the Knowledge model-params record alongside `prefixspan.*`/`anchoring.*`, keyed by domain (a second domain authors its own K, zero code change). (c) is a forbidden magic number (AC-26). (b) would put a domain-tunable value in infra config, splitting the param source; and it is not an operational batching knob (unlike `MAX_TRAILS_PER_BATCH`) — it changes what operators see. Recommended authored value in the `core-ip` record: `10`. |
+| **[SAMPLE] Where sample-alarm selection lives** | (a) **a new pure `sampling.SampleAlarmSelector`, called by `assemble._build_event`** (chosen); (b) inline inside `_build_event`; (c) inside `GroupedMiner`. | **(a).** A small pure module is independently unit-testable **without Spark** (selection is pure Python over `Session.alarms`), keeps `_build_event` readable, and matches the reusable-template shape (generic, config-driven, no domain literals). (b) muddies the assembler. (c) couples sampling to the Spark-backed miner, forcing Spark into sample tests unnecessarily. |
 
 ## Test plan
 
@@ -668,8 +861,15 @@ illustrative — never literals in source/config.
 | AC-19 | On the Simulator P2 corpus: pattern-set size in `distinct_patterns_min..max` (8-10), each span in `per_pattern_type_span_min..max` (10-20), coverage in `pattern_coverage_min..max` (50-60%); bounds from `integration-thresholds.yaml`. | `test_int_pattern_set_size_span_coverage` (integration) | The integration harness runs the full 3-stage pipeline over the Simulator corpus and asserts the three metrics fall within the yaml-sourced ranges; numeric bounds read from `integration-thresholds.yaml`, not hard-coded. |
 | AC-20 | On the same corpus: zero over-split (no ground-truth fault-origin gives more than one anchored event) and zero over-merge (no anchored event spanning more than one ground-truth fault-origin). | `test_int_zero_over_split_zero_over_merge` (integration) | Against the Simulator ground-truth oracle: map each anchored event to ground-truth fault-origins; assert a 1:1 mapping (each ground-truth origin gives exactly one event; each event gives exactly one origin). |
 | AC-21 | Unexplained cascades emitted as an "unexplained" event (if non-empty), do not inflate the anchored count, do not fail the run; distinguishable by `anchorScenarioId` null/absent. | `test_int_unexplained_group_emitted_and_distinguishable` (integration) + unit `test_unexplained_group_does_not_inflate_count` | The unexplained event has `anchorScenarioId` null/absent; the anchored-count metric excludes it; the run completes without error. |
+| **AC-22** | **[SAMPLE]** For a group whose representative session has at least one alarm, `sampleAlarms[]` is present and non-empty; every entry carries all five fields (`alarmId`, `alarmType`, `raisedAt` ISO-8601, `managedObjectId` in `<objectType>:<id>`, `perceivedSeverity`) all non-empty; the event validates against `PatternMinedEvent` with `sampleAlarms` present. | `test_sample_alarms_present_with_five_fields_and_validates` | Assemble an event for a non-empty representative session; assert `payload.sampleAlarms` is non-empty; each item is a `SampleAlarm` with the 5 non-empty fields (`raisedAt` an aware datetime, `managedObjectId` matches `^[^:]+:.+`); `PatternMinedEvent.model_validate(payload_dict)` succeeds with `sampleAlarms` present. |
+| **AC-23** | **[SAMPLE]** Session with more than K alarms gives at most K entries; K-or-fewer gives all; K comes from the Knowledge mock — changing K changes the length with no code change. | `test_sample_alarms_bounded_by_knowledge_k` | With mock `sample.maxAlarms=2` and a 5-alarm session, `len(sampleAlarms)==2` (the first 2 in `(raisedAt, alarmId)` order); with `sample.maxAlarms=10` and the same session, `len==5` (all). Only the Knowledge mock value changed between the two assertions; identical selector code. |
+| **AC-24** | **[SAMPLE]** Every `alarmType` in `sampleAlarms[]` is a member of the pattern's `sequence[]`. | `test_sample_alarm_types_subset_of_sequence` | For each emitted event, `{s.alarmType for s in sampleAlarms} <= set(payload.sequence)` — asserted across the anchored fiber-cut group and a second group; holds by construction (samples drawn from a session containing the representative sequence). |
+| **AC-25** | **[SAMPLE]** No capturable member alarms (empty/absent representative session) gives `sampleAlarms` omitted or empty; event still validates; no error. | `test_sample_alarms_empty_case_still_validates` | Build a `GroupPattern` whose representative session has no alarms (and a defensive no-matching-session variant); assert the selector returns `[]`, `PatternMinedEvent(sampleAlarms=[])` validates, a variant omitting the field validates (`sampleAlarms is None`), and no exception is raised. |
+| **AC-26** | **[SAMPLE]** K is read exclusively from Knowledge and is not a literal anywhere in source/default config; replacing the mock K changes the max array length with no code change. | `test_no_hardcoded_thresholds` (extended to scan for a sample-cap literal) + `test_sample_cap_sourced_from_knowledge` | The source/config scan (existing `test_no_hardcoded_thresholds`) finds no integer sample-cap literal in `sampling.py`/`assemble.py`/`config.py`/`knowledge.py`; `MiningParams.sample_max_alarms` equals the Knowledge mock's `sample.maxAlarms`; a missing `sample.maxAlarms` in the mock raises `KnowledgeError` (no code default). |
+| **AC-det** | **[SAMPLE]** Sampling is deterministic — re-mining the same input yields a byte-identical `sampleAlarms[]` (replay-safe/idempotent). | `test_sample_alarms_deterministic_on_repeat` | Run the selector/assembler twice over the same input (sessions supplied in a shuffled order to prove stability), assert the two `sampleAlarms[]` lists are equal element-for-element (representative-session choice, dedup, ordering, and cap are all order-stable). |
 
-Every spec acceptance criterion (AC-1 through AC-21) maps to a named pytest test above. Supplementary
+Every spec acceptance criterion (AC-1 through AC-26) maps to a named pytest test above (plus the
+determinism test `AC-det` per the spec's replay-safety requirement). Supplementary
 unit tests retained from the merged design: `test_sequence_built_from_alarm_type_not_event_type`,
 `test_sequences_and_timing_built_from_typed_alarms`, and the Codebook-client contract tests below.
 
@@ -724,6 +924,9 @@ Compose). `alarms[]` arrive in-band on `transactions.clean`.
 | 12 | At-least-once redelivery | Redeliver an already-consumed `eventId` | No duplicate event; dedupe metric increments. |
 | 13 | No-RCA / no-topology boundary holds | Inspect every emitted event + the service's outbound calls | No event carries `rootCauseAlarmType`/`patternId`/`lifecycle`; the service makes no Topology-graph call (only Codebook scenario reads + Knowledge params). |
 | 14 | Timing keys consumed by Pattern Manager (P2-GAP-10) | Emitted `patterns.mined` event flows into a real Pattern Manager `SessionWindowDeriver` (or deriver-shaped reader) | `timing` carries the four ms keys; the consumer derives a valid `sessionWindow` with no key-alias remap and no seconds-to-ms conversion. |
+| 15 | **[SAMPLE] Member-alarm evidence flows end to end (XAI)** | Publish a fiber-cut `transactions.clean` batch; consume, mine, emit; a real (or deriver-shaped) `patterns.mined` reader inspects the event | The emitted `PatternMinedEvent.sampleAlarms[]` is non-empty, bounded by the Knowledge `sample.maxAlarms` (K), each item has the 5 fields, every `alarmType` is a member of `sequence`, and it validates against the `main`-synced event-model — ready for pattern-manager to carry to web-ui as evidence (AC-22/AC-23/AC-24). |
+| 16 | **[SAMPLE] Changing K re-shapes the sample; no code change** | Set Knowledge `sample.maxAlarms` to a small K, re-run the same input | `sampleAlarms[]` length drops to at most K in the same `(raisedAt, alarmId)` order; only the Knowledge record changed; re-running the identical input reproduces the identical sample (deterministic) (AC-23/AC-26/AC-det). |
+| 17 | **[SAMPLE] Empty-sample edge case still emits a valid event** | Feed a pattern whose representative session yields no capturable alarms | The event emits with `sampleAlarms` empty/absent and still validates; no error, no dropped event (AC-25). |
 
 ## Config & observability
 
@@ -753,7 +956,14 @@ Compose). `alarms[]` arrive in-band on `transactions.clean`.
   `maxSequenceCount`, `WindowingParams` (tempo profiles/floors, `gapMultiplier`, `tempoPercentile`,
   class thresholds, `baseGap`, `maxClosingGap`, `minBurstSamples`), **`AnchoringParams`**
   (`matchConfidenceThreshold`, `groupingKeys`, `scoringMethod`, `tieBreak`, scorer weights
-  `w_order`/`w_jaccard`), `codebookVersion`. Fault-origin scenario set from **Codebook**.
+  `w_order`/`w_jaccard`), `codebookVersion`, and **[SAMPLE] `sample.maxAlarms`** (K, the sample-alarm
+  cap — required, no code default; recommended authored value for `core-ip`: **10**). Fault-origin
+  scenario set from **Codebook**. **No `sample.maxAlarms` env var** — K is a domain/knowledge value,
+  not an operational knob, so it lives only in the Knowledge record.
+- **[SAMPLE] observability additions:** counter `sample-alarms-empty` (patterns emitted with no
+  capturable sample); gauge/histogram `sample-alarms-length` (K-bounded array length per event);
+  structured log `sample_alarms_selected` (`representative_source_window_id`, `sample_count`, `k`) on
+  each emit, and `sample_alarms_empty` on the empty edge case.
 - **Observability:** `GET /health` (liveness/readiness incl. Kafka + Knowledge + **Codebook**
   reachability); `GET /metrics` (Prometheus): counters for consumed / deduped-dropped / DLQ-routed /
   patterns-emitted / mining-runs / mining-failures / fallback-gap-used / **codebook-fetch-failures** /
@@ -766,8 +976,21 @@ Compose). `alarms[]` arrive in-band on `transactions.clean`.
 
 ## Build & run
 
+- **[SAMPLE] Build prerequisite — sync `libs/event-model` to `main` FIRST.** The `pattern-miner`
+  branch's bundled `libs/event-model` is behind `main` and does **not** yet carry `SampleAlarm` /
+  `PatternMinedEvent.sampleAlarms` on the Python binding. Before writing sample-alarm code or tests,
+  **sync `libs/event-model` on this branch up to `main`** (the surgical event-model sync done for
+  pattern-manager via PR #341) so `from acp_event_model import SampleAlarm` and
+  `PatternMinedEvent(sampleAlarms=...)` are importable and the emitted field validates. This is an
+  implementation step, **not** a contract change (the field is already frozen on `main`, PR #349).
+- **[SAMPLE] Knowledge record data change (not a contract change).** Author `sample.maxAlarms` (e.g.
+  `10`) in the `core-ip/modelParams/pattern-miner` Knowledge record so `MiningParamsClient` can read
+  K. This is a Knowledge-record data edit coordinated with the Knowledge owner — no schema/topic/
+  event-model change.
 - **Build/lint/test:** `ruff check`, `black --check`, `pytest` (unit/contract). Codebook + Knowledge
-  client tests run via respx (no live services).
+  client tests run via respx (no live services). **[SAMPLE]** sample-selection tests run as pure
+  Python (no Spark) over synthetic `Session`s / `GroupPattern`s; only the PrefixSpan-dependent tests
+  need the engine.
 - **Container-only Spark.** Spark/PySpark is not installed locally — all Spark execution (and
   Spark-dependent Stage-3 tests) runs inside the container; local unit gate uses the `local` engine.
   The `Dockerfile` (`python:3.13-slim` + pinned Spark runtime) installs the service +
@@ -789,6 +1012,8 @@ and Codebook (scenarios), both keyed by `{domain}`:
 - **Matching threshold, scorer, weights, tie-break, grouping keys:** all in Knowledge
   `AnchoringParams` per `{domain}`.
 - **Windowing + mining params:** all in Knowledge per `{domain}`.
+- **[SAMPLE] Sample-alarm cap K (`sample.maxAlarms`):** in Knowledge per `{domain}` — a second domain
+  authors its own K with zero code change.
 
 **Onboarding a second domain (e.g. `optical`):** (1) author its Knowledge model-params record
 (`{domain}/modelParams/pattern-miner`) with its windowing/mining/anchoring params; (2) author its
