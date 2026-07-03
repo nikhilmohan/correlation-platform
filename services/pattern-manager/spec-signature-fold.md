@@ -33,7 +33,8 @@ aggregates occurrence counts. This fix makes the unexplained path consistent wit
 path.
 
 The operator requirement: "the same pattern should not be a separate pattern -- capture a
-count/popularity metric on the EXISTING pattern instead."
+count/popularity metric on the EXISTING pattern instead. The significance of a pattern is
+that it occurs across trails -- capture metrics indicating extent of occurrence and impact."
 
 ---
 
@@ -49,7 +50,7 @@ count/popularity metric on the EXISTING pattern instead."
     only if their ordered sequences are identical (repeats and position are significant; no
     normalization such as collapsing consecutive repeats is applied). The exact token-join
     format (separator, encoding) is a designer decision, but the semantic rule -- ordered
-    sequence with repeats significant -- is fixed by this spec.
+    sequence with repeats significant -- is fixed by this spec (see OQ-SF-2: RESOLVED/DEFERRED).
   - **`domain`**: the domain identifier (carried on `PatternMinedEvent.provenance` or the
     equivalent enriched-pattern field) -- scopes the signature to one domain's alarm-type
     vocabulary.
@@ -61,14 +62,26 @@ count/popularity metric on the EXISTING pattern instead."
     came from -- maps to the same `patternId`.
 
 - On a **first occurrence** of a cascade signature (no row exists yet): persist a new draft
-  pattern row with occurrence count = the `instanceCount` from that `PatternMinedEvent` (the
-  mined support count for that window), emit one `PatternDiscoveredEvent`, and record the
-  contributing event (same as the anchored create path).
+  pattern row initialising `occurrenceCount = 1`, `instanceCount` from that event's mined
+  support count, `trailCount = 1` (the contributing trail), `firstSeen` and `lastSeen` set to
+  the event timestamp; emit one `PatternDiscoveredEvent`; record the contributing event and
+  the contributing `trailId` in the pattern's distinct-trail set (see persistence note below).
 
 - On a **subsequent occurrence** of the same cascade signature (a row already exists):
   **aggregate -- do not create a new row**. The aggregation mirrors the anchored fold:
-  - Occurrence/instance count: increment by the new occurrence's `instanceCount`
-    (i.e. sum across all contributing occurrences).
+  - **`occurrenceCount`**: increment by 1 (counts the number of mined occurrences folded in).
+  - **`instanceCount`** (total member-alarm volume): increment by the new occurrence's
+    `instanceCount` (i.e. sum of mined support counts across all contributing occurrences).
+    This is the total number of individual alarm instances across all folded occurrences,
+    distinct from `occurrenceCount` which counts occurrences (events), not alarms.
+  - **`trailCount`**: the count of distinct `trailId` values from all contributing occurrences
+    (including the current one). To maintain this, the pattern must track the distinct set of
+    `trailId` values that have contributed (the `trailId` is carried on every
+    `PatternMinedEvent` even for cross-trail folds). The designer picks the persistence
+    mechanism (e.g. a set column, a child table, or an HLL counter), but the spec requires
+    `trailCount` to reflect the count of DISTINCT contributing trails.
+  - **`firstSeen`**: unchanged (retains the timestamp of the earliest contributing occurrence).
+  - **`lastSeen`**: bumped to the timestamp of the current occurrence.
   - Support, confidence, lift: occurrence-weighted mean (same formula as the anchored fold's
     `PatternAggregator.weightedMean`).
   - Timing: combine using the anchored fold's `PatternAggregator.combineTiming`; recompute
@@ -88,62 +101,102 @@ count/popularity metric on the EXISTING pattern instead."
   -- `INSERT ... ON CONFLICT (event_id) DO NOTHING` on a `contributing_event` (or equivalent
   dedup table) before aggregating -- ensures a re-delivered `PatternMinedEvent` with the same
   `eventId` does not double-count. Only genuinely new occurrences (new `eventId`) increment
-  the count. The existing `processed_event` / `contributing_event` mechanism applies; no new
-  dedup mechanism is introduced.
+  `occurrenceCount`, `instanceCount`, `trailCount`, or `lastSeen`. The existing
+  `processed_event` / `contributing_event` mechanism applies; no new dedup mechanism is
+  introduced.
 
 - **Row-lock serialization**: the fold acquires a `SELECT ... FOR UPDATE` row lock on the
   existing pattern row before aggregating, preventing concurrent fold races on the same
   signature -- same serialization approach as the anchored fold.
 
-- **PatternView `instanceCount` field**: this existing field on `PatternView` (and the
-  Pattern Store) is the vehicle for the aggregated occurrence count. It is the sum of
-  `instanceCount` values contributed by all folded occurrences. The field is already present
-  in the read API and `openapi.json`; no new field is introduced. The field description must
-  be updated in `openapi.json` to state "total number of mined occurrences folded into this
-  pattern across all contributing events and trails." This is an additive clarification to the
-  existing field description, not a new field.
-  - See OQ-SF-3 below for the question of whether a separate `occurrenceCount` field should
-    be added for clarity.
+- **Impact / extent metrics on PatternView -- additive read-API contract change (human-approved
+  via issue #357):** The following fields are added to `PatternView` and persisted on the
+  Pattern Store row. They are populated for BOTH unexplained (signature-folded) AND anchored
+  patterns for consistency. This is an additive change to the published OpenAPI surface;
+  the designer regenerates `openapi.json` as part of this work. The Kafka topics and
+  `PatternMinedEvent` / `PatternDiscoveredEvent` / `PatternApprovedEvent` schemas are
+  NOT changed.
 
-- The anchored consolidation path (`consolidateAnchored`) is **unchanged**: identity,
-  aggregation formula, fold guard, and event emission are all as-is.
+  | Field | Type | Meaning |
+  |---|---|---|
+  | `occurrenceCount` | integer | Number of mined occurrences (distinct `PatternMinedEvent` eventIds) folded into this pattern. Counts events, not alarms. |
+  | `trailCount` | integer | Number of DISTINCT trails from which the signature has been observed (the key spatial-spread / cross-trail significance metric). |
+  | `firstSeen` | timestamp (ISO-8601) | Timestamp of the first occurrence folded (earliest contributing event). |
+  | `lastSeen` | timestamp (ISO-8601) | Timestamp of the most recent occurrence folded; bumped on each fold. |
 
-- Updating the Pattern Manager's published `openapi.json` with the clarified `instanceCount`
-  description (if changed -- see OQ-SF-3).
+  The existing **`instanceCount`** field is retained with its current meaning: total number of
+  member alarm instances (sum of mined support counts across all contributing occurrences;
+  the total member-alarm volume). Its description in `openapi.json` is updated to state "total
+  number of individual alarm instances across all folded occurrences (sum of per-occurrence
+  mined support counts); see also occurrenceCount for the number of distinct occurrences
+  folded."
+
+  For **anchored patterns**: `occurrenceCount`, `trailCount`, `firstSeen`, `lastSeen` are
+  populated consistently using the same fold semantics. The anchored consolidation path
+  (`consolidateAnchored`) is extended to maintain and expose these fields; the anchored
+  identity and aggregation logic are otherwise unchanged.
+
+- **Persistence note for `trailCount`:** to compute `trailCount`, the Pattern Store must
+  track the set of distinct `trailId` values that have contributed to a pattern. The designer
+  specifies the mechanism (e.g. a `pattern_trail` association table, an array/set column, or
+  an approximate counter), but the spec requires:
+  - On fold, the contributing `trailId` is recorded (if not already recorded for this pattern).
+  - `trailCount` is the cardinality of that distinct set.
+  - Idempotent redelivery (same `eventId`) does NOT add the `trailId` again (the fold guard
+    blocks the entire aggregate step including trail-set update).
+
+- **One-time Flyway collapse migration for existing duplicate rows (human-approved via issue
+  #356):** A Flyway migration collapses existing duplicate unexplained-pattern rows that share
+  the same `(sequence, domain, snapshotId)` (the legacy per-occurrence identity produced
+  multiple rows for the same cascade shape). The migration:
+  - Groups existing unexplained rows by `(sequence, domain, snapshotId)`.
+  - For each group: keeps ONE canonical row (the earliest by `createdAt`); sums
+    `occurrenceCount` and `instanceCount` across the group; derives `trailCount` from the
+    count of distinct `trailId` values found in the collapsed rows' contributing-event records
+    (or from any `trailId` column available on those rows); sets `firstSeen = MIN(createdAt)`
+    and `lastSeen = MAX(updatedAt)`; keeps the first row's sample alarms (fold-keeps-first);
+    deletes the redundant rows (cascade-deleting child records).
+  - The designer specifies the exact SQL and Flyway migration version. The migration is
+    idempotent: re-running it on an already-collapsed store is a no-op.
+  - For the development/test environment, the store will be cleared and re-mined (which
+    produces the correct result from the new fold logic without needing the migration). The
+    migration is the production upgrade path.
+
+- The anchored consolidation path (`consolidateAnchored`) is extended only to populate the
+  four new impact-metrics fields; its identity, fold logic, and event emission are unchanged.
+
+- Updating the Pattern Manager's published `openapi.json` with the four new `PatternView`
+  fields and the updated `instanceCount` description (human-approved additive contract change).
 
 - Updating the Pattern Manager's structured logs to include the fold outcome
   (`action=fold` vs `action=create`) and the contributing signature for unexplained folds,
-  at the same log level as the anchored fold.
+  at the same log level as the anchored fold. On fold, log the updated `occurrenceCount`,
+  `trailCount`, and `lastSeen`.
 
-**In scope (operational note -- forward-only):**
+**In scope (operational note -- forward-only + migration):**
 
-- This fix applies to newly consumed `PatternMinedEvent` messages from the point of
-  deployment forward. Existing duplicate rows in a deployed Pattern Store are not
-  automatically collapsed by this fix (see OQ-SF-1: migration/backfill question).
+- The identity fix applies to newly consumed `PatternMinedEvent` messages from the point of
+  deployment forward. Existing duplicate rows are collapsed by the one-time Flyway migration
+  described above (production path) or by clearing and re-mining (dev/test path).
 
 ---
 
 ## Out of scope
 
-- Changing the anchored consolidation path (`consolidateAnchored`, `anchorIdentity`) -- it
-  is correct and unchanged.
+- Changing the anchored consolidation path identity, fold logic, or event emission -- only the
+  four new impact-metric fields are added to the anchored path for consistency.
 - Changing `PatternMinedEvent`, `PatternDiscoveredEvent`, or `PatternApprovedEvent` Kafka
-  event schemas -- this is an internal Pattern Store identity and aggregation change; no
-  event-model contract change is required.
+  event schemas -- this is an internal Pattern Store identity/aggregation change and an
+  additive read-API change; no event-model contract change is required.
 - Changing the Kafka topics consumed or produced -- `patterns.mined`, `patterns.discovered`,
   `patterns.approved` are unchanged.
-- Changing the pattern read API surface beyond an `instanceCount` description update (see
-  OQ-SF-3 for the question of a new field). If a new `occurrenceCount` field is decided, that
-  is a contract change requiring human approval (additive, but still a change to the published
-  OpenAPI surface).
-- Automatic migration or backfill of already-persisted duplicate rows -- this is explicitly
-  flagged as OQ-SF-1 for human decision.
 - Cross-snapshot fold: patterns from different `snapshotId` values are intentionally distinct
   (consistent with the anchored path's scoping). If a new topology snapshot is loaded, new
-  pattern rows are created for that snapshot; folding across snapshots is out of scope for
-  MVP.
+  pattern rows are created for that snapshot; folding across snapshots is out of scope for MVP.
 - Cross-domain fold: the signature is scoped to a single domain; cross-domain folding is out
   of scope.
+- Signature normalization (e.g. collapsing consecutive repeats) -- explicitly deferred; see
+  OQ-SF-2 resolved/deferred note below.
 - Mining-algorithm changes -- owned by Pattern Miner; the Pattern Manager receives
   `PatternMinedEvent` and folds it.
 
@@ -160,27 +213,44 @@ count/popularity metric on the EXISTING pattern instead."
 2. **Fold an occurrence into an existing signature row.** If a Pattern Store row already
    exists for the computed cascade signature identity: acquire the row lock; apply the
    contributing-event fold guard (dedup on `eventId`); if the guard passes, aggregate the
-   occurrence's `instanceCount`, support/confidence/lift (occurrence-weighted mean), timing
-   (combined, then recompute `sessionWindow`), and supporting instances (union) into the
-   existing row; bump `updatedAt`; emit no event. If the fold guard detects a replay (same
-   `eventId` already recorded), record the processed event and return no-op.
+   occurrence's metrics into the existing row: increment `occurrenceCount` by 1; increment
+   `instanceCount` by the event's mined support count; record the contributing `trailId` in
+   the distinct-trail set and update `trailCount`; bump `lastSeen`; update
+   support/confidence/lift (occurrence-weighted mean), timing (combined, then recompute
+   `sessionWindow`), supporting instances (union); bump `updatedAt`; emit no event. If the
+   fold guard detects a replay (same `eventId` already recorded), return no-op without
+   updating any field.
 
 3. **Create a new signature row for a first occurrence.** If no Pattern Store row exists for
    the cascade signature identity: persist a new draft pattern row (same enrichment pipeline
-   as before -- RCA, structural validation, codebook reconciliation, XAI); record the
-   contributing event; emit one `PatternDiscoveredEvent`. Sample alarms (if present in the
+   as before -- RCA, structural validation, codebook reconciliation, XAI) initialising
+   `occurrenceCount = 1`, `instanceCount` from the event's mined support count, `trailCount = 1`,
+   `firstSeen` and `lastSeen` from the event timestamp; record the contributing event and the
+   contributing `trailId`; emit one `PatternDiscoveredEvent`. Sample alarms (if present in the
    event) are persisted on create and never replaced on subsequent folds.
 
 4. **Ensure replay safety for the unexplained fold.** Guarantee that re-processing the same
-   `PatternMinedEvent` (same `eventId`) on an existing signature row does not double-count:
-   the fold guard (contributing-event dedup) must block the aggregate step on replay, same as
-   the anchored path.
+   `PatternMinedEvent` (same `eventId`) on an existing signature row does not increment
+   `occurrenceCount`, `instanceCount`, or `trailCount` and does not add the `trailId` again:
+   the fold guard (contributing-event dedup) must block the entire aggregate step on replay,
+   same as the anchored path.
 
-5. **Surface the aggregated occurrence count via the read API.** The Pattern Store's
-   `instanceCount` field accumulates the total mined occurrences across all contributing
-   events and trails. The read API serves this as the existing `PatternView.instanceCount`
-   field. Update the `openapi.json` description of `instanceCount` to reflect its meaning as
-   the cross-occurrence aggregate (see OQ-SF-3 for whether a separate field is needed).
+5. **Extend the anchored fold to populate impact-metric fields.** For patterns consolidated
+   via the anchored path, populate `occurrenceCount`, `trailCount`, `firstSeen`, and `lastSeen`
+   using the same fold semantics. The anchored identity and event-emission logic are otherwise
+   unchanged.
+
+6. **Deliver the one-time Flyway collapse migration.** Provide a Flyway migration that
+   collapses existing duplicate unexplained rows grouped by `(sequence, domain, snapshotId)`:
+   sum `occurrenceCount`/`instanceCount`, derive `trailCount` from the distinct trails of
+   the collapsed rows, set `firstSeen = MIN(createdAt)` / `lastSeen = MAX(updatedAt)`, keep
+   the first row's sample alarms, delete redundant rows with cascade. Migration must be
+   idempotent.
+
+7. **Surface the impact-metric fields via the read API.** Extend `PatternView` with
+   `occurrenceCount`, `trailCount`, `firstSeen`, `lastSeen` (human-approved additive
+   contract change); update the `instanceCount` description; regenerate and check in
+   `openapi.json`.
 
 ---
 
@@ -193,16 +263,17 @@ behaviour.
 | Phase | Role | Active/Passive/Idle | Inputs/Outputs in this phase |
 |---|---|---|---|
 | P1 -- Topology onboarding | No change from base spec. | Idle | -- |
-| P2 -- Pattern learning | Active (same as base spec). Additionally: the unexplained consolidation path now folds cross-trail occurrences of the same cascade signature into one row, accumulating occurrence count rather than creating duplicate rows. | Active | In: `patterns.mined` (`PatternMinedEvent`) -- unchanged. Out: `patterns.discovered` (one per UNIQUE cascade signature, not one per occurrence); `patterns.approved` -- unchanged. Serves: read API with `instanceCount` reflecting cross-occurrence aggregate. |
-| P3 -- Real-time correlation | No change from base spec. The Pattern Store has fewer rows (one per signature rather than N per recurrence) and each carries an accumulated `instanceCount`. | Passive | Serves: pattern read API -- unchanged shape, fewer rows, higher occurrence counts. |
+| P2 -- Pattern learning | Active (same as base spec). Additionally: the unexplained consolidation path now folds cross-trail occurrences of the same cascade signature into one row, accumulating `occurrenceCount`, `instanceCount`, `trailCount`, `firstSeen`, and `lastSeen` rather than creating duplicate rows. | Active | In: `patterns.mined` (`PatternMinedEvent`) -- unchanged. Out: `patterns.discovered` (one per UNIQUE cascade signature, not one per occurrence); `patterns.approved` -- unchanged. Serves: read API with impact-metric fields on `PatternView`. |
+| P3 -- Real-time correlation | No change from base spec. The Pattern Store has fewer rows (one per signature rather than N per recurrence); each carries accumulated impact metrics. | Passive | Serves: pattern read API -- additive fields on `PatternView`, fewer rows, richer occurrence/trail metrics. |
 
 ---
 
 ## Contract
 
-### No event-model or topic changes
+### Contract change: additive PatternView / openapi.json fields (human-approved, issue #357)
 
-This fix is entirely internal to the Pattern Manager's consolidation logic and Pattern Store.
+This fix is primarily internal to the Pattern Manager's consolidation logic and Pattern Store,
+with one approved additive read-API change.
 
 - **Consumes (Kafka) -- unchanged:** `patterns.mined` (`PatternMinedEvent`). No new fields
   consumed; no new topics.
@@ -211,41 +282,46 @@ This fix is entirely internal to the Pattern Manager's consolidation logic and P
   unexplained patterns, `PatternDiscoveredEvent` is emitted once per unique cascade signature
   (on first occurrence) rather than once per mined occurrence. This is a reduction in event
   volume, not a schema change.
-- **APIs exposed -- unchanged shape, possible description update:** `GET /patterns` and
-  `GET /patterns/{patternId}` are unchanged. The `instanceCount` field on `PatternView`
-  acquires a clearer description. See OQ-SF-3 for whether a new `occurrenceCount` field
-  should be added (a contract change requiring human approval if yes).
+- **APIs exposed -- additive change to PatternView (human-approved):** `GET /patterns` and
+  `GET /patterns/{patternId}` return `PatternView` responses. Four new fields are added to
+  `PatternView` and published in `openapi.json` (regenerated by designer):
+  `occurrenceCount` (integer), `trailCount` (integer), `firstSeen` (ISO-8601 timestamp),
+  `lastSeen` (ISO-8601 timestamp). The existing `instanceCount` field is retained; its
+  description is updated. This additive change is approved per issue #357. It does NOT touch
+  `PatternMinedEvent`, `PatternDiscoveredEvent`, `PatternApprovedEvent`, or any Kafka topic.
+  The event-model contract (`libs/event-model`) is unchanged; this is a pattern-manager
+  read-API (openapi) change only.
 - **APIs/data consumed from other services -- unchanged.** Topology, Codebook Generator, and
   Knowledge Service integration points are unchanged.
 - **Integration points (mock vs. real) -- unchanged.**
-- **Data owned -- Pattern Store (PostgreSQL, schema `pattern`) -- internal change only.** The
-  identity function and fold logic change; the table schema may need a new index or the
-  contributing-event table extended to cover unexplained folds (currently the contributing
-  event table is used only by the anchored path). The schema migration is Pattern Manager's
-  own responsibility (Flyway, scoped to the `pattern` schema). No cross-service data
-  ownership change.
+- **Data owned -- Pattern Store (PostgreSQL, schema `pattern`) -- internal change + migration.**
+  The identity function, fold logic, and stored fields change. The schema migration (Flyway,
+  scoped to the `pattern` schema) adds the four new columns and the one-time collapse migration.
+  The designer specifies the DDL. No cross-service data ownership change.
 
 ---
 
 ## Non-functional
 
 - **Idempotency key:** `eventId` (same as base spec). The fold guard on `eventId` via the
-  contributing-event dedup mechanism makes the unexplained fold replay-safe, exactly as the
-  anchored fold.
+  contributing-event dedup mechanism makes the unexplained fold replay-safe: re-processing the
+  same `eventId` does not increment `occurrenceCount`, `instanceCount`, or `trailCount`, and
+  does not add the `trailId` to the distinct-trail set again.
 - **Config:** no new configurable parameters introduced by this fix. The cascade signature
   key components (`sequence`, `domain`, `snapshotId`) are intrinsic to the event -- no
   thresholds or knobs.
 - **Observability:** structured JSON log at INFO for each unexplained fold:
   `action=create|fold|noop`, `patternId`, `signature` (the ordered sequence tokens, or a
-  hash of them), `domain`, `snapshotId`, and on fold: the updated `instanceCount`. Consistent
-  with the existing anchored-path logging.
+  hash of them), `domain`, `snapshotId`, and on fold: the updated `occurrenceCount`,
+  `trailCount`, and `lastSeen`. Consistent with the existing anchored-path logging.
 - **Error handling:** unchanged from base spec. A failed fold rolls back the transaction; the
   Kafka offset is not committed; the event is redelivered and re-folded safely (idempotent).
   Poison messages route to `patterns.mined.dlq` as before.
-- **API contract:** the published `openapi.json` is the authoritative HTTP surface. If
-  `instanceCount` description is updated, that is not a schema change (no field add/remove/
-  type change). If a new `occurrenceCount` field is added (OQ-SF-3), that is an additive
-  contract change requiring human approval before the designer publishes the update.
+- **API contract:** the published `openapi.json` is the authoritative HTTP surface. Adding
+  `occurrenceCount`, `trailCount`, `firstSeen`, `lastSeen` to `PatternView` is an additive
+  contract change (human-approved, issue #357). The designer regenerates `openapi.json` and
+  checks it in. No field is removed or renamed; existing consumers are unaffected by the
+  additive fields. The event-model contract and Kafka schemas are NOT changed.
 - **Test framework:** JUnit 5 (unit and contract tests), Testcontainers for integration --
   per CLAUDE.md Java cohort standard.
 
@@ -317,109 +393,129 @@ contains only `alarmA`, not `alarmB`.)
 **AC-SF-9 (idempotent replay -- same eventId does not double-count).** Given a
 `PatternMinedEvent` that has already been processed (its `eventId` is already recorded in the
 contributing-event dedup table for the cascade signature row), redelivering the same event
-does NOT increment `instanceCount` again; the Pattern Store row's `instanceCount` remains
-unchanged from after the first processing.
-(JUnit 5 -- process the event; record the `instanceCount`; process the same event again;
-assert `instanceCount` is unchanged.)
+does NOT increment `occurrenceCount`, `instanceCount`, or `trailCount`; none of these fields
+change from their values after the first processing.
+(JUnit 5 -- process the event; record `occurrenceCount`, `instanceCount`, `trailCount`;
+process the same event again; assert all three are unchanged.)
 
 **AC-SF-10 (different snapshotId = different rows).** Given two `PatternMinedEvent` messages
 with the same `sequence` and `domain` but different `snapshotId` values, the Pattern Store
 contains TWO separate pattern rows (distinct `patternId` values).
 (JUnit 5 -- assert two rows; confirms snapshot-scoped identity.)
 
-**AC-SF-11 (anchored path is unchanged).** Given a `PatternMinedEvent` where
-`anchorScenarioId` is non-null, the service routes it through the anchored consolidation path
-(identity = `anchorIdentity(domain, snapshotId, codebookVersion, anchorScenarioId)`),
-producing behaviour identical to the pre-fix anchored path (fold + aggregate on same anchor,
-create on first).
+**AC-SF-11 (anchored path is unchanged in identity and event emission).** Given a
+`PatternMinedEvent` where `anchorScenarioId` is non-null, the service routes it through the
+anchored consolidation path (identity = `anchorIdentity(domain, snapshotId, codebookVersion,
+anchorScenarioId)`), producing behaviour identical to the pre-fix anchored path (fold +
+aggregate on same anchor, create on first; `trailId` and `sourceWindowId` not part of the
+identity).
 (JUnit 5 -- publish an anchored event; assert the existing AC-C1 / anchored-fold criteria
 still hold; assert `trailId` and `sourceWindowId` are NOT part of the identity for this event.)
 
-**AC-SF-12 (read API exposes the accumulated occurrence count).** Given a pattern that has
-been folded from 5 occurrences across 4 trails (total `instanceCount = 12`), a
-`GET /patterns/{patternId}` response returns `instanceCount = 12` and the response validates
-against the published `openapi.json` schema.
-(JUnit 5 -- fixture: pattern with accumulated count; call read API; assert `instanceCount`
-value; validate response against `openapi.json`.)
-
-**AC-SF-13 (exactly N occurrences = exactly 1 row in the store).** Given N = 12
-`PatternMinedEvent` messages all sharing the cascade signature
+**AC-SF-12 (read API exposes the accumulated occurrence count -- live evidence case).** Given
+N = 12 `PatternMinedEvent` messages all sharing the cascade signature
 `["IPLinkDown","LinkDown","LinkBundleDegraded"]` with the same `domain` and `snapshotId` but
-varying `trailId` and `sourceWindowId`, the Pattern Store contains exactly 1 row for that
-sequence after all 12 are processed (validating the motivating live-evidence case).
-(JUnit 5 -- publish 12 events; assert one row in Pattern Store; assert `instanceCount >= 12`.)
+varying `trailId` (11 distinct trail values) and `sourceWindowId`, the Pattern Store contains
+exactly 1 row after all 12 are processed; a `GET /patterns/{patternId}` response returns
+`occurrenceCount = 12`, `trailCount = 11`, and the response validates against the published
+`openapi.json` schema (the motivating live-evidence case: 12 occurrences across 11 trails
+= 1 row, not 12).
+(JUnit 5 -- publish 12 events with 11 distinct trailId values; assert 1 row; assert
+`occurrenceCount = 12`, `trailCount = 11`; validate response schema.)
+
+**AC-SF-13 (occurrenceCount and trailCount are distinct metrics).** Given 3
+`PatternMinedEvent` messages with the same cascade signature but where the first two share the
+same `trailId` (trail-X) and the third has a different `trailId` (trail-Y), after all 3 are
+processed: `occurrenceCount = 3` (three distinct events folded) and `trailCount = 2` (two
+distinct trails: trail-X and trail-Y).
+(JUnit 5 -- assert `occurrenceCount = 3` and `trailCount = 2`; confirms the two metrics
+count different things.)
+
+**AC-SF-14 (firstSeen and lastSeen are set and updated correctly).** Given a first
+`PatternMinedEvent` with timestamp T1 and a second with the same cascade signature and
+timestamp T2 (T2 > T1), after both are processed: `firstSeen = T1` (unchanged by the fold)
+and `lastSeen = T2` (bumped by the fold).
+(JUnit 5 -- process two events with known timestamps; assert `firstSeen = T1`,
+`lastSeen = T2`.)
+
+**AC-SF-15 (idempotent replay does not update lastSeen).** Given a `PatternMinedEvent` at
+timestamp T1 that has already been processed, redelivering the same event at wall-clock time
+T2 (T2 > T1) does NOT change `lastSeen`; it remains at the value from the first processing.
+(JUnit 5 -- process event; record `lastSeen`; redeliver same eventId; assert `lastSeen`
+unchanged.)
+
+**AC-SF-16 (anchored patterns also expose the four impact-metric fields).** Given an anchored
+`PatternMinedEvent` processed via the anchored consolidation path, `GET /patterns/{patternId}`
+returns a response containing `occurrenceCount`, `trailCount`, `firstSeen`, and `lastSeen`
+with correct values, and the response validates against the published `openapi.json` schema.
+(JUnit 5 -- process one anchored event; call read API; assert all four fields present and
+non-null; validate schema.)
+
+**AC-SF-17 (collapse migration produces correct aggregated metrics).** Given N existing
+duplicate unexplained-pattern rows in the Pattern Store all sharing the same
+`(sequence, domain, snapshotId)` with distinct `trailId` values and individual
+`occurrenceCount` values, after running the Flyway collapse migration: exactly 1 row remains
+for that signature; its `occurrenceCount` equals the sum of the N individual
+`occurrenceCount` values; its `instanceCount` equals the sum of the N individual
+`instanceCount` values; its `trailCount` equals the number of distinct `trailId` values
+across the N rows; its `firstSeen` equals the minimum `createdAt` of the N rows; its
+`lastSeen` equals the maximum `updatedAt` of the N rows; the sample alarms from the earliest
+row are retained.
+(JUnit 5 with in-process Flyway -- insert N synthetic duplicate rows; run the migration;
+assert 1 row with correct aggregated metrics.)
+
+**AC-SF-18 (collapse migration is idempotent).** Running the Flyway collapse migration twice
+on an already-collapsed Pattern Store produces the same result as running it once (the second
+run is a no-op with the same final state).
+(JUnit 5 -- run migration; record state; run migration again; assert state unchanged.)
+
+**AC-SF-19 (PatternView openapi.json schema includes the four new fields).** The checked-in
+`openapi.json` for the Pattern Manager includes `occurrenceCount`, `trailCount`, `firstSeen`,
+and `lastSeen` in the `PatternView` schema with correct types; the existing `instanceCount`
+field is present with an updated description; no existing field is removed or renamed.
+(JUnit 5 contract test -- parse checked-in `openapi.json`; assert the PatternView schema
+contains the four new fields with the correct JSON Schema types; assert `instanceCount` is
+still present.)
 
 ---
 
 ## Open questions
 
 **OQ-SF-1 (`service:pattern-manager`, `question`) -- Data migration / backfill for existing
-duplicate rows.**
-This fix is forward-only: from deployment forward, new occurrences fold into one row per
-signature. Existing duplicate rows that were persisted under the old per-occurrence identity
-(`perEventIdentity(trailId, sequence, sourceWindowId, snapshotId)`) remain as separate rows
-and are NOT automatically collapsed.
+duplicate rows. RESOLVED (issue #356).**
+Decision: forward-only fix PLUS a one-time Flyway collapse migration (option b + c).
 
-Options:
-a. **Forward-only** (minimum risk): accept that existing duplicates remain until the next
-   re-mine cycle; operators see both old duplicates and new folded rows until the store is
-   re-populated.
-b. **One-time collapse migration** (recommended for a clean store): a Flyway migration or
-   operational script collapses existing rows with the same `(sequence, domain, snapshotId)`
-   into one, summing `instanceCount` and picking representative metrics. Requires downtime
-   or careful ordering.
-c. **Clear and re-mine** (simplest in dev/test): wipe the Pattern Store and replay
-   `patterns.mined` from the beginning; the fold will produce the correct result. This is
-   the approach for the development/test environment.
+- The identity fix applies to new occurrences from deployment forward.
+- A Flyway migration collapses existing duplicate rows grouped by `(sequence, domain,
+  snapshotId)`: sums `occurrenceCount`/`instanceCount`, derives `trailCount` from the distinct
+  `trailId` values of the collapsed rows, sets `firstSeen = MIN(createdAt)` /
+  `lastSeen = MAX(updatedAt)`, keeps the first row's sample alarms, deletes redundant rows
+  with cascade children. The designer specifies the exact SQL and Flyway version.
+- For the development/test environment: the Pattern Store is cleared and re-mined; the
+  migration is not required in that environment but must pass on a store that is already clean.
+  The migration is the production upgrade path.
 
-Human decision required: choose the migration strategy before the designer specifies the
-Flyway migration plan. The spec recommends option c for the development environment and
-option b for a production-grade deployment, but the choice is a human/operational decision.
+**OQ-SF-2 (`service:pattern-manager`, `question`) -- Signature normalization. DEFERRED (no
+change in this spec).**
+Decision: no normalization. The signature is the ordered `sequence[]` of `alarmType` tokens
+with repeats and order significant. Two patterns are the same if and only if their ordered
+sequences are element-wise identical. No consecutive-repeat collapse, sort, or dedup is
+applied. Any future normalization is a separate feature requiring a new human decision and spec
+update.
 
-**OQ-SF-2 (`service:pattern-manager`, `question`) -- Signature normalization: ordered
-sequence with repeats significant, or collapse consecutive repeats?**
-This spec defines the signature as the ordered `sequence[]` of `alarmType` tokens with
-repeats and order significant -- two patterns are the same if and only if their ordered
-sequences are element-wise identical. No normalization is applied (no consecutive-repeat
-collapse, no sort, no dedup).
+**OQ-SF-3 (`service:pattern-manager`, `question`) -- Reuse `instanceCount` vs. add explicit
+extent/impact fields. RESOLVED (issue #357).**
+Decision: add four explicit fields to `PatternView` (additive read-API contract change,
+approved): `occurrenceCount`, `trailCount`, `firstSeen`, `lastSeen`. The existing
+`instanceCount` field is retained for total member-alarm volume (sum of mined support counts
+across all contributing occurrences). Its description is updated to distinguish it from
+`occurrenceCount`. All four new fields are populated for BOTH unexplained (signature-folded)
+AND anchored patterns. The designer regenerates `openapi.json` as part of this work. This is
+a pattern-manager read-API (openapi) change only; the event-model contract and Kafka schemas
+are NOT changed.
 
-If the mining algorithm can produce `["A","A","B"]` and `["A","B"]` as distinct outputs for
-what is operationally the same cascade, and if the operator requirement is to fold those too,
-then normalization (e.g. collapse consecutive repeats) would be needed. This spec does NOT
-apply normalization; it preserves the mined sequence exactly.
-
-If the product owner or mining team believes normalization is required, this must be a human
-decision before design proceeds -- it changes the identity semantics. The designer must not
-apply normalization without this decision.
-
-**OQ-SF-3 (`service:pattern-manager`, `question`) -- Reuse `instanceCount` vs. add a new
-`occurrenceCount` / `timesObserved` field on `PatternView`.**
-The existing `PatternView.instanceCount` field (already in the read API and `openapi.json`)
-is the natural vehicle for the aggregated cross-occurrence count. Under this spec, its
-semantics become "total mined occurrences folded into this pattern across all contributing
-events and trails." This is an additive description change, not a field change.
-
-Alternative: add a dedicated `occurrenceCount` (or `timesObserved`) field to `PatternView`
-with a clearer name, keeping `instanceCount` for its existing per-event meaning (the mined
-support count of the first contributing event). This would be an additive contract change to
-the published OpenAPI surface -- a new field requires human approval (per the golden rule:
-a read-API surface change = contract change + `architecture.md`/spec update + human approval).
-
-Recommendation: reuse `instanceCount` with an updated description (no new field, no contract
-change). The designer may propose a new field if the name ambiguity is a real UX concern, but
-must flag it for human approval before publishing.
-
-Human decision required if the designer proposes a new field: approve the additive
-`PatternView` / `openapi.json` change.
-
-**OQ-SF-4 (`service:pattern-manager`, `question`) -- Anchored patterns' occurrence count
-exposure for consistency.**
-The anchored path already folds cross-trail and aggregates `instanceCount`. The anchored
-`instanceCount` is already served via `PatternView.instanceCount`. This spec does not change
-the anchored path. However, the operator-facing meaning of `instanceCount` should be
-consistent across anchored and unexplained patterns after this fix: in both cases it is the
-"total occurrences folded in."
-
-If OQ-SF-3 decides to add a new explicit `occurrenceCount` field, it should be populated for
-BOTH anchored and unexplained patterns from `instanceCount`. This is a consistency note for
-the designer, not a new spec requirement.
+**OQ-SF-4 (`service:pattern-manager`, `question`) -- Anchored patterns' impact-metric
+consistency. RESOLVED as part of OQ-SF-3 decision.**
+All four impact-metric fields (`occurrenceCount`, `trailCount`, `firstSeen`, `lastSeen`) are
+populated for both unexplained and anchored patterns (see OQ-SF-3 resolution and Task 5
+above). No further open question remains.
