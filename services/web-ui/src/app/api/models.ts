@@ -129,6 +129,26 @@ export interface SessionWindow {
   windowMs: number;
   type: string;
 }
+/**
+ * Inter-arrival / span timing for a pattern. All fields optional numerics — the Pattern Store
+ * populates whichever it computed. Types-only widening of the wire shape; no contract change.
+ */
+export interface PatternTiming {
+  timeframeMs?: number;
+  medianInterArrivalMs?: number;
+  maxInterArrivalMs?: number;
+  stddevInterArrivalMs?: number;
+}
+/**
+ * One supporting-instance / provenance reference behind a pattern — a window + snapshot handle,
+ * NOT a member alarm. Per-alarm detail (timestamps, node/object) is not yet served by the store.
+ * Extra occurrence keys are preserved via the index signature.
+ */
+export interface SupportingInstance {
+  sourceWindowId?: string;
+  snapshotId?: string;
+  occurrence?: { anchorScenarioId?: string | null; [k: string]: unknown };
+}
 export interface PatternView {
   patternId: string;
   trailId: string;
@@ -137,14 +157,14 @@ export interface PatternView {
   support: number;
   confidence: number;
   lift: number;
-  timing?: Readonly<Record<string, unknown>>;
+  timing?: PatternTiming;
   sessionWindow?: SessionWindow;
   codebookMatchId?: string | null;
   reconcileStatus?: string;
   structurallyValidated?: boolean;
   structuralValidationReason?: string | null;
   instanceCount: number;
-  supportingInstances?: unknown[];
+  supportingInstances?: SupportingInstance[];
   lifecycle: PatternLifecycle;
   domain?: string | null;
   createdAt?: string;
