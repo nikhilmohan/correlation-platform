@@ -413,7 +413,7 @@ const PATTERNS: PatternPage = {
   offset: 0,
   items: [
     {
-      patternId: 'PAT-3',
+      patternId: '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f',
       trailId: 'TR-7',
       sequence: [
         { alarmType: 'LOS', optional: false },
@@ -451,7 +451,7 @@ const PATTERNS: PatternPage = {
       createdAt: '2026-05-01T00:00:00Z',
     },
     {
-      patternId: 'PAT-1',
+      patternId: '10b3918b-2c4d-4f6a-8b1e-9d0c1a2b3c4d',
       trailId: 'TR-8',
       sequence: [
         { alarmType: 'PortFlap', optional: false },
@@ -514,7 +514,7 @@ const INCIDENTS: IncidentVM[] = [
     rootCauseAlarmId: 'a-3',
     rootCauseAlarmType: 'LOS',
     childAlarmIds: ['a-7', 'a-8'],
-    matchedPatternId: 'PAT-3',
+    matchedPatternId: '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f',
     matchedCodebookId: null,
     confidence: 0.91,
     trailId: 'TR-7',

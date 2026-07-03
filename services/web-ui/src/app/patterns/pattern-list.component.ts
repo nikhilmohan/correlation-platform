@@ -11,7 +11,12 @@ import {
   SupportingInstance,
   SampleAlarmView,
 } from '../api/models';
-import { alarmTypeLabel, derivePatternName } from './alarm-type-labels';
+import {
+  alarmTypeLabel,
+  derivePatternName,
+  shortPatternId,
+  PATTERN_NAME_SEPARATOR,
+} from './alarm-type-labels';
 
 /** A cascade chip: readable label + whether it is the root cause + whether it is optional. */
 interface Chip {
@@ -83,7 +88,12 @@ interface Chip {
                 (click)="onExpand(p.patternId)"
               >
                 <span class="chevron" aria-hidden="true">{{ store.expandedId() === p.patternId ? '▾' : '▸' }}</span>
-                <span class="pattern-name">{{ patternName(p) }}</span>
+                <span class="pattern-name" [attr.title]="p.patternId"
+                  >{{ patternBaseName(p)
+                  }}@if (patternIdSuffix(p); as sid) {<span class="pattern-id-suffix">{{
+                    separator
+                  }}{{ sid }}</span>}</span
+                >
               </button>
               <span class="badge" [class]="'tone-' + lifecycleTone(p.lifecycle)" data-testid="pattern-lifecycle">{{
                 p.lifecycle
@@ -407,6 +417,15 @@ interface Chip {
         font-size: 1.05rem;
         font-weight: 700;
       }
+      /* Short stable patternId suffix — a subtle secondary tag so the readable name stays
+         dominant while the id remains scannable/recognisable across runs. */
+      .pattern-id-suffix {
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 0.82em;
+        font-weight: 600;
+        color: var(--text-muted);
+        letter-spacing: 0.02em;
+      }
       /* Badge lifecycle tones (reuse .badge shape from styles.css). */
       .badge.tone-ok {
         background: var(--ok);
@@ -693,8 +712,34 @@ export class PatternListComponent implements OnInit {
 
   // ── Derived presentation ──
 
+  /** Full display name (readable name + stable id suffix); used for a11y/tests/tooltips. */
   patternName(p: PatternView): string {
     return derivePatternName(p);
+  }
+
+  /** Separator rendered between the readable name and the id suffix span. */
+  readonly separator = PATTERN_NAME_SEPARATOR;
+
+  /**
+   * The readable, prominent part of the pattern name (authored name, or "<Root cause> Cascade")
+   * WITHOUT the id suffix — the suffix is rendered as a separate, subtly-styled tag so the
+   * readable name stays dominant. Authored names never carry a suffix.
+   */
+  patternBaseName(p: PatternView): string {
+    const authored = (p as { patternName?: string }).patternName?.trim();
+    if (authored) {
+      return authored;
+    }
+    return `${alarmTypeLabel(p.rootCauseAlarmType)} Cascade`;
+  }
+
+  /** Short stable id suffix (first 8 hex of patternId) shown as a secondary tag, or '' if none. */
+  patternIdSuffix(p: PatternView): string {
+    // Never suffix an authored name (mirrors derivePatternName precedence).
+    if ((p as { patternName?: string }).patternName?.trim()) {
+      return '';
+    }
+    return shortPatternId(p.patternId) ?? '';
   }
 
   alarmLabel(alarmType: string): string {

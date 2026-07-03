@@ -24,7 +24,7 @@ describe('Pattern review & XAI module (P2)', () => {
     const drafts = s.visiblePatterns();
     expect(drafts.length).toBe(1);
     const p = drafts[0];
-    expect(p.patternId).toBe('PAT-3');
+    expect(p.patternId).toBe('02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f');
     expect(p.sequence.map((x) => x.alarmType)).toEqual(['LOS', 'LinkDown', 'AdjDown']);
     expect(p.support).toBeCloseTo(0.12);
     expect(p.confidence).toBeCloseTo(0.9);
@@ -56,9 +56,9 @@ describe('Pattern review & XAI module (P2)', () => {
     const s = store();
     s.load('draft');
     await flush();
-    s.decide('PAT-3', 'approve');
+    s.decide('02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f', 'approve');
     await flush();
-    const updated = s.patterns().find((p) => p.patternId === 'PAT-3');
+    const updated = s.patterns().find((p) => p.patternId === '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f');
     expect(updated?.lifecycle).toBe('approved');
     expect(s.pendingDecision()).toBeNull();
   });
@@ -67,10 +67,10 @@ describe('Pattern review & XAI module (P2)', () => {
     const s = store();
     s.load('draft');
     await flush();
-    expect(s.patterns().some((p) => p.patternId === 'PAT-3')).toBe(true);
-    s.decide('PAT-3', 'reject');
+    expect(s.patterns().some((p) => p.patternId === '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f')).toBe(true);
+    s.decide('02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f', 'reject');
     await flush();
-    expect(s.patterns().some((p) => p.patternId === 'PAT-3')).toBe(false);
+    expect(s.patterns().some((p) => p.patternId === '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f')).toBe(false);
   });
 
   it('AC 38 — the active/approved tab displays only patterns whose lifecycle is approved', async () => {
@@ -80,7 +80,7 @@ describe('Pattern review & XAI module (P2)', () => {
     const approved = s.visiblePatterns();
     expect(approved.length).toBeGreaterThanOrEqual(1);
     expect(approved.every((p) => p.lifecycle === 'approved')).toBe(true);
-    expect(approved.some((p) => p.patternId === 'PAT-1')).toBe(true);
+    expect(approved.some((p) => p.patternId === '10b3918b-2c4d-4f6a-8b1e-9d0c1a2b3c4d')).toBe(true);
   });
 
   it('AC 21 / AC 54 — "View trail" navigates to /topology?trailId=<id>; edit is offered only for draft patterns', async () => {
@@ -107,10 +107,10 @@ describe('Pattern review & XAI module (P2)', () => {
     const s = store();
     s.load('draft');
     await flush();
-    // PAT-3 sequence[1] (LinkDown) starts non-optional; mark it optional
-    s.edit('PAT-3', { sequenceFlags: [{ index: 1, optional: true }], reviewer: 'operator' });
+    // 02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f sequence[1] (LinkDown) starts non-optional; mark it optional
+    s.edit('02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f', { sequenceFlags: [{ index: 1, optional: true }], reviewer: 'operator' });
     await flush();
-    const updated = s.patterns().find((p) => p.patternId === 'PAT-3');
+    const updated = s.patterns().find((p) => p.patternId === '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f');
     // mock pattern-edit endpoint returns the pattern with sequence[1] optional flipped to true
     expect(updated?.sequence[1].optional).toBe(true);
   });

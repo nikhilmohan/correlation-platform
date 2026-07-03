@@ -37,7 +37,7 @@ describe('AC 50 — config-switchable backends resolve to mocks; no real HTTP ca
     TestBed.inject(TopologyClient).objectsAtSite('Site:LON').subscribe();
     TestBed.inject(TrailBuilderClient).listTrails().subscribe();
     TestBed.inject(PatternManagerClient).listPatterns().subscribe();
-    TestBed.inject(PatternManagerClient).decide('PAT-3', { decision: 'approve', reviewer: 'op' }).subscribe();
+    TestBed.inject(PatternManagerClient).decide('02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f', { decision: 'approve', reviewer: 'op' }).subscribe();
     TestBed.inject(KnowledgeClient).getModelParams('noise-filter').subscribe();
     TestBed.inject(CorrelationEngineClient).listIncidents().subscribe();
     TestBed.inject(CorrelationEngineClient).getStats().subscribe();

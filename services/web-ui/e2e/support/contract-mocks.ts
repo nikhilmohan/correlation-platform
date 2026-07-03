@@ -75,7 +75,7 @@ const INCIDENT_FIBER_CUT = {
   rootCauseAlarmId: 'a-3',
   rootCauseAlarmType: 'LOS',
   childAlarmIds: ['a-7', 'a-8'],
-  matchedPatternId: 'PAT-3',
+  matchedPatternId: '02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f',
   matchedCodebookId: null,
   confidence: 0.91,
   trailId: 'TR-7',

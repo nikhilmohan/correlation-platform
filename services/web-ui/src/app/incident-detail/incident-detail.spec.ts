@@ -19,7 +19,7 @@ describe('Incident-detail drill-down page', () => {
     expect(inc?.incidentId).toBe('INC-12');
     expect(inc?.rootCauseAlarmId).toBe('a-3');
     expect(inc?.childAlarmIds).toEqual(['a-7', 'a-8']);
-    expect(inc?.matchedPatternId).toBe('PAT-3');
+    expect(inc?.matchedPatternId).toBe('02007ff1-9d3a-4e21-b7c8-1a2b3c4d5e6f');
     expect(inc?.confidence).toBeCloseTo(0.91);
     expect(inc?.trailId).toBe('TR-7');
   });
