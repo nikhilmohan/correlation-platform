@@ -19,6 +19,41 @@ public final class UuidV5 {
     }
 
     /**
+     * [ANCHOR-CONSOL] The anchor-identity {@code patternId} for an ANCHORED pattern: a deterministic
+     * UUIDv5 over the anchor identity {@code (domain, snapshotId, codebookVersion, anchorScenarioId)}.
+     * All mined events for one fault-origin (across sub-runs) map to this same id, so the
+     * consolidation upserts them into one Pattern Store row. Scoping to {@code snapshotId} +
+     * {@code codebookVersion} re-mints identity when the topology snapshot / codebook changes.
+     *
+     * @return the deterministic anchor-identity pattern id
+     */
+    public static UUID anchorIdentity(String domain, String snapshotId, String codebookVersion,
+            String anchorScenarioId) {
+        String name = nz(domain) + "|" + nz(snapshotId) + "|" + nz(codebookVersion) + "|"
+                + nz(anchorScenarioId);
+        return from(name);
+    }
+
+    /**
+     * [ANCHOR-CONSOL] The per-event {@code patternId} for an UNEXPLAINED pattern (no anchor to
+     * consolidate on): a deterministic UUIDv5 over the mining provenance
+     * {@code (trailId, sequence, sourceWindowId, snapshotId)}. Each unexplained cascade stays a
+     * distinct row.
+     *
+     * @return the deterministic per-event pattern id
+     */
+    public static UUID perEventIdentity(String trailId, java.util.List<String> sequence,
+            String sourceWindowId, String snapshotId) {
+        String name = nz(trailId) + "|" + String.join(",", sequence) + "|" + nz(sourceWindowId)
+                + "|" + nz(snapshotId);
+        return from(name);
+    }
+
+    private static String nz(String s) {
+        return s != null ? s : "";
+    }
+
+    /**
      * @param name the name to hash within the pattern namespace
      * @return a deterministic version-5 UUID
      */
