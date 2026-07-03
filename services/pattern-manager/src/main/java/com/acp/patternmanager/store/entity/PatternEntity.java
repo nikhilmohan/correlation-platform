@@ -69,6 +69,22 @@ public class PatternEntity {
     @Column(name = "instance_count", nullable = false)
     private int instanceCount;
 
+    // [SIG-FOLD] Impact / extent metrics — populated for BOTH unexplained (signature-folded) AND
+    // anchored patterns. occurrenceCount counts distinct contributing eventIds (events, not alarms);
+    // trailCount is the count of DISTINCT trails the signature spans (a cache of count(pattern_trail));
+    // firstSeen is set on create and never changed; lastSeen is bumped on each genuine fold.
+    @Column(name = "occurrence_count", nullable = false)
+    private int occurrenceCount = 1;
+
+    @Column(name = "trail_count", nullable = false)
+    private int trailCount = 1;
+
+    @Column(name = "first_seen", nullable = false)
+    private OffsetDateTime firstSeen;
+
+    @Column(name = "last_seen", nullable = false)
+    private OffsetDateTime lastSeen;
+
     @Column(name = "lifecycle", nullable = false)
     private String lifecycle;
 
@@ -236,6 +252,38 @@ public class PatternEntity {
 
     public void setInstanceCount(int instanceCount) {
         this.instanceCount = instanceCount;
+    }
+
+    public int getOccurrenceCount() {
+        return occurrenceCount;
+    }
+
+    public void setOccurrenceCount(int occurrenceCount) {
+        this.occurrenceCount = occurrenceCount;
+    }
+
+    public int getTrailCount() {
+        return trailCount;
+    }
+
+    public void setTrailCount(int trailCount) {
+        this.trailCount = trailCount;
+    }
+
+    public OffsetDateTime getFirstSeen() {
+        return firstSeen;
+    }
+
+    public void setFirstSeen(OffsetDateTime firstSeen) {
+        this.firstSeen = firstSeen;
+    }
+
+    public OffsetDateTime getLastSeen() {
+        return lastSeen;
+    }
+
+    public void setLastSeen(OffsetDateTime lastSeen) {
+        this.lastSeen = lastSeen;
     }
 
     public String getLifecycle() {

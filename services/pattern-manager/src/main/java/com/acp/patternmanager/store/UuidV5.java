@@ -35,10 +35,36 @@ public final class UuidV5 {
     }
 
     /**
+     * [SIG-FOLD] The cascade-signature {@code patternId} for an UNEXPLAINED pattern: a deterministic
+     * UUIDv5 over the cascade signature {@code (sequence, domain, snapshotId)}. The same ordered
+     * cascade shape — regardless of which trail it was mined from or which mining window it came
+     * from — maps to the SAME id, so cross-trail / cross-window occurrences of one signature FOLD into
+     * ONE Pattern Store row (occurrence + extent + impact metrics accumulate).
+     *
+     * <p>The name-string is {@code join(sequence, ",") + "|" + domain + "|" + snapshotId}. Sequence
+     * order and repeats are SIGNIFICANT (no normalization — OQ-SF-2 DEFERRED): {@code ["A","B","A"]}
+     * → {@code "A,B,A"}; {@code ["B","A","C"]} → {@code "B,A,C"} — both distinct from {@code "A,B,C"}.
+     * {@code domain} and {@code snapshotId} are {@code nz()}-guarded exactly as {@link #anchorIdentity},
+     * sharing its RFC-4122 v5 (SHA-1) NAMESPACE + null-handling. {@code trailId} and
+     * {@code sourceWindowId} are DROPPED from the key — that is the fix.
+     *
+     * @return the deterministic cascade-signature pattern id
+     */
+    public static UUID signatureIdentity(java.util.List<String> sequence, String domain,
+            String snapshotId) {
+        String name = String.join(",", sequence) + "|" + nz(domain) + "|" + nz(snapshotId);
+        return from(name);
+    }
+
+    /**
      * [ANCHOR-CONSOL] The per-event {@code patternId} for an UNEXPLAINED pattern (no anchor to
      * consolidate on): a deterministic UUIDv5 over the mining provenance
-     * {@code (trailId, sequence, sourceWindowId, snapshotId)}. Each unexplained cascade stays a
+     * {@code (trailId, sequence, sourceWindowId, snapshotId)}. Each unexplained cascade stayed a
      * distinct row.
+     *
+     * <p><b>Retired from the live path</b> by [SIG-FOLD]: unexplained patterns now fold by
+     * {@link #signatureIdentity}. Kept for identity-space non-collision tests + the collapse migration
+     * that re-keys legacy {@code perEventIdentity} rows onto {@code signatureIdentity}.
      *
      * @return the deterministic per-event pattern id
      */

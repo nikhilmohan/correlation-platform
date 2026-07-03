@@ -34,9 +34,13 @@ import org.springframework.transaction.annotation.Transactional;
  *       (sum occurrences, occurrence-weighted-mean support/confidence/lift, union supporting
  *       instances, combine timing + recompute {@code sessionWindow}, keep the representative
  *       sequence) and emits nothing.
- *   <li><b>Unexplained</b> ({@code anchorScenarioId == null/absent}) — per-event UUIDv5 over
- *       {@code (trailId, sequence, sourceWindowId, snapshotId)}; each cascade stays a distinct draft
- *       and emits its own discovered event.
+ *   <li><b>Unexplained</b> ({@code anchorScenarioId == null/absent}) — [SIG-FOLD] cascade-signature
+ *       UUIDv5 over {@code (sequence, domain, snapshotId)} ({@code trailId} + {@code sourceWindowId}
+ *       dropped). The SAME cascade shape — from any trail, any mining window — FOLDS into ONE row,
+ *       mirroring the anchored path (row lock + {@code contributing_event} guard + aggregate),
+ *       accumulating {@code occurrenceCount} / {@code trailCount} / {@code instanceCount} /
+ *       {@code lastSeen}. The first occurrence CREATES + emits ONE discovered event; later
+ *       occurrences fold and emit nothing.
  * </ul>
  *
  * <p>The whole fold (row lock + {@code contributing_event} insert + aggregate + {@code
@@ -92,6 +96,8 @@ public class PatternConsolidationService {
             PatternEntity created = storeService.createDraftRow(
                     patternId, enriched, enriched.support() * occ, now);
             recordContributor(eventId, patternId, enriched, occ, source, now);
+            // [SIG-FOLD] record the creating contributor's trail (trailCount initialised to 1).
+            storeService.recordTrail(patternId, enriched.trailId(), now);
             log.info("pattern_consolidated action=create patternId={} anchorScenarioId={} instanceCount={}",
                     patternId, enriched.anchorScenarioId(), created.getInstanceCount());
             return ConsolidationOutcome.created(patternId);
@@ -107,24 +113,34 @@ public class PatternConsolidationService {
             return ConsolidationOutcome.noop(patternId);
         }
 
-        aggregate(existing.get(), enriched, occ);
+        aggregate(existing.get(), enriched, occ, now);
         storeService.recordProcessedFor(eventId, source, patternId, now);
-        log.info("pattern_consolidated action=fold patternId={} anchorScenarioId={} contributors={} instanceCount={}",
+        log.info("pattern_consolidated action=fold patternId={} anchorScenarioId={} contributors={} "
+                        + "instanceCount={} occurrenceCount={} trailCount={} lastSeen={}",
                 patternId, enriched.anchorScenarioId(),
-                contributingEventRepository.countByPatternId(patternId), existing.get().getInstanceCount());
+                contributingEventRepository.countByPatternId(patternId), existing.get().getInstanceCount(),
+                existing.get().getOccurrenceCount(), existing.get().getTrailCount(),
+                existing.get().getLastSeen());
         return ConsolidationOutcome.folded(patternId);
     }
 
-    private void aggregate(PatternEntity row, EnrichedPattern e, int occ) {
-        int oldOcc = row.getInstanceCount();
+    /**
+     * [SIG-FOLD] The single shared fold — used by BOTH the anchored and the unexplained (signature)
+     * paths. Adds the impact-metric maintenance (occurrenceCount, trailCount, firstSeen/lastSeen) on
+     * top of the existing support/confidence/lift/timing/instanceCount math, which is UNCHANGED (the
+     * anchored AC-C1..C8 semantics are preserved — the additions are orthogonal, AC-SF-11).
+     */
+    private void aggregate(PatternEntity row, EnrichedPattern e, int occ, OffsetDateTime eventTs) {
+        // Weighting stays the member-alarm counts (unchanged anchored semantics).
+        int oldInstance = row.getInstanceCount();
 
-        // Ratios -> occurrence-weighted mean; occurrences -> sum.
-        row.setSupport(PatternAggregator.weightedMean(row.getSupport(), oldOcc, e.support(), occ));
-        row.setConfidence(PatternAggregator.weightedMean(row.getConfidence(), oldOcc, e.confidence(), occ));
-        row.setLift(PatternAggregator.weightedMean(row.getLift(), oldOcc, e.lift(), occ));
+        // Ratios -> occurrence-weighted (member-alarm-weighted) mean.
+        row.setSupport(PatternAggregator.weightedMean(row.getSupport(), oldInstance, e.support(), occ));
+        row.setConfidence(PatternAggregator.weightedMean(row.getConfidence(), oldInstance, e.confidence(), occ));
+        row.setLift(PatternAggregator.weightedMean(row.getLift(), oldInstance, e.lift(), occ));
 
         Map<String, Object> combinedTiming = PatternAggregator.combineTiming(
-                readTiming(row), oldOcc, e.timing(), occ);
+                readTiming(row), oldInstance, e.timing(), occ);
         row.setTimingJson(storeService.writeJson(combinedTiming));
 
         // Recompute the session window from the COMBINED timing (deterministic function of it).
@@ -132,9 +148,26 @@ public class PatternConsolidationService {
         row.setSessionWindowMs(window.windowMs());
         row.setSessionWindowType(window.type().wire());
 
-        row.setInstanceCount(oldOcc + occ);
+        // instanceCount = total member-alarm volume (sum of support counts). Unchanged.
+        row.setInstanceCount(oldInstance + occ);
+
+        // [SIG-FOLD] occurrenceCount counts EVENTS (distinct folded eventIds), not alarms -> +1 per
+        // genuine fold; a pure event tally orthogonal to the weighting above.
+        row.setOccurrenceCount(row.getOccurrenceCount() + 1);
+
+        // [SIG-FOLD] record the contributing trail (distinct set); bump trail_count by rows inserted
+        // (0 or 1). A NEW eventId on an already-seen trail bumps occurrenceCount but NOT trailCount.
+        int trailsAdded = storeService.recordTrail(row.getPatternId(), e.trailId(), eventTs);
+        row.setTrailCount(row.getTrailCount() + trailsAdded);
+
+        // [SIG-FOLD] firstSeen unchanged (earliest occurrence); lastSeen bumped to the latest.
+        if (row.getLastSeen() == null || eventTs.isAfter(row.getLastSeen())) {
+            row.setLastSeen(eventTs);
+        }
 
         // Representative sequence: highest occurrence-weighted support, tie longest then lexicographic.
+        // (For a signature fold the sequence is byte-identical across contributors, so this never
+        // replaces — the bookkeeping runs for parity and is a no-op replace.)
         double newWeight = e.support() * occ;
         double currentWeight = row.getRepresentativeWeight() != null ? row.getRepresentativeWeight() : 0.0;
         List<String> currentSeq = row.getSequenceElements().stream()
@@ -167,25 +200,54 @@ public class PatternConsolidationService {
         storeService.recordProcessedFor(eventId, source, patternId, now);
     }
 
+    /**
+     * [SIG-FOLD] Unexplained patterns fold CROSS-TRAIL by cascade SIGNATURE — one pattern row per
+     * {@code (sequence, domain, snapshotId)}, accumulating occurrence + extent + impact metrics.
+     * This MIRRORS {@link #consolidateAnchored}: row-lock -> {@code contributing_event} fold guard ->
+     * shared {@link #aggregate}. The old per-occurrence identity (trailId + sourceWindowId in the key)
+     * and the no-op-on-existing behaviour are GONE — that was the duplicate-row bug.
+     */
     private ConsolidationOutcome persistUnexplained(EnrichedPattern enriched, String eventId,
             String source) {
-        UUID patternId = UuidV5.perEventIdentity(enriched.trailId(), enriched.sequence(),
-                enriched.sourceWindowId(), enriched.snapshotId());
+        UUID patternId = UuidV5.signatureIdentity(enriched.sequence(), enriched.domain(),
+                enriched.snapshotId());
         OffsetDateTime now = OffsetDateTime.now();
+        int occ = Math.max(1, enriched.instanceCount());
+        String signature = String.join(",", enriched.sequence());
 
-        // Per-event identity is deterministic, so a redelivery that slipped the processed_event gate
-        // would upsert the SAME row — treat an existing row as an idempotent no-op (no re-emit).
-        Optional<PatternEntity> existing = patternRepository.findById(patternId);
-        if (existing.isPresent()) {
+        // Serialize concurrent folds of this signature on the row lock (mirrors the anchored path).
+        Optional<PatternEntity> existing = patternRepository.findByIdForUpdate(patternId);
+
+        if (existing.isEmpty()) {
+            PatternEntity created = storeService.createDraftRow(
+                    patternId, enriched, enriched.support() * occ, now);
+            recordContributor(eventId, patternId, enriched, occ, source, now);
+            storeService.recordTrail(patternId, enriched.trailId(), now);
+            log.info("pattern_consolidated action=create patternId={} signature={} domain={} snapshotId={} "
+                            + "instanceCount={}",
+                    patternId, signature, enriched.domain(), enriched.snapshotId(),
+                    created.getInstanceCount());
+            return ConsolidationOutcome.created(patternId);
+        }
+
+        // Fold guard: INSERT ... ON CONFLICT (event_id) DO NOTHING. 0 rows => replay -> no-op.
+        int inserted = contributingEventRepository.insertIgnoreConflict(
+                UUID.fromString(eventId), patternId, null, occ, enriched.support(), now);
+        if (inserted == 0) {
+            log.info("pattern_consolidated action=noop patternId={} signature={} eventId={} (replay)",
+                    patternId, signature, eventId);
             storeService.recordProcessedFor(eventId, source, patternId, now);
             return ConsolidationOutcome.noop(patternId);
         }
 
-        storeService.createDraftRow(patternId, enriched, enriched.support() * enriched.instanceCount(), now);
+        PatternEntity row = existing.get();
+        aggregate(row, enriched, occ, now);
         storeService.recordProcessedFor(eventId, source, patternId, now);
-        log.info("unexplained pattern persisted patternId={} (per-event identity, not consolidated)",
-                patternId);
-        return ConsolidationOutcome.created(patternId);
+        log.info("pattern_consolidated action=fold patternId={} signature={} domain={} snapshotId={} "
+                        + "occurrenceCount={} trailCount={} instanceCount={} lastSeen={}",
+                patternId, signature, enriched.domain(), enriched.snapshotId(),
+                row.getOccurrenceCount(), row.getTrailCount(), row.getInstanceCount(), row.getLastSeen());
+        return ConsolidationOutcome.folded(patternId);
     }
 
     private Map<String, Object> readTiming(PatternEntity row) {
