@@ -10,7 +10,9 @@ import {
   ModelParamsRecord,
   NeighborsDto,
   ObservedChatterPage,
+  PatternLifecycle,
   PatternPage,
+  PatternView,
   RunStatsPage,
   SiteListDto,
   SiteObjectsDto,
@@ -586,7 +588,7 @@ export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => /\/trails\/[^/?]+$/.test(r.url.split('?')[0]), respond: () => TRAIL_DETAIL },
   { matches: (r) => has(r.url, '/trails'), respond: () => TRAILS },
   { matches: (r) => has(r.url, '/patterns') && r.method === 'PATCH', respond: () => ({ ...PATTERNS.items[0], sequence: PATTERNS.items[0].sequence.map((s, i) => (i === 1 ? { ...s, optional: true } : s)) }) },
-  { matches: (r) => has(r.url, '/approve'), respond: (r) => ({ ...PATTERNS.items[0], lifecycle: (r.body as { decision?: string })?.decision === 'reject' ? 'rejected' : 'approved' }) },
+  { matches: (r) => has(r.url, '/approve'), respond: (r) => approvePattern(r) },
   { matches: (r) => has(r.url, '/patterns'), respond: (r) => filterPatterns(r) },
   { matches: (r) => has(r.url, '/model-params') || (has(r.url, '/modelParams') && r.method !== 'PUT'), respond: () => MODEL_PARAMS },
   { matches: (r) => has(r.url, '/modelParams') && r.method === 'PUT', respond: (r) => ({ ...MODEL_PARAMS, version: 'v4', payload: (r.body as { payload?: ModelParamsRecord['payload'] }).payload ?? MODEL_PARAMS.payload }) },
@@ -635,12 +637,50 @@ function traversalFor(req: HttpRequest<unknown>): TraversalDto {
   };
 }
 
+/**
+ * In-session pattern-decision state so the in-app mock mirrors the REAL Pattern Manager's
+ * persistence: an approved (or rejected) draft reads back with its new lifecycle on a subsequent
+ * GET /patterns, which the data-agnostic AC 39 round-trip relies on. Keyed by patternId.
+ */
+const patternDecisions = new Map<string, PatternLifecycle>();
+
+/**
+ * Clear the in-session pattern-decision state. Unit tests that share this module MUST call this
+ * between cases so an approve/reject in one test does not leak into the next (the state is
+ * intentionally persistent within a session to mirror the real Pattern Manager for the AC 39 E2E
+ * round-trip).
+ */
+export function resetMockPatternDecisions(): void {
+  patternDecisions.clear();
+}
+
+/** Effective lifecycle for a pattern, honouring any in-session decision. */
+function effectiveLifecycle(p: PatternView): PatternLifecycle {
+  return patternDecisions.get(p.patternId) ?? p.lifecycle;
+}
+
+/** Parse the patternId from /patterns/{id}/approve. */
+function patternIdFromApproveUrl(url: string): string {
+  const m = url.split('?')[0].match(/\/patterns\/([^/]+)\/approve/);
+  return m ? decodeURIComponent(m[1]) : PATTERNS.items[0].patternId;
+}
+
+function approvePattern(req: HttpRequest<unknown>): PatternView {
+  const id = patternIdFromApproveUrl(req.url);
+  const decision = (req.body as { decision?: string })?.decision;
+  const lifecycle: PatternLifecycle = decision === 'reject' ? 'rejected' : 'approved';
+  patternDecisions.set(id, lifecycle);
+  const base = PATTERNS.items.find((p) => p.patternId === id) ?? PATTERNS.items[0];
+  return { ...base, patternId: id, lifecycle };
+}
+
 function filterPatterns(req: HttpRequest<unknown>): PatternPage {
   const lifecycle = paramOf(req, 'lifecycle');
+  const all = PATTERNS.items.map((p) => ({ ...p, lifecycle: effectiveLifecycle(p) }));
   if (!lifecycle) {
-    return PATTERNS;
+    return { ...PATTERNS, items: all, total: all.length };
   }
-  const items = PATTERNS.items.filter((p) => p.lifecycle === lifecycle);
+  const items = all.filter((p) => p.lifecycle === lifecycle);
   return { ...PATTERNS, items, total: items.length };
 }
 
