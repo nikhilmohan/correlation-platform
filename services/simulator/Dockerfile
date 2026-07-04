@@ -34,7 +34,7 @@ RUN pip install /build/event-model
 COPY services/simulator/pyproject.toml /build/simulator/pyproject.toml
 COPY services/simulator/README.md /build/simulator/README.md
 COPY services/simulator/src /build/simulator/src
-RUN pip install /build/simulator
+RUN pip install "/build/simulator[kafka]"
 
 # ---- runtime ---------------------------------------------------------------------------
 FROM python:3.13-slim AS runtime
