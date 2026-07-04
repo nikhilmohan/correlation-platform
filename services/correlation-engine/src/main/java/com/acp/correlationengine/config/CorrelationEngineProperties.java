@@ -67,12 +67,6 @@ public record CorrelationEngineProperties(
         return "mock".equalsIgnoreCase(integrationMode);
     }
 
-    /** @return the effective Trail Builder mode: explicit {@code trailBuilderMode}, else {@code integrationMode}. */
-    public String effectiveTrailBuilderMode() {
-        return trailBuilderMode == null || trailBuilderMode.isBlank()
-                ? integrationMode : trailBuilderMode;
-    }
-
     public boolean isRcaEvalOn() {
         return "on".equalsIgnoreCase(rcaEvalMode);
     }

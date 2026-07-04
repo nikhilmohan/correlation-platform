@@ -85,7 +85,8 @@ class IncidentRepositoryIT {
 
     @Test
     void persistsAndReadsBackIncidentWithMembership() {
-        Incident incident = new Incident("INC-IT-1", "T1", "root", "LOS",
+        // Current 12-arg Incident shape: matchedTrailId = T1 (cascade trail), discoveryTrailId = T_disc.
+        Incident incident = new Incident("INC-IT-1", "T1", "T_disc", "root", "LOS",
                 List.of("c1", "c2"), "PAT-1", null, 0.9123,
                 MatchCandidate.MatchType.PATTERN, "fp-it-1", Instant.parse("2026-06-11T12:00:00Z"));
         assertThat(repository.save(incident)).isTrue();
@@ -98,12 +99,54 @@ class IncidentRepositoryIT {
         assertThat(read.confidence()).isEqualTo(0.9123);
     }
 
+    /**
+     * AC44 — a pattern incident's {@code discovery_trail_id} round-trips through real PostgreSQL: a
+     * non-null discoveryTrailId (distinct from the matched trailId) is persisted and read back intact.
+     */
+    @Test
+    void discoveryTrailId_roundTripsForPatternIncident() {
+        Incident incident = new Incident("INC-IT-DT-1", "T_match", "T_disc", "root", "LOS",
+                List.of("c1", "c2"), "PAT-DT", null, 0.9,
+                MatchCandidate.MatchType.PATTERN, "fp-dt-1", Instant.parse("2026-06-11T12:00:00Z"));
+        assertThat(repository.save(incident)).isTrue();
+
+        Incident read = repository.findById("INC-IT-DT-1").orElseThrow();
+        assertThat(read.trailId()).isEqualTo("T_match");          // matchedTrailId (existing field)
+        assertThat(read.discoveryTrailId()).isEqualTo("T_disc");  // provenance round-trips (AC44)
+
+        // Confirm the column is genuinely populated in the real schema (not just the record default).
+        String stored = jdbc.getJdbcTemplate().queryForObject(
+                "SELECT discovery_trail_id FROM incident.incident WHERE incident_id = 'INC-IT-DT-1'",
+                String.class);
+        assertThat(stored).isEqualTo("T_disc");
+    }
+
+    /**
+     * AC44 — a codebook / no-discovery incident stores {@code discovery_trail_id = NULL} (nullable,
+     * additive column) and reads back a null discoveryTrailId.
+     */
+    @Test
+    void discoveryTrailId_isNullForCodebookIncident() {
+        Incident codebook = new Incident("INC-IT-DT-2", "T2", "r-cb", "PortDown",
+                List.of("cb1"), null, "CODEBOOK-DT", 0.65,
+                MatchCandidate.MatchType.CODEBOOK, "fp-dt-2", Instant.parse("2026-06-11T12:00:00Z"));
+        assertThat(repository.save(codebook)).isTrue();
+
+        Incident read = repository.findById("INC-IT-DT-2").orElseThrow();
+        assertThat(read.discoveryTrailId()).isNull();
+
+        String stored = jdbc.getJdbcTemplate().queryForObject(
+                "SELECT discovery_trail_id FROM incident.incident WHERE incident_id = 'INC-IT-DT-2'",
+                String.class);
+        assertThat(stored).isNull();
+    }
+
     @Test
     void idempotentOnFingerprint_duplicateIsNoOp() {
-        Incident a = new Incident("INC-IT-2", "T1", "root", "LOS",
+        Incident a = new Incident("INC-IT-2", "T1", "T_disc", "root", "LOS",
                 List.of("c1"), "PAT-1", null, 0.8,
                 MatchCandidate.MatchType.PATTERN, "fp-dup", Instant.parse("2026-06-11T12:00:00Z"));
-        Incident sameFingerprint = new Incident("INC-IT-2b", "T1", "root", "LOS",
+        Incident sameFingerprint = new Incident("INC-IT-2b", "T1", "T_disc", "root", "LOS",
                 List.of("c1"), "PAT-1", null, 0.8,
                 MatchCandidate.MatchType.PATTERN, "fp-dup", Instant.parse("2026-06-11T12:00:00Z"));
 
@@ -113,7 +156,7 @@ class IncidentRepositoryIT {
 
     @Test
     void statsAggregationQueriesRunAgainstRealSchema() {
-        repository.save(new Incident("INC-IT-3", "T2", "r3", "PortDown", List.of("cc1", "cc2"),
+        repository.save(new Incident("INC-IT-3", "T2", null, "r3", "PortDown", List.of("cc1", "cc2"),
                 null, "CODEBOOK-1", 0.65, MatchCandidate.MatchType.CODEBOOK, "fp-3",
                 Instant.parse("2026-06-11T12:00:00Z")));
         assertThat(repository.totalIncidents()).isGreaterThanOrEqualTo(1);
@@ -124,7 +167,7 @@ class IncidentRepositoryIT {
 
     @Test
     void filterByTrailAndMatchType_pagesCorrectly() {
-        repository.save(new Incident("INC-IT-4", "TX", "r4", "LOS", List.of("x1"),
+        repository.save(new Incident("INC-IT-4", "TX", "T_disc", "r4", "LOS", List.of("x1"),
                 "PAT-9", null, 0.9, MatchCandidate.MatchType.PATTERN, "fp-4",
                 Instant.parse("2026-06-11T12:00:00Z")));
         var filter = new IncidentRepository.IncidentFilter("TX", null, null, "pattern", 10, 0);
@@ -143,7 +186,7 @@ class IncidentRepositoryIT {
 
     @Test
     void insertingMembershipTwice_isIdempotent() {
-        Incident incident = new Incident("INC-IT-5", "T1", "root5", "LOS", List.of("m1"),
+        Incident incident = new Incident("INC-IT-5", "T1", "T_disc", "root5", "LOS", List.of("m1"),
                 "PAT-1", null, 0.9, MatchCandidate.MatchType.PATTERN, "fp-5",
                 Instant.parse("2026-06-11T12:00:00Z"));
         assertThat(repository.save(incident)).isTrue();
