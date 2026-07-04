@@ -180,6 +180,45 @@ Correlation Engine's `/stats` and `/incidents` responses.
     identical in both cases.
   - **Backward compatible:** all existing generate/ingest/export modes and P1/P2 behavior are
     unaffected; P3 synthesis is an additive mode selected by config/CLI.
+- **P3 network-wide emission with closed-loop target control (additive enhancement).** Extends
+  the P3 synthesis mode so that each approved pattern's cascade is emitted on **multiple
+  structurally-compatible trails** across different parts of the network (not only its
+  discovery trail), and a **closed-loop controller** reliably achieves a configurable
+  auto-correlation target on every run:
+  - **Compatible-trail discovery:** for each approved pattern, enumerate all deployed trails
+    (Trail Builder `GET /trails?snapshotId&domain` → list; `GET /trails/{id}` → `members[]` of
+    `{managedObjectId, objectType}`) and apply the **hostability rule** (a trail is compatible
+    with pattern P if it contains at least one member of each `objectType` required by P's alarm
+    sequence, including the root object type) — the same rule the Correlation Engine uses to
+    auto-correlate. Prefer compatible trails in **different igp-areas** than the pattern's
+    discovery trail to achieve the "different parts of the network" realism requirement. Cache
+    discovered compatible trails in the **P3 config snapshot** (Task 14) so repeated runs do
+    not re-enumerate. No NebulaGraph access; no new Kafka topic; no event-model change.
+  - **Closed-loop target control:** given `P3_AUTO_CORRELATION_TARGET` (e.g. 0.6 = 60%, the
+    fraction of ALL emitted alarms that end up in a CORRELATED incident — matching CE's
+    `correlatedAlarmCount / totalAlarmsProcessed`) and `P3_TOTAL_ALARMS`, the controller
+    computes the number of complete, in-window aligned cascades needed to hit the target within
+    `P3_TARGET_TOLERANCE` (default ±5 percentage points), then **distributes** those cascades
+    across the discovered compatible trails — spreading across distinct igp-areas where available,
+    bounded by `P3_MAX_CASCADES_PER_TRAIL` so cascades do not pile on a single trail.
+  - **Randomized spread, fresh per run:** compatible trail selection and member-object assignment
+    within each trail are re-randomized on each run (respecting `P3_RNG_SEED` when set), so
+    successive runs emit different alarms from different network parts while each hitting the
+    target.
+  - **Robustness — shortfall handling:** if too few distinct compatible trails exist to reach the
+    target while respecting `P3_MAX_CASCADES_PER_TRAIL`, the controller first exhausts distinct
+    trails then repeats trails (with staggered timing so each repetition still produces its own
+    correlatable incident) until the target is reached. If the target is genuinely unreachable
+    (e.g. fewer compatible trails × max-cap than needed cascades), the controller emits the
+    maximum achievable and **logs the shortfall clearly** (never silently under-delivers).
+  - **Measurability:** ground-truth labels record `{patternId, trailId, managedObjectId
+    assignments, scenarioType}` per cascade instance, enabling verification that (a) the expected
+    auto-correlation fraction matches CE `/stats` `correlatedAlarmCount/totalAlarmsProcessed`
+    and (b) incidents span multiple distinct `trailId`s per pattern — the "different parts of
+    the network" claim is checkable.
+  - **Backward compatible:** when `P3_AUTO_CORRELATION_TARGET` is unset (or network-wide mode
+    is disabled), single-trail P3 synthesis behavior is unchanged. No new Kafka topic; no
+    event-model change.
 
 ## Out of scope
 
@@ -210,6 +249,14 @@ Correlation Engine's `/stats` and `/incidents` responses.
 - **Reading non-approved patterns in P3 synthesis.** Only lifecycle=approved patterns from Pattern
   Manager are used for pattern-aligned cascade synthesis (see Open Questions for whether
   non-approved patterns should be included in any future mode).
+- **Deciding the auto-correlation target on behalf of the Correlation Engine.** The
+  `P3_AUTO_CORRELATION_TARGET` is the simulator's target for what fraction of emitted alarms
+  it expects to land in correlated incidents; the Correlation Engine independently determines
+  what it actually correlates. The Simulator does not force or override CE behavior — it
+  controls only how many and where cascades are emitted.
+- **Querying NebulaGraph directly for compatible-trail discovery.** Compatible-trail enumeration
+  uses only the Trail Builder's published REST API (`GET /trails?snapshotId&domain` and
+  `GET /trails/{id}`); the Simulator has no NebulaGraph credentials or direct graph access.
 
 ## Tasks (high-level)
 
@@ -327,6 +374,40 @@ Correlation Engine's `/stats` and `/incidents` responses.
     snapshot vs. re-fetch, `--p3-rng-seed`, `--p3-aligned-fraction`, `--p3-total-alarms`, and
     `--p3-config-snapshot-path`. Env-var equivalents for all options. `--help` documents standalone
     vs. full-cycle use.
+
+### P3 network-wide emission and closed-loop target tasks (additive)
+
+21. **Enumerate and cache compatible trails for each approved pattern.** For each approved pattern
+    in the P3 config snapshot, call Trail Builder `GET /trails?snapshotId&domain` to obtain the
+    full trail list, then `GET /trails/{id}` for each candidate (reusing cached results for already-
+    fetched trails), and apply the hostability rule (a trail hosts pattern P if it contains at
+    least one member of each objectType required by P's sequence, root objectType included) to
+    produce each pattern's **compatible-trail set**. Prefer trails in igp-areas different from the
+    pattern's discovery trail's area. Store the compatible-trail sets in the P3 config snapshot
+    for reuse across runs. The Trail Builder integration point is the same config-switchable
+    (mock/real) client as Task 13.
+
+22. **Compute cascade count and distribution plan to hit the auto-correlation target.** Given
+    `P3_AUTO_CORRELATION_TARGET`, `P3_TOTAL_ALARMS`, `P3_TARGET_TOLERANCE`, and
+    `P3_MAX_CASCADES_PER_TRAIL`, compute: (a) the number of complete aligned cascades needed
+    so that `(cascade_count × avg_cascade_length) / P3_TOTAL_ALARMS` equals the target within
+    tolerance; (b) a distribution plan that spreads those cascades across the discovered
+    compatible trails — first maximizing distinct igp-areas, then filling up to
+    `P3_MAX_CASCADES_PER_TRAIL` per trail. If total distinct-trail capacity is insufficient,
+    plan trail repeats (staggered). If the target is genuinely unreachable, compute the
+    maximum achievable count and record the projected shortfall in the run metadata.
+
+23. **Emit network-wide aligned cascades per the distribution plan.** For each planned
+    (pattern, trail, instance) triple in the distribution plan: select real `managedObjectId`
+    members from that trail per the placement rule (OQ-P3-1), synthesize the cascade wall-clock-
+    paced within the pattern's `sessionWindow`, and emit on `alarms.live` (existing `AlarmEvent`
+    payload). Each cascade on each trail becomes its own independently-correlatable incident.
+    Record ground-truth labels per cascade instance: `{patternId, trailId, instanceIndex,
+    rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType="pattern-aligned",
+    igpArea}`. Log a structured warning (never a silent under-delivery) when the realized
+    cascade count falls short of the distribution plan due to shortfall. On run completion,
+    persist the per-run summary: `{totalAlarms, alignedAlarms, alignedFraction,
+    distinctTrailsUsed, distinctAreasUsed, shortfallCascades}`.
 
 ## Phase applicability
 
@@ -470,7 +551,13 @@ generated to pre-created.
   `P3_ALIGNED_FRACTION` (default 0.65, range 0.0-1.0), `P3_TOTAL_ALARMS`, `P3_RNG_SEED`
   (optional; absent = fresh randomization), `P3_CONFIG_SNAPSHOT_PATH` (path to persisted P3
   config snapshot; if absent, re-fetches from services). All P3 config items are env/CLI
-  overridable; no hard-coded defaults for URLs or fractions.
+  overridable; no hard-coded defaults for URLs or fractions. **Network-wide target adds:**
+  `P3_AUTO_CORRELATION_TARGET` (float 0.0-1.0; default unset = single-trail behavior unchanged),
+  `P3_TARGET_TOLERANCE` (float; default 0.05 = ±5 percentage points),
+  `P3_MAX_CASCADES_PER_TRAIL` (int; default recommended by design — see OQ-NW-3), and
+  `P3_NETWORK_WIDE` (bool; when false or unset, network-wide mode is disabled and existing
+  single-trail P3 behavior is used). All network-wide config items are env/CLI overridable;
+  no hard-coded thresholds.
 - **Observability:** `/health` (liveness probe), `/metrics` (Prometheus-compatible), structured
   JSON logs on stdout. Cohort is Python (per CLAUDE.md); test framework is pytest.
 - **API contract:** if an HTTP API is exposed, it publishes OpenAPI 3.1 at `/openapi.json`
@@ -500,6 +587,8 @@ config/Knowledge Service** — they are never hard-coded in service code.
 | Pattern coverage of volume | Scenario (in-some-label) alarms ÷ total emitted | **~50-60%** |
 | `p2-demo` / `p3-demo` volume | `simulator_alarms_emitted_total` after the named profile run | **~1000 (P2) / ~500 (P3), within tolerance** |
 | Distinct grounded sites | Distinct `Site` nodes with distinct grounded geo at `SITE_COUNT=10` | **= 10 distinct** |
+| Auto-correlation target hit rate | Fraction of network-wide P3 runs (over repeated executions with fresh seeds) where the realized `alignedFraction` is within `P3_TARGET_TOLERANCE` of `P3_AUTO_CORRELATION_TARGET` | **= 1.0 (every run hits target within tolerance, or logs a measurable shortfall)** |
+| Network-wide spatial spread | Distinct `trailId`s used per approved pattern across a single network-wide P3 run | **≥ 2 distinct trails per pattern (where compatible trails exist in ≥ 2 igp-areas)** |
 
 ## Acceptance criteria
 
@@ -842,6 +931,86 @@ Each criterion maps to a single pytest test.
     (and `PATTERN_MANAGER_API_MODE=real`) produces a structured JSON config-error log and exits
     with a non-zero code before emitting any alarm.
 
+### P3 network-wide emission and closed-loop target acceptance criteria (additive)
+
+Each criterion maps to a single pytest test.
+
+47. **Compatible-trail discovery applies the hostability rule correctly.**
+    Given a P3 config snapshot containing one approved pattern with `sequence` requiring
+    `objectType`s `IPLink` and `IGPAdjacency` (root type `IPLink`), and a trail list that
+    includes Trail A (members: `IPLink:1`, `IGPAdjacency:2`, `Interface:3`) and Trail B
+    (members: `Interface:4`, `Node:5`), the compatible-trail filter returns Trail A and excludes
+    Trail B (Trail B lacks an `IPLink` member). The discovery trail itself is included in the
+    compatible set if it passes the hostability rule.
+
+48. **Compatible-trail sets are cached in the P3 config snapshot and not re-fetched on a second run.**
+    After a network-wide P3 run that fetches trails, the persisted P3 config snapshot includes the
+    compatible-trail sets for each pattern. A second P3 run loading from that snapshot makes zero
+    calls to `GET /trails?snapshotId&domain` or `GET /trails/{id}` for already-cached patterns
+    (verifiable via the mock call count).
+
+49. **Cascades are distributed across multiple compatible trails, preferring distinct igp-areas.**
+    Given a pattern with 3 compatible trails in 3 distinct igp-areas, and a distribution plan
+    requiring 3 cascade instances, the Simulator assigns one cascade instance to each trail (one
+    per area). No single trail receives more cascades than `P3_MAX_CASCADES_PER_TRAIL` when
+    sufficient distinct trails exist.
+
+50. **Each cascade instance on a different trail uses real member objects from THAT trail.**
+    In a network-wide P3 run with cascade instances on Trail A and Trail B, the `managedObjectId`
+    values in Trail A's cascade are members of Trail A (not Trail B), and vice versa. No cascade
+    instance references an object absent from its assigned trail's `members[]`.
+
+51. **Closed-loop controller hits `P3_AUTO_CORRELATION_TARGET` within `P3_TARGET_TOLERANCE`.**
+    Given `P3_AUTO_CORRELATION_TARGET=0.6`, `P3_TOTAL_ALARMS=300`, `P3_TARGET_TOLERANCE=0.05`,
+    and sufficient compatible trails, the Simulator emits a stream where
+    `alignedAlarms / totalAlarms` is in [0.55, 0.65]. The per-run summary label records
+    `alignedFraction` within this range.
+
+52. **Closed-loop controller recalculates correctly for different target values.**
+    Two runs with the same `P3_TOTAL_ALARMS` but `P3_AUTO_CORRELATION_TARGET=0.4` and
+    `P3_AUTO_CORRELATION_TARGET=0.8` produce `alignedFraction` values that are within
+    `P3_TARGET_TOLERANCE` of 0.4 and 0.8 respectively. The higher target produces more
+    aligned cascades in total.
+
+53. **Network-wide P3 run produces incidents on multiple distinct trails per pattern (verifiable via labels).**
+    After a network-wide P3 run with at least 2 compatible trails per pattern, the ground-truth
+    label store contains at least 2 cascade records for one pattern, each with a distinct
+    `trailId`. The `distinctTrailsUsed` field in the per-run summary is ≥ 2.
+
+54. **Network-wide P3 ground-truth labels include `igpArea` and `instanceIndex` per cascade.**
+    Every cascade-level ground-truth label in a network-wide run includes the fields
+    `{patternId, trailId, instanceIndex, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds,
+    scenarioType, igpArea}`. Two cascade records for the same pattern on different trails carry
+    different `trailId` and `igpArea` values (when distinct areas are available).
+
+55. **Shortfall is logged clearly when the target cannot be fully achieved.**
+    Given `P3_AUTO_CORRELATION_TARGET=0.9`, `P3_TOTAL_ALARMS=1000`, and only 2 compatible
+    trails with `P3_MAX_CASCADES_PER_TRAIL=1` for all patterns (making the target unreachable),
+    the Simulator: (a) emits the maximum achievable aligned cascades without exceeding any cap;
+    (b) logs at least one structured warning with `shortfallCascades > 0`; (c) does NOT exit
+    with a non-zero code (shortfall is warned, not fatal); (d) records `shortfallCascades`
+    in the per-run summary metadata.
+
+56. **Trail repetition with staggered timing is used when compatible-trail capacity is exhausted.**
+    Given a distribution plan requiring more cascade instances than the number of distinct
+    compatible trails × `P3_MAX_CASCADES_PER_TRAIL`, the controller assigns repeat visits to
+    already-used trails. Each repeat cascade's emission timing is staggered (offset from prior
+    cascades on that trail by at least `sessionWindow.windowMs`) so CE treats each as a distinct
+    incident. The ground-truth labels record `instanceIndex` ≥ 2 for repeated trails.
+
+57. **Seeded network-wide run is reproducible; different seeds produce different trail selections.**
+    Two network-wide P3 runs with the same `P3_RNG_SEED` and same P3 config snapshot produce
+    identical cascade assignments (same `{patternId, trailId, instanceIndex}` triples in the
+    same order). Two runs with different seeds (or no seed) produce different trail orderings
+    with high probability (verified by comparing the first 5 `trailId` assignments across runs).
+
+58. **Network-wide mode disabled: existing single-trail P3 behavior is unchanged.**
+    A P3 synthesis run with `P3_NETWORK_WIDE=false` (or `P3_AUTO_CORRELATION_TARGET` unset)
+    emits each approved pattern's cascade on its single discovery trail only — identical behavior
+    to the pre-network-wide spec. The compatible-trail enumeration (Task 21) is not performed,
+    and no calls to `GET /trails?snapshotId&domain` are made beyond those already required by
+    the existing P3 synthesis (Task 13).
+
 ## Open questions
 
 - **OQ-2 (design decision — does not block spec): How are ground-truth labels retrieved?**
@@ -924,3 +1093,87 @@ Each criterion maps to a single pytest test.
   requirement says "approved patterns"; if future use cases need to synthesize against
   `discovered` (not-yet-approved) patterns for evaluation purposes, that would be a scope
   extension. Flag for human confirmation; do not implement until confirmed.
+
+### Network-wide emission and closed-loop target open questions
+
+- **OQ-NW-1 (BLOCKS design): Exact target-to-cascade-count math.**
+  How does the closed-loop controller convert `P3_AUTO_CORRELATION_TARGET` into a required
+  number of complete aligned cascades?
+
+  Recommended model: `cascade_count = ceil(TARGET × P3_TOTAL_ALARMS / avg_cascade_length)`,
+  where `avg_cascade_length` is computed from the mandatory (non-optional) elements of the
+  approved patterns' sequences. The reasoning: each COMPLETE cascade contributes exactly
+  `cascade_length` alarms that are expected to auto-correlate (the CE correlates full
+  in-window sequences); partial cascades are counted as non-aligned. The remaining
+  `P3_TOTAL_ALARMS − (cascade_count × avg_cascade_length)` alarms are the non-aligned
+  noise/partial portion.
+
+  Edge cases requiring a human decision before design:
+  (a) **Partial cascades:** if a cascade is synthesized but not all members emit before the
+  session window closes (e.g. due to timing jitter), it may partially correlate. Should the
+  controller treat each cascade as atomically contributing `len(sequence)` aligned alarms
+  (optimistic model), or apply a configurable completion-probability factor?
+  (b) **Noise that accidentally correlates:** CE may correlate noise alarms that happen to
+  match a pattern sequence by coincidence. The simulator cannot control this. Should the
+  target be defined as the EMITTED aligned fraction (what the simulator controls) rather
+  than the REALIZED CE correlation fraction (which CE controls)? Recommended: yes — define
+  target as the emitted aligned fraction; the verifiable KPI is
+  `alignedAlarms / totalAlarms` from the label store, cross-checked against CE
+  `correlatedAlarmCount / totalAlarmsProcessed` within a wider tolerance (since noise
+  accidental correlation and enrichment drop both affect the CE number). A human must
+  confirm this framing before design.
+  (c) **Variable cascade length across patterns:** when patterns have different sequence
+  lengths, `avg_cascade_length` may be a poor estimator. Should the controller compute
+  per-pattern cascade counts and then aggregate, or use a single average? Recommend
+  per-pattern computation for accuracy; flag for design confirmation.
+
+- **OQ-NW-2 (BLOCKS design): Spread policy defaults and behavior when compatible types are confined to one area.**
+  (a) **`P3_MAX_CASCADES_PER_TRAIL` default:** the spec does not fix the default; the
+  recommended starting point is 3 (enough spread without over-concentrating). A human must
+  confirm or override this default before design pins it.
+  (b) **"Prefer different igp-areas" when all compatible trails share one area:** if a
+  pattern's required object types (e.g. a rare SRLG object type) only exist in trails within
+  a single igp-area, the "prefer distinct areas" preference is unsatisfiable. The controller
+  should fall back gracefully to distributing across the available same-area trails (up to
+  the per-trail cap) and log a structured info entry that area spread was not achievable for
+  this pattern. A human must confirm this fallback is acceptable.
+  (c) **Minimum compatible-trail count before network-wide mode proceeds:** if a pattern has
+  only 1 compatible trail (including its discovery trail), should the controller still run
+  network-wide for that pattern (distributing multiple cascades on the one trail up to the
+  cap), or skip it (leaving it at single-trail behavior)? Recommend: still run but log the
+  absence of multi-trail spread. Human confirmation needed.
+
+- **OQ-NW-3 (design decision, does not block spec): Whether enrichment noise-drop should be
+  compensated by over-provisioning.**
+  A prior live finding showed that the Enrichment Service can thin the alarm stream (some
+  alarms are dropped by the deterministic filter before reaching CE). If the CE's realized
+  `correlatedAlarmCount / totalAlarmsProcessed` is systematically below the simulator's
+  emitted `alignedFraction` due to enrichment drop, the target will appear missed even when
+  the simulator's controller did its job correctly.
+
+  Two options for the designer to consider:
+  (a) **Accept the gap:** define the verifiable KPI as the emitted aligned fraction (what
+  the simulator controls); document that CE's realized rate may be lower due to enrichment
+  and tolerate a wider CE-vs-simulator delta (e.g. ±10 pp) in the integration assertion.
+  (b) **Over-provision:** the controller emits `TARGET / (1 − estimated_drop_rate)` aligned
+  alarms, where `estimated_drop_rate` is a configurable env-var (default 0.0 = no
+  compensation). This requires the operator to supply an empirical drop-rate estimate, which
+  may vary by deployment.
+
+  Recommended approach: option (a) for the MVP — the target is the emitted fraction, the
+  cross-check against CE is informational (not a hard gate). Flag as an open question; a
+  human must confirm before the designer chooses option (a) or (b) and pins any default
+  compensation factor.
+
+- **OQ-NW-4 (flag if contract change needed): Does Trail Builder expose `GET /trails?snapshotId&domain`
+  for full trail enumeration?**
+  Compatible-trail discovery (Task 21) requires listing ALL trails for a given snapshot and
+  domain, not just the trails referenced by approved patterns. This is distinct from the
+  existing `GET /trails/{trailId}` point-lookup used in the original P3 fetch (Task 13).
+  If `GET /trails?snapshotId&domain` (or an equivalent list endpoint) is not present in
+  Trail Builder's published OpenAPI, this is a **contract change** to Trail Builder — flag
+  it via the CONVENTIONS.md contract-change procedure (open a `gh` issue labeled
+  `question` + `service:trail-builder`) and stop. Do not design a workaround (e.g. calling
+  Topology or Pattern Manager to derive a trail list indirectly), as that would couple
+  the Simulator to services it has no direct dependency on. A human must confirm the
+  Trail Builder exposes this endpoint before design proceeds.
