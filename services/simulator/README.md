@@ -100,15 +100,48 @@ event is emitted.
 to 1.0). Starting synth in `real` mode without the collaborator's base URL, an out-of-range aligned
 fraction, or a bad mix fails fast before any emission.
 
+**P3 network-wide emission + closed-loop auto-correlation target** (additive; behind
+`P3_NETWORK_WIDE`, or auto-on when `P3_AUTO_CORRELATION_TARGET` is set). When active, each approved
+pattern's cascade is emitted on **multiple structurally-compatible trails** across the network and a
+closed-loop controller sizes the aligned-cascade count so the **CE-measured post-enrichment** rate
+(`correlatedAlarmCount / totalAlarmsProcessed`) lands within tolerance of the target on every run.
+Off (or target unset) → the existing single-trail P3 behavior is unchanged. Knobs (all env/CLI,
+no hard-coded thresholds):
+
+| Env / CLI | Default | Meaning |
+|---|---|---|
+| `P3_NETWORK_WIDE` / `--p3-network-wide` | `false` | enable network-wide emission (auto-`true` when a target is set) |
+| `P3_AUTO_CORRELATION_TARGET` / `--p3-auto-correlation-target` | unset | CE post-enrichment target fraction, range `[0,1]`; unset → single-trail |
+| `P3_TARGET_TOLERANCE` / `--p3-target-tolerance` | `0.03` | ±pp band around the target |
+| `P3_MAX_CASCADES_PER_TRAIL` / `--p3-max-cascades-per-trail` | `3` | per-trail cascade cap (bounds pile-up) |
+| `P3_ENRICHMENT_OVER_PROVISION_MARGIN` / `--p3-enrichment-over-provision-margin` | `0.0` | emitted aligned fraction = `TARGET / (1 − margin)` |
+| `P3_ENRICHMENT_DEDUP_WINDOW_MS` / `--p3-enrichment-dedup-window-ms` | `2000` | **must match** the deployed enrichment `dedupWindow`; drives the enrichment-safe inter-arrival lower bound |
+| `P3_ENRICHMENT_TRANSIENT_TYPES` / `--p3-enrichment-transient-types` | pack-derived | comma-set of transient alarmTypes excluded from aligned cascades |
+| `P3_DEDUP_SPACING_MARGIN` / `--p3-dedup-spacing-margin` | `0.1` | ε so the spacing lower bound is strictly above the dedup window |
+
+Compatible-trail discovery uses the **existing published** Trail Builder `GET /trails?snapshotId&domain&limit&offset`
+(paged) + `GET /trails/{id}` (no contract change); results are cached in the P3 config snapshot
+(schemaVersion **2**, additive `compatibleTrails`) so a second run makes **zero** `GET /trails`
+calls. Aligned cascades are **enrichment-safe by construction** (distinct object per element,
+non-transient types, inter-arrival above the dedup window yet within the session window); a pattern
+whose `sessionWindow.windowMs ≤ dedupWindow` is **excluded and logged** (recorded in
+`enrichmentConflictPatterns`), never aborting the run. When per-trail caps make the target
+unreachable the controller emits the maximum achievable and **logs a measurable shortfall**
+(`p3.target_shortfall`, `shortfallCascades > 0`, exit 0 — never silent). `P3_ENRICHMENT_DEDUP_WINDOW_MS`
+is an operator env that must match the deployed enrichment `FilterParams.dedupWindow` (config-not-contract).
+
 ## Observability + API
 
 - `/health` — 200 when started + Kafka-connected, 503 otherwise.
 - `/metrics` — Prometheus text (`simulator_alarms_emitted_total`, snapshot gauges, …).
 - `/labels`, `/labels/{scenarioId}`, `/scenarios` — ground-truth retrieval for the eval oracle.
   In `synth` mode `/labels` additionally returns per-cascade P3 records
-  `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType}` and
-  `/labels/p3-summary` returns `{totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}`
-  so the ~60-70% auto-correlation KPI is directly computable.
+  `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType,
+  instanceIndex, igpArea}` and `/labels/p3-summary` returns `{totalAlarms, alignedAlarms,
+  nonAlignedAlarms, alignedFraction, distinctTrailsUsed, distinctAreasUsed, shortfallCascades,
+  enrichmentSafeCount, enrichmentConflictPatterns, alignedFractionEmitted}` so the auto-correlation
+  KPI (and the network-wide spread + enrichment-safe count) is directly computable. `instanceIndex`,
+  `igpArea`, and the extra summary fields are additive (single-trail runs default them).
 - OpenAPI 3.1 is served at `/openapi.json`; the checked-in **`openapi.json`** in this directory
   is the authoritative surface (a drift test guards it).
 - Structured JSON logs on stdout (one object per line).

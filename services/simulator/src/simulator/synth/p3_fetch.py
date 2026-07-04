@@ -13,12 +13,15 @@ from __future__ import annotations
 import logging
 
 from simulator.config.settings import Settings
+from simulator.domains.coreip.pack import CoreIPPack
+from simulator.engine.domain_pack import DomainPack
 from simulator.integrations import (
     pattern_manager_client,
     topology_snapshot_client,
     trail_builder_client,
 )
 from simulator.obs.logging import get_logger, log_event
+from simulator.synth import trail_discovery
 from simulator.synth.models import PatternView
 from simulator.synth.p3_config_snapshot import P3ConfigSnapshot
 
@@ -35,6 +38,7 @@ def fetch_config(
     pattern_client=None,
     trail_client=None,
     snapshot_client=None,
+    pack: DomainPack | None = None,
 ) -> P3ConfigSnapshot:
     """Fetch approved patterns + their trail members + snapshot list into a P3 config snapshot."""
     pattern_client = pattern_client or pattern_manager_client.make_client(
@@ -87,12 +91,66 @@ def fetch_config(
 
     snapshots = snapshot_client.list_snapshots(settings.synth_domain)
 
-    return P3ConfigSnapshot(
+    config = P3ConfigSnapshot(
         domain=settings.synth_domain,
         patterns=usable,
         trails=trails,
         source_snapshots=snapshots,
     )
+
+    # Network-wide (Task 21, AC 47-49): discover + cache compatible trails per pattern. Off ->
+    # this block is skipped entirely, so NO GET /trails?... list call is made (AC 58).
+    if settings.p3_network_wide_active:
+        _attach_compatible_trails(
+            settings, config, usable, trails, snapshots, trail_client, pack or CoreIPPack()
+        )
+
+    return config
+
+
+def _resolve_snapshot_id(config_snapshots, trails) -> str:
+    """The snapshotId to enumerate trails against (a trail's snapshotId, else a listed snapshot)."""
+    for trail in trails.values():
+        if trail.snapshot_id:
+            return trail.snapshot_id
+    if config_snapshots:
+        return config_snapshots[0].snapshot_id
+    return ""
+
+
+def _attach_compatible_trails(
+    settings: Settings,
+    config: P3ConfigSnapshot,
+    patterns: list[PatternView],
+    trails,
+    snapshots,
+    trail_client,
+    pack: DomainPack,
+) -> None:
+    """Run compatible-trail discovery and cache the result on the config snapshot (AC 48)."""
+    snapshot_id = _resolve_snapshot_id(snapshots, trails)
+    discovery_areas = {
+        p.pattern_id: (trails[p.trail_id].igp_area if p.trail_id in trails else None)
+        for p in patterns
+    }
+    # Seed the discovery fetch-cache with the already-fetched discovery trails so their members are
+    # NOT re-fetched (memoized, AC 48).
+    fetch_cache: dict = {trail_id: detail for trail_id, detail in trails.items()}
+    config.compatible_trails = trail_discovery.discover_compatible_trails(
+        pack,
+        patterns,
+        trail_client,
+        snapshot_id,
+        settings.synth_domain,
+        discovery_areas,
+        fetch_cache=fetch_cache,
+    )
+    # Make every discovered compatible trail's members available at emit time (each element is
+    # placed on a member of its assigned trail, AC 50). The fetch-cache already holds them (each
+    # fetched at most once, AC 48); merge the successful fetches into the config's trail map.
+    for trail_id, detail in fetch_cache.items():
+        if detail is not None:
+            config.trails.setdefault(trail_id, detail)
 
 
 def _distinct_preserving_order(values) -> list[str]:

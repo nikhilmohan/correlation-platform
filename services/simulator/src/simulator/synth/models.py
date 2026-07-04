@@ -111,6 +111,72 @@ class PatternView:
 
 
 @dataclass(frozen=True)
+class TrailSummary:
+    """One trail-list item (from Trail Builder ``GET /trails`` -> ``TrailSummary``).
+
+    The paged list endpoint returns lightweight summaries (no ``members``); the members are
+    fetched lazily per candidate via ``get_trail`` during compatible-trail discovery.
+    """
+
+    trail_id: str
+    domain: str = ""
+    member_count: int = 0
+    igp_area: str | None = None
+    srlg_group: str | None = None
+
+    @classmethod
+    def from_api(cls, obj: dict[str, Any]) -> TrailSummary:
+        return cls(
+            trail_id=str(obj["trailId"]),
+            domain=str(obj.get("domain", "")),
+            member_count=int(obj.get("memberCount", 0)),
+            igp_area=(str(obj["igpArea"]) if obj.get("igpArea") else None),
+            srlg_group=(str(obj["srlgGroup"]) if obj.get("srlgGroup") else None),
+        )
+
+
+@dataclass(frozen=True)
+class CompatibleTrail:
+    """A discovered trail that hosts a pattern (Task 21 / AC 47-49). Cached in config snapshot."""
+
+    trail_id: str
+    igp_area: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {"trailId": self.trail_id, "igpArea": self.igp_area}
+
+    @classmethod
+    def from_json(cls, obj: dict[str, Any]) -> CompatibleTrail:
+        return cls(
+            trail_id=str(obj["trailId"]),
+            igp_area=(str(obj["igpArea"]) if obj.get("igpArea") else None),
+        )
+
+
+@dataclass(frozen=True)
+class CompatibleTrailSet:
+    """A pattern's discovered compatible-trail set + its discovery igp-area (Task 21 / AC 48)."""
+
+    pattern_id: str
+    discovery_area: str | None
+    trails: tuple[CompatibleTrail, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "discoveryArea": self.discovery_area,
+            "trails": [t.to_json() for t in self.trails],
+        }
+
+    @classmethod
+    def from_json(cls, pattern_id: str, obj: dict[str, Any]) -> CompatibleTrailSet:
+        return cls(
+            pattern_id=pattern_id,
+            discovery_area=(str(obj["discoveryArea"]) if obj.get("discoveryArea") else None),
+            trails=tuple(CompatibleTrail.from_json(t) for t in (obj.get("trails") or [])),
+        )
+
+
+@dataclass(frozen=True)
 class TrailMember:
     """One trail member (from Trail Builder ``TrailMember``)."""
 
@@ -183,7 +249,13 @@ class SnapshotSummary:
 
 @dataclass
 class P3CascadeLabel:
-    """Per-cascade ground-truth label (spec Task 18, AC 43)."""
+    """Per-cascade ground-truth label (spec Task 18, AC 43; network-wide adds AC 54).
+
+    Network-wide P3 additionally records ``instance_index`` (>=2 for staggered trail-repeats, AC 56)
+    and ``igp_area`` per cascade so incidents can be shown to span multiple distinct trails/areas
+    (AC 53, 54). Both are additive JSON keys; single-trail P3 keeps ``instance_index=1`` and a
+    ``None`` area, so existing consumers are unaffected.
+    """
 
     pattern_id: str
     trail_id: str
@@ -191,6 +263,8 @@ class P3CascadeLabel:
     root_cause_alarm_type: str
     child_alarm_ids: list[str] = field(default_factory=list)
     scenario_type: str = "pattern-aligned"
+    instance_index: int = 1
+    igp_area: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -200,17 +274,32 @@ class P3CascadeLabel:
             "rootCauseAlarmType": self.root_cause_alarm_type,
             "childAlarmIds": list(self.child_alarm_ids),
             "scenarioType": self.scenario_type,
+            "instanceIndex": self.instance_index,
+            "igpArea": self.igp_area,
         }
 
 
 @dataclass
 class P3RunSummary:
-    """Per-run summary (spec Task 18, AC 43) — the 60-70% KPI is directly computable from it."""
+    """Per-run summary (spec Task 18, AC 43; network-wide adds AC 51/53/55/65).
+
+    Network-wide P3 adds the spread + enrichment fields (all additive JSON keys, defaulted so a
+    single-trail summary is unaffected): ``distinct_trails_used``/``distinct_areas_used`` (AC 53),
+    ``shortfall_cascades`` (AC 55), ``enrichment_safe_count`` (the expected-correlatable count for
+    the CE cross-check, AC 51/65), ``enrichment_conflict_patterns`` (AC 62/65), and
+    ``aligned_fraction_emitted`` (the over-provisioned emitted fraction, AC 51).
+    """
 
     total_alarms: int
     aligned_alarms: int
     non_aligned_alarms: int
     aligned_fraction: float
+    distinct_trails_used: int = 0
+    distinct_areas_used: int = 0
+    shortfall_cascades: int = 0
+    enrichment_safe_count: int = 0
+    enrichment_conflict_patterns: list[str] = field(default_factory=list)
+    aligned_fraction_emitted: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -218,6 +307,12 @@ class P3RunSummary:
             "alignedAlarms": self.aligned_alarms,
             "nonAlignedAlarms": self.non_aligned_alarms,
             "alignedFraction": self.aligned_fraction,
+            "distinctTrailsUsed": self.distinct_trails_used,
+            "distinctAreasUsed": self.distinct_areas_used,
+            "shortfallCascades": self.shortfall_cascades,
+            "enrichmentSafeCount": self.enrichment_safe_count,
+            "enrichmentConflictPatterns": list(self.enrichment_conflict_patterns),
+            "alignedFractionEmitted": self.aligned_fraction_emitted,
         }
 
 

@@ -14,9 +14,12 @@ from typing import Any
 
 import httpx
 
-from simulator.synth.models import TrailDetail
+from simulator.synth.models import TrailDetail, TrailSummary
 
 TRAIL_PATH = "/trails"
+
+# Default page size for the paged ``GET /trails`` enumeration (config-overridable via the caller).
+DEFAULT_PAGE_LIMIT = 200
 
 
 class TrailNotFound:
@@ -33,9 +36,19 @@ class TrailFetchError(RuntimeError):
 class MockTrailBuilderClient:
     """In-process stub returning configured ``TrailDetail`` bodies (404 for unknown ids)."""
 
-    def __init__(self, trails: dict[str, dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        trails: dict[str, dict[str, Any]] | None = None,
+        *,
+        trail_list: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._trails = dict(trails or {})
+        # The configured ``GET /trails`` list body items (TrailSummary shapes). When absent, the
+        # list is derived from the configured detail bodies so a test that only supplies detail
+        # bodies still gets a consistent list (each summary carries the detail's igpArea).
+        self._trail_list = list(trail_list) if trail_list is not None else None
         self.calls = 0
+        self.list_calls = 0
         self.requested: list[str] = []
 
     def get_trail(self, trail_id: str) -> TrailDetail | TrailNotFound:
@@ -45,6 +58,30 @@ class MockTrailBuilderClient:
         if body is None:
             return TrailNotFound(trail_id)
         return TrailDetail.from_api(body)
+
+    def _derived_list(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for trail_id, body in self._trails.items():
+            members = body.get("members") or []
+            items.append(
+                {
+                    "trailId": trail_id,
+                    "domain": body.get("domain", ""),
+                    "memberCount": body.get("memberCount", len(members)),
+                    "igpArea": body.get("igpArea"),
+                    "srlgGroup": body.get("srlgGroup"),
+                }
+            )
+        return items
+
+    def list_trails(
+        self, snapshot_id: str, domain: str, *, limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0
+    ) -> list[TrailSummary]:
+        """Return one page of the configured trail list (mirrors the paged ``GET /trails``)."""
+        self.list_calls += 1
+        source = self._trail_list if self._trail_list is not None else self._derived_list()
+        page = source[offset : offset + limit]
+        return [TrailSummary.from_api(item) for item in page]
 
 
 class HttpTrailBuilderClient:
@@ -57,6 +94,37 @@ class HttpTrailBuilderClient:
         self._max_attempts = max_attempts
         self._client = client or httpx.Client(timeout=30.0)
         self.calls = 0
+        self.list_calls = 0
+
+    def list_trails(
+        self, snapshot_id: str, domain: str, *, limit: int = DEFAULT_PAGE_LIMIT, offset: int = 0
+    ) -> list[TrailSummary]:
+        """One page of ``GET /trails?snapshotId&domain&limit&offset`` (published list endpoint)."""
+        url = f"{self._base_url}{TRAIL_PATH}"
+        params = {
+            "snapshotId": snapshot_id,
+            "domain": domain,
+            "limit": limit,
+            "offset": offset,
+        }
+        last_exc: Exception | None = None
+        for attempt in range(self._max_attempts):
+            self.list_calls += 1
+            try:
+                resp = self._client.get(url, params=params)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    return [TrailSummary.from_api(item) for item in (body.get("trails") or [])]
+                last_exc = TrailFetchError(
+                    f"unexpected status {resp.status_code} from {url}: {resp.text[:200]}"
+                )
+            except httpx.HTTPError as exc:
+                last_exc = exc
+            if attempt < self._max_attempts - 1:
+                time.sleep(min(2.0**attempt * 0.1, 2.0))
+        raise TrailFetchError(
+            f"list trails from {url} failed after {self._max_attempts} attempts"
+        ) from last_exc
 
     def get_trail(self, trail_id: str) -> TrailDetail | TrailNotFound:
         url = f"{self._base_url}{TRAIL_PATH}/{trail_id}"

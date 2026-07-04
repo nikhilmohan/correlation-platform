@@ -42,21 +42,45 @@ def build_cascade(
     *,
     optional_include_prob: float = 1.0,
     in_window_margin: float = 0.9,
+    spacing_lo_ms: float | None = None,
+    spacing_hi_ms: float | None = None,
+    instance_index: int = 1,
+    igp_area: str | None = None,
 ) -> AlignedCascade:
-    """Build one pattern-aligned cascade for ``pattern`` on its ``trail``."""
+    """Build one pattern-aligned cascade for ``pattern`` on ``trail``.
+
+    Single-trail path (``spacing_*`` unsupplied): behaviour is unchanged from the pre-network-wide
+    build — affine placement with fallback, timing-derived gaps compressed to fit the window.
+
+    Network-wide path (``spacing_lo_ms``/``spacing_hi_ms`` supplied): every element is placed on a
+    **distinct** trail member (draw without replacement, AC 59/63), inter-arrival gaps are drawn in
+    ``[spacing_lo_ms, spacing_hi_ms]`` so each gap is above the enrichment dedup window yet the
+    whole cascade stays within the session window (AC 61); the label records ``instance_index`` +
+    ``igp_area`` (AC 54, 56). The trail argument is the assigned trail so every moid belongs to
+    that trail (AC 50).
+    """
     affinity = pack.placement_affinity()
     retained = _retain_elements(pattern, rng, optional_include_prob)
 
-    inter_arrivals = _inter_arrival_gaps(pattern, len(retained), rng, in_window_margin)
+    network_wide = spacing_lo_ms is not None and spacing_hi_ms is not None
+    if network_wide:
+        inter_arrivals = _reconciled_gaps(len(retained), spacing_lo_ms, spacing_hi_ms, rng)
+    else:
+        inter_arrivals = _inter_arrival_gaps(pattern, len(retained), rng, in_window_margin)
+
     alarms: list[SynthAlarm] = []
     child_ids: list[str] = []
     root_id = ""
     root_type = pattern.root_cause_alarm_type
+    used_moids: set[str] = set()
     at = base_time
     for idx, element in enumerate(retained):
         if idx > 0:
             at = at + timedelta(milliseconds=inter_arrivals[idx - 1])
-        member = _place(element.alarm_type, trail, affinity, rng)
+        if network_wide:
+            member = _place_distinct(element.alarm_type, trail, affinity, rng, used_moids)
+        else:
+            member = _place(element.alarm_type, trail, affinity, rng)
         shape = pack.alarm_shape(element.alarm_type)
         alarm_id = f"alm-{uuid.UUID(int=rng.getrandbits(128)).hex[:16]}"
         is_root = element.alarm_type == root_type and not root_id
@@ -81,13 +105,23 @@ def build_cascade(
 
     label = P3CascadeLabel(
         pattern_id=pattern.pattern_id,
-        trail_id=pattern.trail_id,
+        trail_id=trail.trail_id if network_wide else pattern.trail_id,
         root_cause_alarm_id=root_id,
         root_cause_alarm_type=root_type,
         child_alarm_ids=child_ids,
         scenario_type="pattern-aligned",
+        instance_index=instance_index,
+        igp_area=igp_area if network_wide else None,
     )
     return AlignedCascade(alarms=alarms, label=label)
+
+
+def _reconciled_gaps(n: int, lo_ms: float, hi_ms: float, rng: random.Random) -> list[float]:
+    """Draw ``n-1`` inter-arrival gaps in ``[lo_ms, hi_ms]`` (enrichment-safe spacing, AC 61)."""
+    if n <= 1:
+        return []
+    hi = max(lo_ms, hi_ms)
+    return [rng.uniform(lo_ms, hi) for _ in range(n - 1)]
 
 
 def _retain_elements(pattern: PatternView, rng: random.Random, include_prob: float) -> list:
@@ -159,4 +193,39 @@ def _place(
         return rng.choice(candidates)
     # Fallback: any member of the SAME trail (real object, correct trail -> CE still matches).
     metrics.P3_PLACEMENT_FALLBACK.labels(alarmType=alarm_type).inc()
+    return rng.choice(list(trail.members))
+
+
+def _place_distinct(
+    alarm_type: str,
+    trail: TrailDetail,
+    affinity: dict[str, str],
+    rng: random.Random,
+    used_moids: set[str],
+) -> TrailMember:
+    """Place ``alarm_type`` on a DISTINCT (unused) trail member (draw without replacement, AC 59).
+
+    Prefer an unused member of the affine ``objectType``; else any unused member; only if every
+    member is already used (cascade longer than the trail) reuse a member and log
+    ``p3.member_reuse`` — rare, since compatible trails host the required types. Chosen moid marked.
+    """
+    affine = affinity.get(alarm_type)
+    affine_unused = [
+        m
+        for m in trail.members
+        if m.object_type == affine and m.managed_object_id not in used_moids
+    ]
+    if affine and affine_unused:
+        member = rng.choice(affine_unused)
+        used_moids.add(member.managed_object_id)
+        return member
+    any_unused = [m for m in trail.members if m.managed_object_id not in used_moids]
+    if any_unused:
+        if affine:
+            metrics.P3_PLACEMENT_FALLBACK.labels(alarmType=alarm_type).inc()
+        member = rng.choice(any_unused)
+        used_moids.add(member.managed_object_id)
+        return member
+    # Every member used: cascade longer than the trail. Reuse (logged) — no crash.
+    metrics.P3_MEMBER_REUSE.inc()
     return rng.choice(list(trail.members))

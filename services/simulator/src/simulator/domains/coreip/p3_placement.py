@@ -12,7 +12,7 @@ the same trail (see :mod:`simulator.synth.aligned_synth`) — this table only de
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
 # alarmType -> affine objectType. Every value is one of the nine known typed graph layers
@@ -65,3 +65,28 @@ PLACEMENT_AFFINITY: Mapping[str, str] = MappingProxyType(_AFFINITY)
 def affine_object_type(alarm_type: str) -> str | None:
     """Return the objectType an ``alarmType`` is naturally raised on, or ``None`` if unmapped."""
     return _AFFINITY.get(alarm_type)
+
+
+def required_object_types(
+    alarm_types: Iterable[str],
+    root_alarm_type: str,
+    affinity: Mapping[str, str],
+) -> set[str]:
+    """Return the set of affine ``objectType``s a pattern's sequence needs (root included).
+
+    Task 21 / AC 47: this is the pack-derived input to the hostability rule — a trail is
+    compatible with a pattern iff it hosts >=1 member of **every** object type this returns. The
+    root ``alarmType`` is always included so the discovery/root object type is required. Alarm
+    types with **no affinity** (fallback-placed at emit time onto *any* member) contribute no
+    hard requirement here — keeping discovery consistent with the emit-time fallback placement so
+    a trail is never excluded for a type synthesis would place by fallback (design §A step 3).
+
+    Kept in the domain pack (not ``synth``/engine) so the compatible-trail discovery stays
+    domain-generic and reads object-type requirements only through this pack helper.
+    """
+    required: set[str] = set()
+    for alarm_type in (*alarm_types, root_alarm_type):
+        affine = affinity.get(alarm_type)
+        if affine is not None:
+            required.add(affine)
+    return required

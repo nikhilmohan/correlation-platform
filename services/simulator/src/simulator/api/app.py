@@ -46,7 +46,11 @@ class GroundTruthLabelModel(BaseModel):
 
 
 class P3CascadeLabelModel(BaseModel):
-    """Additive /labels record for P3 synth cascades (same endpoint, additive fields)."""
+    """Additive /labels record for P3 synth cascades (same endpoint, additive fields).
+
+    ``instanceIndex``/``igpArea`` are additive network-wide fields (AC 54); defaulted so existing
+    single-trail consumers are unaffected.
+    """
 
     patternId: str
     trailId: str
@@ -54,15 +58,28 @@ class P3CascadeLabelModel(BaseModel):
     rootCauseAlarmType: str
     childAlarmIds: list[str]
     scenarioType: str
+    instanceIndex: int = 1
+    igpArea: str | None = None
 
 
 class P3RunSummaryModel(BaseModel):
-    """/labels/p3-summary response — the run summary; the 60-70% KPI is directly computable."""
+    """/labels/p3-summary response — the run summary; the 60-70% KPI is directly computable.
+
+    Network-wide adds the spread + enrichment fields (all additive, defaulted): distinct trails/
+    areas used (AC 53), shortfall cascades (AC 55), enrichmentSafeCount + enrichmentConflictPatterns
+    (AC 51/65), and the over-provisioned emitted fraction (AC 51).
+    """
 
     totalAlarms: int
     alignedAlarms: int
     nonAlignedAlarms: int
     alignedFraction: float
+    distinctTrailsUsed: int = 0
+    distinctAreasUsed: int = 0
+    shortfallCascades: int = 0
+    enrichmentSafeCount: int = 0
+    enrichmentConflictPatterns: list[str] = []
+    alignedFractionEmitted: float = 0.0
 
 
 class HealthModel(BaseModel):
