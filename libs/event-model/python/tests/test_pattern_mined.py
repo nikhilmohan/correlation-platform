@@ -88,3 +88,106 @@ def test_provenance_domain_absent_is_optional() -> None:
     del env["payload"]["provenance"]["domain"]
     typed = m.deserialize(env)
     assert typed.payload.provenance.domain is None
+
+
+def test_provenance_anchor_scenario_id_present_round_trips() -> None:
+    """(a) Optional `anchorScenarioId` lives in provenance and round-trips (fixture carries it)."""
+    env = m.deserialize(_mined())
+    assert env.payload.provenance.anchorScenarioId == "CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1"
+    out = json.loads(m.serialize(env))
+    assert (
+        out["payload"]["provenance"]["anchorScenarioId"]
+        == "CODEBOOK-2026-06-08-001:FiberSpan:F-N0_N1"
+    )
+
+
+def test_provenance_anchor_scenario_id_absent_is_optional() -> None:
+    """(b) Backward-compat: a provenance lacking anchorScenarioId still validates -> None.
+
+    null/absent = "unexplained" cascade (a first-class outcome, not an error).
+    """
+    env = _mined()
+    del env["payload"]["provenance"]["anchorScenarioId"]
+    typed = m.deserialize(env)
+    assert typed.payload.provenance.anchorScenarioId is None
+    # And it does not leak into the wire when absent (NON_NULL inclusion).
+    out = json.loads(m.serialize(typed))
+    assert "anchorScenarioId" not in out["payload"]["provenance"]
+
+
+def test_provenance_anchor_scenario_id_not_required() -> None:
+    """(c) anchorScenarioId is optional — NOT in provenance.required."""
+    from acp_event_model import _generated
+
+    fields = _generated.Provenance.model_fields
+    assert "anchorScenarioId" in fields
+    assert fields["anchorScenarioId"].is_required() is False
+
+
+# Optional top-level sampleAlarms[] — a bounded sample of the real member alarms a
+# pattern was mined from (operator review / XAI). Present + absent (backward-compat).
+
+
+def test_sample_alarms_present_round_trips() -> None:
+    """(a) Optional `sampleAlarms` round-trips: all 5 fields of each item survive."""
+    env = m.deserialize(_mined())
+    samples = env.payload.sampleAlarms
+    assert samples is not None
+    assert len(samples) == 2
+    first = samples[0]
+    assert first.alarmId == "ALM-0001262"
+    assert first.alarmType == "lossOfSignal"
+    assert first.managedObjectId == "IPLink:N6_N7"
+    assert first.perceivedSeverity == "major"
+    # raisedAt parsed as an aware datetime; check it round-trips to the wire.
+    out = json.loads(m.serialize(env))
+    wire_samples = out["payload"]["sampleAlarms"]
+    assert len(wire_samples) == 2
+    assert wire_samples[0]["alarmId"] == "ALM-0001262"
+    assert wire_samples[0]["alarmType"] == "lossOfSignal"
+    assert wire_samples[0]["managedObjectId"] == "IPLink:N6_N7"
+    assert wire_samples[0]["perceivedSeverity"] == "major"
+    assert "raisedAt" in wire_samples[0]
+
+
+def test_sample_alarms_absent_is_optional() -> None:
+    """(b) Backward-compat: a PatternMinedEvent WITHOUT sampleAlarms still validates -> None.
+
+    Existing messages that never carried a sample must still deserialize.
+    """
+    env = _mined()
+    del env["payload"]["sampleAlarms"]
+    typed = m.deserialize(env)
+    assert typed.payload.sampleAlarms is None
+    # And it does not leak into the wire when absent (NON_NULL inclusion).
+    out = json.loads(m.serialize(typed))
+    assert "sampleAlarms" not in out["payload"]
+
+
+def test_sample_alarms_not_required() -> None:
+    """(c) sampleAlarms is optional — NOT in PatternMinedEvent.required."""
+    fields = PatternMinedEvent.model_fields
+    assert "sampleAlarms" in fields
+    assert fields["sampleAlarms"].is_required() is False
+
+
+def test_sample_alarm_item_fields_required_and_no_extras() -> None:
+    """Each present sample alarm must be complete (5 required fields) and reject extras."""
+    from acp_event_model import _generated
+
+    item_fields = _generated.SampleAlarm.model_fields
+    for f in ("alarmId", "alarmType", "raisedAt", "managedObjectId", "perceivedSeverity"):
+        assert f in item_fields
+        assert item_fields[f].is_required() is True
+
+    # A present-but-incomplete sample alarm is rejected.
+    env = _mined()
+    del env["payload"]["sampleAlarms"][0]["perceivedSeverity"]
+    with pytest.raises(ValidationError):
+        m.deserialize(env)
+
+    # additionalProperties:false -> an unknown field inside an item is rejected.
+    env = _mined()
+    env["payload"]["sampleAlarms"][0]["bogus"] = "x"
+    with pytest.raises(ValidationError):
+        m.deserialize(env)

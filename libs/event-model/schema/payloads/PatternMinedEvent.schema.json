@@ -27,6 +27,44 @@
       "type": "string",
       "description": "Trail scope the pattern was mined from (top-level field)."
     },
+    "sampleAlarms": {
+      "type": "array",
+      "description": "A bounded, representative sample of the real member alarms this pattern was mined from (for operator review / XAI). Optional; absent or empty when no sample was captured. Bounded by a producer-side cap (K).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "alarmId": {
+            "type": "string",
+            "description": "Unique alarm identifier of the member alarm."
+          },
+          "alarmType": {
+            "type": "string",
+            "description": "Canonical alarm-type token of the member alarm."
+          },
+          "raisedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the member alarm was raised (ISO-8601 UTC)."
+          },
+          "managedObjectId": {
+            "type": "string",
+            "description": "Managed object the member alarm was raised on; canonical '<objectType>:<id>' scheme."
+          },
+          "perceivedSeverity": {
+            "type": "string",
+            "description": "X.733 severity of the member alarm."
+          }
+        },
+        "required": [
+          "alarmId",
+          "alarmType",
+          "raisedAt",
+          "managedObjectId",
+          "perceivedSeverity"
+        ]
+      }
+    },
     "timing": {
       "type": "object",
       "additionalProperties": true,
@@ -52,6 +90,10 @@
         "codebookVersion": {
           "type": "string",
           "description": "Codebook version in scope when mining ran."
+        },
+        "anchorScenarioId": {
+          "type": "string",
+          "description": "The Codebook fault-origin scenario this pattern was anchored to during domain-knowledge anchoring; null/absent means the cascade was unexplained (no confident scenario match). Optional for backward-compat."
         }
       },
       "required": ["sourceWindowId", "snapshotId", "codebookVersion"]
