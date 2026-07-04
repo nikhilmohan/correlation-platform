@@ -1,0 +1,161 @@
+// alarm-manager — sole owner of LIVE alarm state; in-line on the P3 real-time path between
+// Enrichment and the Correlation Engine. Consumes alarms.enriched.live / alarms.status.changed /
+// correlation.results; persists each live alarm (lifecycle open) into the owned live_alarm
+// PostgreSQL schema then republishes on alarms.persisted.live. Serves the live alarm query API.
+// Java 17 / Spring Boot 3 / Gradle.
+//
+// Depends on the frozen event-model Java binding (com.acp:event-model:0.1.0, via includeBuild)
+// and the topic contracts only — never on another service's source. All dependencies are
+// permissive (Apache-2.0 / MIT / BSD / EPL-2.0 / PostgreSQL). No GPL/AGPL.
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.4'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'jacoco'
+}
+
+group = 'com.acp'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    springdocVersion = '2.6.0'
+    logstashEncoderVersion = '7.4'
+    testcontainersVersion = '1.20.1'
+    awaitilityVersion = '4.2.2'
+}
+
+dependencies {
+    // --- The frozen contract: event-model Java binding (generated AlarmEvent / AlarmStatusChange /
+    //     CorrelationResultEvent POJOs + EventCodec + ManagedObjectId).
+    implementation 'com.acp:event-model:0.1.0'
+
+    // --- Spring Boot: web, validation, actuator (health/metrics).
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // --- Kafka (idempotent producer for alarms.persisted.live + DLQ; three consumers).
+    implementation 'org.springframework.kafka:spring-kafka'
+
+    // --- Live alarm store: JDBC + Flyway (schema-scoped migrations into live_alarm).
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // --- OpenAPI 3.1 (springdoc) — /openapi.json + Swagger UI.
+    implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${springdocVersion}"
+
+    // --- Observability: Prometheus registry + structured JSON logging.
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation "net.logstash.logback:logstash-logback-encoder:${logstashEncoderVersion}"
+
+    // --- Tests: JUnit 5, Mockito, Testcontainers (Postgres, Kafka), Awaitility.
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
+    testImplementation "org.testcontainers:junit-jupiter:${testcontainersVersion}"
+    testImplementation "org.testcontainers:postgresql:${testcontainersVersion}"
+    testImplementation "org.testcontainers:kafka:${testcontainersVersion}"
+    testImplementation "org.awaitility:awaitility:${awaitilityVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.testcontainers:testcontainers-bom:${testcontainersVersion}"
+    }
+}
+
+// Unit/contract tests (default). Integration tests (Testcontainers) are tagged "integration"
+// and excluded from the fast unit run; they run via the `integrationTest` task. This keeps
+// `./gradlew build` green without a Docker daemon (the live gate is the Testcontainers task).
+tasks.named('test', Test) {
+    useJUnitPlatform {
+        excludeTags 'integration'
+    }
+    // Forward the opt-in OpenAPI regeneration flag to the test JVM (default off; a normal build
+    // is a read-only drift guard).
+    if (System.getProperty('openapi.regenerate') != null) {
+        systemProperty 'openapi.regenerate', System.getProperty('openapi.regenerate')
+    }
+    finalizedBy jacocoTestReport
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Testcontainers integration tests (PostgreSQL + Kafka).'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'integration'
+    }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    shouldRunAfter test
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/alarmmanager/AlarmManagerApplication.class',
+                    'com/acp/alarmmanager/api/dto/**',
+                    'com/acp/alarmmanager/config/**',
+                    // Raw-JDBC repositories: SQL/upsert/ResultSet->record wiring against real
+                    // PostgreSQL (jsonb, ON CONFLICT, GIN trail membership, partial-unique guard).
+                    // These are NOT unit-testable in isolation and are exercised for real by the
+                    // Testcontainers `integrationTest` task (mirrors topology's driver-wiring
+                    // exclusions). All service/consumer/controller business logic stays in scope.
+                    'com/acp/alarmmanager/repository/**'
+                ])
+            })
+        )
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            element = 'BUNDLE'
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/alarmmanager/AlarmManagerApplication.class',
+                    'com/acp/alarmmanager/api/dto/**',
+                    'com/acp/alarmmanager/config/**',
+                    // Raw-JDBC repositories: SQL/upsert/ResultSet->record wiring against real
+                    // PostgreSQL (jsonb, ON CONFLICT, GIN trail membership, partial-unique guard).
+                    // These are NOT unit-testable in isolation and are exercised for real by the
+                    // Testcontainers `integrationTest` task (mirrors topology's driver-wiring
+                    // exclusions). All service/consumer/controller business logic stays in scope.
+                    'com/acp/alarmmanager/repository/**'
+                ])
+            })
+        )
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification

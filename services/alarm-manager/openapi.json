@@ -1,0 +1,306 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenAPI definition",
+    "version": "v0"
+  },
+  "paths": {
+    "/alarms": {
+      "get": {
+        "tags": [
+          "alarm-query-controller"
+        ],
+        "summary": "List/filter live alarms (paginated).",
+        "description": "Returns the platform-canonical { items, total, limit, offset } list-pagination envelope. Filters are AND-combined.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Lifecycle STATE filter.",
+            "required": false,
+            "schema": {
+              "enum": [
+                "open",
+                "in-progress",
+                "correlated",
+                "cleared"
+              ]
+            }
+          },
+          {
+            "name": "trailId",
+            "in": "query",
+            "description": "Only alarms whose trailIds contain this value.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "incidentId",
+            "in": "query",
+            "description": "Only alarms linked to this incident.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "raisedAt at or after this ISO-8601 UTC time.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "raisedAt at or before this ISO-8601 UTC time.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default from config, capped).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Rows to skip.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Invalid state enum / from-to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmPage"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Canonical AlarmPage envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alarms/{alarmId}": {
+      "get": {
+        "tags": [
+          "alarm-query-controller"
+        ],
+        "summary": "Retrieve a single alarm's full record with ordered transition history.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "alarmId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full AlarmDetail record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown alarmId.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlarmDetail"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AlarmPage": {
+        "description": "Canonical list-pagination envelope { items, total, limit, offset }.",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlarmSummary"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "AlarmSummary": {
+        "description": "Per-alarm summary for the live alarm list view.",
+        "properties": {
+          "alarmId": {
+            "type": "string"
+          },
+          "managedObjectId": {
+            "type": "string"
+          },
+          "eventType": {
+            "type": "string",
+            "description": "X.733 event type / category."
+          },
+          "alarmType": {
+            "type": "string",
+            "description": "Canonical alarm-type join token, distinct from eventType/probableCause."
+          },
+          "perceivedSeverity": {
+            "type": "string"
+          },
+          "raisedAt": {
+            "type": "string",
+            "description": "ISO-8601 UTC time the alarm was raised."
+          },
+          "lifecycleState": {
+            "type": "string",
+            "description": "Alarm-Manager lifecycle STATE: open / in-progress / correlated / cleared."
+          },
+          "role": {
+            "type": "string",
+            "description": "Correlation-group role: root-cause / child / none."
+          },
+          "incidentId": {
+            "type": "string"
+          },
+          "trailIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "AlarmDetail": {
+        "description": "Full live alarm record with ordered transition history.",
+        "properties": {
+          "alarmId": {
+            "type": "string"
+          },
+          "managedObjectId": {
+            "type": "string"
+          },
+          "eventType": {
+            "type": "string",
+            "description": "X.733 event type / category."
+          },
+          "probableCause": {
+            "type": "string",
+            "description": "X.733 probable cause."
+          },
+          "alarmType": {
+            "type": "string",
+            "description": "Canonical alarm-type join token, distinct from eventType/probableCause."
+          },
+          "perceivedSeverity": {
+            "type": "string"
+          },
+          "raisedAt": {
+            "type": "string"
+          },
+          "clearedAt": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "Wire state: raised / cleared."
+          },
+          "trailIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "lifecycleState": {
+            "type": "string",
+            "description": "Alarm-Manager lifecycle STATE: open / in-progress / correlated / cleared."
+          },
+          "role": {
+            "type": "string",
+            "description": "Correlation-group role: root-cause / child / none."
+          },
+          "incidentId": {
+            "type": "string"
+          },
+          "transitions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransitionDto"
+            }
+          }
+        }
+      },
+      "TransitionDto": {
+        "description": "One state-transition audit entry (ascending occurredAt).",
+        "properties": {
+          "toState": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "description": "AlarmStatusChange.source (originating service), when applicable."
+          },
+          "changedAt": {
+            "type": "string",
+            "description": "AlarmStatusChange.changedAt (ISO-8601 UTC), when applicable."
+          },
+          "occurredAt": {
+            "type": "string",
+            "description": "ISO-8601 UTC time the Alarm Manager applied the transition."
+          }
+        }
+      }
+    }
+  }
+}
