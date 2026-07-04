@@ -68,12 +68,21 @@ as-is):
 
 - **Language / runtime:** Java 17 (`eclipse-temurin:17-jdk`), Spring Boot 3.x.
 - **Build:** Gradle (Gradle Wrapper pinned), JUnit 5 (`spring-boot-starter-test`).
-- **Stream processing:** **Kafka Streams** (`spring-kafka` + `kafka-streams`) using the
-  **Processor API** (not the DSL). Correlation-instance state lives in a **RocksDB-backed,
-  changelog-backed keyed state store** keyed by `(trailId, patternId)`; deadline-driven session
-  expiry is fired from a **wall-clock `Punctuator`** over a time-ordered deadline index. The DSL's
-  session/tumbling windows are unsuitable because instance lifetime is per-pattern, born lazily,
-  and torn down immediately on full match (see Design alternatives).
+- **Stream processing (MVP — accepted).** Ingest/produce is **Spring Kafka** (`@KafkaListener`
+  consumers + `KafkaTemplate` producers). Correlation-instance state lives in an **in-memory
+  `(trailId, patternId)` instance registry** (a thread-safe `ConcurrentMap`), driven by the
+  `@KafkaListener` consumers plus a **scheduled wall-clock expiry tick** (`@Scheduled`) that
+  replaces the Kafka Streams `Punctuator`. This is the **accepted MVP design for the state store
+  (Open Question 2 — re-resolved for the MVP)**; see Data model section A and the Design
+  alternatives table for the trade-off. The DSL's session/tumbling windows remain unsuitable
+  because instance lifetime is per-pattern, born lazily, and torn down immediately on full match.
+  - **Target/deferred design (documented follow-up).** The originally-analysed Kafka Streams
+    Processor-API topology with a **RocksDB-backed, changelog-backed keyed state store** keyed by
+    `(trailId, patternId)` and a wall-clock `Punctuator` over a time-ordered deadline index remains
+    the path to **durable restart-recovery of in-flight instances** if/when required. It is
+    preserved throughout this design as the deferred target, not the MVP build. The datastore and
+    contract split is identical either way, so this is an internal state-store choice with **no
+    contract impact**.
 - **HTTP / API:** Spring Web MVC; **springdoc-openapi** generates and serves OpenAPI 3.1 at
   `/openapi.json` and Swagger UI.
 - **Datastore:** PostgreSQL (Incident Store) in the owned schema `incident`, via Spring Data JDBC /
@@ -84,10 +93,12 @@ as-is):
   Codebook Generator, Knowledge Service.
 - **Observability:** Spring Boot Actuator (`/health` liveness+readiness), Micrometer +
   `micrometer-registry-prometheus` (`/metrics`), structured JSON logs (Logback JSON encoder).
-- **Testing:** JUnit 5 (unit/contract), `kafka-streams-test-utils` `TopologyTestDriver` (drives
-  punctuation deterministically via wall-clock advance) for instance-lifecycle tests,
-  **Testcontainers** (Kafka + PostgreSQL) for integration, **WireMock / MockWebServer** stubs
-  generated from collaborators' published OpenAPI for unit tests.
+- **Testing:** JUnit 5 (unit/contract). Instance-lifecycle tests drive the in-memory registry
+  directly and advance an **injectable `Clock`** to fire the expiry tick deterministically (the MVP
+  equivalent of advancing wall-clock time to drive a punctuator); **Testcontainers** (Kafka +
+  PostgreSQL) for integration, **WireMock / MockWebServer** stubs generated from collaborators'
+  published OpenAPI for unit tests. (The deferred Kafka Streams target would test the same
+  lifecycle via `kafka-streams-test-utils` `TopologyTestDriver`.)
 - **Licenses:** all Apache-2.0 / MIT / EPL-2.0 (Testcontainers MIT, MockWebServer Apache-2.0) —
   permissive only.
 
@@ -102,7 +113,7 @@ Every spec Task (1–10) is realized below and traceable to modules/flows.
 | 1. Load approved patterns (startup fetch + `patterns.approved` updates); record trails-active + per-pattern `sessionWindow` | `PatternBootstrapRunner` calls `PatternManagerClient.listApproved()` at startup; `PatternApprovedConsumer` treats each `patterns.approved` event as a **refresh trigger** and **re-fetches the approved pattern set via `PatternManagerClient.listApproved()`** (`GET /patterns?lifecycle=approved`). The **`trailId`** placing each pattern on its trail(s) for `(trailId, patternId)` keying comes from **`PatternView.trailId`** on the read API — **not** from the event (the frozen `PatternApprovedEvent` carries no `trailId`; trail placement is structurally impossible from the event alone). Both paths upsert into `PatternStore`, indexed by `trailId -> activePatterns`. Each `PatternRef` carries `trailId`, `sequence`, `rootCauseAlarmType`, `confidence`, and **`sessionWindow {windowMs, type}`** — all from `PatternView`. |
 | 2. Load codebook (record `codebookId`, fetch full signatures, keep latest-in-scope per `snapshotId`/trail) | `CodebookConsumer` handles `codebook.generated`, calls `CodebookGeneratorClient.fetchTrailSignatures(codebookId)` against the Codebook Generator's **published `GET /codebooks/{codebookId}/trail-signatures` projection** (per scenario fanned out per `trailId`: `{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[] }`), stores into `CodebookStore` keyed by `(snapshotId, trailId)`, monotonic latest-wins replace. Resolves CE Open Q4 (consumer side of P1-G5 / P3-G2). |
 | 3. Consume + validate + dedupe + DLQ + **fan out** `alarms.persisted.live` | `AlarmDeserializer` (event-model binding + `schemaVersion` check), `AlarmIngestProcessor` (dedupe via `alarmId` store, DLQ poison), then **re-key per trail**: for each `trailId` in `trailIds[]` emit one keyed record into the instance topology — the fan-out. |
-| 4. Manage correlation-instance lifecycle (lazy init, in-progress, full-match, session-expiry) | `CorrelationInstanceProcessor` (Processor API) over the `instanceStore` keyed by `(trailId, patternId)`; lazy create, incremental advance, full-match fire-and-destroy; `ExpiryPunctuator` over the `deadlineIndex` destroys expired instances and reverts their alarms. |
+| 4. Manage correlation-instance lifecycle (lazy init, in-progress, full-match, session-expiry) | `CorrelationInstanceProcessor` over the **in-memory `instanceRegistry`** keyed by `(trailId, patternId)`; lazy create, incremental advance, full-match fire-and-destroy; the **scheduled `ExpiryTick`** over the in-memory `deadlineIndex` destroys expired instances and reverts their alarms (the MVP wall-clock tick that replaces the Kafka Streams `Punctuator`; RocksDB/changelog remains the deferred target). |
 | 5. Evaluate codebook decoding (fallback for unmatched alarm sets); threshold floors from Knowledge | `CodebookDecoder` invoked from the **uncovered-alarm path** (no active/covering instance) and on **session-expiry** of an instance; scores the alarm set against trail-scoped scenarios; emits a codebook candidate into `ConflictResolver`. Coexistence model defined in **Algorithm logical flow**. |
 | 6. Resolve conflicts (specificity then confidence; weights from Knowledge) | `ConflictResolver` collects candidates (pattern-instance match + codebook candidate) claiming overlapping alarms, orders specificity-desc then confidence-desc, picks one winner. |
 | 7. Create + persist incident (resolve `rootCauseAlarmType` to `alarmId`, children, stable `incidentId`, write Incident Store) | `IncidentFactory` resolves the root-cause `alarmId` by matching the winning match's `rootCauseAlarmType` token against the matched alarms' **`alarmType`** field (the canonical join key on `AlarmEvent`; **not** `eventType`/`probableCause`) — the matched alarm whose `alarmType == rootCauseAlarmType` supplies `rootCauseAlarmId`, the rest become children — and derives a deterministic `incidentId`; `IncidentRepository` persists incident + membership idempotently. |
@@ -121,7 +132,7 @@ Idle / Idle / Active).
 |---|---|---|---|
 | P1 — Topology onboarding | **Idle** | None. The service may be deployed; consumers see no traffic; no approved patterns/codebook exist. `/health` and `/metrics` respond. | — |
 | P2 — Pattern learning | **Idle** | None of the correlation flow. It does **not** consume any history-path topic. It may receive early `codebook.generated` / `patterns.approved` events and warm `CodebookStore` / `PatternStore`, but performs no correlation (no live alarms). | — (state-warming only) |
-| P3 — Real-time correlation | **Active** | Full pipeline: `AlarmIngestProcessor` to per-trail fan-out to `CorrelationInstanceProcessor` (lazy-init / incremental match / fire-and-destroy) + `ExpiryPunctuator` (session-expiry revert) to `CodebookDecoder` + `ConflictResolver` to `IncidentFactory` to `IncidentRepository` + `CorrelationResultProducer` + `AlarmStatusProducer`; `PatternApprovedConsumer` / `CodebookConsumer` keep model state fresh; `IncidentQueryController` + `StatsController` serve the web-ui. | In (Kafka): `alarms.persisted.live`, `patterns.approved`, `codebook.generated`. Out (Kafka): `correlation.results`, `alarms.status.changed`, `*.dlq`. Calls (API): Pattern Manager, Codebook Generator, Knowledge Service. Serves (API): `GET /incidents`, `GET /incidents/{id}`, `GET /stats`. |
+| P3 — Real-time correlation | **Active** | Full pipeline: `AlarmIngestProcessor` to per-trail fan-out to `CorrelationInstanceProcessor` (lazy-init / incremental match / fire-and-destroy over the in-memory `instanceRegistry`) + the scheduled `ExpiryTick` (session-expiry revert) to `CodebookDecoder` + `ConflictResolver` to `IncidentFactory` to `IncidentRepository` + `CorrelationResultProducer` + `AlarmStatusProducer`; `PatternApprovedConsumer` / `CodebookConsumer` keep model state fresh; `IncidentQueryController` + `StatsController` serve the web-ui. | In (Kafka): `alarms.persisted.live`, `patterns.approved`, `codebook.generated`. Out (Kafka): `correlation.results`, `alarms.status.changed`, `*.dlq`. Calls (API): Pattern Manager, Codebook Generator, Knowledge Service. Serves (API): `GET /incidents`, `GET /incidents/{id}`, `GET /stats`. |
 
 ---
 
@@ -137,12 +148,12 @@ flowchart TB
     PS[(PatternStore trailId to active patterns)]
     CBS[(CodebookStore by snapshotId and trail)]
   end
-  subgraph stream [Kafka Streams instance topology]
+  subgraph stream [In-memory instance registry and processing]
     CIP[CorrelationInstanceProcessor]
-    IST[(instanceStore keyed by trailId and patternId)]
-    DIX[(deadlineIndex time ordered)]
-    DSS[(alarmDedupeStore)]
-    EXP[ExpiryPunctuator wall clock]
+    IST[(instanceRegistry in memory keyed by trailId and patternId)]
+    DIX[(deadlineIndex in memory time ordered)]
+    DSS[(alarmDedupe in memory guard)]
+    EXP[ExpiryTick scheduled wall clock]
     CD[CodebookDecoder]
     CR[ConflictResolver]
     IF[IncidentFactory]
@@ -199,15 +210,15 @@ flowchart TB
 
 | Module | Responsibility |
 |---|---|
-| `AlarmIngestProcessor` | Consume `alarms.persisted.live`; deserialize + validate via event-model binding; reject unknown major `schemaVersion`; dedupe on `alarmId` against `alarmDedupeStore`; route poison to DLQ; emit the alarm forward for fan-out. |
+| `AlarmIngestProcessor` | Consume `alarms.persisted.live`; deserialize + validate via event-model binding; reject unknown major `schemaVersion`; dedupe on `alarmId` against the in-memory `alarmDedupe` guard; route poison to DLQ; emit the alarm forward for fan-out. |
 | `Per-trail fan-out` | For each `trailId` in the alarm's `trailIds[]`, re-key the alarm to that `trailId` so the instance topology is partitioned per trail and the alarm reaches each trail's instances independently (isolation). |
 | `PatternApprovedConsumer` | Consume `patterns.approved`; dedupe on `eventId`; treat the event as a **refresh trigger** and **re-fetch the approved pattern set via `PatternManagerClient.listApproved()`** (`GET /patterns?lifecycle=approved`); upsert each `PatternRef` (incl. `sessionWindow`) into `PatternStore` under its **`trailId` taken from `PatternView.trailId`** (the event carries no `trailId` — the read API is the source of trail placement). |
 | `CodebookConsumer` | Consume `codebook.generated`; dedupe on `eventId`; fetch the per-trail signatures via `CodebookGeneratorClient.fetchTrailSignatures(codebookId)` (the published `GET /codebooks/{codebookId}/trail-signatures` projection); latest-in-scope replace in `CodebookStore`. |
 | `PatternBootstrapRunner` | At startup, seed `PatternStore` from `PatternManagerClient.listApproved()` (Task 1 startup fetch). |
 | `PatternStore` | Thread-safe reference model. Two indices: `(trailId, patternId) -> PatternRef`, and `trailId -> Set of patternId` (active patterns on a trail — the fan-out driver). |
 | `CodebookStore` | Trail-scoped scenario signatures (`TrailScenarioSignature` = `{ trailId, scenarioId, rootCauseAlarmType, expectedSymptoms[{alarmType, managedObjectId}] }` from the trail-signatures projection), latest-in-scope per `(snapshotId, trailId)`. |
-| `CorrelationInstanceProcessor` | The heart: lazy-create / add-to-existing / incremental sequence advance / window-deadline maintenance / full-match fire-and-destroy. Owns `instanceStore` + `deadlineIndex`. |
-| `ExpiryPunctuator` | Wall-clock `Punctuator`; on each tick destroys every instance whose deadline has passed, reverts its alarms, and (per coexistence model) hands the expired alarm set to `CodebookDecoder`. |
+| `CorrelationInstanceProcessor` | The heart: lazy-create / add-to-existing / incremental sequence advance / window-deadline maintenance / full-match fire-and-destroy. Owns the in-memory `instanceRegistry` + `deadlineIndex`. Per-instance mutation (`onAlarm`) and expiry (`onClockTick`) are serialized per `(trailId, patternId)` so a single instance is never mutated concurrently (see the concurrency note). |
+| `ExpiryTick` (`@Scheduled` wall-clock tick — MVP; replaces the Kafka Streams `Punctuator`) | Runs on a fixed wall-clock cadence; on each tick, over the `deadlineIndex` head, destroys every instance whose deadline has passed, reverts its alarms, and (per coexistence model) hands the expired alarm set to `CodebookDecoder`. Correctness: `onAlarm`/`onClockTick` for a given instance are mutually exclusive (single-instance synchronized), so an alarm admitted mid-tick and an expiry cannot race; expiry lateness is bounded by the tick interval. (Deferred target: a wall-clock `Punctuator`.) |
 | `CodebookDecoder` | Closest-match scoring of an uncovered/expired alarm set against trail-scoped scenarios; produces codebook candidates. |
 | `ConflictResolver` | Deterministic specificity-then-confidence resolution among competing candidates; one winner per disjoint alarm set. |
 | `IncidentFactory` | Resolve the root-cause `alarmId` by matching the winning match's `rootCauseAlarmType` token to the matched alarm whose **`alarmType`** equals it (join on `AlarmEvent.alarmType`, not `eventType`/`probableCause`); derive stable `incidentId`; assemble incident + membership (root-cause + children). |
@@ -225,16 +236,45 @@ flowchart TB
 
 This service holds two distinct kinds of state:
 
-1. **Live correlation-instance state** — ephemeral, high-churn, in a Kafka Streams state store
-   (RocksDB + changelog). This is the **depth item** the spec calls out (Open Question 2).
-2. **Durable incident records** — the system of record, in PostgreSQL.
+1. **Live correlation-instance state** — ephemeral, high-churn, in an **in-memory
+   `(trailId, patternId)` registry (MVP — accepted)**. This is the **depth item** the spec calls
+   out (Open Question 2), re-resolved below for the MVP.
+2. **Durable incident records** — the system of record, in PostgreSQL. Incidents are **fully
+   persisted and survive restart**; only in-flight (mid-accumulation) instances are non-durable
+   under the MVP registry (trade-off documented in section A).
 
-### A. CorrelationInstance — the in-flight state structure (Open Question 2 resolved)
+### A. CorrelationInstance — the in-flight state structure (Open Question 2 — MVP re-resolved: in-memory registry)
+
+> **Open Question 2 — state store (re-resolved for the MVP; human-approved).** The MVP
+> implementation stores live correlation instances in an **in-memory `(trailId, patternId)`
+> registry** (a thread-safe `ConcurrentMap`), advanced by the `@KafkaListener` alarm consumers and
+> aged out by a **scheduled wall-clock expiry tick** (`@Scheduled`). This is the **accepted MVP
+> design.** The Kafka Streams RocksDB + changelog analysis below is **preserved as the deferred /
+> target design** for durable in-flight recovery (see the "Deferred target" and "Restart-recovery
+> follow-up" notes and the Design alternatives table).
+>
+> **Trade-off (stated honestly).** Durable **INCIDENTS** — the system of record — are fully
+> persisted to PostgreSQL and **survive restart** unchanged. The **only** state not recovered on a
+> restart is **IN-FLIGHT (mid-accumulation) correlation instances** held in the registry. On
+> restart those are simply **re-accumulated from subsequent alarms** on `alarms.persisted.live` as
+> the same `(trailId, patternId)` instances are lazily re-opened by later alarms. So the loss is
+> **bounded** (only instances that were mid-window at the instant of restart, and only the alarms
+> already consumed before restart), there is **no incident loss**, and there is **no contract
+> impact** (no topic/payload/field change). In exchange the implementation is **dramatically
+> simpler** — no Kafka Streams topology, no changelog topics, no RocksDB state-store operations,
+> no partition-assignment/rebalance handling for the store. This trade is acceptable for the MVP:
+> the system of record is durable, and the correlation window is short enough that a restart loses
+> at most a small, self-healing amount of in-flight accumulation.
+>
+> **Restart-recovery of in-flight instances = documented FOLLOW-UP / limitation.** Durable
+> recovery of mid-accumulation instances is **not** provided by the MVP registry and is an explicit
+> limitation. The **RocksDB + changelog** state store analysed below remains the intended path to
+> add it if/when required; adopting it is an internal state-store change with no contract impact.
 
 **Identity.** A correlation instance is uniquely `(trailId, patternId)`. At most one live instance
 per pair exists at any time (spec idempotency invariant), enforced by lazy-init + destroy-on-conclude.
 
-**The `CorrelationInstance` record** (the value stored in `instanceStore`):
+**The `CorrelationInstance` record** (the value held in the in-memory `instanceRegistry`):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -305,22 +345,33 @@ stateDiagram-v2
 
 ### The registry / indices (where live state lives and how it is found)
 
-Three cooperating indices, all backed by Kafka Streams Processor-API state stores (RocksDB +
-changelog, so they survive restart and rebalance). The justification for each:
+**MVP (accepted):** three cooperating in-memory indices, all held in the JVM heap (thread-safe
+`ConcurrentMap`s) and re-derivable from Kafka on restart. The justification for each:
 
-| Index | Backing | Key to value | Purpose / why this structure |
+| Index | Backing (MVP) | Key to value | Purpose / why this structure |
 |---|---|---|---|
-| **`instanceStore`** (primary registry) | `KeyValueStore` of String to `CorrelationInstance`, RocksDB + changelog | composite key `trailId patternId` to `CorrelationInstance` | **O(1) add-to-existing lookup** when an alarm relevant to pattern P arrives on trail T. The single source of truth for live instance state; changelog gives restart recovery without a PostgreSQL round-trip on the hot path. |
-| **`deadlineIndex`** (expiry timing structure) | `KeyValueStore` over a **range-scannable** key = `deadlineEpochMs` packed with the instance key, RocksDB + changelog | `deadlineEpochMs` big-endian time-ordered to instance key | **Efficient earliest-deadline-first expiry.** RocksDB stores keys sorted, so the `ExpiryPunctuator` does a single forward `range(0, now)` scan to find exactly the due instances — equivalent to a min-heap or timing-wheel head, but persistent and changelog-recoverable. On `gap-based` extension the old deadline key is deleted and a new one inserted (a heap decrease-key then re-insert). |
-| **`PatternStore.trailIndex`** (fan-out driver) | in-memory `ConcurrentMap` of String to Set of String, rebuilt from Pattern Manager + `patterns.approved` | `trailId` to set of active `patternId` | **Fan-out lookup:** given an incoming alarm on trail T, enumerate which patterns are active on T, so the engine knows which `(T, P)` instances the alarm must reach (existing ones) or may open (new ones). Pattern set is low-churn reference data, so plain in-memory plus changelog-free is fine (re-derivable from Pattern Manager on restart). |
+| **`instanceRegistry`** (primary registry) | in-memory `ConcurrentMap` of String to `CorrelationInstance` | composite key `trailId patternId` to `CorrelationInstance` | **O(1) add-to-existing lookup** when an alarm relevant to pattern P arrives on trail T. The single source of truth for live instance state; on restart it is empty and re-accumulated from subsequent alarms (in-flight instances are not durable — see section A trade-off). |
+| **`deadlineIndex`** (expiry timing structure) | in-memory time-ordered structure (a `ConcurrentSkipListMap`/`PriorityQueue` of `deadlineEpochMs` to instance key) | `deadlineEpochMs` ascending to instance key | **Efficient earliest-deadline-first expiry.** A sorted / min-heap head lets the **scheduled expiry tick** find exactly the due instances (`headMap(now)`) — a timing-wheel head. On `gap-based` extension the old deadline entry is removed and a new one inserted (decrease-key then re-insert). |
+| **`PatternStore.trailIndex`** (fan-out driver) | in-memory `ConcurrentMap` of String to Set of String, rebuilt from Pattern Manager + `patterns.approved` | `trailId` to set of active `patternId` | **Fan-out lookup:** given an incoming alarm on trail T, enumerate which patterns are active on T, so the engine knows which `(T, P)` instances the alarm must reach (existing ones) or may open (new ones). Pattern set is low-churn reference data, re-derivable from Pattern Manager on restart. |
 
-> **Why a state store and not pure in-memory or PostgreSQL.** Pure in-memory loses all in-flight
-> instances on restart (a fiber-cut storm mid-accumulation would silently drop). PostgreSQL on the
-> hot path adds a network round-trip per alarm and contends with incident writes. A Kafka Streams
-> RocksDB store keyed by `(trailId, patternId)` gives **O(1) per-alarm state access, partition-local
-> isolation (no cross-instance bleed), changelog-backed restart recovery, and built-in
-> partitioning by trail** — exactly the spec's isolation + idempotency + per-pattern-timing
-> constraints. PostgreSQL is reserved for durable incidents only.
+> **Why an in-memory registry (accepted) and not a PostgreSQL hot path (MVP rationale).**
+> PostgreSQL on the hot path adds a network round-trip per alarm and contends with incident writes,
+> so live instances are **not** kept in the DB. For the MVP the registry is held **in memory**: it
+> gives **O(1) per-alarm state access** and, because the registry is keyed by `(trailId, patternId)`
+> and access is guarded (single-writer per instance — see the concurrency note), it preserves the
+> spec's **isolation + idempotency + per-pattern-timing** constraints. The accepted trade-off is
+> that in-flight instances are **not durable across restart**; durable **incidents** live in
+> PostgreSQL only. (See section A for the full trade-off and the follow-up.)
+>
+> **Deferred target (documented follow-up) — why a Kafka Streams RocksDB state store.** If durable
+> restart-recovery of in-flight instances is later required, the target design replaces the
+> in-memory registry with a **Kafka Streams RocksDB state store keyed by `(trailId, patternId)` +
+> changelog**: it keeps the O(1) per-alarm access and adds **partition-local isolation
+> (no cross-instance bleed), changelog-backed restart recovery, and built-in partitioning by
+> trail** — at the cost of a Kafka Streams topology, changelog topics and RocksDB ops. Under that
+> target the `instanceRegistry`/`deadlineIndex` become RocksDB + changelog `KeyValueStore`s and the
+> scheduled tick becomes a wall-clock `Punctuator` over a range-scannable deadline key. This is an
+> **internal state-store change with no contract impact.**
 
 **Isolation guarantee.** Because the instance topology is keyed by `(trailId, patternId)` and the
 fan-out re-keys per `trailId`, instances on different trails (and different patterns on the same
@@ -422,12 +473,16 @@ Constraint: `UNIQUE(incident_id, alarm_id)`. Index: `(alarm_id)`.
 
 **`incident.processed_event`** (schema `incident`, table `processed_event`) — idempotency ledger for consumed events deduped on `eventId`
 (`patterns.approved` / `codebook.generated`). `scope` distinguishes topics; `dedupe_key` is the
-`eventId`. Alarm dedupe uses the partition-local RocksDB `alarmDedupeStore` (high volume,
-changelog-recoverable); the table is for low-volume event-side dedupe.
+`eventId`. Alarm dedupe (MVP) uses an **in-memory `alarmDedupe` guard** (a bounded in-memory set of
+recently-seen `alarmId`s) plus the per-instance `dedupeAlarmIds`; the table is for low-volume
+event-side dedupe. (Under the deferred Kafka Streams target the alarm dedupe guard would be a
+partition-local RocksDB changelog-recoverable store.)
 
-> Live **instance / dedupe stream state** lives in Kafka Streams state stores (RocksDB,
-> changelog-backed), not in PostgreSQL. PostgreSQL holds only durable incident records + the
-> event-dedupe ledger.
+> Live **instance / alarm-dedupe state** lives in the **in-memory registry** (MVP), not in
+> PostgreSQL and (in the MVP) not in a Kafka Streams state store. PostgreSQL holds only durable
+> incident records + the event-dedupe ledger. In-flight registry state is not durable across
+> restart (bounded, self-healing — see Data model section A); incidents are durable. The Kafka
+> Streams RocksDB + changelog store remains the deferred target for durable in-flight recovery.
 
 ---
 
@@ -437,18 +492,20 @@ changelog-recoverable); the table is for low-volume event-side dedupe.
 
 | Topic | Handler | Payload (event-model) | Idempotency / dedupe key | DLQ |
 |---|---|---|---|---|
-| `alarms.persisted.live` | `AlarmIngestProcessor` | `AlarmEvent` | `alarmId` (RocksDB `alarmDedupeStore`); plus per-instance `dedupeAlarmIds` | `alarms.persisted.live.dlq` |
+| `alarms.persisted.live` | `AlarmIngestProcessor` | `AlarmEvent` | `alarmId` (in-memory `alarmDedupe` guard); plus per-instance `dedupeAlarmIds` | `alarms.persisted.live.dlq` |
 | `patterns.approved` | `PatternApprovedConsumer` | `PatternApprovedEvent` (**refresh trigger only** — `trailId` is fetched from the Pattern Manager read API, not read off this payload) | `eventId` (`processed_event` ledger) | `patterns.approved.dlq` |
 | `codebook.generated` | `CodebookConsumer` | `CodebookGeneratedEvent` | `eventId` (`processed_event` ledger) | `codebook.generated.dlq` |
 
 - **Validation:** every message is decoded through the `libs/event-model` Java binding
   (`EventCodec`). Unknown major `schemaVersion` and unparseable/invalid payloads are poison,
   routed to the topic's DLQ; the consumer commits past them and continues (AC19).
-- **At-least-once + idempotency:** Streams `processing.guarantee=at_least_once`,
-  `isolation.level=read_committed`; producers `enable.idempotence=true`, `acks=all`. A redelivered
-  alarm hits the dedupe store (and, if its instance is live, the instance's `dedupeAlarmIds`) and
-  is dropped before re-admission (AC16). Redelivered pattern/codebook events hit the ledger and are
-  no-ops.
+- **At-least-once + idempotency (MVP):** `@KafkaListener` consumers commit **after** successful
+  processing (at-least-once, manual/`RECORD` ack); producers `enable.idempotence=true`, `acks=all`.
+  A redelivered alarm hits the in-memory `alarmDedupe` guard (and, if its instance is live, the
+  instance's `dedupeAlarmIds`) and is dropped before re-admission (AC16). Redelivered
+  pattern/codebook events hit the `processed_event` ledger and are no-ops. (Under the deferred
+  Kafka Streams target these become Streams `processing.guarantee=at_least_once` +
+  `isolation.level=read_committed` with a changelog-backed dedupe store.)
 
 ### Producers
 
@@ -464,7 +521,7 @@ sites so that no transition is silently omitted (spec invariant):
 
 1. `CorrelationInstanceProcessor.admit(alarm, instance)` fires `in-progress` for the admitted alarm.
 2. `IncidentFactory.fire(winner)` fires `correlated` for the root-cause alarm and every child alarm.
-3. `ExpiryPunctuator.expire(instance)` fires `reverted-open` for every alarm in `matchedAlarms`.
+3. `ExpiryTick.expire(instance)` (the scheduled wall-clock tick) fires `reverted-open` for every alarm in `matchedAlarms`.
 
 Each firing is counted in `alarms_status_changed_total{newStatus}`. The richer correlation context
 (incidentId, role, trailId) travels on `CorrelationResultEvent`, not here.
@@ -604,8 +661,8 @@ never special-case per-producer envelopes.
 ```
 
 ### Operational endpoints
-- `GET /health` — Actuator liveness + readiness (readiness gates on Kafka Streams RUNNING + DB
-  connectivity + Knowledge params loaded + pattern bootstrap complete).
+- `GET /health` — Actuator liveness + readiness (readiness gates on Kafka consumer containers
+  running + DB connectivity + Knowledge params loaded + pattern bootstrap complete).
 - `GET /metrics` — Prometheus.
 - `GET /openapi.json` — OpenAPI 3.1 document.
 
@@ -639,7 +696,7 @@ sequenceDiagram
   participant AC as AlarmIngestProcessor
   participant FAN as Per trail fan out
   participant CIP as CorrelationInstanceProcessor
-  participant IST as instanceStore
+  participant IST as instanceRegistry in memory
   participant ASP as AlarmStatusProducer
   participant IF as IncidentFactory
   participant DB as Incident Store
@@ -676,7 +733,7 @@ sequenceDiagram
   participant AC as AlarmIngestProcessor
   participant FAN as Per trail fan out
   participant CIP as CorrelationInstanceProcessor
-  participant IST as instanceStore
+  participant IST as instanceRegistry in memory
 
   K->>AC: AlarmEvent a trailIds T1 and T2
   AC->>FAN: forward a
@@ -692,15 +749,15 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-  participant EXP as ExpiryPunctuator
-  participant DIX as deadlineIndex
-  participant IST as instanceStore
+  participant EXP as ExpiryTick scheduled
+  participant DIX as deadlineIndex in memory
+  participant IST as instanceRegistry in memory
   participant ASP as AlarmStatusProducer
   participant CD as CodebookDecoder
   participant CR as ConflictResolver
 
-  Note over EXP: wall clock tick at time now
-  EXP->>DIX: range scan deadlines up to now
+  Note over EXP: scheduled wall clock tick at time now
+  EXP->>DIX: headMap deadlines up to now
   DIX-->>EXP: instance key T1 P1 due
   EXP->>IST: load instance T1 P1 not fully matched
   EXP->>ASP: AlarmStatusChange reverted open for each accumulated alarm
@@ -779,7 +836,7 @@ flowchart TD
   C --> D{Any active patterns on this trail}
   D -->|no| U[No instance path collect a into trail uncovered buffer for codebook decode]
   D -->|yes| E[For each active pattern P on trailId]
-  E --> F{Instance trailId P exists in instanceStore}
+  E --> F{Instance trailId P exists in instanceRegistry}
   F -->|yes| G{a already in instance dedupeAlarmIds}
   G -->|yes| GX[Skip redelivered alarm idempotent]
   G -->|no| H{a relevant to P sequence}
@@ -805,8 +862,10 @@ flowchart TD
 **Step detail (prose).**
 
 1. **Fan-out.** For each `trailId` in `a.trailIds[]`, resolve the active patterns on that trail
-   from `PatternStore.trailIndex`. Each trail is processed independently and re-keyed to its own
-   partition, so two trails never share instance state (isolation, AC2/AC8).
+   from `PatternStore.trailIndex`. Each trail is processed independently against its own
+   `(trailId, patternId)` registry entries, so two trails never share instance state (isolation,
+   AC2/AC8). (Under the deferred Streams target this is a re-key per trail onto its own partition;
+   under the MVP the isolation is by distinct registry keys plus single-instance serialized access.)
 2. **Per active pattern P on the trail:**
    - If instance `(trailId, P)` **exists**: dedupe `a` against the instance's `dedupeAlarmIds`
      (AC16); if relevant to P's sequence, **admit** it (append to `matchedAlarms`, advance
@@ -815,7 +874,7 @@ flowchart TD
    - Else if `a` **satisfies P's opening condition** (the first unsatisfied sequence element, or
      P's designated opener): **lazily create** instance `(trailId, P)`, snapshot P's `PatternRef`
      (incl. `sessionWindow`), seed `matchedAlarms=[a]`, set the deadline (`gap-based`:
-     `now + windowMs`; `fixed`: `createdAt + windowMs`), insert into `instanceStore` and
+     `now + windowMs`; `fixed`: `createdAt + windowMs`), insert into `instanceRegistry` and
      `deadlineIndex`, and fire `AlarmStatusChange(in-progress)` (AC1, AC6).
    - Else: `a` neither matches an existing instance nor opens one for P — ignored for P.
 3. **Incremental re-match.** After admitting/seeding, re-evaluate the decisive match condition
@@ -829,17 +888,33 @@ flowchart TD
    equals `rootCauseAlarmType` supplies `rootCauseAlarmId` (see **Root-cause `alarmId` resolution**
    below) — collects the rest as children, derives a stable `incidentId`, persists the incident,
    emits `CorrelationResultEvent`, fires `AlarmStatusChange(correlated)` for root-cause + children, then
-   **destroys** instance `(trailId, P)` (removes from `instanceStore` + `deadlineIndex`) — AC4.
+   **destroys** instance `(trailId, P)` (removes from `instanceRegistry` + `deadlineIndex`) — AC4.
 
-### On `ExpiryPunctuator` wall-clock tick
+### On the scheduled `ExpiryTick` wall-clock tick (MVP)
 
-The punctuator runs on a `PunctuationType.WALL_CLOCK_TIME` schedule. Each tick:
-`range(deadlineIndex, 0 .. now)` returns every instance whose deadline has elapsed without a full
-match. For each, fire `AlarmStatusChange(reverted-open)` for **every** alarm in `matchedAlarms`,
-run the **codebook coexistence** pass on the expired set (below), then destroy the instance and its
-deadline entry. No incident is created from the pattern instance itself (AC5). Per-pattern windows
-are independent because each instance carries its own `windowMs`/`type` and its own deadline entry
-(AC7).
+The tick runs on a fixed wall-clock `@Scheduled` cadence (`INSTANCE_TICK_INTERVAL_MS`), reading the
+current instant from an injectable `Clock`. Each tick: `deadlineIndex.headMap(now)` returns every
+instance whose deadline has elapsed without a full match. For each, fire
+`AlarmStatusChange(reverted-open)` for **every** alarm in `matchedAlarms`, run the **codebook
+coexistence** pass on the expired set (below), then destroy the instance and its deadline entry. No
+incident is created from the pattern instance itself (AC5). Per-pattern windows are independent
+because each instance carries its own `windowMs`/`type` and its own deadline entry (AC7).
+
+**Correctness of the tick (mechanism replacing the punctuator).** For any single instance,
+`onAlarm(...)` (admission/advance) and `onClockTick(...)` (expiry) are **mutually exclusive** —
+access to a given `(trailId, patternId)` entry is synchronized (single-writer per instance), so an
+alarm admitted concurrently with an expiry cannot corrupt the instance or fire both a `correlated`
+and a `reverted-open` for the same alarm set. Expiry **lateness is bounded** by the tick interval:
+an instance is destroyed at most `INSTANCE_TICK_INTERVAL_MS` after its deadline, which is the same
+bounded-lateness guarantee a wall-clock `Punctuator` gives. This synchronized `onAlarm`/`onClockTick`
+pair over an in-memory registry is the MVP mechanism that replaces the Kafka Streams punctuator; the
+observable lifecycle (AC1–AC8) is identical.
+
+> **Restart caveat (in-flight only).** A restart empties the in-memory `instanceRegistry` and
+> `deadlineIndex`. Committed incidents are unaffected (durable in PostgreSQL); only instances that
+> were mid-accumulation are lost and are re-accumulated from subsequent alarms on
+> `alarms.persisted.live` (bounded, self-healing — see Data model section A). Durable in-flight
+> recovery is the RocksDB/changelog follow-up.
 
 ### Codebook coexistence model (Open Question 1 resolved)
 
@@ -851,7 +926,7 @@ Triggers:
 1. **Uncovered alarms.** When an alarm on a trail matches **no** active pattern's opening
    condition and joins **no** existing instance, it lands in a short-lived per-trail
    **uncovered-alarm buffer**. The buffer is decoded against the trail-scoped codebook on the same
-   wall-clock punctuation cadence; if the closest-match score clears the Knowledge floor, a
+   scheduled wall-clock tick cadence; if the closest-match score clears the Knowledge floor, a
    **codebook candidate** is produced.
 2. **Instance expiry.** When a pattern instance expires without a full match, its accumulated
    alarms are handed to the codebook decoder as a salvage decode pass — a partially-correlated set
@@ -1109,11 +1184,12 @@ is present** — that is per-pattern from `sessionWindow`.)
 | Codebook Generator unavailable on `codebook.generated` | Fetch retried with backoff; on persistent failure the prior latest-in-scope codebook is retained, failure logged + counted (`codebook_fetch_failures_total`); pattern-instance matching continues. |
 | Pattern Manager unavailable at startup or on a `patterns.approved`-triggered refresh | Bootstrap/refresh retries with backoff. At startup readiness stays not-ready until the pattern set is seeded (the engine does not correlate against an empty pattern set). On a refresh trigger, if the read-API re-fetch fails the prior in-memory `PatternStore` (with its `trailId` placements from the last good `PatternView`) is retained and the failure is logged + counted — a missed refresh degrades gracefully rather than dropping trail placement. |
 | Winning match names a `rootCauseAlarmType` with no matching alarm in the set | No alarm carries `alarmType == rootCauseAlarmType`: the candidate cannot name a root cause; it is discarded (logged + counted), no incident is emitted with a guessed/empty `rootCauseAlarmId`. Resolution is on `alarmType` only — `eventType`/`probableCause` are never substituted. |
-| Duplicate alarm (at-least-once redelivery) | Dropped by `alarmDedupeStore`; if its instance is live, also guarded by `dedupeAlarmIds` — no duplicate admission, no duplicate incident (AC16). |
+| Duplicate alarm (at-least-once redelivery) | Dropped by the in-memory `alarmDedupe` guard; if its instance is live, also guarded by `dedupeAlarmIds` — no duplicate admission, no duplicate incident (AC16). |
 | Duplicate full-match evaluation / reprocessing | Stable `incidentId` + `UNIQUE(instance_fingerprint)` make persist + emit idempotent (one incident per instance+alarm-set). |
 | Instance expires without a match | Destroyed; no incident; `AlarmStatusChange(reverted-open)` per accumulated alarm; optional codebook salvage decode (AC5). |
-| Alarm matches no pattern and no instance | Lands in uncovered buffer; codebook decode attempted on the punctuation cadence; if none clears the floor, no incident (alarm still counted in `alarms_processed_total`). |
-| DB write failure on incident persist | Transaction rolls back; `CorrelationResultEvent` is **not** emitted (persist-then-emit) and `AlarmStatusChange(correlated)` is not fired; error logged + counted; instance is **not** destroyed so the next event/punctuation can retry. |
+| Alarm matches no pattern and no instance | Lands in uncovered buffer; codebook decode attempted on the scheduled tick cadence; if none clears the floor, no incident (alarm still counted in `alarms_processed_total`). |
+| DB write failure on incident persist | Transaction rolls back; `CorrelationResultEvent` is **not** emitted (persist-then-emit) and `AlarmStatusChange(correlated)` is not fired; error logged + counted; instance is **not** destroyed so the next event/scheduled tick can retry. |
+| Service restart mid-accumulation (MVP registry) | In-flight (mid-window) instances in the in-memory registry are lost; **no incident loss** (incidents are durable in PostgreSQL); the same `(trailId, patternId)` instances re-accumulate from subsequent alarms on `alarms.persisted.live`. Bounded, self-healing — durable in-flight recovery is the RocksDB/changelog follow-up (Data model section A). |
 
 All errors are emitted as structured JSON logs with `traceId`; nothing is silently dropped.
 
@@ -1124,8 +1200,8 @@ All errors are emitted as structured JSON logs with `traceId`; nothing is silent
 | Consideration | Alternatives considered | Chosen + rationale |
 |---|---|---|
 | State model | (a) window-centric per-trail session window aggregating all patterns (prior design); (b) **`(trailId, patternId)` correlation instance**, lazy-init, fire-and-destroy | **(b)** — the re-architected spec is instance-centric: per-pattern windows, lazy init, immediate fire on full match, isolation. A single per-trail window cannot express per-pattern `sessionWindow`, lazy birth, or immediate teardown; the instance model maps 1:1 to the spec lifecycle. |
-| Instance state location | (a) pure in-memory; (b) PostgreSQL; (c) **Kafka Streams RocksDB state store keyed by `(trailId, patternId)` + changelog** | **(c)** — O(1) per-alarm access, partition-local isolation, changelog restart recovery, natural per-trail partitioning. (a) loses in-flight instances on restart; (b) adds a DB round-trip per alarm and contends with incident writes. |
-| Expiry mechanism | (a) DSL session/tumbling window; (b) per-instance `KTable` TTL; (c) **wall-clock `Punctuator` over a time-ordered `deadlineIndex` (range-scan = min-heap head)** | **(c)** — instance lifetime is per-pattern, born lazily, and torn down immediately on full match; the DSL's fixed window semantics cannot model per-pattern gap-based vs fixed deadlines that move on admission. A sorted deadline index gives earliest-deadline-first expiry persistently. |
+| Instance state location (Open Question 2 — re-resolved for the MVP; human-approved) | (a) **in-memory `(trailId, patternId)` registry** driven by `@KafkaListener` + a scheduled expiry tick (MVP); (b) PostgreSQL; (c) Kafka Streams RocksDB state store keyed by `(trailId, patternId)` + changelog | **(a) for the MVP (accepted).** The in-memory registry gives O(1) per-alarm access and, with single-instance serialized access, satisfies isolation + idempotency + per-pattern timing — dramatically simpler (no Streams topology, no changelog, no RocksDB ops). Its only cost is that **in-flight** instances are not durable across restart; but durable **incidents** live in PostgreSQL, so restart re-accumulates in-flight instances from subsequent alarms (bounded, self-healing, no incident loss, no contract impact). (b) adds a DB round-trip per alarm and contends with incident writes. **(c) is the deferred/target design** for durable in-flight recovery (partition-local isolation + changelog restart recovery) if/when required — an internal state-store change with no contract impact. |
+| Expiry mechanism | (a) DSL session/tumbling window; (b) per-instance `KTable` TTL; (c) **scheduled wall-clock expiry tick (`@Scheduled`) over an in-memory time-ordered `deadlineIndex` (`headMap(now)` = min-heap head), MVP; deferred target = a wall-clock `Punctuator` over the same time-ordered index** | **(c)** — instance lifetime is per-pattern, born lazily, and torn down immediately on full match; the DSL's fixed window semantics cannot model per-pattern gap-based vs fixed deadlines that move on admission. A sorted deadline index gives earliest-deadline-first expiry. In the MVP the scheduled tick with single-instance-synchronized `onAlarm`/`onClockTick` gives the same bounded-lateness, race-free lifecycle a punctuator does; the punctuator is the deferred target and is functionally equivalent for AC1–AC8. |
 | Per-pattern window source | (a) global session-gap from Knowledge (prior design); (b) **per-pattern `sessionWindow` from `PatternApprovedEvent`** | **(b)** — the merged contract carries `sessionWindow {windowMs, type}` per pattern; Knowledge supplies match-quality/conflict params only. Two patterns on one trail expire independently (AC7). |
 | Codebook coexistence | (a) codebook always runs concurrently with patterns; (b) **codebook as fallback (uncovered + expiry salvage) feeding the same conflict resolver** | **(b)** — keeps the hot path cheap, avoids systematically duplicating every pattern match, gives clean precedence (specific pattern preferred), while still letting overlapping codebook + pattern candidates compete deterministically (AC9, AC11, AC12). |
 | Multi-trail fan-out | (a) evaluate all trails in one keyed task; (b) **re-key per trail so each trail is its own partition/instance set** | **(b)** — re-keying per `trailId` makes isolation structural (separate store entries, separate partitions); one alarm cleanly drives independent instances across its trails (AC2, AC8). |
@@ -1148,8 +1224,14 @@ All errors are emitted as structured JSON logs with `traceId`; nothing is silent
 
 ### Acceptance criterion → test (unit/contract, JUnit 5)
 
-All 30 criteria map 1:1 to a named JUnit 5 test. Instance-lifecycle tests use the
-`TopologyTestDriver`, advancing wall-clock time to drive punctuation deterministically.
+All 30 criteria map 1:1 to a named JUnit 5 test — and all 30 hold **unchanged under the in-memory
+registry** (the build proved all 30 pass). The state-store re-resolution (Open Question 2 — MVP
+in-memory registry, human-approved) is an **internal** change: the observable lifecycle
+(lazy-init, admit, full-match fire-and-destroy, session-expiry revert, isolation, idempotency) is
+identical, so every AC still maps to the same behaviour. Instance-lifecycle tests drive the
+in-memory `instanceRegistry` directly and advance an **injectable `Clock`** to fire the scheduled
+expiry tick deterministically (the MVP equivalent of advancing wall-clock time to drive a
+punctuator; the deferred Streams target would use `TopologyTestDriver`).
 (Criteria 23–25 are the earlier data-integration-fix criteria: codebook trail-signatures client +
 decode, the canonical `IncidentPage` envelope, and `matchedCodebookId` semantics. Criteria 26–27
 are the design-readiness fixes: `rootCauseAlarmId` resolved via `alarmType` (Q4), and pattern-refresh
@@ -1164,7 +1246,7 @@ fixture.)
 
 | # | Acceptance criterion | Test (JUnit 5) | Asserts |
 |---|---|---|---|
-| 1 | Lazy-init — first matching alarm creates exactly one instance | `LazyInitTest#firstMatchingAlarmCreatesExactlyOneInstance` | No instance for (T1,P1) before the first alarm; after the first alarm matching P1's opening condition, exactly one (T1,P1) instance exists in `instanceStore`. |
+| 1 | Lazy-init — first matching alarm creates exactly one instance | `LazyInitTest#firstMatchingAlarmCreatesExactlyOneInstance` | No instance for (T1,P1) before the first alarm; after the first alarm matching P1's opening condition, exactly one (T1,P1) instance exists in the in-memory `instanceRegistry`. |
 | 2 | Multi-trail fan-out — two independent instances | `MultiTrailFanOutTest#oneAlarmTwoTrailsTwoIsolatedInstances` | An alarm with `trailIds=[T1,T2]` (Pa on T1, Pb on T2) creates instance(T1,Pa) and instance(T2,Pb); the two store entries are distinct and neither's state is visible to the other. |
 | 3 | Add-to-existing — second alarm joins the existing instance | `AddToExistingTest#secondRelevantAlarmJoinsExistingInstance` | With (T,P) open, a second relevant alarm is admitted to the same instance and the match re-evaluated; exactly one (T,P) instance exists after both alarms. |
 | 4 | Full-match fires and destroys immediately | `FullMatchFireAndDestroyTest#fullMatchFiresImmediatelyAndDestroysInstance` | On full match, exactly one incident persisted, exactly one `CorrelationResultEvent`, `AlarmStatusChange(correlated)` for every alarm, and no live (T,P) instance remains — with no wall-clock advance. |
@@ -1241,11 +1323,13 @@ Testcontainers/Compose, real collaborators in `real` mode).
 ## Config & observability
 
 **Environment / config keys:**
-- `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_APPLICATION_ID` (Streams); idempotency settings
-  (`enable.idempotence=true`, `acks=all`, `isolation.level=read_committed`,
-  `processing.guarantee=at_least_once`).
-- `INSTANCE_PUNCTUATION_INTERVAL_MS` — wall-clock cadence of `ExpiryPunctuator` (a tuning knob, not
-  a threshold; instance deadlines themselves come from each pattern's `sessionWindow`).
+- `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_CONSUMER_GROUP_ID`; producer idempotency
+  (`enable.idempotence=true`, `acks=all`) and at-least-once consumer commit. (Deferred Streams
+  target: `KAFKA_APPLICATION_ID`, `isolation.level=read_committed`,
+  `processing.guarantee=at_least_once`.)
+- `INSTANCE_TICK_INTERVAL_MS` — wall-clock cadence of the scheduled `ExpiryTick` (a tuning knob,
+  not a threshold; instance deadlines themselves come from each pattern's `sessionWindow`; expiry
+  lateness is bounded by this interval).
 - `INTEGRATION_MODE=mock|real`; `PATTERN_MANAGER_BASE_URL`, `CODEBOOK_GENERATOR_BASE_URL`,
   `KNOWLEDGE_BASE_URL`, `KNOWLEDGE_DOMAIN` (default `core-ip`).
 - `POSTGRES_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`; owned schema `incident` (Flyway configured
@@ -1271,7 +1355,7 @@ Testcontainers/Compose, real collaborators in `real` mode).
   the D1 numerator; auto-correlation rate = `correlated_alarms_total / alarms_processed_total`),
   `pattern_match_total`, `codebook_match_total`, `instance_session_expirations_total`,
   `alarms_status_changed_total` (labelled by `newStatus`), `dlq_routed_total`, and an
-  `active_instances` gauge (live `instanceStore` size); plus `codebook_fetch_failures_total`. RCA
+  `active_instances` gauge (live in-memory `instanceRegistry` size); plus `codebook_fetch_failures_total`. RCA
   accuracy is **not** a production metric (no ground truth at runtime); it is a shown read-API/UI
   number (D2) and an `integration-thresholds.yaml` oracle metric.
 - Structured JSON logs (Logback JSON), each line carrying `traceId` + `alarmId`/`eventId`/
@@ -1291,8 +1375,11 @@ Testcontainers/Compose, real collaborators in `real` mode).
   `default-schema`=`incident`), so the shared PostgreSQL `public` schema stays empty.
 - **Compose entry:** `correlation-engine` service with `depends_on` Kafka, PostgreSQL, `knowledge`,
   `pattern-manager`, `codebook-generator`; env supplies bootstrap servers, base URLs,
-  `INTEGRATION_MODE`, PostgreSQL connection. Kafka Streams state stores (RocksDB) persist to a
-  mounted volume; changelog topics back `instanceStore`, `deadlineIndex`, and `alarmDedupeStore`
-  for recovery.
+  `INTEGRATION_MODE`, PostgreSQL connection. **No state-store volume (MVP):** the
+  `instanceRegistry`, `deadlineIndex`, and `alarmDedupe` guard are in-memory only, so no mounted
+  volume or changelog topics are required; in-flight instances re-accumulate from
+  `alarms.persisted.live` after a restart (durable incidents live in PostgreSQL). (The deferred
+  Kafka Streams target would add a RocksDB state-store volume + changelog topics for durable
+  in-flight recovery.)
 - **README:** documents env keys, the three consumed topics + two produced topics
   (`correlation.results`, `alarms.status.changed`), the read API, and local run via Compose.
