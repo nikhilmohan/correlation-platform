@@ -57,6 +57,36 @@ class Timing:
 
 
 @dataclass(frozen=True)
+class SampleAlarm:
+    """One representative real member alarm a pattern was mined from (from ``SampleAlarmView``).
+
+    Pattern Manager's published ``PatternView`` carries ``sampleAlarms[]`` — a bounded sample of the
+    real alarms the pattern was mined from — each with a ``managedObjectId`` (``<objectType>:<id>``)
+    and its ``alarmType``. These are the *authoritative* objects the pattern actually touched, and
+    the Correlation Engine derives a pattern's required objectTypes from the ``managedObjectId``
+    prefixes here — so P3 discovery uses the same source (not a theoretical affinity table).
+    """
+
+    managed_object_id: str
+    alarm_type: str
+
+    @property
+    def object_type(self) -> str:
+        """The objectType prefix of ``managedObjectId`` (``<objectType>:<id>``), as CE reads it."""
+        return self.managed_object_id.split(":", 1)[0]
+
+    @classmethod
+    def from_api(cls, obj: dict[str, Any]) -> SampleAlarm:
+        return cls(
+            managed_object_id=str(obj["managedObjectId"]),
+            alarm_type=str(obj["alarmType"]),
+        )
+
+    def to_json(self) -> dict[str, str]:
+        return {"managedObjectId": self.managed_object_id, "alarmType": self.alarm_type}
+
+
+@dataclass(frozen=True)
 class PatternView:
     """The subset of Pattern Manager's ``PatternView`` P3 synthesis consumes."""
 
@@ -66,6 +96,7 @@ class PatternView:
     root_cause_alarm_type: str
     timing: Timing = field(default_factory=Timing)
     session_window: SessionWindow | None = None
+    sample_alarms: tuple[SampleAlarm, ...] = ()
 
     @classmethod
     def from_api(cls, obj: dict[str, Any]) -> PatternView:
@@ -79,6 +110,11 @@ class PatternView:
             if sw_obj and sw_obj.get("windowMs") is not None
             else None
         )
+        sample_alarms = tuple(
+            SampleAlarm.from_api(s)
+            for s in (obj.get("sampleAlarms") or [])
+            if s.get("managedObjectId")
+        )
         return cls(
             pattern_id=str(obj["patternId"]),
             trail_id=str(obj["trailId"]),
@@ -86,6 +122,7 @@ class PatternView:
             root_cause_alarm_type=str(obj["rootCauseAlarmType"]),
             timing=Timing.from_json(obj.get("timing")),
             session_window=session_window,
+            sample_alarms=sample_alarms,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -102,6 +139,7 @@ class PatternView:
                 if self.session_window is None
                 else {"windowMs": self.session_window.window_ms, "type": self.session_window.type}
             ),
+            "sampleAlarms": [s.to_json() for s in self.sample_alarms],
         }
 
     @classmethod

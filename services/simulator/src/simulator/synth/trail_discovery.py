@@ -2,9 +2,12 @@
 
 For each approved pattern, enumerate the deployed trails via Trail Builder ``GET /trails`` (paged,
 the existing published list endpoint) and apply the **hostability rule**: a trail is compatible
-with pattern P iff it hosts >=1 member of every ``objectType`` P's sequence requires (root
-included). Required object types are derived by the domain pack (``required_object_types``) so this
-module stays domain-generic. Candidate trail members are fetched via ``get_trail`` **memoized** in a
+with pattern P iff it hosts >=1 member of every ``objectType`` P requires (root included). Required
+object types are derived the SAME way the Correlation Engine derives them — the distinct set of
+``PatternView.sampleAlarms[].managedObjectId`` prefixes (the real objects P manifested on) — so the
+simulator and CE agree on "required" (see ``_required_types``); the pack affinity table is only a
+fallback for patterns with no sampleAlarms. Candidate trail members are fetched via ``get_trail``
+**memoized** in a
 per-run fetch cache so each trailId is fetched at most once across all patterns (AC 48). Results are
 cached in the P3 config snapshot by the caller (``p3_fetch``); a second run loading that snapshot
 performs zero list/detail fetches (AC 48). When network-wide is off this module is never called
@@ -122,6 +125,23 @@ def discover_compatible_trails(
 
 
 def _required_types(pack: DomainPack, pattern: PatternView, affinity) -> set[str]:
+    """The objectTypes a trail must host to be compatible with ``pattern`` (hostability rule input).
+
+    Derived the SAME way the Correlation Engine derives a pattern's required objectTypes: the
+    distinct set of ``managedObjectId`` prefixes (``<objectType>:<id>``) across the pattern's
+    ``sampleAlarms`` — the real objects the pattern actually manifested on. This is authoritative
+    and replaces the previous theoretical alarmType->objectType affinity derivation, which
+    disagreed with where the pattern's alarms really land (e.g. QueueDrop's affinity wrongly
+    required ``VPNService`` though its real sampleAlarms sit on ``{FiberSpan, Interface, Port}``,
+    yielding 0 compatible trails).
+
+    Fallback (only when a pattern carries NO sampleAlarms, e.g. older mined patterns): mirror CE's
+    fallback and derive from the pack affinity table over the sequence + root alarmTypes.
+    """
+    prefixes = {s.object_type for s in pattern.sample_alarms if s.object_type}
+    if prefixes:
+        return prefixes
+
     from simulator.domains.coreip import p3_placement
 
     return p3_placement.required_object_types(

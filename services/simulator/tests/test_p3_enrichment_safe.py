@@ -267,9 +267,9 @@ def test_place_distinct_draws_without_replacement() -> None:
     )
     rng = random.Random(3)
     used: set[str] = set()
+    target_type = pack.placement_affinity().get("IPLinkDown")
     picks = [
-        aligned_synth._place_distinct("IPLinkDown", trail, pack.placement_affinity(), rng, used)
-        for _ in range(3)
+        aligned_synth._place_distinct("IPLinkDown", target_type, trail, rng, used) for _ in range(3)
     ]
     assert len({m.managed_object_id for m in picks}) == 3  # all distinct
 
@@ -277,3 +277,18 @@ def test_place_distinct_draws_without_replacement() -> None:
 def test_view_roundtrip() -> None:
     v = PatternView.from_api(_pattern())
     assert v.pattern_id == "pat-01"
+
+
+def test_view_parses_sample_alarms() -> None:
+    """PatternView parses the published sampleAlarms[] (managedObjectId + alarmType)."""
+    obj = _pattern()
+    obj["sampleAlarms"] = [
+        {"managedObjectId": "FiberSpan:f1", "alarmType": "QueueDrop"},
+        {"managedObjectId": "Interface:i1", "alarmType": "QueueDrop"},
+    ]
+    v = PatternView.from_api(obj)
+    assert [s.managed_object_id for s in v.sample_alarms] == ["FiberSpan:f1", "Interface:i1"]
+    assert {s.object_type for s in v.sample_alarms} == {"FiberSpan", "Interface"}
+    # Absent sampleAlarms -> empty tuple (backward-compat, triggers the fallback path).
+    obj.pop("sampleAlarms")
+    assert PatternView.from_api(obj).sample_alarms == ()

@@ -60,6 +60,11 @@ def build_cascade(
     that trail (AC 50).
     """
     affinity = pack.placement_affinity()
+    # Prefer the objectType each alarmType ACTUALLY manifested on in the pattern's sampleAlarms
+    # (map alarmType -> that objectType), so the emitted cascade matches how the real pattern
+    # occurred and lands on the objectTypes CE indexes. Falls back to the pack affinity table (then
+    # any trail member) for alarmTypes not present in sampleAlarms.
+    sample_object_types = _sample_object_types(pattern)
     retained = _retain_elements(pattern, rng, optional_include_prob)
 
     network_wide = spacing_lo_ms is not None and spacing_hi_ms is not None
@@ -77,10 +82,13 @@ def build_cascade(
     for idx, element in enumerate(retained):
         if idx > 0:
             at = at + timedelta(milliseconds=inter_arrivals[idx - 1])
+        target_type = sample_object_types.get(element.alarm_type) or affinity.get(
+            element.alarm_type
+        )
         if network_wide:
-            member = _place_distinct(element.alarm_type, trail, affinity, rng, used_moids)
+            member = _place_distinct(element.alarm_type, target_type, trail, rng, used_moids)
         else:
-            member = _place(element.alarm_type, trail, affinity, rng)
+            member = _place(element.alarm_type, target_type, trail, rng)
         shape = pack.alarm_shape(element.alarm_type)
         alarm_id = f"alm-{uuid.UUID(int=rng.getrandbits(128)).hex[:16]}"
         is_root = element.alarm_type == root_type and not root_id
@@ -180,15 +188,29 @@ def _inter_arrival_gaps(
     return gaps
 
 
+def _sample_object_types(pattern: PatternView) -> dict[str, str]:
+    """Map ``alarmType -> objectType`` from the pattern's sampleAlarms (managedObjectId prefixes).
+
+    This is the objectType each alarmType ACTUALLY manifested on when the pattern was mined, so
+    emitted alarms match how the real pattern occurred (and land on the objectTypes CE indexes). If
+    an alarmType appears on multiple objectTypes, the last one wins (deterministic over the sample
+    order); alarmTypes absent from the sample are left to the affinity/any-member fallback.
+    """
+    mapping: dict[str, str] = {}
+    for s in pattern.sample_alarms:
+        if s.object_type:
+            mapping[s.alarm_type] = s.object_type
+    return mapping
+
+
 def _place(
     alarm_type: str,
+    target_type: str | None,
     trail: TrailDetail,
-    affinity: dict[str, str],
     rng: random.Random,
 ) -> TrailMember:
-    """Pick a real trail member for ``alarm_type`` (affine objectType, else any member — logged)."""
-    affine = affinity.get(alarm_type)
-    candidates = [m for m in trail.members if m.object_type == affine] if affine else []
+    """Pick a real trail member for ``alarm_type`` (``target_type`` member, else any — logged)."""
+    candidates = [m for m in trail.members if m.object_type == target_type] if target_type else []
     if candidates:
         return rng.choice(candidates)
     # Fallback: any member of the SAME trail (real object, correct trail -> CE still matches).
@@ -198,30 +220,30 @@ def _place(
 
 def _place_distinct(
     alarm_type: str,
+    target_type: str | None,
     trail: TrailDetail,
-    affinity: dict[str, str],
     rng: random.Random,
     used_moids: set[str],
 ) -> TrailMember:
     """Place ``alarm_type`` on a DISTINCT (unused) trail member (draw without replacement, AC 59).
 
-    Prefer an unused member of the affine ``objectType``; else any unused member; only if every
+    Prefer an unused member of ``target_type`` (the objectType this alarmType manifested on in the
+    pattern's sampleAlarms, else its affine objectType); else any unused member; only if every
     member is already used (cascade longer than the trail) reuse a member and log
     ``p3.member_reuse`` — rare, since compatible trails host the required types. Chosen moid marked.
     """
-    affine = affinity.get(alarm_type)
     affine_unused = [
         m
         for m in trail.members
-        if m.object_type == affine and m.managed_object_id not in used_moids
+        if m.object_type == target_type and m.managed_object_id not in used_moids
     ]
-    if affine and affine_unused:
+    if target_type and affine_unused:
         member = rng.choice(affine_unused)
         used_moids.add(member.managed_object_id)
         return member
     any_unused = [m for m in trail.members if m.managed_object_id not in used_moids]
     if any_unused:
-        if affine:
+        if target_type:
             metrics.P3_PLACEMENT_FALLBACK.labels(alarmType=alarm_type).inc()
         member = rng.choice(any_unused)
         used_moids.add(member.managed_object_id)

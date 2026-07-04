@@ -183,6 +183,118 @@ def test_discovery_includes_passing_discovery_trail() -> None:
     assert "trail-A" in {ct.trail_id for ct in result["pat-01"].trails}
 
 
+# --- Bug fix: required objectTypes come from sampleAlarms prefixes, matching the CE -----------
+def test_required_types_from_sample_alarm_prefixes() -> None:
+    """_required_types is the distinct set of sampleAlarms managedObjectId prefixes (CE parity)."""
+    pattern = _view(
+        fx.pattern_view(
+            "pat-qd",
+            "trail-A",
+            [("QueueDrop", False), ("CRCErrors", False)],
+            "QueueDrop",
+            sample_alarms=[
+                ("FiberSpan:f1", "QueueDrop"),
+                ("Interface:i1", "QueueDrop"),
+                ("Port:p1", "CRCErrors"),
+            ],
+        )
+    )
+    required = trail_discovery._required_types(
+        CoreIPPack(), pattern, CoreIPPack().placement_affinity()
+    )
+    assert required == {"FiberSpan", "Interface", "Port"}
+
+
+def test_queuedrop_style_finds_compatible_trail_not_requiring_vpnservice() -> None:
+    """The live bug: QueueDrop's affinity wrongly required VPNService (0 trails); the real
+    sampleAlarms land on {FiberSpan, Interface, Port}. A trail hosting those is now compatible,
+    and one missing Port is not — with NO VPNService member anywhere."""
+    pack = CoreIPPack()
+    pattern = _view(
+        fx.pattern_view(
+            "pat-qd",
+            "trail-A",
+            [("QueueDrop", False)],
+            "QueueDrop",
+            sample_alarms=[
+                ("FiberSpan:f1", "QueueDrop"),
+                ("Interface:i1", "QueueDrop"),
+                ("Port:p1", "QueueDrop"),
+            ],
+        )
+    )
+    hosting = fx.trail_detail(
+        "trail-A",
+        [("FiberSpan:f9", "FiberSpan"), ("Interface:i9", "Interface"), ("Port:p9", "Port")],
+        igp_area="area-0",
+    )
+    missing_port = fx.trail_detail(
+        "trail-B",
+        [("FiberSpan:f8", "FiberSpan"), ("Interface:i8", "Interface")],
+        igp_area="area-1",
+    )
+    tb = MockTrailBuilderClient({"trail-A": hosting, "trail-B": missing_port})
+    result = trail_discovery.discover_compatible_trails(
+        pack, [pattern], tb, "snap-1", "core-ip", {"pat-qd": "area-0"}
+    )
+    trail_ids = {ct.trail_id for ct in result["pat-qd"].trails}
+    assert trail_ids == {"trail-A"}  # under the old affinity this was {} (required VPNService)
+
+
+def test_required_types_fallback_to_affinity_when_no_sample_alarms() -> None:
+    """A pattern with NO sampleAlarms falls back to the pack affinity-derived required set."""
+    pattern = _view(
+        fx.pattern_view(
+            "pat-legacy",
+            "trail-A",
+            [("IPLinkDown", False), ("ISISAdjacencyDown", False)],
+            "IPLinkDown",
+            sample_alarms=[],
+        )
+    )
+    assert pattern.sample_alarms == ()
+    required = trail_discovery._required_types(
+        CoreIPPack(), pattern, CoreIPPack().placement_affinity()
+    )
+    assert required == {"IPLink", "IGPAdjacency"}
+
+
+def test_placement_prefers_sample_alarm_object_type() -> None:
+    """Emit-time placement puts an alarmType on the objectType it appeared on in sampleAlarms."""
+    import random as _random
+    from datetime import UTC, datetime
+
+    from simulator.synth import aligned_synth
+
+    pattern = _view(
+        fx.pattern_view(
+            "pat-qd",
+            "trail-A",
+            [("QueueDrop", False)],
+            "QueueDrop",
+            sample_alarms=[("Interface:i1", "QueueDrop")],
+        )
+    )
+    # Trail hosts both a VPNService (old affinity target) and an Interface (real sample target).
+    trail = fx.trail_detail(
+        "trail-A",
+        [("VPNService:v1", "VPNService"), ("Interface:i9", "Interface")],
+        igp_area="area-0",
+    )
+    from simulator.synth.models import TrailDetail
+
+    detail = TrailDetail.from_api(trail)
+    cascade = aligned_synth.build_cascade(
+        CoreIPPack(),
+        pattern,
+        detail,
+        _random.Random(1),
+        datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    moids = {a.managed_object_id for a in cascade.alarms}
+    assert moids == {"Interface:i9"}  # placed on the sampleAlarm objectType, not VPNService
+
+
 # --- AC 48: cached compatible trails, zero re-fetch on a second run ----------------------------
 def test_discovery_cached_second_run_zero_calls(tmp_path: Path) -> None:
     path = tmp_path / "p3-config-snapshot.json"
