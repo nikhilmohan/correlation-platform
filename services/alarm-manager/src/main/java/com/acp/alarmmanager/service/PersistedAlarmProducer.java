@@ -47,7 +47,22 @@ public class PersistedAlarmProducer {
             return;
         }
         String wire = codec.serialize(envelope);
-        kafkaTemplate.send(topic, alarmId, wire);
+        try {
+            // Block on the broker ack: the published guard was claimed above (so a concurrent
+            // redelivery cannot also emit), but we only KEEP the flag flipped once the send
+            // actually succeeds. On failure we roll the guard back so a Kafka redelivery
+            // re-attempts the emit — closing the lost-emit window while staying single-emit.
+            kafkaTemplate.send(topic, alarmId, wire).get();
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            alarms.unmarkPublished(alarmId, Instant.now());
+            throw new IllegalStateException("interrupted republishing alarmId=" + alarmId, ex);
+        } catch (RuntimeException | java.util.concurrent.ExecutionException ex) {
+            alarms.unmarkPublished(alarmId, Instant.now());
+            log.warn("republish send failed for alarmId={} — published guard rolled back for retry",
+                    alarmId, ex);
+            throw new IllegalStateException("failed to republish alarmId=" + alarmId, ex);
+        }
         metrics.republished();
         log.info("republished alarmId={} on {}", alarmId, topic);
     }

@@ -130,6 +130,50 @@ class AlarmRepositoryIT extends PostgresIntegrationBase {
         assertThat(processed.claim("evt-1", Instant.now())).isFalse();
     }
 
+    /**
+     * B1 / AC17 — a FINALISED role/incidentId from a completed CorrelationResultEvent must SURVIVE
+     * a later reverted-open. The revert returns STATE to open but preserves the finalised
+     * root-cause role + incident linkage (Design alternatives, option (b)).
+     */
+    @Test
+    void revertPreservesFinalisedRoleAndIncident() {
+        alarms.insertIfAbsent(record("ALM-FIN", LifecycleState.CORRELATED, null, List.of(),
+                Instant.parse("2026-06-13T09:00:00Z")));
+        // completed CorrelationResultEvent finalises role + incident linkage
+        alarms.updateRoleAndIncident("ALM-FIN", Role.ROOT_CAUSE, "INC-42", Instant.now());
+
+        // late reverted-open arrives
+        alarms.revertToOpenClearingProvisionalRole("ALM-FIN", Instant.now());
+
+        AlarmRecord after = alarms.findById("ALM-FIN").orElseThrow();
+        assertThat(after.lifecycleState()).isEqualTo(LifecycleState.OPEN);
+        // finalised role + incidentId SURVIVE (not clobbered by the revert)
+        assertThat(after.role()).isEqualTo(Role.ROOT_CAUSE);
+        assertThat(after.incidentId()).isEqualTo("INC-42");
+    }
+
+    /**
+     * B1 / AC17 — a PROVISIONAL role association (no finalised incident linkage) IS cleared to
+     * {@code none} on reverted-open, while STATE returns to {@code open}.
+     */
+    @Test
+    void revertClearsProvisionalRoleWithoutIncident() {
+        alarms.insertIfAbsent(record("ALM-PROV", LifecycleState.IN_PROGRESS, null, List.of(),
+                Instant.parse("2026-06-13T09:00:00Z")));
+        // provisional in-progress role, deliberately NOT finalised (no incident_id)
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource());
+        jdbc.update("UPDATE live_alarm.alarm SET role = 'child' WHERE alarm_id = 'ALM-PROV'");
+        assertThat(alarms.findById("ALM-PROV").orElseThrow().role()).isEqualTo(Role.CHILD);
+
+        alarms.revertToOpenClearingProvisionalRole("ALM-PROV", Instant.now());
+
+        AlarmRecord after = alarms.findById("ALM-PROV").orElseThrow();
+        assertThat(after.lifecycleState()).isEqualTo(LifecycleState.OPEN);
+        // provisional role reset to none, still no incident linkage
+        assertThat(after.role()).isEqualTo(Role.NONE);
+        assertThat(after.incidentId()).isNull();
+    }
+
     private AlarmQueryFilter filter(LifecycleState state, String trailId, String incidentId,
             Instant from, Instant to) {
         return new AlarmQueryFilter(state, trailId, incidentId, from, to, 50, 0);

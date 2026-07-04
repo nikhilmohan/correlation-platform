@@ -79,6 +79,18 @@ public class AlarmRepository {
         return updated == 1;
     }
 
+    /**
+     * Roll the {@code published} guard back to false after a failed republish send, so a Kafka
+     * redelivery re-attempts the emit (the send-failure lost-emit window is closed). Idempotent:
+     * only affects a row that this emitter had just claimed.
+     */
+    public void unmarkPublished(String alarmId, Instant now) {
+        jdbc.update("""
+                UPDATE live_alarm.alarm SET published = false, updated_at = ?
+                WHERE alarm_id = ? AND published = true
+                """, ts(now), alarmId);
+    }
+
     /** STATE channel: set lifecycle_state (and cleared_at when clearing). */
     public void updateLifecycleState(String alarmId, LifecycleState state, Instant clearedAt,
             Instant now) {
@@ -95,11 +107,27 @@ public class AlarmRepository {
         }
     }
 
-    /** STATE channel (revert): return to open and reset a provisional role to none. */
+    /**
+     * STATE channel (revert): return lifecycle to {@code open}, clearing only a <em>provisional</em>
+     * in-progress role association while <em>preserving</em> a finalised role/{@code incidentId}.
+     *
+     * <p>Per the approved design (Design alternatives, "Role-clearing on revert", option (b)), a
+     * {@code reverted-open} means <em>this</em> correlation instance expired without a match; a
+     * previously completed {@code CorrelationResultEvent} remains a real fact about the alarm. A
+     * finalised role is anchored by its {@code incident_id}: the ROLE channel
+     * ({@code updateRoleAndIncident}) is the only writer of {@code role} and always sets
+     * {@code incident_id} together, so {@code incident_id IS NOT NULL} marks a finalised
+     * ({@code root-cause}/{@code child}) role that must survive the revert. When there is no
+     * finalised linkage ({@code incident_id IS NULL}) the role is at most provisional and is reset
+     * to {@code none}. Lifecycle STATE always returns to {@code open}.
+     */
     public void revertToOpenClearingProvisionalRole(String alarmId, Instant now) {
         jdbc.update("""
-                UPDATE live_alarm.alarm SET lifecycle_state = 'open', role = 'none', updated_at = ?
-                WHERE alarm_id = ?
+                UPDATE live_alarm.alarm
+                   SET lifecycle_state = 'open',
+                       role = CASE WHEN incident_id IS NOT NULL THEN role ELSE 'none' END,
+                       updated_at = ?
+                 WHERE alarm_id = ?
                 """, ts(now), alarmId);
     }
 

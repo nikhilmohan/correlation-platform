@@ -1,6 +1,7 @@
 package com.acp.alarmmanager.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -15,12 +16,16 @@ import com.acp.alarmmanager.repository.AlarmRepository;
 import com.acp.eventmodel.EventCodec;
 import com.acp.eventmodel.TypedEnvelope;
 import com.acp.eventmodel.generated.AlarmEvent;
+import java.util.concurrent.CompletableFuture;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 
 /**
  * AC2 — the same AlarmEvent is republished on alarms.persisted.live and round-trips against the
@@ -43,9 +48,17 @@ class PersistedAlarmProducerTest {
                 new AlarmManagerProperties());
     }
 
+    private static CompletableFuture<SendResult<String, String>> ackFuture() {
+        RecordMetadata md = new RecordMetadata(
+                new TopicPartition("alarms.persisted.live", 0), 0, 0, 0L, 0, 0);
+        return CompletableFuture.completedFuture(
+                new SendResult<>(new ProducerRecord<>("alarms.persisted.live", "k", "v"), md));
+    }
+
     @Test
     void republishesSameAlarmEventValidAgainstBinding() {
         when(alarms.markPublished(eq("ALM-0001"), any())).thenReturn(true);
+        when(kafka.send(anyString(), anyString(), anyString())).thenReturn(ackFuture());
         TypedEnvelope<Object> env = Fixtures.alarmEnvelope("ALM-0001", "PortDown", "raised");
 
         producer.republish("ALM-0001", env);
@@ -68,12 +81,33 @@ class PersistedAlarmProducerTest {
     void redeliveryDoesNotProduceSecondEmit() {
         // First call wins the flip; second finds published already true.
         when(alarms.markPublished(eq("ALM-0001"), any())).thenReturn(true).thenReturn(false);
+        when(kafka.send(anyString(), anyString(), anyString())).thenReturn(ackFuture());
         TypedEnvelope<Object> env = Fixtures.alarmEnvelope("ALM-0001", "PortDown", "raised");
 
         producer.republish("ALM-0001", env);
         producer.republish("ALM-0001", env);
 
         verify(kafka, times(1)).send(anyString(), anyString(), anyString());
+    }
+
+    /**
+     * M2 — a send failure must NOT leave the published guard flipped: the flag is rolled back so a
+     * Kafka redelivery re-attempts the emit (lost-emit window closed), still single-emit on success.
+     */
+    @Test
+    void sendFailureRollsBackPublishedGuardForRetry() {
+        when(alarms.markPublished(eq("ALM-0001"), any())).thenReturn(true);
+        CompletableFuture<SendResult<String, String>> failed = new CompletableFuture<>();
+        failed.completeExceptionally(new RuntimeException("broker down"));
+        when(kafka.send(anyString(), anyString(), anyString())).thenReturn(failed);
+        TypedEnvelope<Object> env = Fixtures.alarmEnvelope("ALM-0001", "PortDown", "raised");
+
+        assertThatThrownBy(() -> producer.republish("ALM-0001", env))
+                .isInstanceOf(IllegalStateException.class);
+
+        // Guard rolled back so a redelivery can re-emit; success metric NOT recorded.
+        verify(alarms, times(1)).unmarkPublished(eq("ALM-0001"), any());
+        verify(metrics, never()).republished();
     }
 
     @Test
