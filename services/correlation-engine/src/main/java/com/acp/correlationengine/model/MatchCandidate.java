@@ -17,13 +17,25 @@ public record MatchCandidate(
         List<ObservedAlarm> matchedAlarms,
         double confidence,
         String matchedPatternId,
-        String matchedCodebookId) {
+        String matchedCodebookId,
+        String discoveryTrailId) {
 
     public MatchCandidate {
         Objects.requireNonNull(matchType, "matchType");
         Objects.requireNonNull(trailId, "trailId");
         Objects.requireNonNull(rootCauseAlarmType, "rootCauseAlarmType");
         matchedAlarms = List.copyOf(matchedAlarms);
+    }
+
+    /**
+     * Backward-compatible constructor without discovery provenance (codebook decodes have no
+     * discovery trail — {@code discoveryTrailId} is null).
+     */
+    public MatchCandidate(MatchType matchType, String trailId, String rootCauseAlarmType,
+            List<ObservedAlarm> matchedAlarms, double confidence, String matchedPatternId,
+            String matchedCodebookId) {
+        this(matchType, trailId, rootCauseAlarmType, matchedAlarms, confidence, matchedPatternId,
+                matchedCodebookId, null);
     }
 
     /** Specificity = number of alarms covered (more wins in conflict resolution). */

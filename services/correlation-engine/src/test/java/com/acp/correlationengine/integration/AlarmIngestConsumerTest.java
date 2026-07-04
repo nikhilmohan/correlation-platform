@@ -8,9 +8,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.acp.correlationengine.config.CorrelationEngineProperties;
-import com.acp.correlationengine.model.PatternRef;
-import com.acp.correlationengine.model.WindowType;
 import com.acp.correlationengine.support.EngineHarness;
+import com.acp.correlationengine.support.Fixtures;
 import com.acp.eventmodel.EventCodec;
 import com.acp.eventmodel.TypedEnvelope;
 import com.acp.eventmodel.generated.AlarmEvent;
@@ -26,13 +25,12 @@ class AlarmIngestConsumerTest {
 
     private final EventCodec codec = new EventCodec();
     private final CorrelationEngineProperties props = new CorrelationEngineProperties(
-            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", null);
+            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", "u", "mock", 2, "u", "mock", null);
 
     @Test
     void ac19_poisonMessageRoutedToDlq_processingContinues() {
         EngineHarness h = new EngineHarness();
-        h.addPattern(new PatternRef("P", "T1", List.of("LOS", "LinkDown"), "LOS", 0.9,
-                60_000, WindowType.GAP_BASED));
+        h.addPattern(Fixtures.gapPattern("P", "T1", List.of("LOS", "LinkDown"), "LOS", 60_000));
         DlqProducer dlq = mock(DlqProducer.class);
         AlarmIngestConsumer consumer = new AlarmIngestConsumer(h.engine, codec, dlq, props);
 
@@ -50,10 +48,8 @@ class AlarmIngestConsumerTest {
     @Test
     void validAlarm_fansOutToTrails() {
         EngineHarness h = new EngineHarness();
-        h.addPattern(new PatternRef("Pa", "T1", List.of("LOS", "LinkDown"), "LOS", 0.9,
-                60_000, WindowType.GAP_BASED));
-        h.addPattern(new PatternRef("Pb", "T2", List.of("LOS", "PortDown"), "LOS", 0.9,
-                60_000, WindowType.GAP_BASED));
+        h.addPattern(Fixtures.gapPattern("Pa", "T1", List.of("LOS", "LinkDown"), "LOS", 60_000));
+        h.addPattern(Fixtures.gapPattern("Pb", "T2", List.of("LOS", "PortDown"), "LOS", 60_000));
         DlqProducer dlq = mock(DlqProducer.class);
         AlarmIngestConsumer consumer = new AlarmIngestConsumer(h.engine, codec, dlq, props);
 

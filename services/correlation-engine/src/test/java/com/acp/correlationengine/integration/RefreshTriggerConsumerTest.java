@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 
 import com.acp.correlationengine.codebook.CodebookRefreshService;
 import com.acp.correlationengine.config.CorrelationEngineProperties;
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
 import com.acp.correlationengine.pattern.PatternRefreshService;
 import com.acp.eventmodel.EventCodec;
 import com.acp.eventmodel.TypedEnvelope;
@@ -30,7 +31,7 @@ class RefreshTriggerConsumerTest {
 
     private final EventCodec codec = new EventCodec();
     private final CorrelationEngineProperties props = new CorrelationEngineProperties(
-            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", null);
+            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", "u", "mock", 2, "u", "mock", null);
 
     // ---- codebook.generated ------------------------------------------------
 
@@ -79,36 +80,41 @@ class RefreshTriggerConsumerTest {
     @Test
     void patterns_validEvent_triggersRefetchOfApprovedSet() {
         PatternRefreshService refresh = mock(PatternRefreshService.class);
+        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
         DlqProducer dlq = mock(DlqProducer.class);
         PatternApprovedConsumer consumer = new PatternApprovedConsumer(
-                refresh, new InMemoryProcessedEventStore(), codec, dlq, props);
+                refresh, index, new InMemoryProcessedEventStore(), codec, dlq, props);
 
         consumer.onMessage(patternWire("evt-pat-1", "PAT-1"));
 
         verify(refresh).refreshOnApproval();
+        verify(index).rebuildForApprovedSet(); // AC38: index updated before ack
         verifyNoInteractions(dlq);
     }
 
     @Test
     void patterns_redeliveredEvent_isIdempotentNoOp() {
         PatternRefreshService refresh = mock(PatternRefreshService.class);
+        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
         DlqProducer dlq = mock(DlqProducer.class);
         PatternApprovedConsumer consumer = new PatternApprovedConsumer(
-                refresh, new InMemoryProcessedEventStore(), codec, dlq, props);
+                refresh, index, new InMemoryProcessedEventStore(), codec, dlq, props);
 
         String wire = patternWire("evt-pat-dup", "PAT-2");
         consumer.onMessage(wire);
         consumer.onMessage(wire);
 
         verify(refresh, times(1)).refreshOnApproval();
+        verify(index, times(1)).rebuildForApprovedSet();
     }
 
     @Test
     void patterns_poisonMessage_routedToDlq_refreshUntouched() {
         PatternRefreshService refresh = mock(PatternRefreshService.class);
+        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
         DlqProducer dlq = mock(DlqProducer.class);
         PatternApprovedConsumer consumer = new PatternApprovedConsumer(
-                refresh, new InMemoryProcessedEventStore(), codec, dlq, props);
+                refresh, index, new InMemoryProcessedEventStore(), codec, dlq, props);
 
         consumer.onMessage("}}garbage");
 

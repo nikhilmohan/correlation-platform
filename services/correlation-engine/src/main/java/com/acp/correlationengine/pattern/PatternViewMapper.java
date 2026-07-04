@@ -4,7 +4,10 @@ import com.acp.correlationengine.model.PatternRef;
 import com.acp.correlationengine.model.WindowType;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * Maps the Pattern Manager {@code PatternPage} envelope ({@code {items[], total, limit, offset}})
@@ -33,6 +36,39 @@ public final class PatternViewMapper {
         return out;
     }
 
+    /**
+     * @return the first topology snapshot id derivable from a {@code PatternPage} envelope — read off
+     *     {@code PatternView.supportingInstances[].snapshotId} (the top-level {@code PatternView
+     *     .snapshotId} is null in practice; the snapshot lives on the supporting instances). Used as
+     *     the startup snapshot-discovery FALLBACK when the Topology Service is unreachable.
+     */
+    public static Optional<String> snapshotIdFromPage(JsonNode page) {
+        if (page == null) {
+            return Optional.empty();
+        }
+        JsonNode items = page.get("items");
+        if (items == null || !items.isArray()) {
+            return Optional.empty();
+        }
+        for (JsonNode view : items) {
+            // Prefer the top-level snapshotId if a future read model ever populates it.
+            String top = text(view, "snapshotId");
+            if (top != null && !top.isBlank()) {
+                return Optional.of(top);
+            }
+            JsonNode instances = view.get("supportingInstances");
+            if (instances != null && instances.isArray()) {
+                for (JsonNode inst : instances) {
+                    String snap = text(inst, "snapshotId");
+                    if (snap != null && !snap.isBlank()) {
+                        return Optional.of(snap);
+                    }
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
     /** @return one {@link PatternRef} from a single {@code PatternView} node. */
     public static PatternRef fromView(JsonNode view) {
         String patternId = text(view, "patternId");
@@ -56,8 +92,40 @@ public final class PatternViewMapper {
         WindowType windowType = WindowType.fromWire(sw != null && sw.has("type")
                 ? sw.get("type").asText() : "gap-based");
 
+        Map<String, String> sampleAlarmObjectTypes = sampleAlarmObjectTypes(view);
+
         return new PatternRef(patternId, trailId, sequence, rootCauseAlarmType, confidence,
-                windowMs, windowType);
+                windowMs, windowType, sampleAlarmObjectTypes);
+    }
+
+    /**
+     * Build the {@code alarmType -> objectType} witness map from {@code PatternView.sampleAlarms[]}
+     * (spec OQ-G2 / Algorithm A). Each sample's objectType is the prefix of its {@code managedObjectId}
+     * ({@code "<objectType>:<id>"}, per {@code managedObjectId.schema.json}) — the SAME vocabulary as
+     * Trail Builder's {@code TrailMember.objectType}, so no mapping layer is needed. First witness per
+     * alarmType wins (multiple samples for one alarmType agree by construction).
+     */
+    private static Map<String, String> sampleAlarmObjectTypes(JsonNode view) {
+        Map<String, String> out = new LinkedHashMap<>();
+        JsonNode samples = view.get("sampleAlarms");
+        if (samples == null || !samples.isArray()) {
+            return out;
+        }
+        for (JsonNode sample : samples) {
+            String alarmType = text(sample, "alarmType");
+            String managedObjectId = text(sample, "managedObjectId");
+            if (alarmType == null || alarmType.isEmpty()
+                    || managedObjectId == null || managedObjectId.isEmpty()) {
+                continue;
+            }
+            int colon = managedObjectId.indexOf(':');
+            if (colon <= 0) {
+                continue; // not a typed managedObjectId — cannot derive objectType
+            }
+            String objectType = managedObjectId.substring(0, colon);
+            out.putIfAbsent(alarmType, objectType);
+        }
+        return out;
     }
 
     /**

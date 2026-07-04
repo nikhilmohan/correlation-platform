@@ -2,6 +2,8 @@ package com.acp.correlationengine.observability;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -21,8 +23,11 @@ public class MicrometerCorrelationMetrics implements CorrelationMetrics {
     private final Counter sessionExpirations;
     private final Counter dlqRouted;
     private final Counter codebookFetchFailure;
+    private final Counter trailBuilderFetchErrors;
+    private final Counter requiredTypesUnresolved;
     private final MeterRegistry registry;
     private final AtomicInteger activeInstances = new AtomicInteger(0);
+    private final Map<String, AtomicInteger> compatibleTrailsGauges = new ConcurrentHashMap<>();
 
     public MicrometerCorrelationMetrics(MeterRegistry registry) {
         this.registry = registry;
@@ -40,6 +45,12 @@ public class MicrometerCorrelationMetrics implements CorrelationMetrics {
                 .description("Poison messages routed to a DLQ").register(registry);
         this.codebookFetchFailure = Counter.builder("codebook_fetch_failure_total")
                 .description("Failed codebook trail-signature fetches").register(registry);
+        this.trailBuilderFetchErrors = Counter.builder("trail_builder_fetch_errors_total")
+                .description("Trail Builder fetch failures during compatibility index build")
+                .register(registry);
+        this.requiredTypesUnresolved = Counter.builder("pattern_required_types_unresolved_total")
+                .description("Patterns excluded because required object types could not be resolved")
+                .register(registry);
         registry.gauge("active_instances", activeInstances);
     }
 
@@ -86,5 +97,29 @@ public class MicrometerCorrelationMetrics implements CorrelationMetrics {
     @Override
     public void setActiveInstances(int count) {
         activeInstances.set(count);
+    }
+
+    @Override
+    public void incrementTrailBuilderFetchError() {
+        trailBuilderFetchErrors.increment();
+    }
+
+    @Override
+    public void incrementIndexRefresh(String trigger) {
+        registry.counter("pattern_generalization_index_refresh_total", "trigger", trigger).increment();
+    }
+
+    @Override
+    public void incrementRequiredTypesUnresolved() {
+        requiredTypesUnresolved.increment();
+    }
+
+    @Override
+    public void setCompatibleTrailsForPattern(String patternId, int compatibleTrailCount) {
+        compatibleTrailsGauges.computeIfAbsent(patternId, id -> {
+            AtomicInteger g = new AtomicInteger(0);
+            registry.gauge("compatible_trails_per_pattern", io.micrometer.core.instrument.Tags.of("patternId", id), g);
+            return g;
+        }).set(compatibleTrailCount);
     }
 }

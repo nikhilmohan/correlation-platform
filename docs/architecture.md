@@ -15,7 +15,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | noise-filter | Python | DBSCAN noise removal | alarms.enriched | transactions.clean |
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
-| correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated | correlation.results |
+| correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated, trails.built | correlation.results |
 | alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`, and keeps live alarm status in sync from generic `alarms.status.changed` (`AlarmStatusChange`, produced by any service); serves the live alarm query API | alarms.enriched.live, correlation.results, alarms.status.changed | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
@@ -184,6 +184,15 @@ contract**.
 This requirement is captured per service in each `services/<svc>/spec.md` (Contract section)
 and detailed in `design.md` (API contracts + integration points), and is checked by the
 `code-review` and `integration-test` skills.
+
+> **Correlation Engine startup snapshot discovery (existing Topology read; no contract change).**
+> On startup the Correlation Engine discovers the current topology snapshot to build its
+> pattern-compatibility index immediately, rather than waiting for a live `trails.built` event a
+> running system already consumed. It reads the **existing** Topology Service API
+> `GET /topology/snapshots` (picks `status == "current"` for the `core-ip` domain) via a
+> config-switchable (`mock|real`, `TOPOLOGY_BASE_URL`/`TOPOLOGY_MODE`) client, with a fallback to the
+> approved patterns' `PatternView.supportingInstances[].snapshotId` if Topology is unreachable. This
+> is a read of an already-published API — no new topic/payload/field, no event-model change.
 
 ## Topology snapshot file & ingestion API
 Topology is loaded by **file upload to an API**, not by a Kafka event:

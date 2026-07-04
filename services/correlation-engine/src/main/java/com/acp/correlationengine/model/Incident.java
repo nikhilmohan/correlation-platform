@@ -15,6 +15,7 @@ import java.util.Objects;
 public record Incident(
         String incidentId,
         String trailId,
+        String discoveryTrailId,
         String rootCauseAlarmId,
         String rootCauseAlarmType,
         List<String> childAlarmIds,
@@ -30,6 +31,20 @@ public record Incident(
         Objects.requireNonNull(trailId, "trailId");
         Objects.requireNonNull(rootCauseAlarmId, "rootCauseAlarmId");
         childAlarmIds = List.copyOf(childAlarmIds);
+    }
+
+    /**
+     * Backward-compatible constructor without discovery provenance ({@code discoveryTrailId} = null).
+     * The matched {@code trailId} is unchanged; {@code discoveryTrailId} is additive, nullable
+     * read-model/audit only (spec Task NEW / AC44) — never on {@code CorrelationResultEvent}.
+     */
+    public Incident(String incidentId, String trailId, String rootCauseAlarmId,
+            String rootCauseAlarmType, List<String> childAlarmIds, String matchedPatternId,
+            String matchedCodebookId, double confidence, MatchCandidate.MatchType matchType,
+            String instanceFingerprint, Instant createdAt) {
+        this(incidentId, trailId, null, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds,
+                matchedPatternId, matchedCodebookId, confidence, matchType, instanceFingerprint,
+                createdAt);
     }
 
     /** @return the read-API/wire token: {@code "pattern"} or {@code "codebook"}. */

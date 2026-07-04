@@ -32,7 +32,7 @@ class EmitterSchemaComplianceTest {
 
     private final EventCodec codec = new EventCodec();
     private final CorrelationEngineProperties props = new CorrelationEngineProperties(
-            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", null);
+            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", "u", "mock", 2, "u", "mock", null);
 
     @SuppressWarnings("unchecked")
     private KafkaTemplate<String, String> mockTemplate() {

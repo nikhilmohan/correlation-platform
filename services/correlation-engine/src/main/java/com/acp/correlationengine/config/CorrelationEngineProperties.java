@@ -18,6 +18,14 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param expiryTickMs the wall-clock cadence at which session-expiry + uncovered-buffer decode runs.
  * @param rcaEvalMode when {@code on}, {@code GET /stats.rcaAccuracy} may be computed against a
  *     wired labels oracle; {@code off} (production) leaves it {@code null}.
+ * @param trailBuilderBaseUrl base URL of the Trail Builder read API (pattern generalization).
+ * @param trailBuilderMode {@code mock} | {@code real} for the Trail Builder integration point;
+ *     falls back to {@code integrationMode} when blank.
+ * @param trailBuilderMaxRetries bounded per-trail member-fetch retry count (AC41).
+ * @param topologyBaseUrl base URL of the Topology Service read API (startup current-snapshot
+ *     discovery via {@code GET /topology/snapshots} — an existing Topology read; no contract change).
+ * @param topologyMode {@code mock} | {@code real} for the Topology integration point; falls back to
+ *     {@code integrationMode} when blank.
  * @param topics the in/out Kafka topic names (frozen contract).
  */
 @ConfigurationProperties(prefix = "correlation-engine")
@@ -30,6 +38,11 @@ public record CorrelationEngineProperties(
         long knowledgeRefreshMs,
         long expiryTickMs,
         String rcaEvalMode,
+        String trailBuilderBaseUrl,
+        String trailBuilderMode,
+        int trailBuilderMaxRetries,
+        String topologyBaseUrl,
+        String topologyMode,
         Topics topics) {
 
     public CorrelationEngineProperties {
@@ -48,6 +61,9 @@ public record CorrelationEngineProperties(
         if (rcaEvalMode == null || rcaEvalMode.isBlank()) {
             rcaEvalMode = "off";
         }
+        if (trailBuilderMaxRetries < 0) {
+            trailBuilderMaxRetries = 2;
+        }
         if (topics == null) {
             topics = Topics.defaults();
         }
@@ -61,19 +77,32 @@ public record CorrelationEngineProperties(
         return "on".equalsIgnoreCase(rcaEvalMode);
     }
 
+    /** @return the effective Topology integration mode: {@code topologyMode} or, if blank, {@code integrationMode}. */
+    public String effectiveTopologyMode() {
+        return (topologyMode == null || topologyMode.isBlank()) ? integrationMode : topologyMode;
+    }
+
     /** The frozen in/out topic names (contract). */
     public record Topics(
             String alarmsPersistedLive,
             String patternsApproved,
             String codebookGenerated,
+            String trailsBuilt,
             String correlationResults,
             String alarmsStatusChanged) {
+
+        public Topics {
+            if (trailsBuilt == null || trailsBuilt.isBlank()) {
+                trailsBuilt = "trails.built";
+            }
+        }
 
         public static Topics defaults() {
             return new Topics(
                     "alarms.persisted.live",
                     "patterns.approved",
                     "codebook.generated",
+                    "trails.built",
                     "correlation.results",
                     "alarms.status.changed");
         }

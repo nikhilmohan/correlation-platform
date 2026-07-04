@@ -19,6 +19,7 @@ module. See `spec.md` (contract) and `design.md` (how).
 | In | `alarms.persisted.live` | `AlarmEvent` |
 | In | `patterns.approved` | `PatternApprovedEvent` (refresh trigger; `trailId` from the Pattern Manager read API) |
 | In | `codebook.generated` | `CodebookGeneratedEvent` (summary; full signatures fetched via API) |
+| In | `trails.built` | `TrailsBuiltEvent` (refresh trigger — rebuilds the pattern-generalization compatibility index on a new topology snapshot) |
 | Out | `correlation.results` | `CorrelationResultEvent` |
 | Out | `alarms.status.changed` | `AlarmStatusChange` (`source = correlation-engine`) |
 
@@ -57,6 +58,9 @@ Poison messages route to `<topic>.dlq` (never dropped). Consumers are idempotent
 | `KNOWLEDGE_BASE_URL` | `http://knowledge:8080` | Knowledge Service API |
 | `KNOWLEDGE_DOMAIN` | `core-ip` | Knowledge domain |
 | `KNOWLEDGE_REFRESH_MS` | `60000` | match-params cache TTL |
+| `TRAIL_BUILDER_BASE_URL` | `http://trail-builder:8080` | Trail Builder read API (pattern-generalization compatibility index) |
+| `TRAIL_BUILDER_MODE` | _(falls back to `INTEGRATION_MODE`)_ | `mock` \| `real` for the Trail Builder integration point |
+| `TRAIL_BUILDER_MAX_RETRIES` | `2` | bounded per-trail member-fetch retry count (fetch failure omits the trail from the index) |
 | `EXPIRY_TICK_MS` | `1000` | session-expiry / uncovered-buffer decode cadence |
 | `RCA_EVAL_MODE` | `off` | `on` enables the eval-mode `rcaAccuracy` when a labels oracle is wired |
 | `SERVER_PORT` | `8080` | HTTP port |

@@ -20,6 +20,8 @@ public class PatternStore {
     private final Map<String, PatternRef> byKey = new ConcurrentHashMap<>();
     /** trailId -> set of active patternIds */
     private final Map<String, Set<String>> trailIndex = new ConcurrentHashMap<>();
+    /** patternId -> PatternRef — the generalization lookup (a pattern is one record, many trails). */
+    private final Map<String, PatternRef> byPatternId = new ConcurrentHashMap<>();
 
     private static String key(String trailId, String patternId) {
         return trailId + "::" + patternId;
@@ -29,6 +31,7 @@ public class PatternStore {
     public synchronized void replaceAll(List<PatternRef> patterns) {
         byKey.clear();
         trailIndex.clear();
+        byPatternId.clear();
         for (PatternRef p : patterns) {
             upsert(p);
         }
@@ -39,6 +42,7 @@ public class PatternStore {
         byKey.put(key(pattern.trailId(), pattern.patternId()), pattern);
         trailIndex.computeIfAbsent(pattern.trailId(), t -> ConcurrentHashMap.newKeySet())
                 .add(pattern.patternId());
+        byPatternId.put(pattern.patternId(), pattern);
     }
 
     /** @return the patterns active on {@code trailId} (empty if none) — the fan-out lookup. */
@@ -48,6 +52,20 @@ public class PatternStore {
                 .map(id -> byKey.get(key(trailId, id)))
                 .filter(java.util.Objects::nonNull)
                 .toList();
+    }
+
+    /**
+     * @return the approved pattern with {@code patternId}, or {@code null} if none is held. Used by
+     *     the {@code CompatibilityIndex} to resolve the compatible-pattern ids on a trail back to
+     *     their {@link PatternRef} (the pattern generalization fan-out) — the single-owner lookup.
+     */
+    public PatternRef findById(String patternId) {
+        return byPatternId.get(patternId);
+    }
+
+    /** @return all approved patterns currently held (compatibility-index full rebuild source). */
+    public List<PatternRef> all() {
+        return List.copyOf(byPatternId.values());
     }
 
     /** @return true if any patterns are active on {@code trailId}. */
