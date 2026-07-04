@@ -10,7 +10,7 @@ live), uploads the topology snapshot to the Topology Service's ingestion API, re
 Kafka, and serves as the platform evaluation oracle. See `spec.md` (contract) and `design.md`
 (how).
 
-## Architecture (one simulator, three phases × two data-source modes)
+## Architecture (one simulator, three phases × three data-source modes)
 
 | Phase | Action | Topic / sink |
 |-------|--------|--------------|
@@ -24,6 +24,15 @@ Kafka, and serves as the platform evaluation oracle. See `spec.md` (contract) an
 - **ingest** (`--ingest` / `SIM_MODE=ingest`): **skip generation** and replay a pre-created
   snapshot/corpus file verbatim. A generate→export→re-ingest round-trip reproduces the exact
   ordered alarm payloads (fresh `eventId`s only).
+- **synth** (`--synth` / `SIM_MODE=synth`, P3-only): **P3 topology-and-pattern-driven live
+  synthesis.** Reads the already-deployed topology + trails + approved patterns from the running
+  services' published APIs (Topology `GET /topology/snapshots`, Trail Builder `GET /trails/{id}`,
+  Pattern Manager `GET /patterns?lifecycle=approved`) and synthesizes a pattern-aligned
+  `alarms.live` stream — targeting a configurable ~60-70% auto-correlation + RCA rate — with full
+  ground-truth labels. Regenerates nothing (no topology build, no pattern mining, no
+  `POST /topology/snapshots`); introduces no contract change. Each integration is
+  config-switchable (mock/real). The fetched (topology, trails, patterns) are persisted as a
+  reusable **P3 config snapshot** so repeated seeded runs replay standalone with zero API calls.
 
 All emitted `AlarmEvent`s use the frozen `acp_event_model` binding and carry the canonical
 `alarmType`; every `managedObjectId` follows the `<objectType>:<id>` scheme shared with the
@@ -55,6 +64,19 @@ TOPOLOGY_API_MODE=real TOPOLOGY_API_BASE_URL=http://topology:8080 \
 
 # live wall-clock-paced replay to alarms.live
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --phase p3
+
+# P3 synth: read deployed topology+trails+approved patterns, synthesize onto alarms.live
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
+  PATTERN_MANAGER_API_MODE=real PATTERN_MANAGER_API_BASE_URL=http://pattern-manager:8080 \
+  TRAIL_BUILDER_API_MODE=real   TRAIL_BUILDER_API_BASE_URL=http://trail-builder:8080 \
+  TOPOLOGY_API_MODE=real        TOPOLOGY_API_BASE_URL=http://topology:8080 \
+  python -m simulator.main --synth \
+    --p3-total-alarms 500 --p3-aligned-fraction 0.65 --p3-rng-seed 42
+
+# P3 synth standalone: replay from a persisted P3 config snapshot with ZERO API calls
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
+  python -m simulator.main --synth \
+    --p3-config-snapshot-path /data/sim/p3-config-snapshot.json --p3-rng-seed 42
 ```
 
 `--help` prints the full option surface; `--dry-run` validates config + inputs without emitting.
@@ -69,11 +91,24 @@ defaults / ranges, see `config/settings.py`): `TOPOLOGY_NODE_COUNT`, `SITE_COUNT
 Missing required config fails fast with a structured JSON log and a non-zero exit **before** any
 event is emitted.
 
+**P3 synth knobs** (all env/CLI overridable, no hard-coded URLs/fractions): `PATTERN_MANAGER_API_MODE`
+/ `PATTERN_MANAGER_API_BASE_URL`, `TRAIL_BUILDER_API_MODE` / `TRAIL_BUILDER_API_BASE_URL`,
+`TOPOLOGY_API_MODE` / `TOPOLOGY_API_BASE_URL`, `P3_ALIGNED_FRACTION` (default 0.65),
+`P3_TOTAL_ALARMS` (default 500), `P3_RNG_SEED` (unset = fresh, logged), `P3_CONFIG_SNAPSHOT_PATH`,
+`P3_OPTIONAL_INCLUDE_PROB` (default 1.0), and the non-aligned mix
+`P3_PARTIAL_CASCADE_FRACTION`/`P3_RANDOM_ALARM_FRACTION`/`P3_NOISE_FRACTION` (0.4/0.4/0.2, must sum
+to 1.0). Starting synth in `real` mode without the collaborator's base URL, an out-of-range aligned
+fraction, or a bad mix fails fast before any emission.
+
 ## Observability + API
 
 - `/health` — 200 when started + Kafka-connected, 503 otherwise.
 - `/metrics` — Prometheus text (`simulator_alarms_emitted_total`, snapshot gauges, …).
 - `/labels`, `/labels/{scenarioId}`, `/scenarios` — ground-truth retrieval for the eval oracle.
+  In `synth` mode `/labels` additionally returns per-cascade P3 records
+  `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType}` and
+  `/labels/p3-summary` returns `{totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}`
+  so the ~60-70% auto-correlation KPI is directly computable.
 - OpenAPI 3.1 is served at `/openapi.json`; the checked-in **`openapi.json`** in this directory
   is the authoritative surface (a drift test guards it).
 - Structured JSON logs on stdout (one object per line).

@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import random
 
-from simulator.domains.coreip import alarm_shapes, propagation, scenario_library, topology_model
+from simulator.domains.coreip import (
+    alarm_shapes,
+    p3_placement,
+    propagation,
+    scenario_library,
+    topology_model,
+)
 from simulator.domains.coreip.geo_catalogue import GEO_CATALOGUE
 from simulator.engine.domain_pack import (
     AlarmShape,
@@ -89,6 +95,9 @@ class CoreIPPack:
 
     def geo_sites(self) -> tuple[GeoSite, ...]:
         return GEO_CATALOGUE
+
+    def placement_affinity(self) -> dict[str, str]:
+        return dict(p3_placement.PLACEMENT_AFFINITY)
 
     def build_topology(self, params: TopologyParams, rng: random.Random) -> BuildResult:
         return topology_model.build_topology(params, rng, GEO_CATALOGUE)

@@ -48,6 +48,26 @@ PRODUCE_ERRORS = Counter(
     registry=REGISTRY,
 )
 
+# --- P3 topology-and-pattern-driven synthesis ---------------------------------------------
+P3_PLACEMENT_FALLBACK = Counter(
+    "simulator_p3_placement_fallback_total",
+    "P3 aligned-cascade placements that fell back to any trail member (no affine objectType), "
+    "labelled by alarmType.",
+    ["alarmType"],
+    registry=REGISTRY,
+)
+P3_ALIGNED_ALARMS = Counter(
+    "simulator_p3_aligned_alarms_total",
+    "P3 pattern-aligned alarms emitted.",
+    registry=REGISTRY,
+)
+P3_NONALIGNED_ALARMS = Counter(
+    "simulator_p3_nonaligned_alarms_total",
+    "P3 non-aligned alarms emitted, labelled by scenarioType.",
+    ["scenarioType"],
+    registry=REGISTRY,
+)
+
 # --- ingest / export ----------------------------------------------------------------------
 INGESTED_ALARMS = Counter(
     "simulator_ingested_alarms_total",
@@ -112,6 +132,11 @@ MODE = Gauge(
     "simulator_mode",
     "Current data-source mode (1 = active).",
     ["mode"],
+    registry=REGISTRY,
+)
+P3_ALIGNED_FRACTION = Gauge(
+    "simulator_p3_aligned_fraction",
+    "Realized P3 pattern-aligned fraction for the last synth run.",
     registry=REGISTRY,
 )
 

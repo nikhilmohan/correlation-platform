@@ -60,6 +60,9 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Make the tests/ directory itself importable (so `from tests import p3_fixtures` resolves) under a
+# bare `cd services/simulator && pytest` — the exact CI invocation, with NO PYTHONPATH tweak.
+pythonpath = ["."]
 addopts = "--cov=simulator --cov-report=term-missing"
 
 [tool.coverage.run]

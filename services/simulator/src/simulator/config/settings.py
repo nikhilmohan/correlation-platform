@@ -20,7 +20,7 @@ from simulator.domains.coreip import geo_catalogue
 from simulator.domains.coreip.scenario_library import SCENARIO_TYPES
 
 Phase = Literal["p1", "p2", "p3"]
-Mode = Literal["generate", "ingest"]
+Mode = Literal["generate", "ingest", "synth"]
 
 
 class ConfigError(ValueError):
@@ -49,6 +49,37 @@ class Settings(BaseSettings):
     topology_api_base_url: str | None = Field(default=None, alias="TOPOLOGY_API_BASE_URL")
     knowledge_mode: Literal["local", "real"] = Field(default="local", alias="KNOWLEDGE_MODE")
     knowledge_api_base_url: str | None = Field(default=None, alias="KNOWLEDGE_API_BASE_URL")
+
+    # P3 topology-and-pattern-driven synthesis integrations (config-switchable mock/real)
+    pattern_manager_api_mode: Literal["mock", "real"] = Field(
+        default="mock", alias="PATTERN_MANAGER_API_MODE"
+    )
+    pattern_manager_api_base_url: str | None = Field(
+        default=None, alias="PATTERN_MANAGER_API_BASE_URL"
+    )
+    trail_builder_api_mode: Literal["mock", "real"] = Field(
+        default="mock", alias="TRAIL_BUILDER_API_MODE"
+    )
+    trail_builder_api_base_url: str | None = Field(default=None, alias="TRAIL_BUILDER_API_BASE_URL")
+
+    # P3 synthesis knobs (no hard-coded thresholds — env/CLI overridable)
+    synth_domain: str = Field(default="core-ip", alias="SYNTH_DOMAIN")
+    p3_aligned_fraction: float = Field(default=0.65, alias="P3_ALIGNED_FRACTION")
+    p3_total_alarms: int = Field(default=500, alias="P3_TOTAL_ALARMS")
+    p3_rng_seed: int | None = Field(default=None, alias="P3_RNG_SEED")
+    p3_config_snapshot_path: str | None = Field(default=None, alias="P3_CONFIG_SNAPSHOT_PATH")
+    p3_optional_include_prob: float = Field(default=1.0, alias="P3_OPTIONAL_INCLUDE_PROB")
+    # Stagger controls (M1): successive cascades on the same (trailId, patternId) are separated by
+    # windowMs * P3_STAGGER_MARGIN (+ a seeded jitter up to P3_STAGGER_JITTER_MS) so each forms its
+    # own Correlation-Engine session/incident. margin > 1.0 guarantees strictly-more-than-windowMs.
+    p3_stagger_margin: float = Field(default=1.5, alias="P3_STAGGER_MARGIN")
+    p3_stagger_jitter_ms: float = Field(default=2000.0, alias="P3_STAGGER_JITTER_MS")
+    # Fraction of a pattern's sessionWindow the in-window cascade span is compressed to fit inside
+    # (leaves a margin so the last alarm lands strictly inside the window). No hard-coded literal.
+    p3_in_window_margin: float = Field(default=0.9, alias="P3_IN_WINDOW_MARGIN")
+    p3_partial_cascade_fraction: float = Field(default=0.4, alias="P3_PARTIAL_CASCADE_FRACTION")
+    p3_random_alarm_fraction: float = Field(default=0.4, alias="P3_RANDOM_ALARM_FRACTION")
+    p3_noise_fraction: float = Field(default=0.2, alias="P3_NOISE_FRACTION")
 
     # topology shape
     topology_node_count: int = Field(default=20, alias="TOPOLOGY_NODE_COUNT")
@@ -98,6 +129,13 @@ class Settings(BaseSettings):
             name, _, weight = token.partition(":")
             out[name.strip()] = float(weight) if weight else 1.0
         return out
+
+    @property
+    def resolved_p3_config_snapshot_path(self) -> str:
+        """The P3 config snapshot path (explicit override or the default under SIM_OUTPUT_DIR)."""
+        if self.p3_config_snapshot_path:
+            return self.p3_config_snapshot_path
+        return f"{self.sim_output_dir.rstrip('/')}/p3-config-snapshot.json"
 
     def resolved_history_window(self) -> tuple[datetime, datetime]:
         """Resolve the (start, end) P2 history window from the configured knobs."""
@@ -174,6 +212,9 @@ def _validate(s: Settings) -> None:  # noqa: C901 - flat range checks
             if s.phase == "p2" and start >= end:
                 raise ConfigError("HISTORY_START must be < HISTORY_END")
 
+    if s.sim_mode == "synth":
+        _validate_synth(s)
+
     if s.total_alarms is not None:
         floor = _minable_floor(len(s.selected_scenarios), s.background_fraction, s.noise_rate)
         if s.total_alarms < floor:
@@ -181,6 +222,46 @@ def _validate(s: Settings) -> None:  # noqa: C901 - flat range checks
                 f"TOTAL_ALARMS={s.total_alarms} below minable floor {floor} "
                 f"(5 x scenarios x min-cascade / signal_fraction)"
             )
+
+
+def _validate_synth(s: Settings) -> None:
+    """P3 synthesis fail-fast validation (AC 44, 46) — runs before any alarm emission."""
+    # synth pins to P3 / alarms.live and needs Kafka to emit.
+    if not s.kafka_bootstrap_servers:
+        raise ConfigError("KAFKA_BOOTSTRAP_SERVERS required for synth mode")
+    if not (0.0 <= s.p3_aligned_fraction <= 1.0):
+        raise ConfigError(f"P3_ALIGNED_FRACTION={s.p3_aligned_fraction} out of range [0,1]")
+    if s.p3_total_alarms < 1:
+        raise ConfigError("P3_TOTAL_ALARMS must be >= 1")
+    if not (0.0 <= s.p3_optional_include_prob <= 1.0):
+        raise ConfigError(
+            f"P3_OPTIONAL_INCLUDE_PROB={s.p3_optional_include_prob} out of range [0,1]"
+        )
+    if s.p3_stagger_margin <= 1.0:
+        raise ConfigError(
+            f"P3_STAGGER_MARGIN={s.p3_stagger_margin} must be > 1.0 (strictly separate cascades "
+            "on the same (trailId, patternId) beyond their sessionWindow)"
+        )
+    if s.p3_stagger_jitter_ms < 0:
+        raise ConfigError("P3_STAGGER_JITTER_MS must be >= 0")
+    if not (0.0 < s.p3_in_window_margin <= 1.0):
+        raise ConfigError(f"P3_IN_WINDOW_MARGIN={s.p3_in_window_margin} out of range (0,1]")
+    mix = s.p3_partial_cascade_fraction + s.p3_random_alarm_fraction + s.p3_noise_fraction
+    if abs(mix - 1.0) > 1e-6:
+        raise ConfigError(
+            "P3 non-aligned mix fractions (partial+random+noise) must sum to 1.0, " f"got {mix:.4f}"
+        )
+    # Collaborator URLs required when the corresponding mode is real (AC 44/46). Only enforced
+    # when a re-fetch is required (no persisted config snapshot present is a runtime concern; the
+    # missing-URL check is a config concern enforced unconditionally so `real` never runs URL-less).
+    if s.pattern_manager_api_mode == "real" and not s.pattern_manager_api_base_url:
+        raise ConfigError(
+            "PATTERN_MANAGER_API_BASE_URL required when PATTERN_MANAGER_API_MODE=real"
+        )
+    if s.trail_builder_api_mode == "real" and not s.trail_builder_api_base_url:
+        raise ConfigError("TRAIL_BUILDER_API_BASE_URL required when TRAIL_BUILDER_API_MODE=real")
+    if s.topology_api_mode == "real" and not s.topology_api_base_url:
+        raise ConfigError("TOPOLOGY_API_BASE_URL required when TOPOLOGY_API_MODE=real")
 
 
 def _minable_floor(num_scenarios: int, background_fraction: float, noise_rate: float) -> int:
