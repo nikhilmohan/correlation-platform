@@ -48,6 +48,16 @@ export class StatsStore {
 
   readonly rcaAccuracy = computed(() => this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()));
 
+  /**
+   * Incidents ordered most-recent-first by `createdAt` (descending); incidents with no
+   * `createdAt` sort last, then by incidentId for a stable order. The template iterates this so
+   * the newest incident is always at the top of the list.
+   */
+  readonly sortedIncidents = computed<IncidentVM[]>(() => {
+    const t = (i: IncidentVM): number => (i.createdAt ? Date.parse(i.createdAt) : Number.NEGATIVE_INFINITY);
+    return [...this.incidents()].sort((a, b) => t(b) - t(a) || a.incidentId.localeCompare(b.incidentId));
+  });
+
   readonly visibleAlarms = computed<AlarmSummary[]>(() => {
     const filter = this.alarmStateFilter();
     return filter === 'all' ? this.alarms() : this.alarms().filter((a) => a.lifecycleState === filter);
@@ -72,14 +82,24 @@ export class StatsStore {
     }
     const incidentType = new Map(this.incidents().map((i) => [i.incidentId, i.rootCauseAlarmType]));
     const groups: CorrelationGroup[] = [];
+    const raisedMs = (a: AlarmSummary): number => (a.raisedAt ? Date.parse(a.raisedAt) : 0);
     for (const [incidentId, members] of byIncident) {
       const rootCause = members.find((a) => a.role === 'root-cause') ?? null;
-      const children = members.filter((a) => a.role !== 'root-cause');
+      // Children ordered by raisedAt ASCENDING so the cascade reads in time order under the RCA.
+      const children = members
+        .filter((a) => a.role !== 'root-cause')
+        .sort((a, b) => raisedMs(a) - raisedMs(b) || a.alarmId.localeCompare(b.alarmId));
+      // Group header timestamp: prefer the RCA alarm's raisedAt, else the newest member's.
+      const newest = members.reduce<string | undefined>(
+        (acc, a) => (a.raisedAt && (!acc || Date.parse(a.raisedAt) > Date.parse(acc)) ? a.raisedAt : acc),
+        undefined,
+      );
       groups.push({
         incidentId,
         rootCause,
         rootCauseAlarmType: rootCause?.alarmType ?? rootCause?.eventType ?? incidentType.get(incidentId) ?? null,
         children,
+        groupRaisedAt: rootCause?.raisedAt ?? newest,
       });
     }
     const latest = (g: CorrelationGroup): number => {
@@ -89,10 +109,16 @@ export class StatsStore {
     return groups.sort((a, b) => latest(b) - latest(a) || a.incidentId.localeCompare(b.incidentId));
   });
 
-  /** Uncorrelated alarms (role='none' / no incident) — rendered as a flat list, not a group. */
-  readonly uncorrelatedAlarms = computed<AlarmSummary[]>(() =>
-    this.visibleAlarms().filter((a) => a.role === 'none' || !a.incidentId),
-  );
+  /**
+   * Uncorrelated alarms (role='none' / no incident) — rendered as a flat list, not a group.
+   * Ordered most-recent-first by `raisedAt` (descending); alarms with no `raisedAt` sort last.
+   */
+  readonly uncorrelatedAlarms = computed<AlarmSummary[]>(() => {
+    const t = (a: AlarmSummary): number => (a.raisedAt ? Date.parse(a.raisedAt) : Number.NEGATIVE_INFINITY);
+    return this.visibleAlarms()
+      .filter((a) => a.role === 'none' || !a.incidentId)
+      .sort((a, b) => t(b) - t(a) || a.alarmId.localeCompare(b.alarmId));
+  });
 
   /** storm-reduction ratio = alarmsIn / clustersFormed (guarded). */
   stormReduction(row: RunStatsRow): number | null {

@@ -297,6 +297,11 @@ export interface CorrelationGroup {
   rootCause: AlarmSummary | null;
   rootCauseAlarmType?: string | null;
   children: AlarmSummary[];
+  /**
+   * ISO-8601 timestamp for the group header — the root-cause alarm's `raisedAt` when present,
+   * otherwise the newest member alarm's `raisedAt`. Undefined when no member carries a timestamp.
+   */
+  groupRaisedAt?: string;
 }
 export interface AlarmTransition {
   toState: string;

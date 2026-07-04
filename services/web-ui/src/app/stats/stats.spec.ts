@@ -1,6 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { describe, expect, it } from 'vitest';
 import { StatsStore } from './stats.store';
+import { StatsComponent } from './stats.component';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { testProviders, flush } from '../../test-utils';
 import { AlarmSummary, RunStatsRow, StatsVM } from '../api/models';
@@ -175,5 +176,82 @@ describe('Correlation stats module + alarm lifecycle', () => {
     s.setAlarmFilter('correlated');
     expect(s.correlationGroups().length).toBe(1);
     expect(s.correlationGroups()[0].incidentId).toBe('INC-12');
+  });
+});
+
+describe('Stats timestamps + most-recent-first ordering', () => {
+  it('sortedIncidents orders incidents by createdAt DESCENDING (fixture is stored out of order)', async () => {
+    const s = store();
+    s.loadIncidents();
+    await flush();
+    // Fixture array order is [INC-11 (11:50), INC-12 (12:00)]; sorted view must flip it.
+    expect(s.incidents().map((i) => i.incidentId)).toEqual(['INC-11', 'INC-12']);
+    expect(s.sortedIncidents().map((i) => i.incidentId)).toEqual(['INC-12', 'INC-11']);
+  });
+
+  it('sortedIncidents pushes incidents with no createdAt to the end', () => {
+    const s = store();
+    s.incidents.set([
+      { incidentId: 'B', createdAt: undefined } as never,
+      { incidentId: 'A', createdAt: '2026-06-01T12:00:00Z' } as never,
+    ]);
+    expect(s.sortedIncidents().map((i) => i.incidentId)).toEqual(['A', 'B']);
+  });
+
+  it('correlationGroups exposes a group timestamp (RCA raisedAt) and keeps children in raisedAt order', async () => {
+    const s = store();
+    s.loadIncidents();
+    s.loadAlarms();
+    await flush();
+    const g = s.correlationGroups()[0];
+    expect(g.groupRaisedAt).toBe('2026-06-01T12:00:00Z');
+    // children a-7 (12:00:03) then a-8 (12:00:05) — ascending cascade order.
+    expect(g.children.map((c) => c.alarmId)).toEqual(['a-7', 'a-8']);
+  });
+
+  it('uncorrelatedAlarms are ordered by raisedAt DESCENDING (most recent first)', async () => {
+    const s = store();
+    s.loadIncidents();
+    s.loadAlarms();
+    await flush();
+    // Fixture raisedAt: a-2 (11:45) < a-1 (11:55) < a-9 (12:10); desc → a-9, a-1, a-2.
+    expect(s.uncorrelatedAlarms().map((a) => a.alarmId)).toEqual(['a-9', 'a-1', 'a-2']);
+  });
+
+  it('renders incidents most-recent-first with a createdAt timestamp cell', async () => {
+    TestBed.configureTestingModule({ providers: [...testProviders()] });
+    const cmp = TestBed.createComponent(StatsComponent);
+    cmp.detectChanges();
+    await flush();
+    cmp.detectChanges();
+
+    const rows = cmp.nativeElement.querySelectorAll('[data-testid="stats-incident"]');
+    expect(rows.length).toBe(2);
+    // Most-recent (INC-12) first despite the out-of-order fixture.
+    expect(rows[0].textContent).toContain('INC-12');
+    expect(rows[1].textContent).toContain('INC-11');
+    // Each incident shows a timestamp cell.
+    const ts = cmp.nativeElement.querySelectorAll('[data-testid="incident-created-at"]');
+    expect(ts.length).toBe(2);
+    expect((ts[0] as HTMLElement).getAttribute('title')).toBeTruthy();
+  });
+
+  it('renders correlation groups most-recent-first with per-alarm raisedAt cells', async () => {
+    TestBed.configureTestingModule({ providers: [...testProviders()] });
+    const cmp = TestBed.createComponent(StatsComponent);
+    cmp.detectChanges();
+    await flush();
+    // Switch to the alarm-lifecycle tab (loads alarms).
+    (cmp.nativeElement.querySelector('[data-testid="tab-alarms"]') as HTMLButtonElement).click();
+    cmp.detectChanges();
+    await flush();
+    cmp.detectChanges();
+
+    // Group header carries a timestamp.
+    const groupTs = cmp.nativeElement.querySelector('[data-testid="group-raised-at"]');
+    expect(groupTs).toBeTruthy();
+    // Each alarm row shows a raisedAt cell (RCA + 2 children + 3 uncorrelated = 6).
+    const alarmTs = cmp.nativeElement.querySelectorAll('[data-testid="alarm-raised-at"]');
+    expect(alarmTs.length).toBe(6);
   });
 });

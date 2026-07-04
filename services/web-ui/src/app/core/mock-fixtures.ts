@@ -510,18 +510,10 @@ const STATS: StatsVM = {
   rcaAccuracy: 0.86,
 };
 
+// Deliberately stored OUT OF createdAt order (older INC-11 first) so the store's
+// createdAt-descending sort (sortedIncidents) is actually exercised — a test that asserts
+// most-recent-first would FAIL if the list were rendered unsorted.
 const INCIDENTS: IncidentVM[] = [
-  {
-    incidentId: 'INC-12',
-    rootCauseAlarmId: 'a-3',
-    rootCauseAlarmType: 'LOS',
-    childAlarmIds: ['a-7', 'a-8'],
-    matchedPatternId: 'PAT-3',
-    matchedCodebookId: null,
-    confidence: 0.91,
-    trailId: 'TR-7',
-    createdAt: '2026-06-01T12:00:00Z',
-  },
   {
     incidentId: 'INC-11',
     rootCauseAlarmId: 'a-20',
@@ -532,6 +524,17 @@ const INCIDENTS: IncidentVM[] = [
     confidence: 0.77,
     trailId: 'TR-8',
     createdAt: '2026-06-01T11:50:00Z',
+  },
+  {
+    incidentId: 'INC-12',
+    rootCauseAlarmId: 'a-3',
+    rootCauseAlarmType: 'LOS',
+    childAlarmIds: ['a-7', 'a-8'],
+    matchedPatternId: 'PAT-3',
+    matchedCodebookId: null,
+    confidence: 0.91,
+    trailId: 'TR-7',
+    createdAt: '2026-06-01T12:00:00Z',
   },
 ];
 
@@ -548,10 +551,12 @@ const ALARMS: AlarmPage = {
     { alarmId: 'a-3', managedObjectId: 'FiberSpan:lon-fra-1', eventType: 'LOS', alarmType: 'LOS', perceivedSeverity: 'critical', raisedAt: '2026-06-01T12:00:00Z', lifecycleState: 'correlated', role: 'root-cause', incidentId: 'INC-12', trailIds: ['TR-7'] },
     { alarmId: 'a-7', managedObjectId: 'Interface:lon-r1-e1', eventType: 'LinkDown', alarmType: 'LinkDown', perceivedSeverity: 'major', raisedAt: '2026-06-01T12:00:03Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
     { alarmId: 'a-8', managedObjectId: 'IGPAdj:lon-r1-r2', eventType: 'AdjDown', alarmType: 'AdjDown', perceivedSeverity: 'minor', raisedAt: '2026-06-01T12:00:05Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
-    // Uncorrelated alarms (role='none') — rendered in the separate bottom section.
-    { alarmId: 'a-2', managedObjectId: 'Router:lon-r1', eventType: 'CpuHigh', alarmType: 'CpuHigh', lifecycleState: 'in-progress', role: 'none', incidentId: null, trailIds: [] },
-    { alarmId: 'a-1', managedObjectId: 'Router:lon-r1', eventType: 'PortFlap', alarmType: 'PortFlap', lifecycleState: 'open', role: 'none', incidentId: null, trailIds: [] },
-    { alarmId: 'a-9', managedObjectId: 'Router:lon-r1', eventType: 'AdjDown', alarmType: 'AdjDown', lifecycleState: 'cleared', role: 'none', incidentId: null, trailIds: [] },
+    // Uncorrelated alarms (role='none') — rendered in the separate bottom section. Their raisedAt
+    // values are deliberately OUT OF array order (a-2 oldest, a-1 middle, a-9 newest) so the store's
+    // raisedAt-descending sort is exercised: rendered order must be a-9, a-1, a-2.
+    { alarmId: 'a-2', managedObjectId: 'Router:lon-r1', eventType: 'CpuHigh', alarmType: 'CpuHigh', perceivedSeverity: 'warning', raisedAt: '2026-06-01T11:45:00Z', lifecycleState: 'in-progress', role: 'none', incidentId: null, trailIds: [] },
+    { alarmId: 'a-1', managedObjectId: 'Router:lon-r1', eventType: 'PortFlap', alarmType: 'PortFlap', perceivedSeverity: 'minor', raisedAt: '2026-06-01T11:55:00Z', lifecycleState: 'open', role: 'none', incidentId: null, trailIds: [] },
+    { alarmId: 'a-9', managedObjectId: 'Router:lon-r1', eventType: 'AdjDown', alarmType: 'AdjDown', perceivedSeverity: 'cleared', raisedAt: '2026-06-01T12:10:00Z', lifecycleState: 'cleared', role: 'none', incidentId: null, trailIds: [] },
   ],
 };
 

@@ -1,10 +1,11 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
-import { DecimalPipe, PercentPipe } from '@angular/common';
+import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { StatsStore } from './stats.store';
 import { NavigationService } from '../core/navigation.service';
 import { AlarmSummary, LifecycleState } from '../api/models';
 import { alarmTypeLabel } from '../patterns/alarm-type-labels';
+import { relativeTime } from '../core/relative-time';
 
 type Tab = 'incidents' | 'alarms' | 'noise';
 
@@ -18,7 +19,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [StatsStore],
-  imports: [DecimalPipe, PercentPipe, RouterLink],
+  imports: [DatePipe, DecimalPipe, PercentPipe, RouterLink],
   template: `
     <h1>Correlation stats</h1>
 
@@ -61,13 +62,18 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       @case ('incidents') {
         <section class="card" aria-labelledby="inc-h">
           <h2 id="inc-h">Incidents</h2>
-          @if (store.incidents().length) {
+          @if (store.sortedIncidents().length) {
             <ul class="list">
-              @for (inc of store.incidents(); track inc.incidentId) {
+              @for (inc of store.sortedIncidents(); track inc.incidentId) {
                 <li data-testid="stats-incident">
                   <a [routerLink]="['/incidents', inc.incidentId]">{{ inc.incidentId }}</a>
                   — root {{ inc.rootCauseAlarmType ?? inc.rootCauseAlarmId }}
                   · children: {{ inc.childAlarmIds.join(', ') || 'none' }}
+                  @if (inc.createdAt) {
+                    <span class="ts" data-testid="incident-created-at" [title]="inc.createdAt | date: 'medium'">
+                      {{ rel(inc.createdAt) }}
+                    </span>
+                  }
                 </li>
               }
             </ul>
@@ -96,6 +102,11 @@ type Tab = 'incidents' | 'alarms' | 'noise';
               <div class="corr-head">
                 <a class="corr-inc" [routerLink]="['/incidents', g.incidentId]">{{ g.incidentId }}</a>
                 <span class="corr-count">root cause + {{ g.children.length }} {{ g.children.length === 1 ? 'child' : 'children' }}</span>
+                @if (g.groupRaisedAt) {
+                  <span class="ts" data-testid="group-raised-at" [title]="g.groupRaisedAt | date: 'medium'">
+                    {{ rel(g.groupRaisedAt) }}
+                  </span>
+                }
               </div>
 
               <!-- Root-cause alarm (highlighted) or graceful placeholder -->
@@ -105,6 +116,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
                   <span class="alarm-type">{{ label(rc) }}</span>
                   <span class="alarm-mo" [title]="rc.managedObjectId">{{ rc.managedObjectId }}</span>
                   <span class="badge state" [class]="stateClass(rc.lifecycleState)" data-testid="lifecycle-state">{{ rc.lifecycleState }}</span>
+                  <span class="ts" data-testid="alarm-raised-at" [title]="rc.raisedAt ? (rc.raisedAt | date: 'medium') : ''">{{ rel(rc.raisedAt) || '—' }}</span>
                   <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ rc.alarmId }}</a>
                 </div>
               } @else {
@@ -128,6 +140,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
                   <span class="alarm-type">{{ label(c) }}</span>
                   <span class="alarm-mo" [title]="c.managedObjectId">{{ c.managedObjectId }}</span>
                   <span class="badge state" [class]="stateClass(c.lifecycleState)" data-testid="lifecycle-state">{{ c.lifecycleState }}</span>
+                  <span class="ts" data-testid="alarm-raised-at" [title]="c.raisedAt ? (c.raisedAt | date: 'medium') : ''">{{ rel(c.raisedAt) || '—' }}</span>
                   <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ c.alarmId }}</a>
                 </div>
               }
@@ -146,6 +159,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
                   <span class="alarm-type">{{ label(u) }}</span>
                   <span class="alarm-mo" [title]="u.managedObjectId">{{ u.managedObjectId }}</span>
                   <span class="badge state" [class]="stateClass(u.lifecycleState)" data-testid="lifecycle-state">{{ u.lifecycleState }}</span>
+                  <span class="ts" data-testid="alarm-raised-at" [title]="u.raisedAt ? (u.raisedAt | date: 'medium') : ''">{{ rel(u.raisedAt) || '—' }}</span>
                   <span class="alarm-id">{{ u.alarmId }}</span>
                 </div>
               }
@@ -274,7 +288,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       }
       .alarm {
         display: grid;
-        grid-template-columns: auto 1fr auto auto auto;
+        grid-template-columns: auto 1fr auto auto auto auto;
         align-items: center;
         gap: 0.6rem;
         padding: 0.45rem 0.75rem;
@@ -344,6 +358,19 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       .uncorr .corr-inc {
         color: var(--text-muted);
       }
+      /* Relative timestamps: muted + monospace-ish, hover title shows the absolute time. */
+      .ts {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        white-space: nowrap;
+        cursor: default;
+      }
+      .list .ts {
+        margin-left: 0.4rem;
+      }
+      .corr-head .ts {
+        margin-left: auto;
+      }
       .muted {
         color: var(--text-muted);
       }
@@ -381,6 +408,11 @@ export class StatsComponent implements OnInit {
   /** Tone class for the lifecycle-state badge. */
   stateClass(state: LifecycleState): string {
     return `state-${state}`;
+  }
+
+  /** Relative "… ago" form of an ISO-8601 timestamp for the timestamp cells (shared helper). */
+  rel(iso: string | null | undefined): string {
+    return relativeTime(iso);
   }
 
   onAlarmFilter(event: Event): void {
