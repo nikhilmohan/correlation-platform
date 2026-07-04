@@ -1,0 +1,153 @@
+// correlation-engine — the real-time correlation core + system of record for incidents (P3).
+// Consumes alarms.persisted.live / patterns.approved / codebook.generated; produces
+// correlation.results + alarms.status.changed; owns the PostgreSQL `incident` schema; serves a
+// read API for the web-ui Correlation Stats module. Java 17 / Spring Boot 3 / Gradle.
+//
+// Depends ONLY on the frozen event-model Java binding (com.acp:event-model:0.1.0, via includeBuild)
+// and the topic contracts — never on another service's source. All dependencies are permissive
+// (Apache-2.0 / MIT / BSD / EPL-2.0 / PostgreSQL). No GPL/AGPL.
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.4'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'jacoco'
+}
+
+group = 'com.acp'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    springdocVersion = '2.6.0'
+    networkntVersion = '1.4.0'
+    logstashEncoderVersion = '7.4'
+    testcontainersVersion = '1.20.1'
+    mockwebserverVersion = '4.12.0'
+    awaitilityVersion = '4.2.2'
+}
+
+dependencies {
+    // --- The frozen contract: event-model Java binding (generated payload POJOs + codec).
+    implementation 'com.acp:event-model:0.1.0'
+
+    // --- Spring Boot: web, validation, actuator (health/metrics).
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // --- Kafka Streams (stateful, per-(trailId, patternId) instance store) + spring-kafka.
+    implementation 'org.springframework.kafka:spring-kafka'
+    implementation 'org.apache.kafka:kafka-streams'
+
+    // --- PostgreSQL Incident Store: JDBC + Flyway (schema-scoped migrations into `incident`).
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
+
+    // --- JSON Schema validation (same validator event-model uses) for read-model / stubs.
+    implementation "com.networknt:json-schema-validator:${networkntVersion}"
+
+    // --- OpenAPI 3.1 (springdoc) — /openapi.json + Swagger UI.
+    implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${springdocVersion}"
+
+    // --- Observability: Prometheus registry + structured JSON logging.
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation "net.logstash.logback:logstash-logback-encoder:${logstashEncoderVersion}"
+
+    // --- Tests: JUnit 5, Mockito, Kafka Streams TopologyTestDriver, Testcontainers (Postgres +
+    //     Kafka), MockWebServer (mock collaborators from their published OpenAPI), Awaitility.
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
+    testImplementation 'org.apache.kafka:kafka-streams-test-utils'
+    testImplementation "org.testcontainers:junit-jupiter:${testcontainersVersion}"
+    testImplementation "org.testcontainers:postgresql:${testcontainersVersion}"
+    testImplementation "org.testcontainers:kafka:${testcontainersVersion}"
+    testImplementation "com.squareup.okhttp3:mockwebserver:${mockwebserverVersion}"
+    testImplementation "org.awaitility:awaitility:${awaitilityVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.testcontainers:testcontainers-bom:${testcontainersVersion}"
+    }
+}
+
+// Unit/contract tests (default). Integration tests (Testcontainers) are tagged "integration" and
+// excluded from the fast unit run; they run via the `integrationTest` task. `check`/`build`
+// includes the unit gate + JaCoCo so `./gradlew build` is the single green gate (DoD).
+tasks.named('test', Test) {
+    useJUnitPlatform {
+        excludeTags 'integration'
+    }
+    finalizedBy jacocoTestReport
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Testcontainers integration tests (PostgreSQL + Kafka).'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'integration'
+    }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    shouldRunAfter test
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/correlationengine/CorrelationEngineApplication.class',
+                    'com/acp/correlationengine/api/dto/**',
+                    // Spring @Configuration wiring is exercised for real by the Testcontainers
+                    // `integrationTest` task (context load), not the fast unit gate.
+                    'com/acp/correlationengine/config/**'
+                ])
+            })
+        )
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            element = 'BUNDLE'
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/correlationengine/CorrelationEngineApplication.class',
+                    'com/acp/correlationengine/api/dto/**',
+                    'com/acp/correlationengine/config/**'
+                ])
+            })
+        )
+    }
+}
+
+check.dependsOn jacocoTestCoverageVerification

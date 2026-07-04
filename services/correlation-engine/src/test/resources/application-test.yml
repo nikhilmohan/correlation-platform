@@ -1,0 +1,29 @@
+# Unit/slice test profile: no Kafka broker, no PostgreSQL — the engine core + read API load over
+# in-memory persistence. The real Kafka + Postgres paths are exercised by the integrationTest task.
+correlation:
+  # Unit/slice profile: no Postgres — the in-memory Incident Store + dedupe ledger back the
+  # engine core. The real JDBC path (default) is exercised by the integrationTest task.
+  persistence:
+    mode: memory
+
+correlation-engine:
+  kafka:
+    enabled: false
+  integration-mode: mock
+  pattern-manager-base-url: http://localhost:0
+  codebook-generator-base-url: http://localhost:0
+  knowledge-base-url: http://localhost:0
+  trail-builder-base-url: http://localhost:0
+  topology-base-url: http://localhost:0
+  knowledge-domain: core-ip
+  knowledge-refresh-ms: 60000
+  expiry-tick-ms: 60000
+  rca-eval-mode: off
+
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
