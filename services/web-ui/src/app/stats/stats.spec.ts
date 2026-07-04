@@ -230,10 +230,17 @@ describe('Stats timestamps + most-recent-first ordering', () => {
     // Most-recent (INC-12) first despite the out-of-order fixture.
     expect(rows[0].textContent).toContain('INC-12');
     expect(rows[1].textContent).toContain('INC-11');
-    // Each incident shows a timestamp cell.
+    // Each incident LEADS with a full absolute timestamp cell (dd MMM yy HH:mm:ss.SSS),
+    // and the relative "… ago" form is kept only as the hover title.
     const ts = cmp.nativeElement.querySelectorAll('[data-testid="incident-created-at"]');
     expect(ts.length).toBe(2);
+    expect((ts[0] as HTMLElement).textContent?.trim()).toMatch(
+      /\d{2} \w{3} \d{2} \d{2}:\d{2}:\d{2}\.\d{3}/,
+    );
     expect((ts[0] as HTMLElement).getAttribute('title')).toBeTruthy();
+    // Timestamp is the FIRST field in the row (leads the incident id).
+    const row0 = rows[0].textContent ?? '';
+    expect(row0.search(/\d{2} \w{3} \d{2} \d{2}:\d{2}:\d{2}/)).toBeLessThan(row0.indexOf('INC-12'));
   });
 
   it('renders correlation groups most-recent-first with per-alarm raisedAt cells', async () => {
@@ -247,11 +254,18 @@ describe('Stats timestamps + most-recent-first ordering', () => {
     await flush();
     cmp.detectChanges();
 
-    // Group header carries a timestamp.
+    // Group header LEADS with a full absolute timestamp (dd MMM yy HH:mm:ss.SSS).
     const groupTs = cmp.nativeElement.querySelector('[data-testid="group-raised-at"]');
     expect(groupTs).toBeTruthy();
-    // Each alarm row shows a raisedAt cell (RCA + 2 children + 3 uncorrelated = 6).
+    expect((groupTs as HTMLElement).textContent?.trim()).toMatch(
+      /\d{2} \w{3} \d{2} \d{2}:\d{2}:\d{2}\.\d{3}/,
+    );
+    // Each alarm row shows a raisedAt cell (RCA + 2 children + 3 uncorrelated = 6),
+    // each carrying the full absolute timestamp as its leading value.
     const alarmTs = cmp.nativeElement.querySelectorAll('[data-testid="alarm-raised-at"]');
     expect(alarmTs.length).toBe(6);
+    expect((alarmTs[0] as HTMLElement).textContent?.trim()).toMatch(
+      /\d{2} \w{3} \d{2} \d{2}:\d{2}:\d{2}\.\d{3}/,
+    );
   });
 });

@@ -66,14 +66,14 @@ type Tab = 'incidents' | 'alarms' | 'noise';
             <ul class="list">
               @for (inc of store.sortedIncidents(); track inc.incidentId) {
                 <li data-testid="stats-incident">
+                  @if (inc.createdAt) {
+                    <span class="ts" data-testid="incident-created-at" [title]="rel(inc.createdAt)">{{ inc.createdAt | date: TS_FMT }}</span>
+                  } @else {
+                    <span class="ts" data-testid="incident-created-at">{{ '—' }}</span>
+                  }
                   <a [routerLink]="['/incidents', inc.incidentId]">{{ inc.incidentId }}</a>
                   — root {{ inc.rootCauseAlarmType ?? inc.rootCauseAlarmId }}
                   · children: {{ inc.childAlarmIds.join(', ') || 'none' }}
-                  @if (inc.createdAt) {
-                    <span class="ts" data-testid="incident-created-at" [title]="inc.createdAt | date: 'medium'">
-                      {{ rel(inc.createdAt) }}
-                    </span>
-                  }
                 </li>
               }
             </ul>
@@ -100,23 +100,23 @@ type Tab = 'incidents' | 'alarms' | 'noise';
           @for (g of store.correlationGroups(); track g.incidentId) {
             <div class="corr-group" data-testid="corr-group">
               <div class="corr-head">
+                @if (g.groupRaisedAt) {
+                  <span class="ts" data-testid="group-raised-at" [title]="rel(g.groupRaisedAt)">{{ g.groupRaisedAt | date: TS_FMT }}</span>
+                } @else {
+                  <span class="ts" data-testid="group-raised-at">{{ '—' }}</span>
+                }
                 <a class="corr-inc" [routerLink]="['/incidents', g.incidentId]">{{ g.incidentId }}</a>
                 <span class="corr-count">root cause + {{ g.children.length }} {{ g.children.length === 1 ? 'child' : 'children' }}</span>
-                @if (g.groupRaisedAt) {
-                  <span class="ts" data-testid="group-raised-at" [title]="g.groupRaisedAt | date: 'medium'">
-                    {{ rel(g.groupRaisedAt) }}
-                  </span>
-                }
               </div>
 
               <!-- Root-cause alarm (highlighted) or graceful placeholder -->
               @if (g.rootCause; as rc) {
                 <div class="alarm rca" data-testid="lifecycle-row" data-role="root-cause">
+                  <span class="ts" data-testid="alarm-raised-at" [title]="rc.raisedAt ? rel(rc.raisedAt) : ''">{{ rc.raisedAt ? (rc.raisedAt | date: TS_FMT) : '—' }}</span>
                   <span class="badge rca-badge" aria-label="Root cause alarm">&#9733; Root cause</span>
                   <span class="alarm-type">{{ label(rc) }}</span>
                   <span class="alarm-mo" [title]="rc.managedObjectId">{{ rc.managedObjectId }}</span>
                   <span class="badge state" [class]="stateClass(rc.lifecycleState)" data-testid="lifecycle-state">{{ rc.lifecycleState }}</span>
-                  <span class="ts" data-testid="alarm-raised-at" [title]="rc.raisedAt ? (rc.raisedAt | date: 'medium') : ''">{{ rel(rc.raisedAt) || '—' }}</span>
                   <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ rc.alarmId }}</a>
                 </div>
               } @else {
@@ -136,11 +136,11 @@ type Tab = 'incidents' | 'alarms' | 'noise';
               <!-- Child alarms (nested, subordinate) -->
               @for (c of g.children; track c.alarmId) {
                 <div class="alarm child" data-testid="lifecycle-row" data-role="child">
+                  <span class="ts" data-testid="alarm-raised-at" [title]="c.raisedAt ? rel(c.raisedAt) : ''">{{ c.raisedAt ? (c.raisedAt | date: TS_FMT) : '—' }}</span>
                   <span class="tree" aria-hidden="true">&#9492;&#9472;</span>
                   <span class="alarm-type">{{ label(c) }}</span>
                   <span class="alarm-mo" [title]="c.managedObjectId">{{ c.managedObjectId }}</span>
                   <span class="badge state" [class]="stateClass(c.lifecycleState)" data-testid="lifecycle-state">{{ c.lifecycleState }}</span>
-                  <span class="ts" data-testid="alarm-raised-at" [title]="c.raisedAt ? (c.raisedAt | date: 'medium') : ''">{{ rel(c.raisedAt) || '—' }}</span>
                   <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ c.alarmId }}</a>
                 </div>
               }
@@ -156,10 +156,10 @@ type Tab = 'incidents' | 'alarms' | 'noise';
               </div>
               @for (u of store.uncorrelatedAlarms(); track u.alarmId) {
                 <div class="alarm uncorr-row" data-testid="lifecycle-row" data-role="none">
+                  <span class="ts" data-testid="alarm-raised-at" [title]="u.raisedAt ? rel(u.raisedAt) : ''">{{ u.raisedAt ? (u.raisedAt | date: TS_FMT) : '—' }}</span>
                   <span class="alarm-type">{{ label(u) }}</span>
                   <span class="alarm-mo" [title]="u.managedObjectId">{{ u.managedObjectId }}</span>
                   <span class="badge state" [class]="stateClass(u.lifecycleState)" data-testid="lifecycle-state">{{ u.lifecycleState }}</span>
-                  <span class="ts" data-testid="alarm-raised-at" [title]="u.raisedAt ? (u.raisedAt | date: 'medium') : ''">{{ rel(u.raisedAt) || '—' }}</span>
                   <span class="alarm-id">{{ u.alarmId }}</span>
                 </div>
               }
@@ -288,7 +288,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       }
       .alarm {
         display: grid;
-        grid-template-columns: auto 1fr auto auto auto auto;
+        grid-template-columns: auto auto 1fr auto auto auto;
         align-items: center;
         gap: 0.6rem;
         padding: 0.45rem 0.75rem;
@@ -358,18 +358,24 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       .uncorr .corr-inc {
         color: var(--text-muted);
       }
-      /* Relative timestamps: muted + monospace-ish, hover title shows the absolute time. */
+      /* Leading absolute timestamp: fixed-width monospace so rows line up; hover title
+         shows the relative "… ago" form. */
       .ts {
         color: var(--text-muted);
         font-size: 0.8rem;
         white-space: nowrap;
         cursor: default;
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      .list li {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        flex-wrap: wrap;
       }
       .list .ts {
-        margin-left: 0.4rem;
-      }
-      .corr-head .ts {
-        margin-left: auto;
+        flex: 0 0 auto;
       }
       .muted {
         color: var(--text-muted);
@@ -381,6 +387,14 @@ export class StatsComponent implements OnInit {
   readonly store = inject(StatsStore);
   readonly nav = inject(NavigationService);
   readonly tab = signal<Tab>('incidents');
+
+  /**
+   * Compact, unambiguous absolute-timestamp format for the leading timestamp column:
+   * `05 Jul 26 00:57:18.123` (day, short month, 2-digit year, 24h time WITH milliseconds).
+   * Milliseconds matter — alarms/incidents can be sub-second apart. The relative "… ago"
+   * form is kept only as a hover title, not the visible value.
+   */
+  readonly TS_FMT = 'dd MMM yy HH:mm:ss.SSS';
 
   ngOnInit(): void {
     this.store.loadStats();
