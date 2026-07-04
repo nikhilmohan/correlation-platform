@@ -1,0 +1,81 @@
+# Enrichment Service — all values overridable by environment variables (no hard-coded URLs/
+# thresholds). Per-source filter parameters + field mappings live ONLY in the mounted rulesets
+# YAML (ENRICHMENT_RULESETS_FILE), never here and never in Knowledge.
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: enrichment
+
+# Kafka cluster + integration URLs.
+kafka:
+  bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+trail-builder:
+  base-url: ${TRAIL_BUILDER_BASE_URL:http://trail-builder:8000}
+  mode: ${TRAIL_BUILDER_MODE:real}
+
+# Knowledge Service — authoritative source of the alarmTypeVocabulary (validated at startup).
+# Only the domain vocabulary is fetched here; pipeline params stay Enrichment-owned (spec invariant).
+knowledge:
+  base-url: ${KNOWLEDGE_BASE_URL:http://knowledge:8080}
+  mode: ${KNOWLEDGE_MODE:real}
+
+enrichment:
+  consumer-group: ${ENRICHMENT_CONSUMER_GROUP:enrichment}
+  domain: ${ENRICHMENT_DOMAIN:core-ip}
+  rulesets-file: ${ENRICHMENT_RULESETS_FILE:/config/rulesets.yaml}
+  rulesets-reload: ${ENRICHMENT_RULESETS_RELOAD:false}
+  chatter-overlay-file: ${ENRICHMENT_CHATTER_OVERLAY_FILE:/config/chatter-overlay.json}
+  self-clear-sweep-ms: ${ENRICHMENT_SELF_CLEAR_SWEEP_MS:1000}
+  history-topic: ${ENRICHMENT_HISTORY_TOPIC:alarms.history}
+  live-topic: ${ENRICHMENT_LIVE_TOPIC:alarms.live}
+  enriched-topic: ${ENRICHMENT_ENRICHED_TOPIC:alarms.enriched}
+  enriched-live-topic: ${ENRICHMENT_ENRICHED_LIVE_TOPIC:alarms.enriched.live}
+  history-dlq-topic: ${ENRICHMENT_HISTORY_DLQ_TOPIC:alarms.history.dlq}
+  live-dlq-topic: ${ENRICHMENT_LIVE_DLQ_TOPIC:alarms.live.dlq}
+
+# Resilience4j: retry + circuit-breaker around the Trail Builder getTrailsForObject call.
+resilience4j:
+  retry:
+    instances:
+      trailBuilder:
+        max-attempts: ${TRAIL_BUILDER_MAX_RETRIES:3}
+        wait-duration: ${TRAIL_BUILDER_RETRY_BACKOFF_MS:200}ms
+  circuitbreaker:
+    instances:
+      trailBuilder:
+        sliding-window-size: 20
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 3
+
+# Actuator: /actuator/health (liveness + readiness), /actuator/prometheus.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,rulesets
+      show-details: always
+  health:
+    readinessstate:
+      enabled: true
+    livenessstate:
+      enabled: true
+
+# springdoc: publish OpenAPI 3.1 at /openapi.json (+ Swagger UI).
+springdoc:
+  api-docs:
+    path: /openapi.json
+    version: openapi_3_1
+  swagger-ui:
+    path: /swagger-ui.html
