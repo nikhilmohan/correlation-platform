@@ -432,10 +432,9 @@ services:
       PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"  # → nginx → pattern-manager:8080
       NOISE_FILTER_API_BASE_URL: "/api/noise-filter"        # → nginx → noise-filter:8080
       ENRICHMENT_CHATTER_API_BASE_URL: "/api/enrichment"    # → nginx → enrichment:8080
-      # P3 services not yet in this compose — left UNSET on purpose (graceful degrade). The nginx
-      # /api/<svc> proxy routes already exist, so the moment those land we just set the URL here:
-      #   CORRELATION_ENGINE_API_BASE_URL: "/api/correlation-engine"
-      #   ALARM_MANAGER_API_BASE_URL: "/api/alarm-manager"
+      # P3 services (now in this compose) — same-origin prefixes proxied by nginx BY SERVICE NAME:
+      CORRELATION_ENGINE_API_BASE_URL: "/api/correlation-engine"  # → nginx → correlation-engine:8080
+      ALARM_MANAGER_API_BASE_URL: "/api/alarm-manager"            # → nginx → alarm-manager:8080
       STREAMING_REFRESH_INTERVAL_MS: "3000"
       DOMAIN: "core-ip"
       SNAPSHOT_ID: "current"
@@ -655,14 +654,112 @@ services:
       # JVM Spring Boot + Flyway migration on startup; allow the startup window on a busy host.
       start_period: 180s
 
+  # ===== P3 cohort — real-time correlation ================================================
+  # Live chain: enrichment → alarms.enriched.live → alarm-manager → alarms.persisted.live →
+  # correlation-engine (match/score/RCA vs approved patterns + codebook) → correlation.results
+  # → alarm-manager (lifecycle + incident role) → live alarm API → web-ui.
+
+  # --- Alarm Manager — sole owner of LIVE alarm state. Sits in-line on the live path: consumes
+  #     alarms.enriched.live, PERSISTS each alarm to its own `live_alarm` schema (Flyway) then
+  #     REPUBLISHES on alarms.persisted.live (persist-first = SoT). Maintains lifecycle
+  #     (open→correlated→cleared/reverted-open) + root-cause/child role + incident linkage from
+  #     correlation.results, syncs status from alarms.status.changed, serves the live alarm query
+  #     API to the web-ui. All config from env; consumers idempotent (dedupe on eventId/alarmId). ---
+  alarm-manager:
+    build:
+      context: .
+      dockerfile: services/alarm-manager/Dockerfile
+    image: acp/alarm-manager:0.1.0
+    container_name: cp-alarm-manager
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      ALARM_MANAGER_PORT: "8080"
+      ALARM_DB_JDBC_URL: "jdbc:postgresql://postgres:5432/correlation"
+      SPRING_DATASOURCE_USERNAME: "correlation"
+      SPRING_DATASOURCE_PASSWORD: "correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+    ports:
+      - "8091:8080"      # live alarm query API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      cp-net:
+        aliases:
+          - alarm-manager
+
+  # --- Correlation Engine — real-time correlation core + system of record for incidents. Consumes
+  #     alarms.persisted.live, correlates via lazy per-(matchedTrailId,patternId) instances against
+  #     APPROVED patterns + the latest codebook, tags root cause, PERSISTS incidents to its own
+  #     `incident` schema (Flyway), emits correlation.results + alarms.status.changed, serves a read
+  #     API (/incidents, /stats). PATTERN GENERALIZATION: an approved pattern auto-correlates on ANY
+  #     structurally-compatible trail network-wide (not just its discovery trail) — CE builds a
+  #     compatibility index from the Trail Builder catalog + discovers the current snapshot from the
+  #     Topology API at startup, and refreshes on the trails.built topic. In-memory instance registry
+  #     + scheduled expiry (MVP, per design #371). ---
+  correlation-engine:
+    build:
+      context: .
+      dockerfile: services/correlation-engine/Dockerfile
+    image: acp/correlation-engine:0.1.0
+    container_name: cp-correlation-engine
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      knowledge:
+        condition: service_started
+      pattern-manager:
+        condition: service_started
+      codebook-api:
+        condition: service_started
+      trail-builder:
+        condition: service_started
+      topology:
+        condition: service_started
+    environment:
+      SERVER_PORT: "8080"
+      DB_URL: "jdbc:postgresql://postgres:5432/correlation"
+      SPRING_DATASOURCE_USERNAME: "correlation"
+      SPRING_DATASOURCE_PASSWORD: "correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KAFKA_ENABLED: "true"
+      INTEGRATION_MODE: "real"
+      # Read-API collaborators (in-compose service names). The codebook READ API is codebook-api:8000
+      # (codebook-generator is the HTTP-less consumer), so point CE's codebook base URL there.
+      PATTERN_MANAGER_BASE_URL: "http://pattern-manager:8080"
+      CODEBOOK_GENERATOR_BASE_URL: "http://codebook-api:8000"
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_DOMAIN: "core-ip"
+      # Pattern generalization: CE reads the Trail Builder catalog (compatibility index) + discovers
+      # the current topology snapshot at startup so an approved pattern matches any compatible trail.
+      TRAIL_BUILDER_BASE_URL: "http://trail-builder:8000"
+      TRAIL_BUILDER_MODE: "real"
+      TOPOLOGY_BASE_URL: "http://topology:8080"
+      TOPOLOGY_MODE: "real"
+    ports:
+      - "8092:8080"      # incident + stats read API + /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    networks:
+      cp-net:
+        aliases:
+          - correlation-engine
+
 # -----------------------------------------------------------------------------------------
-# DEFERRED — not yet built (source stubs only, no build.gradle). Add a real Dockerfile +
-# compose entry once each is implemented, following the P2 services above:
-#
-#   correlation-engine — consumes patterns.approved + transactions.clean → correlation.results
-#   alarm-manager      — owns the alarm store / incident read model
-#
-#   Also deferred:
+# DEFERRED — not yet built:
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
 # -----------------------------------------------------------------------------------------
 
