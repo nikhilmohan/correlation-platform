@@ -2001,6 +2001,532 @@ No inbound Kafka in P3 either, so **no DLQ**; the P3 reads are HTTP GETs (bounde
 | P3 emit path | (a) new synthesis-specific producer; (b) **reuse `engine/replay:LiveReplay`** | **(b)** — same topic, pacing, fresh-`eventId` envelope, frozen `AlarmEvent`; no new code path, no contract change, guaranteed identical wire behaviour to existing P3 replay. |
 | Fetch vs. persist decoupling | (a) always re-fetch; (b) **persist once, load-from-file for repeated runs** | **(b)** — spec Task 14/AC 34/42: repeated randomized runs must align without re-fetching and must run standalone/offline; the persisted snapshot isolates synthesis from service availability. |
 
+## P3 network-wide emission + closed-loop auto-correlation target (additive enhancement)
+
+This section is the buildable detail for spec **Tasks 21–24** and **ACs 47–65**. It is an
+**additive enhancement to the existing P3 `synth` mode** (the section above) — it does **not**
+rewrite P1/P2, generate/ingest/export, or the existing P3 synth internals. It **builds on** the
+already-built modules: `synth/{p3_fetch, p3_run, aligned_controller, aligned_synth,
+nonaligned_synth, p3_schedule, p3_config_snapshot, p3_labels, models}.py`,
+`integrations/{pattern_manager_client, trail_builder_client, topology_snapshot_client}.py`, and
+`domains/coreip/p3_placement.py`. Every change below is **behind the `P3_NETWORK_WIDE` flag**;
+when it is off (or `P3_AUTO_CORRELATION_TARGET` is unset) the existing single-trail P3 behaviour is
+**byte-for-byte unchanged** (AC 58).
+
+**No contract change — explicit confirmation.** Every capability here consumes collaborators'
+**already-published** OpenAPI surfaces as-is and emits the **frozen `AlarmEvent`** on the
+**existing `alarms.live`** topic:
+- Trail Builder `GET /trails?snapshotId&domain&limit&offset` (paged list) is **already present** in
+  Trail Builder's published `openapi.json` (verified: `GET /trails` exists alongside
+  `GET /trails/{trailId}`, `GET /trails/by-object`, `POST /trails/rebuild`) — OQ-NW-4 RESOLVED, no
+  contract change.
+- Trail Builder `GET /trails/{trailId}` → `TrailDetail.members[]` of `{managedObjectId, objectType}`
+  is the same endpoint the existing P3 fetch already uses (OQ-P3-5 resolved — `objectType` declared
+  per member, consumed as-is, never derived from the moid prefix).
+- Pattern Manager `GET /patterns?lifecycle=approved` and Topology `GET /topology/snapshots` are
+  unchanged from the existing P3 fetch.
+- **New config only** (`P3_NETWORK_WIDE`, `P3_AUTO_CORRELATION_TARGET`, `P3_TARGET_TOLERANCE`,
+  `P3_MAX_CASCADES_PER_TRAIL`, `P3_ENRICHMENT_OVER_PROVISION_MARGIN`, `P3_ENRICHMENT_DEDUP_WINDOW_MS`,
+  `P3_ENRICHMENT_TRANSIENT_TYPES`). Config is not a contract. The **P3 config snapshot** file
+  (Simulator-owned artifact) gains an additive `compatibleTrails` block under a bumped
+  `schemaVersion` — the artifact is Simulator-owned and versioned, so this is not a platform
+  contract change.
+
+### Task breakdown (network-wide — from the spec)
+
+| Spec task | Realized by (modules / flow) |
+|---|---|
+| 21. Enumerate + cache compatible trails per pattern | New `synth/trail_discovery.py` (`discover_compatible_trails`) drives the extended `trail_builder_client.list_trails(...)` (paged `GET /trails`) + the existing `get_trail(...)` with an in-run fetch cache; applies the **hostability rule** using `pack.placement_affinity()`; prefers distinct igp-areas. Results cached in the **P3 config snapshot** (`p3_config_snapshot` schemaVersion 2, additive `compatibleTrails` block). Called from `p3_fetch` only when `P3_NETWORK_WIDE` is on. |
+| 22. Compute cascade count + distribution plan to hit target | New `synth/target_controller.py` (`plan_network_wide`) computes per-pattern cascade counts from the **CE-measured post-enrichment target** (OQ-NW-1 math) and a **distribution plan** (round-robin across compatible trails, maximize distinct igp-areas first, then fill to `P3_MAX_CASCADES_PER_TRAIL`, then staggered trail-repeats); records projected shortfall. Wraps/extends the existing `aligned_controller` staggering primitive. |
+| 23. Emit network-wide aligned cascades per the plan | `p3_run` (network-wide branch) drives `aligned_synth.build_cascade(...)` once per `(pattern, trail, instanceIndex)` plan entry (reusing the built synthesizer + the placement rule + the existing per-`(trail,pattern)` stagger cursor for repeats), records extended `P3CascadeLabel` (adds `instanceIndex`, `igpArea`), and persists the extended `P3RunSummary`. Reuses `p3_schedule` + `LiveReplay` for emission. |
+| 24. Enforce enrichment-safe constraints on every aligned cascade | New `synth/enrichment_safe.py` (`reconcile_spacing`, `is_enrichment_safe_pattern`, `assert_safe`) is invoked by the target controller (pattern-level conflict exclusion) and by `aligned_synth` (per-cascade spacing lower-bound + distinct-object + transient/flap guards). Conflicting patterns recorded in `enrichmentConflictPatterns`; `enrichmentSafeCount` in the summary. Non-aligned/noise portion is exempt (untouched `nonaligned_synth`). |
+
+### Phase applicability (network-wide, design view)
+
+Unchanged from the existing P3 row — this enhancement is **P3-only** and only refines the
+**synthesis sub-mode** of P3. P1 and P2: **Idle** for these modules (dormant unless
+`SIM_MODE=synth` **and** `P3_NETWORK_WIDE=true`). P3: **Active** — the network-wide discovery +
+target-controller + enrichment-safe modules are exercised in addition to the existing synth flow;
+I/O is unchanged (reads Topology/Trail Builder/Pattern Manager APIs; emits `alarms.live`).
+
+| Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
+|---|---|---|---|
+| P1 — Topology onboarding | Idle (for these modules) | dormant | — |
+| P2 — Pattern learning | Idle (for these modules) | dormant | — |
+| P3 — Real-time correlation | Active (when `P3_NETWORK_WIDE=true`) | `trail_discovery`, `target_controller`, `enrichment_safe`, extended `aligned_synth`/`p3_run`/`p3_config_snapshot`/`p3_labels`; existing `LiveReplay`/`p3_schedule` reused | In: Trail Builder `GET /trails?…` + `GET /trails/{id}`, Pattern Manager `GET /patterns?lifecycle=approved`, Topology `GET /topology/snapshots` (all mock/real, config-switchable); persisted P3 config snapshot. Out: `alarms.live` (frozen `AlarmEvent`, wall-clock paced); extended P3 labels + run summary. |
+
+### Module breakdown (network-wide additions)
+
+New/extended code stays under `synth/` + the existing `integrations/trail_builder_client.py` +
+`domains/coreip/p3_placement.py`. Engine core, P1/P2 pack content, and generate/ingest/export are
+**untouched**. Existing `aligned_synth`, `p3_schedule`, `nonaligned_synth`, `LiveReplay` are
+**reused**.
+
+| Module | New/Extended | Responsibility |
+|---|---|---|
+| `integrations/trail_builder_client.py` | **Extended** | Add `list_trails(snapshot_id, domain, limit, offset)` → paged `GET /trails` returning `[TrailSummary{trailId, snapshotId, igpArea}]` (mock + real, call-counted). `get_trail(...)` unchanged. Mock adds a configurable trail-list body. |
+| `synth/trail_discovery.py` | **New** | `discover_compatible_trails(pack, patterns, trail_client, snapshot_id, domain, discovery_areas, cache)` — enumerate all trails (paged), fetch each candidate's members via `get_trail` (reuse fetch-cache — AC 48), apply the **hostability rule** (Algorithm §A below), return `CompatibleTrails{patternId → [CompatibleTrail{trailId, igpArea}]}`. Prefer distinct areas; log same-area / single-trail fallbacks. |
+| `synth/target_controller.py` | **New** | `plan_network_wide(settings, patterns, compatible, enrichment_safe_ctx)` — compute per-pattern cascade counts from the target math (§B), build the distribution plan (§C), exclude enrichment-conflicting patterns (§D), compute shortfall. Returns `NetworkWidePlan{entries:[PlanEntry{patternId, trailId, igpArea, instanceIndex}], enrichmentConflictPatterns, shortfallCascades, targetEmittedFraction}`. |
+| `synth/enrichment_safe.py` | **New** | Pure helpers: `reconcile_spacing(dedup_window_ms, session_window_ms) -> (lo, hi) | Conflict`; `is_enrichment_safe_pattern(pattern, dedup_window_ms) -> bool`; `transient_types(settings) -> set[str]`; `assert_cascade_safe(cascade, dedup_window_ms, transient_types)` (used in tests + a runtime guard). No I/O. |
+| `synth/aligned_synth.py` | **Extended** | `build_cascade(...)` gains `spacing_lo_ms`/`spacing_hi_ms` (the reconciled bounds) so consecutive elements are ≥ dedup window and the whole cascade ≤ session window; **distinct-object placement** (never place two elements of one cascade on the same `managedObjectId`); accepts `instance_index` + `igp_area` for the extended label. Single-trail path (bounds not supplied) unchanged. |
+| `synth/aligned_controller.py` | **Reused (delegated)** | The `_next_start_offset_ms` stagger primitive (strictly `> windowMs`) is reused by `target_controller` for **trail-repeat** staggering (AC 56). No behaviour change; `plan(...)` is still the single-trail path. |
+| `synth/p3_config_snapshot.py` | **Extended** | schemaVersion **2** (SUPPORTED_MAJOR `{1,2}`, load-compat with v1 = no cached compatibleTrails). Additive `compatibleTrails` block persisted/loaded. v1 file loads fine (compatibleTrails absent → discovery runs on next network-wide run). |
+| `synth/p3_labels.py` | **Extended** | `P3CascadeLabel` gains `instance_index:int`, `igp_area:str|None`; `P3RunSummary` gains `distinct_trails_used`, `distinct_areas_used`, `shortfall_cascades`, `enrichment_safe_count`, `enrichment_conflict_patterns`, `aligned_fraction_emitted` (over-provisioned). Existing fields retained (backward-compatible JSON — additive keys). |
+| `synth/models.py` | **Extended** | Add `TrailSummary`, `CompatibleTrail`; extend `P3CascadeLabel`/`P3RunSummary` (above). |
+| `synth/p3_fetch.py` | **Extended** | When `P3_NETWORK_WIDE`: after assembling patterns+trails, call `trail_discovery` and attach `compatibleTrails` to the `P3ConfigSnapshot`; record each pattern's **discovery-trail igp-area** (from `get_trail`). Off → unchanged (no `GET /trails?…` beyond existing). |
+| `synth/p3_run.py` | **Extended** | Branch on `settings.p3_network_wide`: network-wide → `target_controller.plan_network_wide` → per-`PlanEntry` `aligned_synth.build_cascade` → non-aligned fill (existing) → `p3_schedule` → `LiveReplay`. Off → existing `aligned_controller.plan` path. |
+| `domains/coreip/p3_placement.py` | **Extended** | Add `required_object_types(pattern, affinity) -> set[str]` helper (the set of affine objectTypes the pattern's sequence needs, root included) so the hostability rule is **pack-derived**, keeping `synth/` domain-generic. |
+| `config/settings.py` | **Extended** | New fields + `_validate_synth` range checks (§Config). |
+
+```mermaid
+flowchart TD
+  A["p3_run (synth mode)"] --> B{"P3_NETWORK_WIDE and P3_AUTO_CORRELATION_TARGET set"}
+  B -->|no| C["existing single-trail path: aligned_controller.plan (AC 58, unchanged)"]
+  B -->|yes| D["p3_fetch: discover + cache compatible trails (trail_discovery)"]
+  D --> E["enrichment_safe: exclude conflicting patterns, log (AC 62)"]
+  E --> F["target_controller: cascade-count math + distribution plan (AC 51, 52, 55, 56)"]
+  F --> G["aligned_synth.build_cascade per PlanEntry: enrichment-safe, distinct objects (AC 49, 50, 59, 61, 63)"]
+  G --> H["nonaligned_synth fill (unconstrained, AC 64)"]
+  H --> I["p3_schedule + LiveReplay to alarms.live (existing)"]
+  I --> J["p3_labels: extended labels + summary (AC 53, 54, 65)"]
+```
+
+### Algorithm §A — Compatible-trail discovery + hostability rule (Task 21, AC 47–50, 58)
+
+`trail_discovery.discover_compatible_trails(...)`:
+
+1. **Enumerate** all trails for the current snapshot: page `trail_client.list_trails(snapshotId,
+   domain, limit=_PAGE_LIMIT, offset)` until fewer than `limit` returned. Each entry gives
+   `{trailId, snapshotId, igpArea}`.
+2. **Required object types per pattern:** `req(P) = { affinity[e.alarmType] for e in P.sequence }`
+   (skip `None` affinity), **including the root** — computed by
+   `p3_placement.required_object_types(P, affinity)`. This is the SAME affinity the Correlation
+   Engine's hostability check uses (via the shared `<objectType>` layer set), so a
+   Simulator-compatible trail is a CE-hostable trail.
+3. **Hostability filter:** a trail T is compatible with pattern P **iff** for every
+   `ot ∈ req(P)` there exists ≥1 member of T with `objectType == ot`. To read a candidate's
+   members, call `get_trail(trailId)` — **memoized** in the run's fetch cache so a trailId is
+   fetched **at most once** across all patterns (AC 48). (Fallback-affinity types — where the
+   pattern uses the any-member fallback — are treated as "any member present" so a trail is never
+   excluded for a type the synthesis would place by fallback; this keeps discovery consistent with
+   the emit-time placement rule.)
+4. **Discovery-trail area:** each pattern's own `trailId` (from the pattern) is included in the
+   candidate set and, if it passes hostability, is retained; its igp-area is the pattern's
+   **discovery area**, recorded so the distribution plan can *prefer different areas*.
+5. **Ordering / preference:** compatible trails are returned **grouped by igp-area**, areas other
+   than the discovery area first; within a group, ordered by trailId then **shuffled under the
+   seeded RNG** at plan time (not here — discovery is deterministic and cacheable; randomization is
+   a plan-time concern for AC 57).
+6. **Fallback logging (OQ-NW-2):** if all compatible trails share one area →
+   `p3.area_spread_unavailable` (info); if exactly one compatible trail →
+   `p3.single_compatible_trail` (info). Neither aborts.
+7. **Caching (AC 48):** the resulting `{patternId → [CompatibleTrail]}` is stored in the P3 config
+   snapshot (`compatibleTrails` block, schemaVersion 2). On a **second** run loading a snapshot that
+   already contains `compatibleTrails`, discovery is **skipped entirely** → **zero**
+   `GET /trails?…` and **zero** `GET /trails/{id}` calls for cached patterns (verified via the
+   mock call counters).
+8. **Disabled path (AC 58):** when `P3_NETWORK_WIDE=false`, `discover_compatible_trails` is **never
+   called**; `p3_fetch` performs only the existing per-pattern `get_trail` fetches, so **no**
+   `GET /trails?…` request is made.
+
+```mermaid
+flowchart TD
+  S["list_trails paged (GET /trails?snapshotId&domain&limit&offset)"] --> T["candidate trailIds"]
+  T --> U["for each candidate: get_trail memoized (AC 48 zero refetch)"]
+  U --> V{"trail hosts every required objectType of pattern P (root included)"}
+  V -->|yes| W["compatible: record trailId + igpArea"]
+  V -->|no| X["exclude (AC 47: Trail B lacks IPLink)"]
+  W --> Y["group by area, prefer non-discovery areas (AC 49)"]
+  Y --> Z["cache in P3 config snapshot compatibleTrails block (AC 48)"]
+```
+
+### Algorithm §B — Target → cascade-count math (Task 22, OQ-NW-1, AC 51, 52)
+
+The target is the **CE-measured post-enrichment** rate
+`correlatedAlarmCount / totalAlarmsProcessed`, **not** the raw emitted fraction. Because every
+aligned cascade is **enrichment-safe by construction** (§D), a complete cascade survives enrichment
+intact and contributes its **full mandatory sequence length** as CE-correlatable alarms. Let:
+
+- `TARGET = P3_AUTO_CORRELATION_TARGET` (e.g. `0.6`), `TOL = P3_TARGET_TOLERANCE` (default `0.03`),
+  `T = P3_TOTAL_ALARMS`, `margin = P3_ENRICHMENT_OVER_PROVISION_MARGIN` (default `0.0`).
+- `TARGET_EMITTED_FRACTION = TARGET / (1 − margin)` (margin `0.0` → equals `TARGET`).
+- `A = round(TARGET_EMITTED_FRACTION × T)` = target number of **aligned (correlatable) alarms**.
+- For each **enrichment-safe** pattern `P` (conflicting patterns excluded in §D), its
+  **mandatory length** `L_P` = count of `sequence` elements with `optional == false` **plus the
+  root** if the root is the only representation (root always counted once). Under the default
+  `P3_OPTIONAL_INCLUDE_PROB = 1.0`, the **emitted** cascade length equals the full sequence length;
+  the controller uses `L_P` = **the emitted cascade length** (mandatory + included optionals) as the
+  per-cascade contribution, so the count math matches what is actually emitted and what CE will see.
+- `Lbar = mean(L_P over eligible patterns)`.
+
+**Cascade count:** `cascade_count = ceil(A / Lbar)` total, distributed per pattern round-robin (§C).
+Equivalently, per OQ-NW-1, aggregated:
+`cascade_count = ceil(TARGET_EMITTED_FRACTION × T / Lbar)`. The controller then **greedily** adds
+whole cascades (each contributing its own `L_P`) until the accumulated aligned-alarm count is within
+`[A − round(TOL×T), A + round(TOL×T)]`, picking the count whose total lands **closest to A**
+(reusing the accumulate-to-tolerance loop already in `aligned_controller`, now parameterized by the
+per-pattern `L_P` instead of a uniform length). Non-aligned alarms fill `T − accumulated`.
+
+- **Expected CE rate:** `enrichmentSafeCount / T` where `enrichmentSafeCount` = sum of emitted
+  aligned-cascade alarm counts (all enrichment-safe by construction). With `margin = 0`, this
+  equals `A / T ≈ TARGET` within tolerance (AC 51). With `margin > 0`, the emitted fraction is
+  `TARGET/(1−margin)` (over-provisioned) and the **summary records both** `alignedFraction`
+  (post-enrichment expectation `= enrichmentSafeCount/T`, targeted at `TARGET`) and
+  `alignedFractionEmitted` (`= A/T`, the over-provisioned emitted fraction) — AC 51 second clause.
+- **Different targets (AC 52):** `TARGET=0.4` and `TARGET=0.8` yield `A = round(0.4·T)` and
+  `round(0.8·T)`; higher target → strictly more cascades. The realized `alignedFraction` lands
+  within `TOL` of each target.
+
+Worked example (AC 51): `TARGET=0.6`, `T=300`, `TOL=0.03`, `margin=0.0`, one pattern with mandatory
+length `L=4`. `A = round(0.6×300) = 180`; `cascade_count = ceil(180/4) = 45` cascades ×4 = 180
+aligned alarms; `enrichmentSafeCount/T = 180/300 = 0.60` → in `[0.57, 0.63]`. ✔
+
+### Algorithm §C — Trail-distribution plan (Task 22, AC 49, 53, 55, 56)
+
+Given, per pattern `P`, the desired cascade count `n_P` (from §B) and its compatible-trail list
+`C_P` (grouped by area, non-discovery areas first; shuffled under the seeded RNG for AC 57):
+
+1. **Distinct-area spread first:** walk `C_P` in area order, assigning **one** cascade per distinct
+   area (one trail per area, round-robin across areas) until either `n_P` reached or every area used
+   once. This maximizes `distinctAreasUsed` (AC 49, 54).
+2. **Fill to per-trail cap:** if cascades remain, assign additional cascades to already-used
+   compatible trails, **round-robin**, never exceeding `P3_MAX_CASCADES_PER_TRAIL` (default 3) on any
+   single trail (AC 49).
+3. **Distinct-trail exhaustion → staggered repeats (AC 56):** if `distinct_trails × cap < n_P`,
+   remaining cascades **repeat** already-used trails. Each repeat on a `(trail, pattern)` is
+   time-staggered by **strictly more than `sessionWindow.windowMs`** (reuse
+   `aligned_controller._next_start_offset_ms`, `stagger_margin > 1`) so CE opens a **distinct**
+   `(trailId, patternId)` session → distinct incident. `instanceIndex` increments per repeat
+   (repeats carry `instanceIndex ≥ 2`).
+4. **Single compatible trail (OQ-NW-2c):** `|C_P| == 1` → stack up to the cap on that one trail,
+   staggered, and log `p3.single_compatible_trail`. Still "runs network-wide" for that pattern.
+5. **Shortfall (AC 55):** if even after cap + repeats the plan cannot reach `n_P` under the
+   configured caps (e.g. `n_P` capped by `distinct_trails × cap` when repeats are disallowed by an
+   at-most-cap policy) — concretely, the unreachable case in AC 55 is
+   `TARGET=0.9, T=1000, 2 trails, cap=1` → **max achievable** cascades emitted (2 per pattern),
+   `shortfallCascades = n_needed − n_achieved > 0` recorded in the summary and a **structured
+   warning** `p3.target_shortfall` logged; run **exits 0** (shortfall is warned, never fatal, never
+   silent). Note repeats (step 3) are used to *reach* the target when the cap permits; the genuine
+   shortfall arises only when caps make the target arithmetically unreachable.
+6. **Each cascade uses THAT trail's members (AC 50):** the `PlanEntry` carries the concrete
+   `trailId`; `aligned_synth.build_cascade` places every element on a member of **that** trail —
+   so a Trail-A cascade's moids are Trail-A members, never Trail-B's.
+
+The plan is a flat, ordered list of `PlanEntry{patternId, trailId, igpArea, instanceIndex}`. Its
+order (and the trail shuffle in step 0) is **seeded** (AC 57): same seed + same snapshot →
+identical `{patternId, trailId, instanceIndex}` triples in the same order; different/absent seed →
+different trail orderings with high probability (first-5 comparison).
+
+```mermaid
+flowchart TD
+  A["n_P cascades needed for pattern P"] --> B["assign 1 per distinct area (prefer non-discovery areas)"]
+  B --> C{"cascades remain"}
+  C -->|no| Z["plan entries ready"]
+  C -->|yes| D["fill used trails round-robin up to P3_MAX_CASCADES_PER_TRAIL"]
+  D --> E{"cascades remain and cap not everywhere hit"}
+  E -->|yes| F["staggered trail-repeats (offset more than windowMs), instanceIndex increments (AC 56)"]
+  E -->|no, caps exhausted| G["record shortfallCascades, log p3.target_shortfall, exit 0 (AC 55)"]
+  F --> Z
+  G --> Z
+```
+
+### Algorithm §D — Enrichment-safe cascade synthesis (Task 24, AC 59–65)
+
+Enrichment (the P3 live-path filter — NOT the P2-only noise-filter) legitimately applies **dedup**,
+**self-clear/transient suppression**, and **flap-damping**. Aligned cascades must survive intact so
+the whole cascade reaches CE and correlates. Four rules, enforced **by construction** plus a
+runtime assertion:
+
+1. **Distinct object per element (AC 59).** Each cascade element is placed on a **distinct**
+   `managedObjectId` (a distinct trail member). `aligned_synth._place` is extended to draw
+   **without replacement** within a cascade (track used moids; if the affine-type candidate pool is
+   exhausted, fall back to any *unused* member; if the trail has fewer members than the cascade
+   length, wrap only after all members used and log `p3.member_reuse` — but by trail-selection this
+   is rare, since compatible trails host the required types). Result: no two elements share
+   `(managedObjectId, alarmType)` within the dedup window → dedup cannot collapse them.
+2. **No transient/self-clearing members (AC 60).** The pack's aligned-synthesis alarm shapes are
+   restricted to **non-transient** types. The transient set is **config-driven**
+   (`P3_ENRICHMENT_TRANSIENT_TYPES`, default derived from the pack's flapping/self-clearing shapes,
+   e.g. `PortFlapping, RouteFlap` and any pack-declared transient) — never hard-coded in `synth/`.
+   `enrichment_safe.transient_types(settings)` returns the effective set; `assert_cascade_safe`
+   confirms **no** cascade element's `alarmType` is in it. (The affinity table already excludes most
+   transients from mandatory pattern sequences; this makes it explicit + configurable.)
+3. **Spacing reconciliation (AC 61, 62).** `reconcile_spacing(dedup_ms, window_ms)`:
+   - lower bound `lo = dedup_ms × (1 + ε)` (ε small margin, config `P3_DEDUP_SPACING_MARGIN`
+     default 0.1) so consecutive elements are **strictly above** the dedup window;
+   - upper bound `hi = window_ms × P3_IN_WINDOW_MARGIN` (existing knob) so the whole cascade stays
+     **within** the session window;
+   - **Conflict** when `lo × (n−1) > hi` for the cascade length `n`, or more simply when
+     `window_ms ≤ dedup_ms` (no gap can be simultaneously above dedup and within window). On
+     conflict the **pattern is excluded** from aligned synthesis, its `patternId` added to
+     `enrichmentConflictPatterns`, a structured warning `p3.enrichment_window_conflict` logged with
+     the two bounds, and the run **continues** with the remaining patterns (AC 62). `aligned_synth`
+     draws inter-arrival gaps clamped into `[lo, hi/(n−1)]` so every gap is `≥ dedup_ms` and the
+     total `≤ window_ms` (AC 61).
+4. **No flapping (AC 63).** By rule 1 each `(managedObjectId, alarmType)` appears **at most once**
+   per cascade and every cascade element is `state=raised` (cascades never emit a raise/clear pair
+   on the same object within the window). `assert_cascade_safe` confirms no alternating
+   raised/cleared repeat.
+
+**Non-aligned exemption (AC 64):** `nonaligned_synth` is **not** touched by any of the above —
+partial cascades, random singles, and noise may include transients, duplicate raises, and flaps.
+The enrichment-safe guards apply **only** to `scenarioType == "pattern-aligned"` synthesis.
+
+**Measurability (AC 65):** `enrichmentSafeCount` = count of emitted aligned-cascade alarms (all
+pass the guards by construction); `enrichmentConflictPatterns` = list of excluded `patternId`s
+(possibly empty). Both are written into `P3RunSummary` and retrievable via the existing
+`/labels/p3-summary` surface.
+
+```mermaid
+flowchart TD
+  A["pattern P, dedup_window_ms, sessionWindow.windowMs"] --> B{"reconcile_spacing: window greater than dedup and lo times (n-1) at most hi"}
+  B -->|conflict| C["exclude P, add to enrichmentConflictPatterns, log p3.enrichment_window_conflict, continue (AC 62)"]
+  B -->|ok| D["build cascade: distinct object per element (AC 59)"]
+  D --> E["restrict to non-transient alarm types (AC 60)"]
+  E --> F["draw gaps in range lo to hi over (n-1) so each at least dedup and total within window (AC 61)"]
+  F --> G["all elements state raised, no raise/clear repeat (AC 63)"]
+  G --> H["count into enrichmentSafeCount (AC 65)"]
+```
+
+### Data model — extensions (network-wide)
+
+No new datastore. Two extensions to Simulator-owned artifacts:
+
+**P3 config snapshot — schemaVersion 2 (additive `compatibleTrails`).** v1 files load unchanged
+(no cached compatible trails → discovery runs). `SUPPORTED_MAJOR = {1, 2}`.
+
+```jsonc
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-07-04T12:00:00Z",
+  "domain": "core-ip",
+  "sourceSnapshots": [ /* … as v1 … */ ],
+  "trails": { /* … as v1 … */ },
+  "patterns": [ /* … as v1, plus discoveryArea captured per pattern's own trail … */ ],
+  "compatibleTrails": {                     // NEW (Task 21 / AC 48). keyed by patternId
+    "pat-01": {
+      "discoveryArea": "area-0",
+      "trails": [
+        { "trailId": "trail-A", "igpArea": "area-0" },
+        { "trailId": "trail-B", "igpArea": "area-1" },
+        { "trailId": "trail-C", "igpArea": "area-2" }
+      ]
+    }
+  }
+}
+```
+
+**Extended P3 labels + summary.** `P3CascadeLabel` and `P3RunSummary` gain additive keys (existing
+consumers unaffected):
+
+```jsonc
+// P3CascadeLabel (network-wide adds instanceIndex, igpArea)
+{ "patternId": "pat-01", "trailId": "trail-B", "instanceIndex": 1,
+  "rootCauseAlarmId": "alm-…", "rootCauseAlarmType": "IPLinkDown",
+  "childAlarmIds": ["alm-…"], "scenarioType": "pattern-aligned", "igpArea": "area-1" }
+// P3RunSummary (network-wide adds spread + enrichment fields)
+{ "totalAlarms": 300, "alignedAlarms": 180, "nonAlignedAlarms": 120,
+  "alignedFraction": 0.60, "alignedFractionEmitted": 0.60,
+  "distinctTrailsUsed": 3, "distinctAreasUsed": 3,
+  "shortfallCascades": 0, "enrichmentSafeCount": 180,
+  "enrichmentConflictPatterns": [] }
+```
+
+```mermaid
+erDiagram
+  P3ConfigSnapshot ||--o{ CompatibleTrailSet : "caches (schemaVersion 2)"
+  CompatibleTrailSet ||--o{ CompatibleTrail : trails
+  NetworkWidePlan ||--o{ PlanEntry : entries
+  PlanEntry ||--|| P3CascadeLabel : "synthesizes"
+  P3RunSummary ||--o{ P3CascadeLabel : aggregates
+  CompatibleTrailSet {
+    string patternId
+    string discoveryArea
+  }
+  CompatibleTrail {
+    string trailId
+    string igpArea
+  }
+  PlanEntry {
+    string patternId
+    string trailId
+    string igpArea
+    int instanceIndex
+  }
+  P3CascadeLabel {
+    string patternId
+    string trailId
+    int instanceIndex
+    string igpArea
+    string rootCauseAlarmType
+    string scenarioType
+  }
+  P3RunSummary {
+    int distinctTrailsUsed
+    int distinctAreasUsed
+    int shortfallCascades
+    int enrichmentSafeCount
+    float alignedFraction
+    float alignedFractionEmitted
+  }
+```
+
+### Integration points (network-wide — mock vs. real)
+
+Same three config-switchable clients as the existing P3 synth (no new collaborator). The only
+addition is a **new operation on the existing Trail Builder client**:
+
+| Collaborator + operation | Config keys | Mock (unit) / Real (integration) |
+|---|---|---|
+| Trail Builder `GET /trails?snapshotId&domain&limit&offset` (list, **new op, existing endpoint**) | `TRAIL_BUILDER_API_MODE`, `TRAIL_BUILDER_API_BASE_URL` | Mock: `MockTrailBuilderClient.list_trails` serves a configured trail-list body (stub from TB `openapi.json`, call-counted). Real: `httpx` paged. No hard-coded URL. |
+| Trail Builder `GET /trails/{trailId}` (members, existing) | same | as existing P3 fetch (memoized, call-counted) |
+| Pattern Manager `GET /patterns?lifecycle=approved` | `PATTERN_MANAGER_API_*` | as existing |
+| Topology `GET /topology/snapshots` | `TOPOLOGY_API_*` | as existing |
+
+Unit tests build the Trail Builder mock from **Trail Builder's published `openapi.json`** (both the
+list and detail shapes) — never from its source.
+
+### Key flow — network-wide P3 run (sequence)
+
+```mermaid
+sequenceDiagram
+  participant CLI as main (synth, P3_NETWORK_WIDE=true)
+  participant Run as p3_run
+  participant Fetch as p3_fetch
+  participant Disc as trail_discovery
+  participant TB as Trail Builder (mock/real)
+  participant Snap as p3_config_snapshot
+  participant ES as enrichment_safe
+  participant TC as target_controller
+  participant AS as aligned_synth
+  participant NA as nonaligned_synth
+  participant Lab as p3_labels
+  participant LR as LiveReplay
+  participant K as Kafka (alarms.live)
+  CLI->>Run: run_synth (network-wide)
+  Run->>Fetch: resolve config
+  alt persisted snapshot has compatibleTrails
+    Fetch->>Snap: load v2 (zero GET /trails calls, AC 48)
+  else discover
+    Fetch->>TB: GET /trails?snapshotId&domain&limit&offset (paged list)
+    TB-->>Fetch: TrailSummary[] (trailId, igpArea)
+    Fetch->>Disc: hostability filter per pattern (memoized GET /trails/id)
+    Disc->>TB: GET /trails/(id) (each candidate once, AC 48)
+    TB-->>Disc: members[] (managedObjectId, objectType)
+    Disc-->>Fetch: compatibleTrails per pattern (grouped by area)
+    Fetch->>Snap: persist v2 with compatibleTrails
+  end
+  Run->>ES: reconcile spacing per pattern, exclude conflicts (AC 62)
+  ES-->>Run: eligible patterns + enrichmentConflictPatterns
+  Run->>TC: plan_network_wide (cascade math + distribution, AC 51/52/55/56)
+  TC-->>Run: PlanEntry[] + shortfallCascades
+  loop each PlanEntry (pattern, trail, instanceIndex)
+    Run->>AS: build_cascade (that trail, enrichment-safe, distinct objects, AC 49/50/59/61/63)
+    AS-->>Run: cascade alarms + extended P3CascadeLabel (instanceIndex, igpArea)
+  end
+  Run->>NA: fill non-aligned remainder (unconstrained, AC 64)
+  Run->>LR: p3_schedule stream to alarms.live (existing)
+  LR->>K: TypedEnvelope(AlarmEvent) wall-clock paced, fresh eventId
+  Run->>Lab: extended labels + P3RunSummary (AC 53/54/65)
+```
+
+### Config & observability (network-wide additions)
+
+All env/CLI overridable; no hard-coded thresholds (CLAUDE.md). Validated in
+`settings.py::_validate_synth`.
+
+| CLI flag | Env | Default | Meaning / validation |
+|---|---|---|---|
+| `--p3-network-wide` | `P3_NETWORK_WIDE` | `false` (auto-`true` when target set) | enable network-wide emission; off → single-trail (AC 58) |
+| `--p3-auto-correlation-target` | `P3_AUTO_CORRELATION_TARGET` | unset | CE post-enrichment target `correlatedAlarmCount/totalAlarmsProcessed`; range `[0,1]`; unset → single-trail |
+| `--p3-target-tolerance` | `P3_TARGET_TOLERANCE` | `0.03` | ±pp band; `> 0` |
+| `--p3-max-cascades-per-trail` | `P3_MAX_CASCADES_PER_TRAIL` | `3` | per-trail cap; `≥ 1` |
+| `--p3-enrichment-over-provision-margin` | `P3_ENRICHMENT_OVER_PROVISION_MARGIN` | `0.0` | emitted fraction `= TARGET/(1−margin)`; range `[0,1)` |
+| `--p3-enrichment-dedup-window-ms` | `P3_ENRICHMENT_DEDUP_WINDOW_MS` | `2000` | inter-arrival lower bound; must match deployed enrichment `dedupWindow`; `> 0` |
+| `--p3-enrichment-transient-types` | `P3_ENRICHMENT_TRANSIENT_TYPES` | pack-derived (e.g. `PortFlapping,RouteFlap`) | comma-set of transient alarmTypes excluded from aligned cascades |
+| `--p3-dedup-spacing-margin` | `P3_DEDUP_SPACING_MARGIN` | `0.1` | ε so `lo = dedup×(1+ε)`; `≥ 0` |
+
+**Dedup-window learning (how the Simulator gets the bound):** the Simulator does **not** hard-code
+enrichment's dedup window and does **not** query enrichment (no such API + would couple services).
+Instead `P3_ENRICHMENT_DEDUP_WINDOW_MS` is an **operator-set env** that must match the deployed
+enrichment `FilterParams.dedupWindow` (documented in `--help` and the compose file, where the same
+value is set for enrichment). This is the config-not-contract way the two agree on the bound.
+
+**Metrics (Prometheus):** `simulator_p3_compatible_trails{patternId}` (gauge),
+`simulator_p3_cascade_shortfall_total`, `simulator_p3_enrichment_conflict_total`,
+`simulator_p3_distinct_trails_used`, `simulator_p3_distinct_areas_used`,
+`simulator_p3_member_reuse_total`. `/health`, `/metrics`, structured JSON logs unchanged.
+
+### Error handling (network-wide additions)
+
+| Failure mode | Handling |
+|---|---|
+| Trail list (`GET /trails?…`) 5xx / unreachable (real) | Bounded retry (mirrors existing clients); on exhaustion `p3.dependency_failure`, exit 4, zero alarms, `/health` non-200. |
+| A candidate trail 404s during discovery | Skip that candidate (not compatible); log `p3.trail_not_found`; continue. |
+| Pattern has zero compatible trails (even its own discovery trail fails hostability) | Log `p3.no_compatible_trails{patternId}` (warning); that pattern contributes no aligned cascades; run continues with others; if **all** patterns end with zero → same fail-fast as no-usable-patterns (exit 3). |
+| Session-window / dedup-window conflict | Exclude pattern, record in `enrichmentConflictPatterns`, log `p3.enrichment_window_conflict`; continue (AC 62); never abort if ≥1 pattern is conflict-free. |
+| Target unreachable under caps | Emit max achievable, record `shortfallCascades`, log `p3.target_shortfall`; **exit 0** (AC 55) — never silent, never fatal. |
+| Stale P3 config snapshot (schemaVersion not in `{1,2}`) | `p3.config_snapshot_stale`, exit 3. |
+| Invalid network-wide config (`P3_AUTO_CORRELATION_TARGET` out of `[0,1]`, `margin` out of `[0,1)`, `dedup ≤ 0`, `tolerance ≤ 0`, `max_cascades < 1`) | Config-invalid fail-fast (`config.invalid`, exit 3) before any alarm. |
+
+No inbound Kafka → **no DLQ**; reads are HTTP GETs with bounded retry. `AlarmEvent` schema
+unchanged; `schemaVersion` rejection applies only to the Simulator-owned P3 config snapshot file.
+
+### Design alternatives (network-wide)
+
+| Consideration | Alternatives considered | Chosen + rationale |
+|---|---|---|
+| Target basis (OQ-NW-1/3) | (a) raw emitted fraction; (b) **CE post-enrichment fraction with enrichment-safe cascades + over-provision margin** | **(b, resolved)** — the KPI is CE's `correlatedAlarmCount/totalAlarmsProcessed`; enrichment-safe cascades make emitted≈correlatable so the count math is exact, and the margin covers any residual reduction. (a) would systematically overshoot the real KPI. |
+| Cascade-count math | (a) global uniform avg length; (b) **per-pattern length `L_P`, greedy-to-tolerance** | **(b)** — patterns differ in mandatory length; per-pattern `L_P` makes `enrichmentSafeCount/T` land on target within `TOL` regardless of the pattern mix. Reuses the existing tolerance loop. |
+| Compatible-trail enumeration | (a) NebulaGraph query; (b) derive from moid prefixes; (c) **paged `GET /trails` + `GET /trails/{id}` hostability, cached** | **(c)** — uses the **already-published** TB list endpoint (no contract change, OQ-NW-4), no graph credentials (out of scope), no moid-prefix coupling (OQ-P3-5). Caching in the config snapshot satisfies AC 48. |
+| Distribution preference | (a) random spread; (b) **distinct-areas-first, then per-trail cap, then staggered repeats** | **(b)** — realizes "different parts of the network" (distinct igp-areas, AC 49/53/54), bounds pile-up (`MAX_CASCADES_PER_TRAIL`), and still reaches the target via staggered repeats (AC 56); shortfall is explicit (AC 55). |
+| Enrichment dedup-window source | (a) query enrichment; (b) hard-code; (c) **operator env matching deployed enrichment `dedupWindow`** | **(c)** — (a) needs a non-existent API + couples services; (b) breaks CLAUDE.md no-hard-coded-thresholds; (c) is config-not-contract, documented, and matches the value enrichment itself is configured with in compose. |
+| Enrichment-safe enforcement | (a) post-hoc filter emitted stream; (b) **safe-by-construction (distinct objects, non-transient types, reconciled spacing) + assert** | **(b)** — construction guarantees the whole cascade survives enrichment so `enrichmentSafeCount == emitted aligned` (exact KPI); a post-hoc filter would drop alarms and desync the count. Runtime `assert_cascade_safe` is a cheap belt-and-braces used heavily in unit tests. |
+| Conflict pattern handling | (a) shrink session window; (b) compress below dedup; (c) **exclude + log** | **(c, spec-mandated)** — (a)/(b) would make CE miss or enrichment dedup; excluding the pattern and recording it keeps the run honest and the emitted cascades all correlatable (AC 62). |
+| Trail-repeat vs. under-deliver | (a) under-deliver silently; (b) **staggered repeats to reach target, explicit shortfall only when caps forbid** | **(b)** — repeats (offset `> windowMs`) each become their own CE incident (AC 56); silent under-delivery is forbidden by the spec (AC 55). |
+
+### Test plan — network-wide (AC 47–65 → pytest test)
+
+Unit tests are pytest; Trail Builder / Pattern Manager / Topology are **mocked from their published
+OpenAPI** (list + detail shapes). No live services in unit tests.
+
+| # | Acceptance criterion | Test | Asserts |
+|---|---|---|---|
+| 47 | Hostability rule via list endpoint | `test_discovery_hostability_filters_incompatible_trail` | Pattern needs `IPLink`+`IGPAdjacency` (root `IPLink`); mock list returns Trail A (`IPLink,IGPAdjacency,Interface`) + Trail B (`Interface,Node`) → compatible set == {A}; B excluded (lacks `IPLink`); discovery trail included when it passes. |
+| 48 | Compatible trails cached, no re-fetch on 2nd run | `test_discovery_cached_second_run_zero_calls` | Run 1 populates `compatibleTrails` in the v2 snapshot; run 2 loads it → mock `list_trails.calls == 0` and `get_trail.calls == 0` for cached patterns. |
+| 49 | Distribute across trails, prefer distinct areas | `test_distribution_one_per_area_under_cap` | 3 compatible trails in 3 areas, plan needs 3 → one cascade per trail (one per area); no trail exceeds `P3_MAX_CASCADES_PER_TRAIL`. |
+| 50 | Each cascade uses THAT trail's members | `test_cascade_moids_belong_to_assigned_trail` | Cascades on Trail A / Trail B → all Trail-A cascade moids ∈ A.members, all Trail-B ∈ B.members; none cross. |
+| 51 | Closed-loop hits CE post-enrichment target within tolerance | `test_target_controller_hits_rate_within_tolerance` | `TARGET=0.6,T=300,TOL=0.03,margin=0.0` → `enrichmentSafeCount/300 ∈ [0.57,0.63]`; summary has `alignedFraction` + `enrichmentSafeCount`; with `margin=0.1`, emitted fraction `= 0.6/0.9` and `alignedFractionEmitted` recorded separately. |
+| 52 | Recalculates for different targets | `test_target_controller_scales_with_target` | Same `T`, `TARGET=0.4` and `0.8` → realized `alignedFraction` within `TOL` of 0.4 / 0.8; the 0.8 run has strictly more aligned cascades. |
+| 53 | Multiple distinct trails per pattern (labels) | `test_labels_multiple_distinct_trails_per_pattern` | ≥2 compatible trails per pattern → ≥2 cascade labels for one pattern with distinct `trailId`; `distinctTrailsUsed ≥ 2`. |
+| 54 | Labels include `igpArea` + `instanceIndex` | `test_cascade_labels_have_igparea_and_instanceindex` | Every network-wide label has `{patternId,trailId,instanceIndex,rootCauseAlarmId,rootCauseAlarmType,childAlarmIds,scenarioType,igpArea}`; two labels same pattern/different trails → different `trailId`+`igpArea`. |
+| 55 | Shortfall logged, not fatal | `test_target_shortfall_logged_and_nonfatal` | `TARGET=0.9,T=1000,2 trails,cap=1` → max cascades emitted; ≥1 `p3.target_shortfall` log with `shortfallCascades>0`; exit code 0; summary `shortfallCascades>0`. |
+| 56 | Staggered trail-repeats on exhaustion | `test_trail_repeat_staggered_instance_index` | Plan needs > `distinct_trails×cap` → repeats assigned; repeat cascade start offset ≥ `sessionWindow.windowMs` from prior on that trail; repeat labels carry `instanceIndex ≥ 2`. |
+| 57 | Seeded reproducible; different seeds differ | `test_network_wide_seed_reproducible_and_varies` | Same seed+snapshot → identical `{patternId,trailId,instanceIndex}` sequence; different seed → first-5 `trailId` assignments differ (high prob). |
+| 58 | Network-wide off → single-trail unchanged | `test_network_wide_off_single_trail_behavior` | `P3_NETWORK_WIDE=false` (or target unset) → each pattern emits on its discovery trail only; `trail_discovery` not called; **zero** `GET /trails?…` beyond existing P3 fetch; output equals pre-network-wide path. |
+| 59 | Distinct object/type per element within dedup window | `test_cascade_elements_distinct_objects` | Over 100 synthesized cascades, no two elements share `(managedObjectId,alarmType)`; each element on a distinct trail member. |
+| 60 | No transient/self-clearing cascade members | `test_cascade_excludes_transient_types` | For every synthesized cascade across all patterns, no element `alarmType ∈ P3_ENRICHMENT_TRANSIENT_TYPES`; set is config-driven (override in test changes the assertion set). |
+| 61 | Inter-arrival above dedup, within session window | `test_cascade_spacing_bounds` | `dedup=2000,window=30000` over 50 cascades → every gap ≥ 2000 ms and cascade total ≤ 30000 ms. |
+| 62 | Conflicting pattern excluded + logged | `test_conflict_pattern_excluded` | Pattern with `windowMs ≤ dedup` → excluded from aligned synthesis; `p3.enrichment_window_conflict` logged with bounds + `patternId`; `enrichmentConflictPatterns` contains it; run does not abort when another pattern is conflict-free. |
+| 63 | No flap-damping trigger | `test_cascade_no_flap` | For every cascade, no `(managedObjectId,alarmType)` appears twice with alternating `raised`/`cleared` in the window; all elements `state=raised`. |
+| 64 | Non-aligned/noise not constrained | `test_nonaligned_not_enrichment_constrained` | Enrichment-safe guards applied only to `scenarioType="pattern-aligned"`; `nonaligned_synth` output may contain transients/dups/flaps; asserts guards are NOT run on non-aligned labels. |
+| 65 | Summary records enrichment fields | `test_summary_enrichment_fields` | One conflict-free + one conflicting pattern → summary has correct `enrichmentSafeCount` (aligned alarm count) and `enrichmentConflictPatterns` (the excluded id); retrievable via `/labels/p3-summary`. |
+
+Supporting unit tests (not 1:1 with an AC but required for the modules): `list_trails` paging
+(mock+real shape), `required_object_types` derivation, `reconcile_spacing` boundary math, config
+validation fail-fast for each new knob, v1→v2 config-snapshot load compatibility.
+
+### E2E scenarios — network-wide (from the Simulator's point of view)
+
+| # | Scenario | Trigger → path | Expected outcome |
+|---|---|---|---|
+| 1 | Network-wide hits target end-to-end | `SIM_MODE=synth, P3_NETWORK_WIDE=true, P3_AUTO_CORRELATION_TARGET=0.6, T=300` against real Trail Builder/PM/Topology + real enrichment→CE → discover, plan, emit enrichment-safe cascades on multiple trails | CE `/stats` `correlatedAlarmCount/totalAlarmsProcessed` within ±0.03 of 0.6; oracle joins P3 labels vs CE `/incidents` → RCA ≥ 0.80; `enrichmentSafeCount/T` matches CE rate. |
+| 2 | Network spread verifiable | same, ≥2 compatible trails in ≥2 areas per pattern | CE `/incidents` shows incidents on ≥2 distinct `trailId` per pattern; Simulator summary `distinctTrailsUsed ≥ 2`, `distinctAreasUsed ≥ 2`; labels' `trailId`/`igpArea` match the incidents' trails. |
+| 3 | Enrichment-safe survives the live filter | cascades cross real enrichment (dedup/transient/flap-damping on) | every enrichment-safe aligned cascade arrives at CE intact (no cascade element dropped by enrichment) → correlates into one incident; `enrichmentSafeCount` ≈ CE `correlatedAlarmCount` contribution. |
+| 4 | Conflict pattern excluded (partial path) | a pattern with `sessionWindow.windowMs ≤ dedup` present in the approved set | that pattern emits **no** aligned cascade; `enrichmentConflictPatterns` lists it; other patterns still hit the target; run exits 0. |
+| 5 | Shortfall path (partial) | `TARGET=0.9` with too few compatible trails under `cap=1` | Simulator emits max achievable, logs `p3.target_shortfall`, records `shortfallCascades>0`, exits 0; CE rate below target but the shortfall is measurable, not silent. |
+| 6 | Cached-snapshot standalone run | run 1 discovers+persists v2 snapshot; run 2 with `P3_CONFIG_SNAPSHOT_PATH` set, services down | run 2 makes zero `GET /trails?…`/`GET /trails/{id}` calls, still emits network-wide from cache. |
+
 ## UI wireframes
 
 N/A — backend/CLI service (no web-ui surface).
