@@ -23,15 +23,18 @@ from simulator.engine.models import SynthAlarm
 from simulator.integrations.producer import AlarmProducer
 from simulator.obs import metrics
 from simulator.obs.logging import get_logger, log_event
-from simulator.synth import aligned_controller, nonaligned_synth, p3_config_snapshot, p3_fetch
+from simulator.synth import (
+    aligned_controller,
+    nonaligned_synth,
+    p3_config_snapshot,
+    p3_fetch,
+    p3_schedule,
+)
 from simulator.synth.models import P3RunSummary
 from simulator.synth.p3_config_snapshot import P3ConfigSnapshot
 from simulator.synth.p3_labels import P3LabelStore
 
 _log = get_logger("simulator.synth.p3_run")
-
-# Fixed epoch used as the cascade base time in seeded runs (reproducible raisedAt — AC 41).
-_EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 @dataclass
@@ -120,9 +123,13 @@ def run_synth(
     )
 
     rng, _seed_value = _seed(settings)
-    # A seeded run pins base_time to a fixed epoch so raisedAt is reproducible too (AC 41);
-    # an unseeded run uses wall-clock so successive fresh runs differ.
-    base_time = _EPOCH if settings.p3_rng_seed is not None else datetime.now(tz=UTC)
+    # Anchor cascade timing to REAL wall-clock now() for the live emission so raisedAt ~= arrival
+    # time (nothing looks stale to downstream/UI). Reproducibility under P3_RNG_SEED is RELATIVE:
+    # the seeded rng fixes ordering, stagger offsets, in-cascade gaps, noise placement and all
+    # identities (alarmIds/moids), so two seeded runs reproduce identical RELATIVE timing/ordering/
+    # identities — only the absolute base (now()) naturally differs (AC 41, relative form). CE
+    # windows on wall-clock ARRIVAL, so the absolute base is irrelevant to auto-correlation.
+    base_time = datetime.now(tz=UTC)
 
     plan = aligned_controller.plan(
         pack,
@@ -159,8 +166,11 @@ def run_synth(
     )
     labels.record_all(non_aligned.labels)
 
-    # Interleave aligned + non-aligned strictly by raisedAt so LiveReplay pacing is coherent.
-    stream = sorted(aligned_alarms + non_aligned.alarms, key=lambda a: a.raised_at)
+    # Emit each aligned cascade as a CONTIGUOUS in-window burst (opener first), with non-aligned /
+    # noise alarms sprinkled into the gaps BETWEEN cascades — never interleaved INTO a cascade. This
+    # is the cascade-timing fix (M2): the prior global sort scattered a single cascade across the
+    # timeline so opener+followers never arrived within windowMs at the CE -> ~0 auto-correlation.
+    stream = p3_schedule.build_emission_stream(plan.cascades, non_aligned.alarms, rng)
 
     strategy = replay.LiveReplay(producer, pacing_multiplier=settings.pacing_multiplier)
     emitted = strategy.replay_synth(stream)

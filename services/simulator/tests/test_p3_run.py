@@ -118,8 +118,15 @@ def test_ac35_every_moid_present_in_topology(tmp_path: Path) -> None:
         assert envelope.payload.managedObjectId in valid
 
 
-# --- AC 41: seeded reproducibility; unseeded divergence ------------------------------------
+# --- AC 41: seeded reproducibility (RELATIVE); unseeded divergence -------------------------
 def test_ac41_same_seed_reproducible(tmp_path: Path) -> None:
+    """Two seeded runs reproduce identical ORDERING, identities and RELATIVE timing.
+
+    Emission is anchored to real wall-clock ``now()`` (so raisedAt ~= arrival time and nothing looks
+    stale), and the seeded rng fixes ordering, stagger offsets, in-cascade gaps, noise placement and
+    all identities. So two seeded runs match on ordering / alarmIds / moids / alarmTypes and on the
+    RELATIVE timing (each raisedAt minus the first raisedAt); only the absolute base differs.
+    """
     p1 = FakeProducer()
     p2 = FakeProducer()
     _run(_settings(tmp_path / "a", P3_RNG_SEED="777"), p1)
@@ -132,7 +139,14 @@ def test_ac41_same_seed_reproducible(tmp_path: Path) -> None:
     assert [e.payload.managedObjectId for _, e in p1.sent] == [
         e.payload.managedObjectId for _, e in p2.sent
     ]
-    assert [e.payload.raisedAt for _, e in p1.sent] == [e.payload.raisedAt for _, e in p2.sent]
+
+    # RELATIVE timing is identical (absolute base is now(), so it naturally differs).
+    def rel(p: FakeProducer) -> list[float]:
+        raised = [e.payload.raisedAt for _, e in p.sent]
+        base = raised[0]
+        return [round((r - base).total_seconds(), 6) for r in raised]
+
+    assert rel(p1) == rel(p2)
 
 
 def test_ac41_unseeded_diverges(tmp_path: Path) -> None:
