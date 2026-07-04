@@ -271,6 +271,13 @@ export interface AlarmSummary {
   alarmId: string;
   managedObjectId: string;
   eventType: string;
+  /**
+   * Canonical Core-IP alarm-type token (e.g. `LOS`, `LinkDown`) when the Alarm Manager `/alarms`
+   * response carries it. Optional because it post-dates the frozen `eventType` field; the grouped
+   * Alarm-Lifecycle view falls back to `eventType` when absent. Passes through the generic client
+   * deserialization untouched.
+   */
+  alarmType?: string;
   perceivedSeverity?: string;
   raisedAt?: string;
   lifecycleState: LifecycleState;
@@ -279,6 +286,18 @@ export interface AlarmSummary {
   trailIds?: string[];
 }
 export type AlarmPage = Page<AlarmSummary>;
+/**
+ * One correlation (incident) group for the Alarm-Lifecycle view: the root-cause alarm (may be
+ * null if the incident's RCA alarm role is not yet resolved in the Alarm Manager) plus its child
+ * alarms. `rootCauseAlarmType` carries the incident-declared RCA type used as a graceful fallback
+ * label when `rootCause` is null.
+ */
+export interface CorrelationGroup {
+  incidentId: string;
+  rootCause: AlarmSummary | null;
+  rootCauseAlarmType?: string | null;
+  children: AlarmSummary[];
+}
 export interface AlarmTransition {
   toState: string;
   reason?: string;

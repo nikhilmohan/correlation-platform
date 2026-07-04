@@ -539,15 +539,19 @@ const INCIDENT_PAGE: IncidentPage = { items: INCIDENTS, total: 2, limit: 50, off
 
 // --- Alarm Manager fixtures (P3) ---
 const ALARMS: AlarmPage = {
-  total: 5,
+  total: 6,
   limit: 50,
   offset: 0,
   items: [
-    { alarmId: 'a-3', managedObjectId: 'FiberSpan:lon-fra-1', eventType: 'LOS', perceivedSeverity: 'critical', raisedAt: '2026-06-01T12:00:00Z', lifecycleState: 'correlated', role: 'root-cause', incidentId: 'INC-12', trailIds: ['TR-7'] },
-    { alarmId: 'a-7', managedObjectId: 'Interface:lon-r1-e1', eventType: 'LinkDown', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
-    { alarmId: 'a-2', managedObjectId: 'Router:lon-r1', eventType: 'CpuHigh', lifecycleState: 'in-progress', role: 'none', incidentId: null, trailIds: [] },
-    { alarmId: 'a-1', managedObjectId: 'Router:lon-r1', eventType: 'PortFlap', lifecycleState: 'open', role: 'none', incidentId: null, trailIds: [] },
-    { alarmId: 'a-9', managedObjectId: 'Router:lon-r1', eventType: 'AdjDown', lifecycleState: 'cleared', role: 'none', incidentId: null, trailIds: [] },
+    // Correlation group INC-12 — one root cause (a-3) + two children (a-7, a-8), matching the
+    // incident fixture's childAlarmIds so the grouped Alarm-Lifecycle view renders a full group.
+    { alarmId: 'a-3', managedObjectId: 'FiberSpan:lon-fra-1', eventType: 'LOS', alarmType: 'LOS', perceivedSeverity: 'critical', raisedAt: '2026-06-01T12:00:00Z', lifecycleState: 'correlated', role: 'root-cause', incidentId: 'INC-12', trailIds: ['TR-7'] },
+    { alarmId: 'a-7', managedObjectId: 'Interface:lon-r1-e1', eventType: 'LinkDown', alarmType: 'LinkDown', perceivedSeverity: 'major', raisedAt: '2026-06-01T12:00:03Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
+    { alarmId: 'a-8', managedObjectId: 'IGPAdj:lon-r1-r2', eventType: 'AdjDown', alarmType: 'AdjDown', perceivedSeverity: 'minor', raisedAt: '2026-06-01T12:00:05Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
+    // Uncorrelated alarms (role='none') — rendered in the separate bottom section.
+    { alarmId: 'a-2', managedObjectId: 'Router:lon-r1', eventType: 'CpuHigh', alarmType: 'CpuHigh', lifecycleState: 'in-progress', role: 'none', incidentId: null, trailIds: [] },
+    { alarmId: 'a-1', managedObjectId: 'Router:lon-r1', eventType: 'PortFlap', alarmType: 'PortFlap', lifecycleState: 'open', role: 'none', incidentId: null, trailIds: [] },
+    { alarmId: 'a-9', managedObjectId: 'Router:lon-r1', eventType: 'AdjDown', alarmType: 'AdjDown', lifecycleState: 'cleared', role: 'none', incidentId: null, trailIds: [] },
   ],
 };
 

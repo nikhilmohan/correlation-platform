@@ -6,7 +6,15 @@ import { NoiseFilterClient } from '../api/noise-filter.client';
 import { SimulatorLabelsClient } from '../api/simulator-labels.client';
 import { ApiConfigService } from '../core/api-config.service';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
-import { AlarmSummary, GroundTruthLabel, IncidentVM, LifecycleState, RunStatsRow, StatsVM } from '../api/models';
+import {
+  AlarmSummary,
+  CorrelationGroup,
+  GroundTruthLabel,
+  IncidentVM,
+  LifecycleState,
+  RunStatsRow,
+  StatsVM,
+} from '../api/models';
 
 @Injectable()
 export class StatsStore {
@@ -44,6 +52,47 @@ export class StatsStore {
     const filter = this.alarmStateFilter();
     return filter === 'all' ? this.alarms() : this.alarms().filter((a) => a.lifecycleState === filter);
   });
+
+  /**
+   * Correlated alarms grouped by incident, root-cause first then children. Built from the
+   * state-filtered `visibleAlarms()` so the lifecycle-state filter still applies within groups.
+   * A group with children but no live root-cause alarm is still emitted (RCA type falls back to
+   * the incident's declared `rootCauseAlarmType`) so incidents are never silently dropped. Groups
+   * are ordered by most-recent activity (newest `raisedAt` in the group first).
+   */
+  readonly correlationGroups = computed<CorrelationGroup[]>(() => {
+    const byIncident = new Map<string, AlarmSummary[]>();
+    for (const a of this.visibleAlarms()) {
+      if (a.role === 'none' || !a.incidentId) {
+        continue;
+      }
+      const list = byIncident.get(a.incidentId) ?? [];
+      list.push(a);
+      byIncident.set(a.incidentId, list);
+    }
+    const incidentType = new Map(this.incidents().map((i) => [i.incidentId, i.rootCauseAlarmType]));
+    const groups: CorrelationGroup[] = [];
+    for (const [incidentId, members] of byIncident) {
+      const rootCause = members.find((a) => a.role === 'root-cause') ?? null;
+      const children = members.filter((a) => a.role !== 'root-cause');
+      groups.push({
+        incidentId,
+        rootCause,
+        rootCauseAlarmType: rootCause?.alarmType ?? rootCause?.eventType ?? incidentType.get(incidentId) ?? null,
+        children,
+      });
+    }
+    const latest = (g: CorrelationGroup): number => {
+      const all = g.rootCause ? [g.rootCause, ...g.children] : g.children;
+      return all.reduce((max, a) => Math.max(max, a.raisedAt ? Date.parse(a.raisedAt) : 0), 0);
+    };
+    return groups.sort((a, b) => latest(b) - latest(a) || a.incidentId.localeCompare(b.incidentId));
+  });
+
+  /** Uncorrelated alarms (role='none' / no incident) — rendered as a flat list, not a group. */
+  readonly uncorrelatedAlarms = computed<AlarmSummary[]>(() =>
+    this.visibleAlarms().filter((a) => a.role === 'none' || !a.incidentId),
+  );
 
   /** storm-reduction ratio = alarmsIn / clustersFormed (guarded). */
   stormReduction(row: RunStatsRow): number | null {
