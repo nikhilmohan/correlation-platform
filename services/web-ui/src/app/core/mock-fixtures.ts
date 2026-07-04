@@ -414,6 +414,7 @@ const PATTERNS: PatternPage = {
   items: [
     {
       patternId: 'PAT-3',
+      patternName: 'Loss of Signal Cascade · 02007ff1',
       trailId: 'TR-7',
       sequence: [
         { alarmType: 'LOS', optional: false },
@@ -452,6 +453,7 @@ const PATTERNS: PatternPage = {
     },
     {
       patternId: 'PAT-1',
+      patternName: 'Port Flap Cascade · 10b3918b',
       trailId: 'TR-8',
       sequence: [
         { alarmType: 'PortFlap', optional: false },

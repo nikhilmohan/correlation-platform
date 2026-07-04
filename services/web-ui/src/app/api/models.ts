@@ -165,6 +165,13 @@ export interface SampleAlarmView {
 }
 export interface PatternView {
   patternId: string;
+  /**
+   * Readable pattern name served by the Pattern Store, of the form
+   * `"<label> Cascade · <short8>"` (e.g. "IP Link Down Cascade · 02007ff1"). The name is owned +
+   * persisted by Pattern Manager; the UI renders it verbatim. Optional for backward-compat with
+   * older responses / mock fixtures that predate the field.
+   */
+  patternName?: string;
   trailId: string;
   sequence: SequenceElement[];
   rootCauseAlarmType: string;
