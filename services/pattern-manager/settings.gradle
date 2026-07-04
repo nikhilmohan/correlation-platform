@@ -1,0 +1,14 @@
+// pattern-manager — Service Gradle build.
+//
+// Self-contained Gradle project (its own gradlew) so CI runs
+// `(cd services/pattern-manager && ./gradlew --no-daemon clean build)`.
+//
+// The event-model Java binding (libs/event-model/java, group com.acp, artifact
+// event-model) is the FROZEN contract for the Envelope + PatternMinedEvent /
+// PatternDiscoveredEvent / PatternApprovedEvent payloads + common/sessionWindow. It is
+// consumed as a Gradle *composite build* (includeBuild) — the dependency
+// `com.acp:event-model` is substituted by the included build. This is a build-time
+// reference only; this service never depends on another service's source.
+rootProject.name = 'pattern-manager'
+
+includeBuild('../../libs/event-model/java')
