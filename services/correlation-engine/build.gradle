@@ -117,11 +117,9 @@ jacocoTestReport {
                 fileTree(dir: it, exclude: [
                     'com/acp/correlationengine/CorrelationEngineApplication.class',
                     'com/acp/correlationengine/api/dto/**',
-                    // Spring @Configuration wiring, the Kafka Streams bootstrap, and the
-                    // observability adapters are exercised for real by the Testcontainers
-                    // `integrationTest` task, not the unit gate.
-                    'com/acp/correlationengine/config/**',
-                    'com/acp/correlationengine/stream/StreamsBootstrap.class'
+                    // Spring @Configuration wiring is exercised for real by the Testcontainers
+                    // `integrationTest` task (context load), not the fast unit gate.
+                    'com/acp/correlationengine/config/**'
                 ])
             })
         )
@@ -145,8 +143,7 @@ jacocoTestCoverageVerification {
                 fileTree(dir: it, exclude: [
                     'com/acp/correlationengine/CorrelationEngineApplication.class',
                     'com/acp/correlationengine/api/dto/**',
-                    'com/acp/correlationengine/config/**',
-                    'com/acp/correlationengine/stream/StreamsBootstrap.class'
+                    'com/acp/correlationengine/config/**'
                 ])
             })
         )
