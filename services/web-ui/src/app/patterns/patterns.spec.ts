@@ -1,9 +1,10 @@
 import { TestBed } from '@angular/core/testing';
 import { Router } from '@angular/router';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PatternStore } from './pattern.store';
 import { PatternListComponent } from './pattern-list.component';
 import { NavigationService } from '../core/navigation.service';
+import { resetMockPatternDecisions } from '../core/mock-fixtures';
 import { testProviders, flush } from '../../test-utils';
 
 function store(): PatternStore {
@@ -12,6 +13,10 @@ function store(): PatternStore {
 }
 
 describe('Pattern review & XAI module (P2)', () => {
+  // The in-app mock now PERSISTS approve/reject decisions within a session (to mirror the real
+  // Pattern Manager for the AC 39 E2E round-trip), so reset that state between unit cases.
+  beforeEach(() => resetMockPatternDecisions());
+
   it('AC 34 — lists each discovered pattern with sequence, support, confidence, lift, RCA, codebook overlap, instance count', async () => {
     const s = store();
     s.load('draft');

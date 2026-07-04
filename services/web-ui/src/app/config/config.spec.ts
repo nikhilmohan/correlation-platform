@@ -22,7 +22,6 @@ describe('Config module (P2) — Knowledge model-params', () => {
     expect(keys).toContain('dbscan.epsilon');
     expect(keys).toContain('dbscan.minSamples');
     expect(keys).toContain('window.sizeSeconds');
-    expect(keys).toContain('prefixspan.minSupport');
     // rendered into the form
     expect(fixture.nativeElement.querySelector('[data-testid="param-dbscan.epsilon"]')).toBeTruthy();
   });
@@ -59,9 +58,9 @@ describe('Config module (P2) — Knowledge model-params', () => {
       return original(...args);
     }) as typeof knowledge.updateModelParams;
 
-    // prefixspan.minSupport bound is min 0 max 1 — set out of bounds
-    const ctrl = cmp.form.controls.params.controls.find((g) => g.controls.key.value === 'prefixspan.minSupport')!;
-    ctrl.controls.value.setValue(5);
+    // dbscan.minSamples bound is min 1 max 1000 — set out of bounds
+    const ctrl = cmp.form.controls.params.controls.find((g) => g.controls.key.value === 'dbscan.minSamples')!;
+    ctrl.controls.value.setValue(9999);
     ctrl.controls.value.markAsTouched();
     cmp.submit();
     await flush();
@@ -69,6 +68,6 @@ describe('Config module (P2) — Knowledge model-params', () => {
     expect(putCalled).toBe(false);
     expect(cmp.saveStatus()).toBe('');
     fixture.detectChanges();
-    expect(fixture.nativeElement.querySelector('[data-testid="error-prefixspan.minSupport"]')).toBeTruthy();
+    expect(fixture.nativeElement.querySelector('[data-testid="error-dbscan.minSamples"]')).toBeTruthy();
   });
 });

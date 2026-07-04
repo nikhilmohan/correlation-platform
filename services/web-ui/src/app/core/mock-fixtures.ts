@@ -10,7 +10,9 @@ import {
   ModelParamsRecord,
   NeighborsDto,
   ObservedChatterPage,
+  PatternLifecycle,
   PatternPage,
+  PatternView,
   RunStatsPage,
   SiteListDto,
   SiteObjectsDto,
@@ -412,6 +414,7 @@ const PATTERNS: PatternPage = {
   items: [
     {
       patternId: 'PAT-3',
+      patternName: 'Loss of Signal Cascade · 02007ff1',
       trailId: 'TR-7',
       sequence: [
         { alarmType: 'LOS', optional: false },
@@ -422,19 +425,35 @@ const PATTERNS: PatternPage = {
       support: 0.12,
       confidence: 0.9,
       lift: 4.2,
-      timing: { medianIatMs: 1200 },
+      timing: { timeframeMs: 9700, medianInterArrivalMs: 1200, maxInterArrivalMs: 1500, stddevInterArrivalMs: 310 },
       sessionWindow: { windowMs: 30000, type: 'session-gap' },
       codebookMatchId: 'CB-2',
       structurallyValidated: true,
       structuralValidationReason: null,
       instanceCount: 18,
-      supportingInstances: [{ id: 'inst-1' }],
+      occurrenceCount: 12,
+      trailCount: 11,
+      firstSeen: '2026-05-01T09:14:02Z',
+      lastSeen: '2026-05-10T18:02:41Z',
+      supportingInstances: [
+        { sourceWindowId: 'win-3f2a', snapshotId: 'current', occurrence: { anchorScenarioId: 'Port:N0-LC1-P1' } },
+        { sourceWindowId: 'win-9c17', snapshotId: 'current', occurrence: { anchorScenarioId: 'Port:N0-LC1-P1' } },
+      ],
+      sampleAlarms: [
+        { alarmId: 'ALM-1001', alarmType: 'LOS', raisedAt: '2026-05-01T09:14:02Z', managedObjectId: 'Port:N0-LC1-P1', perceivedSeverity: 'critical' },
+        { alarmId: 'ALM-1002', alarmType: 'LinkDown', raisedAt: '2026-05-01T09:14:03Z', managedObjectId: 'IPLink:N0_N1', perceivedSeverity: 'major' },
+        { alarmId: 'ALM-1003', alarmType: 'AdjDown', raisedAt: '2026-05-01T09:14:05Z', managedObjectId: 'IGPAdj:N0_N1', perceivedSeverity: 'minor' },
+        { alarmId: 'ALM-1004', alarmType: 'LinkDown', raisedAt: '2026-05-01T09:14:06Z', managedObjectId: 'IPLink:N0_N2', perceivedSeverity: 'major' },
+        { alarmId: 'ALM-1005', alarmType: 'AdjDown', raisedAt: '2026-05-01T09:14:08Z', managedObjectId: 'IGPAdj:N0_N2', perceivedSeverity: 'warning' },
+        { alarmId: 'ALM-1006', alarmType: 'LinkDown', raisedAt: '2026-05-01T09:14:11Z', managedObjectId: 'IPLink:N1_N2', perceivedSeverity: 'cleared' },
+      ],
       lifecycle: 'draft',
       domain: 'core-ip',
       createdAt: '2026-05-01T00:00:00Z',
     },
     {
       patternId: 'PAT-1',
+      patternName: 'Port Flap Cascade · 10b3918b',
       trailId: 'TR-8',
       sequence: [
         { alarmType: 'PortFlap', optional: false },
@@ -444,13 +463,19 @@ const PATTERNS: PatternPage = {
       support: 0.2,
       confidence: 0.85,
       lift: 3.1,
-      timing: { medianIatMs: 800 },
+      timing: { timeframeMs: 6400, medianInterArrivalMs: 800, maxInterArrivalMs: 900 },
       sessionWindow: { windowMs: 30000, type: 'session-gap' },
       codebookMatchId: null,
       structurallyValidated: false,
       structuralValidationReason: 'no codebook overlap',
       instanceCount: 30,
-      supportingInstances: [],
+      occurrenceCount: 1,
+      trailCount: 1,
+      firstSeen: '2026-04-20T02:11:00Z',
+      lastSeen: '2026-04-20T02:11:00Z',
+      supportingInstances: [
+        { sourceWindowId: 'win-a44b', snapshotId: 'current', occurrence: {} },
+      ],
       lifecycle: 'approved',
       domain: 'core-ip',
       createdAt: '2026-04-20T00:00:00Z',
@@ -471,7 +496,6 @@ const MODEL_PARAMS: ModelParamsRecord = {
       { key: 'dbscan.epsilon', type: 'number', value: 0.5, min: 0, max: 100 },
       { key: 'dbscan.minSamples', type: 'number', value: 3, min: 1, max: 1000 },
       { key: 'window.sizeSeconds', type: 'number', value: 60, min: 1, max: 86400, unit: 's' },
-      { key: 'prefixspan.minSupport', type: 'number', value: 0.3, min: 0, max: 1 },
     ],
   },
 };
@@ -586,10 +610,10 @@ export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => /\/trails\/[^/?]+$/.test(r.url.split('?')[0]), respond: () => TRAIL_DETAIL },
   { matches: (r) => has(r.url, '/trails'), respond: () => TRAILS },
   { matches: (r) => has(r.url, '/patterns') && r.method === 'PATCH', respond: () => ({ ...PATTERNS.items[0], sequence: PATTERNS.items[0].sequence.map((s, i) => (i === 1 ? { ...s, optional: true } : s)) }) },
-  { matches: (r) => has(r.url, '/approve'), respond: (r) => ({ ...PATTERNS.items[0], lifecycle: (r.body as { decision?: string })?.decision === 'reject' ? 'rejected' : 'approved' }) },
+  { matches: (r) => has(r.url, '/approve'), respond: (r) => approvePattern(r) },
   { matches: (r) => has(r.url, '/patterns'), respond: (r) => filterPatterns(r) },
-  { matches: (r) => has(r.url, '/model-params') || (has(r.url, '/modelParams') && r.method !== 'PUT'), respond: () => MODEL_PARAMS },
-  { matches: (r) => has(r.url, '/modelParams') && r.method === 'PUT', respond: (r) => ({ ...MODEL_PARAMS, version: 'v4', payload: (r.body as { payload?: ModelParamsRecord['payload'] }).payload ?? MODEL_PARAMS.payload }) },
+  { matches: (r) => (has(r.url, '/model-params') || has(r.url, '/modelParams')) && r.method !== 'PUT', respond: () => MODEL_PARAMS },
+  { matches: (r) => (has(r.url, '/model-params') || has(r.url, '/modelParams')) && r.method === 'PUT', respond: (r) => ({ ...MODEL_PARAMS, version: 'v4', payload: (r.body as { payload?: ModelParamsRecord['payload'] }).payload ?? MODEL_PARAMS.payload }) },
   { matches: (r) => /\/incidents\/[^/?]+$/.test(r.url.split('?')[0]), respond: (r) => incidentById(r) },
   { matches: (r) => has(r.url, '/incidents'), respond: () => INCIDENT_PAGE },
   { matches: (r) => has(r.url, '/stats'), respond: () => STATS },
@@ -635,12 +659,50 @@ function traversalFor(req: HttpRequest<unknown>): TraversalDto {
   };
 }
 
+/**
+ * In-session pattern-decision state so the in-app mock mirrors the REAL Pattern Manager's
+ * persistence: an approved (or rejected) draft reads back with its new lifecycle on a subsequent
+ * GET /patterns, which the data-agnostic AC 39 round-trip relies on. Keyed by patternId.
+ */
+const patternDecisions = new Map<string, PatternLifecycle>();
+
+/**
+ * Clear the in-session pattern-decision state. Unit tests that share this module MUST call this
+ * between cases so an approve/reject in one test does not leak into the next (the state is
+ * intentionally persistent within a session to mirror the real Pattern Manager for the AC 39 E2E
+ * round-trip).
+ */
+export function resetMockPatternDecisions(): void {
+  patternDecisions.clear();
+}
+
+/** Effective lifecycle for a pattern, honouring any in-session decision. */
+function effectiveLifecycle(p: PatternView): PatternLifecycle {
+  return patternDecisions.get(p.patternId) ?? p.lifecycle;
+}
+
+/** Parse the patternId from /patterns/{id}/approve. */
+function patternIdFromApproveUrl(url: string): string {
+  const m = url.split('?')[0].match(/\/patterns\/([^/]+)\/approve/);
+  return m ? decodeURIComponent(m[1]) : PATTERNS.items[0].patternId;
+}
+
+function approvePattern(req: HttpRequest<unknown>): PatternView {
+  const id = patternIdFromApproveUrl(req.url);
+  const decision = (req.body as { decision?: string })?.decision;
+  const lifecycle: PatternLifecycle = decision === 'reject' ? 'rejected' : 'approved';
+  patternDecisions.set(id, lifecycle);
+  const base = PATTERNS.items.find((p) => p.patternId === id) ?? PATTERNS.items[0];
+  return { ...base, patternId: id, lifecycle };
+}
+
 function filterPatterns(req: HttpRequest<unknown>): PatternPage {
   const lifecycle = paramOf(req, 'lifecycle');
+  const all = PATTERNS.items.map((p) => ({ ...p, lifecycle: effectiveLifecycle(p) }));
   if (!lifecycle) {
-    return PATTERNS;
+    return { ...PATTERNS, items: all, total: all.length };
   }
-  const items = PATTERNS.items.filter((p) => p.lifecycle === lifecycle);
+  const items = all.filter((p) => p.lifecycle === lifecycle);
   return { ...PATTERNS, items, total: items.length };
 }
 
