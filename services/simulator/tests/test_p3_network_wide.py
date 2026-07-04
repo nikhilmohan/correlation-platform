@@ -590,3 +590,124 @@ def test_emitted_alarms_are_valid_alarmevents(tmp_path: Path) -> None:
     for _, envelope in producer.sent:
         assert isinstance(envelope.payload, AlarmEvent)
         assert envelope.payload.alarmType
+
+
+# --- Regression (live bug #392): real-shaped 5 patterns are NOT excluded, aligned > 0 ----------
+# Root cause: the enrichment-safe synthesis wrongly required each cascade inter-arrival to exceed
+# the enrichment dedup window (2000ms), which conflicted with a ~5000ms session window for a 4-6
+# element cascade (~975ms/gap budget) -> reconcile_spacing reported a conflict -> plan_network_wide
+# EXCLUDED all 5 patterns -> entries=0, aligned=0. Cascade elements have DISTINCT dedup keys
+# (distinct managedObjectId + distinct alarmType per position) so enrichment NEVER dedups them; the
+# blanket dedup-window floor was removed. This fixture mirrors the live shapes (windowMs ~5000, 4-6
+# distinct-object elements) and asserts NO pattern is excluded and aligned cascades are produced.
+def _real_shaped_patterns() -> list[dict]:
+    # All member alarmTypes are NON-transient (transients are correctly excluded by AC 60), each
+    # sequence position a distinct alarmType on a distinct objectType -> distinct dedup keys.
+    specs = [
+        (
+            "pat-fiber",
+            [
+                ("LOS", False),
+                ("InterfaceDown", False),
+                ("ISISAdjacencyDown", False),
+                ("LSPDown", False),
+                ("VPNReachabilityLoss", False),
+            ],
+            "LOS",
+        ),
+        (
+            "pat-linecard",
+            [
+                ("LineCardFault", False),
+                ("InterfaceDown", False),
+                ("IPLinkDown", False),
+                ("ISISAdjacencyDown", False),
+            ],
+            "LineCardFault",
+        ),
+        (
+            "pat-iplink",
+            [
+                ("IPLinkDown", False),
+                ("ISISAdjacencyDown", False),
+                ("LSPDown", False),
+                ("VPNReachabilityLoss", False),
+                ("ServiceDegraded", False),
+            ],
+            "IPLinkDown",
+        ),
+        (
+            "pat-fibercut",
+            [
+                ("FiberCut", False),
+                ("OpticalPowerLow", False),
+                ("InterfaceDown", False),
+                ("IPLinkDown", False),
+                ("ISISAdjacencyDown", False),
+                ("LSPDown", False),
+            ],
+            "FiberCut",
+        ),
+        (
+            "pat-bgp",
+            [
+                ("BGPPeerDown", False),
+                ("RouteFlap", False),
+                ("VPNReachabilityLoss", False),
+                ("ServiceDegraded", False),
+            ],
+            "BGPPeerDown",
+        ),
+    ]
+    return [
+        fx.pattern_view(pid, "trail-A", seq, root, window_ms=5000, median_ms=600.0, max_ms=1200.0)
+        for pid, seq, root in specs
+    ]
+
+
+def _all_types_fleet(count: int = 40) -> dict:
+    """A fleet of ``count`` compatible trails, each hosting every objectType the 5 patterns need."""
+    object_types = [
+        "FiberSpan",
+        "LineCard",
+        "Port",
+        "Interface",
+        "IPLink",
+        "IGPAdjacency",
+        "LSP",
+        "VPNService",
+    ]
+    bodies: dict = {}
+    areas = ["area-0", "area-1", "area-2"]
+    tids = [f"trail-{i:03d}" for i in range(count)] + ["trail-A"]
+    for i, tid in enumerate(tids):
+        # 3 members per objectType so distinct placement has room even when two sequence positions
+        # share an affine objectType (e.g. ISISAdjacencyDown + RouteFlap both -> IGPAdjacency).
+        members = [(f"{ot}:{tid}-{k}", ot) for ot in object_types for k in range(3)]
+        bodies[tid] = fx.trail_detail(tid, members, igp_area=areas[i % 3])
+    return bodies
+
+
+def test_five_real_shaped_patterns_not_excluded_and_aligned_positive(tmp_path: Path) -> None:
+    patterns = _real_shaped_patterns()
+    producer = FakeProducer()
+    outcome = _run(_settings(tmp_path), producer, patterns, trail_bodies=_all_types_fleet())
+    # NO pattern excluded by the (removed) dedup-window/session-window conflict.
+    assert outcome.summary.enrichment_conflict_patterns == []
+    # aligned cascades ARE produced (the bug produced aligned=0).
+    aligned = [x for x in outcome.labels.all() if x.scenario_type == "pattern-aligned"]
+    assert aligned
+    assert outcome.summary.aligned_alarms > 0
+    assert outcome.summary.enrichment_safe_count == outcome.summary.aligned_alarms
+    # multiple of the 5 patterns contribute (target distributes across them).
+    assert len({x.pattern_id for x in aligned}) >= 2
+    # every cascade stays within its 5000ms session window and keeps distinct dedup keys.
+    by_id = {e.payload.alarmId: e.payload for _, e in producer.sent}
+    for label in aligned:
+        ids = [label.root_cause_alarm_id, *label.child_alarm_ids]
+        alarms = [by_id[i] for i in ids if i in by_id]
+        ordered = sorted(alarms, key=lambda a: a.raisedAt)
+        span_ms = (ordered[-1].raisedAt - ordered[0].raisedAt).total_seconds() * 1000.0
+        assert span_ms <= 5000
+        keys = [(a.managedObjectId, a.alarmType) for a in alarms]
+        assert len(keys) == len(set(keys))  # distinct dedup keys -> enrichment-safe

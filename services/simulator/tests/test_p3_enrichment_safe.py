@@ -6,7 +6,6 @@ mocked from their published OpenAPI shapes; no live services.
 
 from __future__ import annotations
 
-import logging
 import random
 from datetime import UTC, datetime
 from pathlib import Path
@@ -147,8 +146,14 @@ def test_transient_types_config_override_wins() -> None:
     assert override == frozenset({"CustomTransient"})  # config override, not pack-derived
 
 
-# --- AC 61: inter-arrival above dedup, within session window ----------------------------------
-def test_cascade_spacing_bounds(tmp_path: Path) -> None:
+# --- AC 61 (corrected): natural timing within the session window ------------------------------
+def test_cascade_spacing_within_window(tmp_path: Path) -> None:
+    """Cascades fit inside the session window using natural timing.
+
+    Corrected model: cascade elements have DISTINCT dedup keys (distinct managedObjectId + distinct
+    alarmType per position), so enrichment never dedups them and there is NO dedup-window floor.
+    The only remaining spacing invariant is that the whole cascade stays within the session window.
+    """
     producer = FakeProducer()
     outcome = _run(
         _settings(tmp_path, P3_ENRICHMENT_DEDUP_WINDOW_MS="2000"), producer, [_pattern()]
@@ -159,32 +164,43 @@ def test_cascade_spacing_bounds(tmp_path: Path) -> None:
         ordered = sorted(cascade, key=lambda a: a.raisedAt)
         span_ms = (ordered[-1].raisedAt - ordered[0].raisedAt).total_seconds() * 1000.0
         assert span_ms <= 30000  # within session window
-        for prev, nxt in zip(ordered, ordered[1:], strict=False):
-            gap = (nxt.raisedAt - prev.raisedAt).total_seconds() * 1000.0
-            assert gap >= 2000  # above dedup window
+        # elements have distinct dedup keys -> enrichment-safe by construction (no floor needed)
+        keys = [(a.managedObjectId, a.alarmType) for a in cascade]
+        assert len(keys) == len(set(keys))
 
 
-# --- AC 62: conflicting pattern excluded + logged ---------------------------------------------
-def test_conflict_pattern_excluded(tmp_path: Path, caplog) -> None:
-    # window <= dedup -> impossible to be both above dedup and within window.
-    conflicting = _pattern("pat-conflict", "trail-A", window_ms=1500)
+# --- AC 62 (corrected): distinct-key cascade NOT excluded; only degenerate window conflicts ----
+def test_small_window_pattern_not_excluded(tmp_path: Path) -> None:
+    """A pattern whose windowMs is below the dedup window is NO LONGER excluded.
+
+    Corrected model: cascade elements have distinct dedup keys, so enrichment never dedups them;
+    windowMs < dedup window is not a conflict. The pattern must still emit aligned cascades.
+    """
+    small = _pattern("pat-small", "trail-A", window_ms=1500)
     ok = _pattern("pat-ok", "trail-B", window_ms=30000)
     producer = FakeProducer()
-    with caplog.at_level(logging.WARNING):
-        outcome = _run(_settings(tmp_path), producer, [conflicting, ok])
-    assert "pat-conflict" in outcome.summary.enrichment_conflict_patterns
-    assert any(getattr(r, "event", "") == "p3.enrichment_window_conflict" for r in caplog.records)
-    # run did NOT abort: the conflict-free pattern still emitted aligned cascades.
+    outcome = _run(_settings(tmp_path), producer, [small, ok])
+    assert outcome.summary.enrichment_conflict_patterns == []  # nothing excluded
     aligned = [x for x in outcome.labels.all() if x.scenario_type == "pattern-aligned"]
     assert aligned
-    assert all(x.pattern_id != "pat-conflict" for x in aligned)
+    # BOTH patterns are eligible and contribute aligned cascades.
+    assert {x.pattern_id for x in aligned} == {"pat-small", "pat-ok"}
 
 
-def test_reconcile_spacing_returns_conflict() -> None:
+def test_reconcile_spacing_degenerate_window_conflicts() -> None:
+    # Only a degenerate windowMs <= 0 conflicts now; a distinct-key cascade never does otherwise.
+    result = enrichment_safe.reconcile_spacing(2000, 0, 3, spacing_margin=0.1, in_window_margin=0.9)
+    assert isinstance(result, SpacingConflict)
+
+
+def test_reconcile_spacing_small_window_returns_bounds() -> None:
+    # windowMs (1500) BELOW the dedup window (2000) no longer conflicts: distinct-key cascade.
     result = enrichment_safe.reconcile_spacing(
         2000, 1500, 3, spacing_margin=0.1, in_window_margin=0.9
     )
-    assert isinstance(result, SpacingConflict)
+    assert isinstance(result, SpacingBounds)
+    assert result.lo_ms == 0.0  # no dedup-window floor
+    assert result.hi_ms > 0.0
 
 
 def test_reconcile_spacing_returns_bounds() -> None:
@@ -192,7 +208,9 @@ def test_reconcile_spacing_returns_bounds() -> None:
         2000, 30000, 3, spacing_margin=0.1, in_window_margin=0.9
     )
     assert isinstance(result, SpacingBounds)
-    assert result.lo_ms >= 2000  # strictly above dedup window
+    assert result.lo_ms == 0.0  # natural floor, NOT the dedup window
+    # per-gap upper budget fits the whole cascade in the window: 30000*0.9 / (3-1) = 13500
+    assert result.hi_ms == 30000 * 0.9 / 2
 
 
 # --- AC 63: no flap-damping trigger -----------------------------------------------------------
@@ -244,13 +262,15 @@ def test_nonaligned_not_enrichment_constrained(tmp_path: Path) -> None:
 
 # --- AC 65: summary records enrichmentSafeCount + enrichmentConflictPatterns -------------------
 def test_summary_enrichment_fields(tmp_path: Path) -> None:
-    conflicting = _pattern("pat-conflict", "trail-A", window_ms=1500)
+    # Corrected model: distinct-key patterns are never excluded -> conflict list is empty and
+    # every emitted aligned alarm is enrichment-safe by construction.
+    small = _pattern("pat-small", "trail-A", window_ms=1500)
     ok = _pattern("pat-ok", "trail-B", window_ms=30000)
     producer = FakeProducer()
-    outcome = _run(_settings(tmp_path), producer, [conflicting, ok])
+    outcome = _run(_settings(tmp_path), producer, [small, ok])
     d = outcome.summary.to_json()
     assert d["enrichmentSafeCount"] == outcome.summary.aligned_alarms > 0
-    assert d["enrichmentConflictPatterns"] == ["pat-conflict"]
+    assert d["enrichmentConflictPatterns"] == []
 
 
 def test_place_distinct_draws_without_replacement() -> None:

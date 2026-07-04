@@ -74,7 +74,14 @@ def _eligible_patterns(
     patterns: list[PatternView],
     plan: NetworkWidePlan,
 ) -> list[PatternView]:
-    """Filter out enrichment-conflicting patterns; record + log them (AC 62). Never aborts here."""
+    """Reconcile per-pattern spacing; record spacing bounds. Never aborts here.
+
+    Corrected enrichment-safe model (AC 61/62): distinct-key cascades (distinct managedObjectId +
+    distinct alarmType per element) have distinct enrichment dedup keys, so enrichment never dedups
+    them and there is no dedup-window/session-window conflict to exclude on. ``reconcile_spacing``
+    now only reports a :class:`SpacingConflict` for the degenerate ``windowMs <= 0`` case, so real
+    patterns are no longer blanket-excluded (the old behaviour set ``entries=0``, ``aligned=0``).
+    """
     dedup_ms = float(settings.p3_enrichment_dedup_window_ms)
     eligible: list[PatternView] = []
     for pattern in patterns:

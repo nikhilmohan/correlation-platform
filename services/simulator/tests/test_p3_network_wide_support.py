@@ -209,18 +209,27 @@ def test_reconcile_spacing_single_element_never_conflicts() -> None:
     assert isinstance(result, SpacingBounds)  # n==1 needs no gap
 
 
-def test_reconcile_spacing_lower_bound_strictly_above_dedup() -> None:
+def test_reconcile_spacing_lo_is_natural_floor_not_dedup() -> None:
+    # Corrected model: lo is a natural floor (0), NOT the dedup window; hi = budget / (n-1).
     result = enrichment_safe.reconcile_spacing(
         2000, 60000, 4, spacing_margin=0.1, in_window_margin=0.9
     )
     assert isinstance(result, SpacingBounds)
-    assert result.lo_ms == pytest.approx(2200.0)  # 2000 * (1 + 0.1)
+    assert result.lo_ms == 0.0  # no dedup-window floor (distinct-key cascade)
+    assert result.hi_ms == pytest.approx(60000 * 0.9 / 3)
 
 
-def test_reconcile_spacing_conflict_when_window_le_dedup() -> None:
+def test_reconcile_spacing_window_equal_dedup_not_conflict() -> None:
+    # windowMs == dedup window no longer conflicts: distinct-key cascades are dedup-safe by
+    # construction, so the pattern stays eligible and gets valid bounds.
     result = enrichment_safe.reconcile_spacing(
         2000, 2000, 3, spacing_margin=0.1, in_window_margin=0.9
     )
+    assert isinstance(result, SpacingBounds)
+
+
+def test_reconcile_spacing_degenerate_window_conflicts() -> None:
+    result = enrichment_safe.reconcile_spacing(2000, 0, 3, spacing_margin=0.1, in_window_margin=0.9)
     assert isinstance(result, SpacingConflict)
 
 

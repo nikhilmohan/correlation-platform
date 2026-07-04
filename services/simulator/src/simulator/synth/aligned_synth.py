@@ -69,7 +69,9 @@ def build_cascade(
 
     network_wide = spacing_lo_ms is not None and spacing_hi_ms is not None
     if network_wide:
-        inter_arrivals = _reconciled_gaps(len(retained), spacing_lo_ms, spacing_hi_ms, rng)
+        inter_arrivals = _reconciled_gaps(
+            pattern, len(retained), spacing_lo_ms, spacing_hi_ms, rng, in_window_margin
+        )
     else:
         inter_arrivals = _inter_arrival_gaps(pattern, len(retained), rng, in_window_margin)
 
@@ -124,12 +126,30 @@ def build_cascade(
     return AlignedCascade(alarms=alarms, label=label)
 
 
-def _reconciled_gaps(n: int, lo_ms: float, hi_ms: float, rng: random.Random) -> list[float]:
-    """Draw ``n-1`` inter-arrival gaps in ``[lo_ms, hi_ms]`` (enrichment-safe spacing, AC 61)."""
+def _reconciled_gaps(
+    pattern: PatternView,
+    n: int,
+    lo_ms: float,
+    hi_ms: float,
+    rng: random.Random,
+    in_window_margin: float,
+) -> list[float]:
+    """Network-wide inter-arrival gaps: NATURAL pattern timing capped to the session window (AC 61).
+
+    Corrected enrichment-safe model: aligned cascade elements have DISTINCT dedup keys (distinct
+    managedObjectId + distinct alarmType per position), so enrichment's DedupStep never collapses
+    them and there is NO dedup-window floor to honour. The cascade therefore uses the pattern's own
+    natural inter-arrival timing (``_inter_arrival_gaps``, already window-clamped), and each gap is
+    additionally capped at the per-gap window budget ``hi_ms`` so the whole cascade stays inside the
+    session window regardless of timing noise. ``lo_ms`` (natural floor, ~0) is applied as a
+    non-negative clamp only. This keeps cascades realistically paced and within-window instead of
+    forcing an artificial dedup-window spacing that excluded every real pattern.
+    """
     if n <= 1:
         return []
+    natural = _inter_arrival_gaps(pattern, n, rng, in_window_margin)
     hi = max(lo_ms, hi_ms)
-    return [rng.uniform(lo_ms, hi) for _ in range(n - 1)]
+    return [max(lo_ms, min(g, hi)) for g in natural]
 
 
 def _retain_elements(pattern: PatternView, rng: random.Random, include_prob: float) -> list:

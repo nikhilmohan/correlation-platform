@@ -20,10 +20,15 @@ from simulator.engine.models import SynthAlarm
 
 @dataclass(frozen=True)
 class SpacingBounds:
-    """Reconciled per-cascade inter-arrival spacing bounds (ms), design §D rule 3.
+    """Reconciled per-cascade inter-arrival spacing bounds (ms), design §D rule 3 (corrected).
 
-    ``lo`` is strictly above the enrichment dedup window; ``hi`` is the largest inter-arrival gap
-    that still keeps the whole cascade within the session window given its length.
+    ``hi`` is the largest inter-arrival gap that still keeps the whole cascade within the session
+    window given its length. ``lo`` is a small NATURAL floor (never the dedup window) — aligned
+    cascades fire DISTINCT alarmTypes on DISTINCT managedObjectIds, so every element has a distinct
+    enrichment dedup key ``(path, source, managedObjectId, eventType, alarmType, state)`` and
+    enrichment's DedupStep never collapses them. The old dedup-window floor was based on a false
+    premise (that consecutive distinct-key elements would be deduped) and needlessly excluded every
+    real cascade whose per-gap budget was below that floor; it has been removed.
     """
 
     lo_ms: float
@@ -32,7 +37,11 @@ class SpacingBounds:
 
 @dataclass(frozen=True)
 class SpacingConflict:
-    """The session-window / dedup-window bounds cannot be simultaneously satisfied (AC 62)."""
+    """The cascade length cannot fit inside the session window at all (degenerate — AC 62).
+
+    Now only triggers for the degenerate ``session_window_ms <= 0`` case; distinct-key cascades are
+    never excluded for a dedup-window/session-window conflict (that premise was incorrect).
+    """
 
     pattern_id: str
     dedup_window_ms: float
@@ -49,42 +58,41 @@ def reconcile_spacing(
     spacing_margin: float,
     in_window_margin: float,
 ) -> SpacingBounds | SpacingConflict:
-    """Reconcile the enrichment dedup lower bound against the session-window upper bound.
+    """Reconcile the per-cascade inter-arrival spacing to fit the session window (corrected model).
 
-    - lower bound ``lo = dedup_window_ms * (1 + spacing_margin)`` (strictly above the dedup window)
-      so consecutive elements on distinct objects are never deduped (AC 61a);
+    Aligned cascades are enrichment-safe **by construction**: each element is placed on a distinct
+    managedObjectId and each sequence position is a distinct alarmType, so every element has a
+    distinct enrichment dedup key and enrichment's DedupStep (which only collapses REPEATED
+    IDENTICAL ``(path, source, managedObjectId, eventType, alarmType, state)``) never applies.
+    There is therefore NO need to space elements above the dedup window — the cascade uses its
+    natural pattern timing, which already fits inside the session window.
+
     - upper budget ``budget = session_window_ms * in_window_margin`` so the whole cascade stays
-      inside the session window (AC 61b); the per-gap upper bound is ``budget / (n - 1)``.
+      inside the session window (AC 61b); the per-gap upper bound is ``budget / (n - 1)``;
+    - lower bound is a small natural floor (``0``) — the dedup-window floor was removed because it
+      was based on a false premise and blanket-excluded every real pattern (see class docstring).
 
-    Returns a :class:`SpacingConflict` when no gap can be simultaneously above the dedup window and
-    within the session window — concretely when ``session_window_ms <= dedup_window_ms`` or when
-    ``lo * (n - 1) > budget`` for the cascade length ``n`` (AC 62). A single-element cascade never
-    conflicts (no inter-arrival gap is needed).
+    ``dedup_window_ms`` / ``spacing_margin`` are retained in the signature (used elsewhere only for
+    the narrow genuine-duplicate guard) but no longer act as an inter-arrival floor. Returns a
+    :class:`SpacingConflict` only in the degenerate ``session_window_ms <= 0`` case; a distinct-key
+    cascade is never excluded for a dedup/window conflict. A single-element cascade never conflicts.
     """
-    lo = dedup_window_ms * (1.0 + spacing_margin)
+    del dedup_window_ms, spacing_margin  # no longer used as an inter-arrival floor (see docstring)
     n = max(1, cascade_length)
     if n <= 1:
         # No inter-arrival gap needed; hi is irrelevant but kept coherent for the caller.
-        return SpacingBounds(lo_ms=lo, hi_ms=lo)
+        return SpacingBounds(lo_ms=0.0, hi_ms=0.0)
+    if session_window_ms <= 0:
+        return SpacingConflict(
+            pattern_id="",
+            dedup_window_ms=0.0,
+            session_window_ms=session_window_ms,
+            cascade_length=n,
+            reason="sessionWindow.windowMs <= 0 (degenerate)",
+        )
     budget = session_window_ms * in_window_margin
-    if session_window_ms <= dedup_window_ms:
-        return SpacingConflict(
-            pattern_id="",
-            dedup_window_ms=dedup_window_ms,
-            session_window_ms=session_window_ms,
-            cascade_length=n,
-            reason="sessionWindow.windowMs <= enrichment dedup window",
-        )
     hi_per_gap = budget / (n - 1)
-    if lo > hi_per_gap:
-        return SpacingConflict(
-            pattern_id="",
-            dedup_window_ms=dedup_window_ms,
-            session_window_ms=session_window_ms,
-            cascade_length=n,
-            reason="dedup-window lower bound exceeds in-window per-gap budget for cascade length",
-        )
-    return SpacingBounds(lo_ms=lo, hi_ms=hi_per_gap)
+    return SpacingBounds(lo_ms=0.0, hi_ms=hi_per_gap)
 
 
 def transient_types(pack: DomainPack, override: Iterable[str]) -> frozenset[str]:
