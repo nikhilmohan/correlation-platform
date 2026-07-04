@@ -1,5 +1,11 @@
 # Unit/slice test profile: no Kafka broker, no PostgreSQL — the engine core + read API load over
 # in-memory persistence. The real Kafka + Postgres paths are exercised by the integrationTest task.
+correlation:
+  # Unit/slice profile: no Postgres — the in-memory Incident Store + dedupe ledger back the
+  # engine core. The real JDBC path (default) is exercised by the integrationTest task.
+  persistence:
+    mode: memory
+
 correlation-engine:
   kafka:
     enabled: false

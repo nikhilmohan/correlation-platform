@@ -7,24 +7,45 @@ import com.acp.correlationengine.integration.InMemoryProcessedEventStore;
 import com.acp.correlationengine.integration.JdbcProcessedEventStore;
 import com.acp.correlationengine.integration.ProcessedEventStore;
 import javax.sql.DataSource;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 /**
- * Incident Store + event-dedupe persistence wiring. When a {@link DataSource} is present (real
- * PostgreSQL via Flyway on the owned {@code incident} schema) the JDBC implementations are used;
- * otherwise the in-memory implementations back the mock/unit profile. The engine core is agnostic —
- * it depends only on the {@link IncidentRepository} / {@link ProcessedEventStore} ports.
+ * Incident Store + event-dedupe persistence wiring. Correlation-engine is the durable
+ * system-of-record for incidents and the processed-event ledger, so whenever a real PostgreSQL
+ * DataSource is configured the JDBC implementations MUST win; the in-memory implementations exist
+ * only for the no-datasource unit/mock path.
+ *
+ * <p>The switch is a deterministic property switch on {@code correlation.persistence.mode}, NOT
+ * {@code @ConditionalOnBean(DataSource.class)}. {@code @ConditionalOnBean} on a user
+ * {@code @Configuration} is evaluated while user config is processed — BEFORE Spring Boot's
+ * {@code DataSourceAutoConfiguration} has registered the DataSource bean — so the condition sees
+ * no DataSource and the JDBC beans are silently skipped, letting the in-memory fallbacks win even
+ * with a fully working Postgres. That defeated durability (incidents/dedupe lived only in memory
+ * and vanished on restart).
+ *
+ * <p>Instead, {@code correlation.persistence.mode} defaults to {@code jdbc} (durable-by-default:
+ * the real/compose profile has a live Postgres and never overrides it), and only the unit/mock
+ * profile explicitly sets it to {@code memory}. A plain property is resolved deterministically and
+ * is not subject to bean-registration ordering, so JDBC reliably wins whenever a real DB is
+ * configured.
+ *
+ * <p>The engine core stays agnostic — it depends only on the {@link IncidentRepository} /
+ * {@link ProcessedEventStore} ports; only this wiring chooses the backing implementation.
  */
 @Configuration
 public class PersistenceConfig {
 
-    /** JDBC persistence — active whenever a {@link DataSource} is on the context (real Postgres). */
+    /**
+     * JDBC persistence — the default. Active unless {@code correlation.persistence.mode} is
+     * explicitly {@code memory} (real/compose profile: durable Postgres system-of-record).
+     */
     @Configuration
-    @ConditionalOnBean(DataSource.class)
+    @ConditionalOnProperty(
+            name = "correlation.persistence.mode", havingValue = "jdbc", matchIfMissing = true)
     static class Jdbc {
         @Bean
         @ConditionalOnMissingBean(NamedParameterJdbcTemplate.class)
@@ -45,13 +66,20 @@ public class PersistenceConfig {
         }
     }
 
+    /**
+     * In-memory fallback — active only when {@code correlation.persistence.mode=memory} is set
+     * explicitly (the unit/mock path, with no datasource). A real-DB run defaults to {@code jdbc}
+     * and never lands here.
+     */
     @Bean
+    @ConditionalOnProperty(name = "correlation.persistence.mode", havingValue = "memory")
     @ConditionalOnMissingBean(IncidentRepository.class)
     public IncidentRepository inMemoryIncidentRepository() {
         return new InMemoryIncidentRepository();
     }
 
     @Bean
+    @ConditionalOnProperty(name = "correlation.persistence.mode", havingValue = "memory")
     @ConditionalOnMissingBean(ProcessedEventStore.class)
     public ProcessedEventStore inMemoryProcessedEventStore() {
         return new InMemoryProcessedEventStore();
