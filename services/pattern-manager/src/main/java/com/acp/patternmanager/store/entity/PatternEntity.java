@@ -35,6 +35,13 @@ public class PatternEntity {
     @Column(name = "root_cause_alarm_type", nullable = false)
     private String rootCauseAlarmType;
 
+    // Deterministic, readable pattern name derived from (rootCauseAlarmType, patternId) at create
+    // time via PatternNaming. Persisted here (the SSoT) so consumers never derive it client-side. The
+    // create path always sets it and V6 backfills historicals; the column is left DB-nullable so the
+    // V5 rekey migration's fixed-column INSERT stays valid (the mapper re-derives on the rare null).
+    @Column(name = "pattern_name")
+    private String patternName;
+
     @Column(name = "support", nullable = false)
     private double support;
 
@@ -164,6 +171,14 @@ public class PatternEntity {
 
     public void setRootCauseAlarmType(String rootCauseAlarmType) {
         this.rootCauseAlarmType = rootCauseAlarmType;
+    }
+
+    public String getPatternName() {
+        return patternName;
+    }
+
+    public void setPatternName(String patternName) {
+        this.patternName = patternName;
     }
 
     public double getSupport() {

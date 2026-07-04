@@ -41,6 +41,7 @@ class PatternControllerTest {
     private PatternView view(String lifecycle) {
         return new PatternView(
                 "11111111-1111-1111-1111-111111111111",
+                "Loss of Signal Cascade · 11111111",
                 "trail-1",
                 List.of(new SequenceElementView("LOS", false),
                         new SequenceElementView("LinkDown", false)),

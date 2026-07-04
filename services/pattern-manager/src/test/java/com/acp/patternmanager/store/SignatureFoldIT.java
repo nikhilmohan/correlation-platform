@@ -85,6 +85,32 @@ class SignatureFoldIT {
         assertThat(row.getTrailCount()).isEqualTo(2);
     }
 
+    // [PATTERN-NAME] A freshly-created unexplained pattern head persists the deterministic readable
+    // pattern_name (Pattern Manager owns + persists it; the DB is the SSoT). The name is stable per
+    // signature, so a later fold leaves it unchanged, and the mapper serves the persisted value.
+    @Test
+    void unexplainedPatternPersistsAndServesDeterministicPatternName() {
+        String snap = snap();
+        List<String> seq = List.of("LOS", "LinkDown"); // rootCauseAlarmType = "LOS"
+        EnrichedPattern e1 = unexplained("trail-1", seq, "w1", snap, 3, 0.6);
+
+        UUID pid = consolidationService.consolidate(e1, id(), "pattern-miner").patternId();
+
+        PatternEntity created = patternRepository.findById(pid).orElseThrow();
+        String expected =
+                com.acp.patternmanager.naming.PatternNaming.patternName("LOS", pid.toString());
+        assertThat(created.getPatternName()).isEqualTo(expected);
+        assertThat(created.getPatternName()).startsWith("Loss of Signal Cascade · ");
+        // Served on the read model straight from the persisted column.
+        assertThat(viewMapper.toView(created).patternName()).isEqualTo(expected);
+
+        // A later fold of the SAME signature does NOT change the stable name.
+        EnrichedPattern e2 = unexplained("trail-2", seq, "w2", snap, 2, 0.4);
+        consolidationService.consolidate(e2, id(), "pattern-miner");
+        assertThat(patternRepository.findById(pid).orElseThrow().getPatternName())
+                .isEqualTo(expected);
+    }
+
     // AC-SF-2: same signature, DIFFERENT windows, SAME trail -> ONE row, summed instanceCount.
     @Test
     void signatureFoldsAcrossWindowsSameTrail() {

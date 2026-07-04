@@ -49,7 +49,8 @@ class SampleAlarmOpenApiContractTest {
 
     private static PatternView view(String id, List<SampleAlarmView> samples) {
         return new PatternView(
-                id, "trail:ospf-area0:7",
+                id, com.acp.patternmanager.naming.PatternNaming.patternName("FiberFault", id),
+                "trail:ospf-area0:7",
                 List.of(new SequenceElementView("FiberFault", false),
                         new SequenceElementView("LinkDown", false),
                         new SequenceElementView("PortDown", false)),

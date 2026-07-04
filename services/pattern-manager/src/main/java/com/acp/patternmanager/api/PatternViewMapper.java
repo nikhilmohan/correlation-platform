@@ -5,6 +5,7 @@ import com.acp.patternmanager.api.dto.SampleAlarmView;
 import com.acp.patternmanager.api.dto.SequenceElementView;
 import com.acp.patternmanager.api.dto.SessionWindowView;
 import com.acp.patternmanager.api.dto.SupportingInstanceView;
+import com.acp.patternmanager.naming.PatternNaming;
 import com.acp.patternmanager.store.entity.PatternEntity;
 import com.acp.patternmanager.store.entity.SampleAlarmEntity;
 import com.acp.patternmanager.store.entity.SupportingInstanceEntity;
@@ -38,8 +39,14 @@ public class PatternViewMapper {
         List<SampleAlarmView> sampleAlarms = e.getSampleAlarms().stream()
                 .map(this::toSampleAlarm)
                 .toList();
+        // Read the PERSISTED name (the DB is the SSoT). Defensive fallback ONLY if the column is
+        // somehow null (e.g. a row that predates the backfill) so the API never serves a null name.
+        String patternName = e.getPatternName() != null
+                ? e.getPatternName()
+                : PatternNaming.patternName(e.getRootCauseAlarmType(), e.getPatternId().toString());
         return new PatternView(
                 e.getPatternId().toString(),
+                patternName,
                 e.getTrailId(),
                 seq,
                 e.getRootCauseAlarmType(),

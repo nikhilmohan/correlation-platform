@@ -70,8 +70,8 @@
           "required" : true
         },
         "responses" : {
-          "409" : {
-            "description" : "Pattern is not in a lifecycle state that permits approval/rejection"
+          "404" : {
+            "description" : "No pattern with the given id"
           },
           "200" : {
             "description" : "Decision applied; updated PatternView returned",
@@ -86,8 +86,8 @@
           "422" : {
             "description" : "Decision body fails validation (invalid decision/semantics)"
           },
-          "404" : {
-            "description" : "No pattern with the given id"
+          "409" : {
+            "description" : "Pattern is not in a lifecycle state that permits approval/rejection"
           }
         }
       }
@@ -141,8 +141,14 @@
           "required" : true
         },
         "responses" : {
+          "404" : {
+            "description" : "No pattern with the given id"
+          },
           "409" : {
             "description" : "Pattern is not editable in its current lifecycle state (only drafts are editable)"
+          },
+          "422" : {
+            "description" : "Edit body is un-processable (e.g. out-of-range position index)"
           },
           "200" : {
             "description" : "Edit applied; updated PatternView returned",
@@ -153,12 +159,6 @@
                 }
               }
             }
-          },
-          "422" : {
-            "description" : "Edit body is un-processable (e.g. out-of-range position index)"
-          },
-          "404" : {
-            "description" : "No pattern with the given id"
           }
         }
       }
@@ -232,6 +232,10 @@
         "properties" : {
           "patternId" : {
             "type" : "string"
+          },
+          "patternName" : {
+            "type" : "string",
+            "description" : "deterministic, readable pattern name owned + persisted by the Pattern Manager (\"<label> Cascade · <short8-of-patternId>\", e.g. \"IP Link Down Cascade · 02007ff1\"); consumers render this instead of deriving a name client-side"
           },
           "trailId" : {
             "type" : "string"
