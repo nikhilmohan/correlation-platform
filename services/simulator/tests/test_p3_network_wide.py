@@ -388,9 +388,9 @@ def test_target_controller_hits_rate_within_tolerance(tmp_path: Path) -> None:
     # It is the expected-correlated count, not the emitted aligned count (which is higher: yield<1).
     assert outcome.summary.enrichment_safe_count == outcome.summary.expected_correlated_alarms
     assert outcome.summary.aligned_alarms > outcome.summary.enrichment_safe_count
-    # emitted correlated / emitted aligned ~= the configured yield (default 0.61) within rounding.
+    # emitted correlated / emitted aligned ~= the configured yield (default 0.66) within rounding.
     realized_yield = outcome.summary.enrichment_safe_count / outcome.summary.aligned_alarms
-    assert abs(realized_yield - 0.61) < 0.05
+    assert abs(realized_yield - 0.66) < 0.05
 
 
 def test_target_over_provision_margin_inflates_correlated_target(tmp_path: Path) -> None:
@@ -401,7 +401,7 @@ def test_target_over_provision_margin_inflates_correlated_target(tmp_path: Path)
     """
     producer = FakeProducer()
     patterns = [_pattern()]
-    # Base target 0.4 * 1/(1-0.1) = 0.444 correlated fraction (feasible: below the ~0.61 max the
+    # Base target 0.4 * 1/(1-0.1) = 0.444 correlated fraction (feasible: below the ~0.66 max the
     # yield ceiling permits within T).
     outcome = _run(
         _settings(
@@ -417,7 +417,7 @@ def test_target_over_provision_margin_inflates_correlated_target(tmp_path: Path)
 
 # --- AC 52: recalculates for different targets ------------------------------------------------
 def test_target_controller_scales_with_target(tmp_path: Path) -> None:
-    # Both targets are below the ~0.61 correlated-yield ceiling (max achievable correlated rate
+    # Both targets are below the ~0.66 correlated-yield ceiling (max achievable correlated rate
     # within T when every alarm is aligned == the per-alarm yield), so both are feasible.
     patterns = [_pattern()]
     o3 = _run(
