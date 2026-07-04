@@ -231,19 +231,31 @@ Correlation Engine's `/stats` and `/incidents` responses.
     self-clear/transient-suppression, and flap-damping are expected and correct (only the
     separate noise-filter service is P2-only; it is NOT in the P3 live path). Every
     pattern-aligned cascade emitted in network-wide P3 mode MUST be synthesized to survive
-    enrichment intact so the full cascade reaches the Correlation Engine and auto-correlates:
-    - No rapid duplicate raises on the same `managedObjectId` within enrichment's dedup window
-      — each cascade element targets a **distinct object/type occurrence**.
-    - No self-clearing/transient alarms as cascade members — nothing that enrichment would
-      suppress as a transient.
-    - Inter-arrival spacing of cascade elements is ABOVE the enrichment dedup window (so
-      consecutive elements on different objects are not deduped) yet WITHIN the pattern's
-      `sessionWindow.windowMs` (so CE still matches the sequence). If these two bounds conflict
-      for a given pattern (e.g. a pattern whose `sessionWindow` is shorter than the enrichment
-      dedup window), the Simulator flags the conflict in the per-run summary and excludes that
-      pattern from aligned synthesis (logs a structured warning; does not abort).
-    - No flapping (repeated raise/clear) patterns as cascade members that flap-damping would
-      collapse.
+    enrichment intact so the full cascade reaches the Correlation Engine and auto-correlates.
+    NOTE: The enrichment-safety invariant was corrected during live validation (P3 network-wide
+    build #392). The correct invariant is: **distinct dedup keys (distinct managedObjectId per
+    element + distinct alarmType per sequence position) + sustained single-raise (no `cleared`
+    event emitted for cascade members) + no genuine same-key duplicate**. It is NOT an alarmType
+    blocklist and NOT a dedup-window spacing floor. The shipped build already implements this.
+    - **Distinct dedup keys:** each cascade element targets a **distinct `managedObjectId`** and
+      a **distinct `alarmType`** per sequence position. Enrichment's DedupStep key is
+      `(path, source, managedObjectId, eventType, alarmType, state)`; it only collapses repeated
+      identical alarms (same object + same alarmType + same state). Distinct-key elements are
+      never deduped, regardless of inter-arrival timing.
+    - **Sustained single-raise:** aligned cascade members are emitted as sustained single `raised`
+      events — no `cleared` event is emitted for cascade members. Enrichment's SelfClearStep
+      suppresses a raise only when a matching CLEAR arrives within the hold-time; a sustained
+      raise with no paired clear passes through regardless of alarmType. This makes every cascade
+      member self-clear-safe and flap-safe without any alarmType restriction.
+    - **No genuine same-key duplicate:** distinct-object placement already prevents any
+      `(managedObjectId, alarmType, state)` repeat within a cascade.
+    - **Session-window timing:** inter-arrival timing stays within the pattern's
+      `sessionWindow.windowMs` so CE still matches the sequence. No minimum inter-arrival floor
+      above the dedup window is required for distinct-key elements.
+    - **Conflict exclusion:** if a pattern's `sessionWindow.windowMs` is too short to fit even
+      the minimal natural timing (a genuine structural conflict), that pattern is excluded from
+      aligned synthesis and logged. This is distinct from the (now-corrected) dedup-window floor.
+    - **No flapping:** no repeated raise/clear sequence on the same object within the cascade window.
     The non-aligned/noise portion of the stream MAY still include realistic transients,
     duplicates, and flaps — those are expected not to correlate, and that is correct behavior.
     Ground-truth labels record the expected-correlatable count as the count of
@@ -450,20 +462,30 @@ Correlation Engine's `/stats` and `/incidents` responses.
     enrichmentConflictPatterns}`.
 
 24. **Enforce enrichment-safe constraints on every aligned cascade.** Before emitting a
-    pattern-aligned cascade, validate it against enrichment's processing rules:
-    (a) ensure every cascade element targets a distinct `managedObjectId`/`alarmType`
-    combination (no rapid duplicate raises on the same object within the enrichment dedup
-    window); (b) ensure no cascade member is a transient/self-clearing alarm (not of a type
-    that enrichment suppresses as transient); (c) ensure inter-arrival spacing between
-    consecutive cascade elements is above the configured enrichment dedup window
-    (`P3_ENRICHMENT_DEDUP_WINDOW_MS`) yet within the pattern's `sessionWindow.windowMs` —
-    if these two bounds conflict for a pattern, exclude that pattern from aligned synthesis,
-    record it in `enrichmentConflictPatterns`, and log a structured warning; (d) ensure no
-    cascade member triggers flap-damping (no repeated raise/clear sequence). The non-aligned
-    and noise portions of the stream are NOT subject to these constraints (realistic
-    transients and dups there are correct behavior). Record the count of enrichment-safe
-    aligned cascade alarms as `enrichmentSafeCount` in the per-run summary; this count
-    is the expected-correlatable count measurable against CE `/stats`.
+    pattern-aligned cascade, validate it against enrichment's processing rules.
+    NOTE: Constraints (b) and (c) below were corrected during live validation (P3 network-wide
+    build #392); the shipped build already implements the corrected behavior. The enrichment-
+    safety invariant is: distinct dedup keys + sustained single-raise + no genuine same-key
+    duplicate. It is NOT an alarmType blocklist and NOT a dedup-window spacing floor.
+    (a) ensure every cascade element targets a distinct `managedObjectId` and occupies a
+    distinct `alarmType` sequence position — enrichment's DedupStep key is
+    `(path, source, managedObjectId, eventType, alarmType, state)` and only collapses repeated
+    identical alarms; distinct-key elements are never collapsed regardless of timing;
+    (b) ensure every aligned cascade member is emitted as a **sustained single `raised` event**
+    with NO corresponding `cleared` emitted — enrichment's SelfClearStep suppresses a raise
+    only when a matching CLEAR arrives within hold-time; a sustained raise without a clear
+    passes through regardless of alarmType; there is NO alarmType blocklist for cascade members;
+    (c) ensure inter-arrival timing stays **within the pattern's `sessionWindow.windowMs`** so
+    CE still matches the sequence — no minimum floor above the enrichment dedup window is
+    required or enforced for distinct-key cascades; if a pattern's `sessionWindow` is too short
+    to fit natural timing, exclude that pattern from aligned synthesis, record it in
+    `enrichmentConflictPatterns`, and log a structured warning;
+    (d) ensure no cascade member triggers flap-damping (no repeated raise/clear sequence on
+    the same object within the cascade window).
+    The non-aligned and noise portions of the stream are NOT subject to these constraints
+    (realistic transients and dups there are correct behavior). Record the count of
+    enrichment-safe aligned cascade alarms as `enrichmentSafeCount` in the per-run summary;
+    this count is the expected-correlatable count measurable against CE `/stats`.
 
 ## Phase applicability
 
@@ -1096,30 +1118,75 @@ Each criterion maps to a single pytest test.
     are structurally impossible by construction. A unit test over 100 synthesized cascades
     confirms zero same-object/same-type pairs within the dedup window across all elements.
 
-60. **No aligned cascade member is a transient/self-clearing alarm type.**
-    The domain pack's alarm shapes for cascade members in pattern-aligned synthesis are
-    restricted to non-transient alarm types (types that enrichment does not classify as
-    self-clearing transients). A unit test asserts that, for every synthesized cascade across
-    all approved patterns, no cascade element's `alarmType` appears in the configured
-    enrichment transient-suppression set. The transient-alarm type set is config-driven
-    (`P3_ENRICHMENT_TRANSIENT_TYPES` or equivalent), not hard-coded.
+60. **Aligned cascade members are emitted as sustained single `raised` events — enrichment self-clear and flap safety derives from this, not from an alarmType blocklist.**
+    NOTE: This criterion corrects a premise found wrong during live validation (P3 network-wide
+    build #392). The original premise — that no transient/self-clearing `alarmType` may be a
+    cascade member — conflated alarmType identity with per-instance raise/clear behavior.
+    The shipped build already implements the correct behavior described here.
 
-61. **Inter-arrival spacing is above the enrichment dedup window and within the session window.**
-    For a synthesized cascade with `P3_ENRICHMENT_DEDUP_WINDOW_MS=2000` and
-    `sessionWindow.windowMs=30000`, the time gap between consecutive cascade elements is:
-    (a) at least 2000 ms (above the dedup window) so enrichment does not collapse them; and
-    (b) at most 30000 ms (within the session window) so CE still matches the sequence.
-    A unit test generates 50 cascades under these parameters and confirms every inter-arrival
-    gap satisfies both bounds.
+    Transience is a per-instance property (a raise+clear pair arriving within enrichment's
+    hold-time), NOT an alarmType property. An alarmType used as a self-clearing noise alarm
+    elsewhere is still valid as a sustained cascade member. Enrichment's SelfClearStep
+    suppresses a raise only when a matching CLEAR arrives within the hold-time; a sustained
+    raise with no paired clear passes through regardless of alarmType.
 
-62. **Patterns whose sessionWindow conflicts with the enrichment dedup window are excluded and logged.**
-    Given a pattern whose `sessionWindow.windowMs` is less than or equal to
-    `P3_ENRICHMENT_DEDUP_WINDOW_MS` (making enrichment-safe synthesis impossible — no
-    inter-arrival gap can be simultaneously above the dedup window and within the session
-    window), the Simulator: (a) excludes that pattern from aligned synthesis; (b) logs a
-    structured warning identifying the pattern by `patternId` and the conflicting bounds;
-    (c) records the pattern's `patternId` in `enrichmentConflictPatterns` in the per-run
-    summary; (d) does NOT abort the run if other patterns are conflict-free.
+    The invariant is: aligned cascade elements are emitted as **sustained single `raised` events**
+    — the Simulator emits NO `cleared` event for any cascade member. This makes every cascade
+    member self-clear-safe and flap-safe by construction, independent of alarmType.
+    There is no alarmType blocklist for cascade membership.
+
+    A unit test asserts that, for every synthesized cascade across all approved patterns,
+    every cascade element's `state` is `raised` and no corresponding `cleared` event is emitted
+    for any `(managedObjectId, alarmType)` cascade pair within the cascade window. The test
+    must NOT assert that cascade member `alarmType` values are absent from any transient-type
+    set — that is the corrected (invalid) premise.
+
+    The non-aligned/noise portion of the stream MAY still emit self-clearing raise+clear pairs
+    — those are intended noise behavior.
+
+61. **Cascade elements have distinct dedup keys — no minimum inter-arrival floor above the dedup window is required.**
+    NOTE: This criterion corrects a premise (AC61b) found wrong during live validation (P3
+    network-wide build #392). The original premise — that cascade element inter-arrival must
+    exceed the enrichment dedup window to avoid deduplication — was wrong for distinct-key
+    cascades. The shipped build already implements the correct behavior described here.
+
+    Enrichment's DedupStep key is `(path, source, managedObjectId, eventType, alarmType, state)`.
+    It only collapses REPEATED IDENTICAL alarms — same object AND same alarmType AND same state
+    within the dedup window. Aligned cascade elements have DISTINCT dedup keys by construction:
+    each element targets a distinct `managedObjectId` (enforced by AC59) AND a distinct
+    `alarmType` per sequence position. Therefore enrichment never dedups them, regardless of
+    inter-arrival spacing.
+
+    The enrichment-safety invariant for spacing is: cascade elements use their **natural pattern
+    timing** within the `sessionWindow.windowMs` (so CE still matches the sequence). No minimum
+    inter-arrival floor above the dedup window is required or enforced.
+    The ONLY spacing concern that would cause deduplication is a genuine repeated
+    `(managedObjectId, alarmType, state)` — which distinct-object placement (AC59) already
+    prevents by construction.
+
+    (a) A unit test generates 50 cascades and confirms every inter-arrival gap is within
+    `sessionWindow.windowMs` (CE session-window bound is honored).
+    (b) The test must NOT assert a lower bound of `P3_ENRICHMENT_DEDUP_WINDOW_MS` on
+    inter-arrival gaps — that is the corrected (invalid) premise for distinct-key cascades.
+
+62. **Patterns whose sessionWindow is too short for natural cascade timing are excluded and logged.**
+    NOTE: This criterion is updated for consistency with the corrected AC61 premise. The
+    original conflict condition (sessionWindow <= dedup window) was derived from the now-
+    corrected premise that inter-arrival must exceed the dedup window. For distinct-key
+    cascades, the dedup window is irrelevant; the only genuine conflict is when a pattern's
+    `sessionWindow.windowMs` is too short to accommodate the cascade's natural timing (e.g.
+    shorter than the minimum physically-achievable inter-arrival for the pattern's sequence
+    length and throughput constraints).
+
+    Given a pattern whose `sessionWindow.windowMs` is too short to fit even the minimum
+    natural inter-arrival timing for its sequence (making it impossible to emit all cascade
+    elements as distinct, ordered events within the window), the Simulator:
+    (a) excludes that pattern from aligned synthesis; (b) logs a structured warning
+    identifying the pattern by `patternId` and the conflicting bounds; (c) records the
+    pattern's `patternId` in `enrichmentConflictPatterns` in the per-run summary;
+    (d) does NOT abort the run if other patterns are conflict-free.
+    A unit test confirms that a pattern with a `sessionWindow.windowMs` of 0 ms (or 1 ms)
+    is always excluded; a pattern with a `sessionWindow.windowMs` of 30000 ms proceeds.
 
 63. **No aligned cascade member triggers flap-damping.**
     Aligned cascade members do not include repeated raise/clear sequences on the same object
