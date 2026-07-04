@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from simulator.engine.labels import LabelStore
 from simulator.obs import metrics
+from simulator.synth.p3_labels import P3LabelStore
 
 
 @dataclass
@@ -26,6 +27,7 @@ class RunState:
     run_id: str | None = None
     labels: LabelStore = field(default_factory=LabelStore)
     scenarios: list[dict[str, object]] = field(default_factory=list)
+    p3_labels: P3LabelStore = field(default_factory=P3LabelStore)
 
     @property
     def healthy(self) -> bool:
@@ -41,6 +43,26 @@ class GroundTruthLabelModel(BaseModel):
     rootCauseManagedObjectId: str
     rootCauseAlarmType: str
     children: list[str]
+
+
+class P3CascadeLabelModel(BaseModel):
+    """Additive /labels record for P3 synth cascades (same endpoint, additive fields)."""
+
+    patternId: str
+    trailId: str
+    rootCauseAlarmId: str
+    rootCauseAlarmType: str
+    childAlarmIds: list[str]
+    scenarioType: str
+
+
+class P3RunSummaryModel(BaseModel):
+    """/labels/p3-summary response — the run summary; the 60-70% KPI is directly computable."""
+
+    totalAlarms: int
+    alignedAlarms: int
+    nonAlignedAlarms: int
+    alignedFraction: float
 
 
 class HealthModel(BaseModel):
@@ -71,7 +93,10 @@ def create_app(state: RunState) -> FastAPI:
     def metrics_endpoint() -> Response:
         return Response(content=metrics.render(), media_type="text/plain; version=0.0.4")
 
-    @app.get("/labels", response_model=list[GroundTruthLabelModel])
+    @app.get(
+        "/labels",
+        response_model=list[GroundTruthLabelModel | P3CascadeLabelModel],
+    )
     def labels(scenarioId: str | None = None) -> list[dict[str, object]]:
         if scenarioId is not None:
             label = state.labels.get(scenarioId)
@@ -80,7 +105,17 @@ def create_app(state: RunState) -> FastAPI:
             from simulator.engine.labels import label_to_dict
 
             return [label_to_dict(label)]
-        return state.labels.to_dicts()
+        # Generate/ingest scenario labels + (additive) P3 synth cascade labels on the same surface.
+        return state.labels.to_dicts() + state.p3_labels.to_dicts()
+
+    @app.get("/labels/p3-summary", response_model=P3RunSummaryModel)
+    def p3_summary() -> dict[str, object]:
+        summary = state.p3_labels.summary
+        if summary is None and state.p3_labels.all():
+            summary = state.p3_labels.compute_summary()
+        if summary is None:
+            raise HTTPException(status_code=404, detail="no P3 synth run recorded")
+        return summary.to_json()
 
     @app.get("/labels/{scenario_id}", response_model=GroundTruthLabelModel)
     def label_by_id(scenario_id: str) -> dict[str, object]:

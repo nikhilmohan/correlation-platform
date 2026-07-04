@@ -202,6 +202,36 @@ def run_replay_phase(
     return outcome
 
 
+def run_synth_phase(
+    settings: Settings,
+    producer: AlarmProducer,
+    *,
+    state: RunState | None = None,
+    run_id: str | None = None,
+    pattern_client=None,
+    trail_client=None,
+    snapshot_client=None,
+) -> RunOutcome:
+    """P3 synth: read deployed topology+trails+patterns, synthesize onto ``alarms.live``."""
+    from simulator.synth import p3_run
+
+    run_id = run_id or uuid.uuid4().hex[:12]
+    outcome = p3_run.run_synth(
+        settings,
+        producer,
+        run_id=run_id,
+        pack=make_pack(),
+        pattern_client=pattern_client,
+        trail_client=trail_client,
+        snapshot_client=snapshot_client,
+    )
+    result = RunOutcome(run_id=run_id, phase="p3", mode="synth", emitted=outcome.emitted)
+    if state is not None:
+        state.run_id = run_id
+        state.p3_labels = outcome.labels
+    return result
+
+
 def make_topology_client(settings: Settings):
     """Build the configured topology client (mock/real)."""
     return topology_client.make_client(settings.topology_api_mode, settings.topology_api_base_url)

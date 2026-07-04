@@ -58,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process or
         if settings.phase == "p1":
             client = run.make_topology_client(settings)
             outcome = run.run_p1(settings, client)
+        elif settings.sim_mode == "synth":
+            from simulator.integrations.kafka_producer import KafkaProducer
+
+            producer = KafkaProducer(settings.kafka_bootstrap_servers or "")
+            outcome = run.run_synth_phase(settings, producer)
         else:
             from simulator.integrations.kafka_producer import KafkaProducer
 

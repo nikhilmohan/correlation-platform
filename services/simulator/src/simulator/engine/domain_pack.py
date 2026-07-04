@@ -153,6 +153,15 @@ class DomainPack(Protocol):
         """The grounded geo-site catalogue (≥10 distinct entries)."""
         ...
 
+    def placement_affinity(self) -> dict[str, str]:
+        """P3 synthesis: map each canonical ``alarmType`` to its affine ``objectType``.
+
+        Pack-authored (OQ-P3-1); the engine/``synth`` stay domain-generic and read the mapping
+        only through this Protocol method. Used to place a pattern sequence element onto a real
+        trail member of the affine object type (with a fallback to any trail member).
+        """
+        ...
+
     def build_topology(self, params: TopologyParams, rng: random.Random) -> BuildResult:
         """Populate a typed multi-layer ``networkx`` graph for the domain."""
         ...

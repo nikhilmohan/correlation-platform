@@ -69,7 +69,14 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/GroundTruthLabelModel"
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/GroundTruthLabelModel"
+                      },
+                      {
+                        "$ref": "#/components/schemas/P3CascadeLabelModel"
+                      }
+                    ]
                   },
                   "title": "Response Labels Labels Get"
                 }
@@ -82,6 +89,24 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/labels/p3-summary": {
+      "get": {
+        "summary": "P3 Summary",
+        "operationId": "p3_summary_labels_p3_summary_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/P3RunSummaryModel"
                 }
               }
             }
@@ -231,6 +256,77 @@
           "run"
         ],
         "title": "HealthModel"
+      },
+      "P3CascadeLabelModel": {
+        "properties": {
+          "patternId": {
+            "type": "string",
+            "title": "Patternid"
+          },
+          "trailId": {
+            "type": "string",
+            "title": "Trailid"
+          },
+          "rootCauseAlarmId": {
+            "type": "string",
+            "title": "Rootcausealarmid"
+          },
+          "rootCauseAlarmType": {
+            "type": "string",
+            "title": "Rootcausealarmtype"
+          },
+          "childAlarmIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Childalarmids"
+          },
+          "scenarioType": {
+            "type": "string",
+            "title": "Scenariotype"
+          }
+        },
+        "type": "object",
+        "required": [
+          "patternId",
+          "trailId",
+          "rootCauseAlarmId",
+          "rootCauseAlarmType",
+          "childAlarmIds",
+          "scenarioType"
+        ],
+        "title": "P3CascadeLabelModel",
+        "description": "Additive /labels record for P3 synth cascades (same endpoint, additive fields)."
+      },
+      "P3RunSummaryModel": {
+        "properties": {
+          "totalAlarms": {
+            "type": "integer",
+            "title": "Totalalarms"
+          },
+          "alignedAlarms": {
+            "type": "integer",
+            "title": "Alignedalarms"
+          },
+          "nonAlignedAlarms": {
+            "type": "integer",
+            "title": "Nonalignedalarms"
+          },
+          "alignedFraction": {
+            "type": "number",
+            "title": "Alignedfraction"
+          }
+        },
+        "type": "object",
+        "required": [
+          "totalAlarms",
+          "alignedAlarms",
+          "nonAlignedAlarms",
+          "alignedFraction"
+        ],
+        "title": "P3RunSummaryModel",
+        "description": "/labels/p3-summary response \u2014 the run summary; the 60-70% KPI is directly computable."
       },
       "ValidationError": {
         "properties": {
