@@ -186,31 +186,68 @@ Correlation Engine's `/stats` and `/incidents` responses.
   discovery trail), and a **closed-loop controller** reliably achieves a configurable
   auto-correlation target on every run:
   - **Compatible-trail discovery:** for each approved pattern, enumerate all deployed trails
-    (Trail Builder `GET /trails?snapshotId&domain` → list; `GET /trails/{id}` → `members[]` of
-    `{managedObjectId, objectType}`) and apply the **hostability rule** (a trail is compatible
-    with pattern P if it contains at least one member of each `objectType` required by P's alarm
-    sequence, including the root object type) — the same rule the Correlation Engine uses to
-    auto-correlate. Prefer compatible trails in **different igp-areas** than the pattern's
-    discovery trail to achieve the "different parts of the network" realism requirement. Cache
-    discovered compatible trails in the **P3 config snapshot** (Task 14) so repeated runs do
-    not re-enumerate. No NebulaGraph access; no new Kafka topic; no event-model change.
+    via Trail Builder `GET /trails?snapshotId&domain&limit&offset` (the existing, published
+    endpoint — **no contract change**), then `GET /trails/{id}` for each candidate (reusing
+    cached results for already-fetched trails), and apply the **hostability rule** (a trail is
+    compatible with pattern P if it contains at least one member of each `objectType` required
+    by P's alarm sequence, including the root object type) — the same rule the Correlation
+    Engine uses to auto-correlate. Prefer compatible trails in **different igp-areas** than
+    the pattern's discovery trail to achieve the "different parts of the network" realism
+    requirement. Cache discovered compatible trails in the **P3 config snapshot** (Task 14)
+    so repeated runs do not re-enumerate. No NebulaGraph access; no new Kafka topic; no
+    event-model change.
   - **Closed-loop target control:** given `P3_AUTO_CORRELATION_TARGET` (e.g. 0.6 = 60%, the
-    fraction of ALL emitted alarms that end up in a CORRELATED incident — matching CE's
-    `correlatedAlarmCount / totalAlarmsProcessed`) and `P3_TOTAL_ALARMS`, the controller
-    computes the number of complete, in-window aligned cascades needed to hit the target within
-    `P3_TARGET_TOLERANCE` (default ±5 percentage points), then **distributes** those cascades
-    across the discovered compatible trails — spreading across distinct igp-areas where available,
-    bounded by `P3_MAX_CASCADES_PER_TRAIL` so cascades do not pile on a single trail.
+    fraction of alarms **ingested at the Correlation Engine — post-enrichment** — that
+    auto-correlate, matching CE's own `correlatedAlarmCount / totalAlarmsProcessed`) and
+    `P3_TOTAL_ALARMS`, the controller computes the number of complete, in-window aligned
+    cascades needed so the CE-measured post-enrichment correlation rate lands at the target
+    within `P3_TARGET_TOLERANCE` (default ±3 percentage points). To compensate for the
+    legitimate reduction that enrichment's dedup, transient-suppression, and flap-damping
+    apply on the live path, the controller **over-provisions** emitted aligned cascades by a
+    configurable margin (`P3_ENRICHMENT_OVER_PROVISION_MARGIN`, default 0.0 = no
+    over-provision); when non-zero the emitted aligned fraction is `TARGET /
+    (1 − margin)`. The Simulator then **distributes** those cascades across the discovered
+    compatible trails — spreading across distinct igp-areas where available, bounded by
+    `P3_MAX_CASCADES_PER_TRAIL` (default 3) so cascades do not pile on a single trail.
   - **Randomized spread, fresh per run:** compatible trail selection and member-object assignment
     within each trail are re-randomized on each run (respecting `P3_RNG_SEED` when set), so
     successive runs emit different alarms from different network parts while each hitting the
     target.
+  - **Spread policy defaults (all configurable):** `P3_MAX_CASCADES_PER_TRAIL` defaults to 3.
+    When all compatible trails for a pattern share one igp-area (e.g. rare object types exist
+    only in one area), the "prefer distinct areas" preference is unsatisfiable; the controller
+    falls back to distributing across the available same-area trails up to the per-trail cap
+    and logs a structured info entry that area spread was not achievable for that pattern.
+    When a pattern has only one compatible trail, the controller still runs network-wide for
+    that pattern (stacking cascades on the one trail up to the cap) and logs the absence of
+    multi-trail spread.
   - **Robustness — shortfall handling:** if too few distinct compatible trails exist to reach the
     target while respecting `P3_MAX_CASCADES_PER_TRAIL`, the controller first exhausts distinct
     trails then repeats trails (with staggered timing so each repetition still produces its own
     correlatable incident) until the target is reached. If the target is genuinely unreachable
     (e.g. fewer compatible trails × max-cap than needed cascades), the controller emits the
     maximum achievable and **logs the shortfall clearly** (never silently under-delivers).
+  - **Enrichment-safe aligned cascades (required).** On the P3 live path, enrichment's dedup,
+    self-clear/transient-suppression, and flap-damping are expected and correct (only the
+    separate noise-filter service is P2-only; it is NOT in the P3 live path). Every
+    pattern-aligned cascade emitted in network-wide P3 mode MUST be synthesized to survive
+    enrichment intact so the full cascade reaches the Correlation Engine and auto-correlates:
+    - No rapid duplicate raises on the same `managedObjectId` within enrichment's dedup window
+      — each cascade element targets a **distinct object/type occurrence**.
+    - No self-clearing/transient alarms as cascade members — nothing that enrichment would
+      suppress as a transient.
+    - Inter-arrival spacing of cascade elements is ABOVE the enrichment dedup window (so
+      consecutive elements on different objects are not deduped) yet WITHIN the pattern's
+      `sessionWindow.windowMs` (so CE still matches the sequence). If these two bounds conflict
+      for a given pattern (e.g. a pattern whose `sessionWindow` is shorter than the enrichment
+      dedup window), the Simulator flags the conflict in the per-run summary and excludes that
+      pattern from aligned synthesis (logs a structured warning; does not abort).
+    - No flapping (repeated raise/clear) patterns as cascade members that flap-damping would
+      collapse.
+    The non-aligned/noise portion of the stream MAY still include realistic transients,
+    duplicates, and flaps — those are expected not to correlate, and that is correct behavior.
+    Ground-truth labels record the expected-correlatable count as the count of
+    enrichment-safe aligned cascade alarms; this count is measurable against CE `/stats`.
   - **Measurability:** ground-truth labels record `{patternId, trailId, managedObjectId
     assignments, scenarioType}` per cascade instance, enabling verification that (a) the expected
     auto-correlation fraction matches CE `/stats` `correlatedAlarmCount/totalAlarmsProcessed`
@@ -378,14 +415,16 @@ Correlation Engine's `/stats` and `/incidents` responses.
 ### P3 network-wide emission and closed-loop target tasks (additive)
 
 21. **Enumerate and cache compatible trails for each approved pattern.** For each approved pattern
-    in the P3 config snapshot, call Trail Builder `GET /trails?snapshotId&domain` to obtain the
-    full trail list, then `GET /trails/{id}` for each candidate (reusing cached results for already-
-    fetched trails), and apply the hostability rule (a trail hosts pattern P if it contains at
-    least one member of each objectType required by P's sequence, root objectType included) to
-    produce each pattern's **compatible-trail set**. Prefer trails in igp-areas different from the
-    pattern's discovery trail's area. Store the compatible-trail sets in the P3 config snapshot
-    for reuse across runs. The Trail Builder integration point is the same config-switchable
-    (mock/real) client as Task 13.
+    in the P3 config snapshot, call Trail Builder `GET /trails?snapshotId&domain&limit&offset`
+    (the existing published endpoint, confirmed present in Trail Builder's published OpenAPI —
+    no contract change) to obtain the full trail list, then `GET /trails/{trailId}` for each
+    candidate (reusing cached results for already-fetched trails), and apply the hostability rule
+    (a trail hosts pattern P if it contains at least one member of each objectType required by
+    P's sequence, root objectType included) to produce each pattern's **compatible-trail set**.
+    Prefer trails in igp-areas different from the pattern's discovery trail's area; fall back to
+    same-area distribution if all compatible trails share one area (log accordingly). Store the
+    compatible-trail sets in the P3 config snapshot for reuse across runs. The Trail Builder
+    integration point is the same config-switchable (mock/real) client as Task 13.
 
 22. **Compute cascade count and distribution plan to hit the auto-correlation target.** Given
     `P3_AUTO_CORRELATION_TARGET`, `P3_TOTAL_ALARMS`, `P3_TARGET_TOLERANCE`, and
@@ -407,7 +446,24 @@ Correlation Engine's `/stats` and `/incidents` responses.
     igpArea}`. Log a structured warning (never a silent under-delivery) when the realized
     cascade count falls short of the distribution plan due to shortfall. On run completion,
     persist the per-run summary: `{totalAlarms, alignedAlarms, alignedFraction,
-    distinctTrailsUsed, distinctAreasUsed, shortfallCascades}`.
+    distinctTrailsUsed, distinctAreasUsed, shortfallCascades, enrichmentSafeCount,
+    enrichmentConflictPatterns}`.
+
+24. **Enforce enrichment-safe constraints on every aligned cascade.** Before emitting a
+    pattern-aligned cascade, validate it against enrichment's processing rules:
+    (a) ensure every cascade element targets a distinct `managedObjectId`/`alarmType`
+    combination (no rapid duplicate raises on the same object within the enrichment dedup
+    window); (b) ensure no cascade member is a transient/self-clearing alarm (not of a type
+    that enrichment suppresses as transient); (c) ensure inter-arrival spacing between
+    consecutive cascade elements is above the configured enrichment dedup window
+    (`P3_ENRICHMENT_DEDUP_WINDOW_MS`) yet within the pattern's `sessionWindow.windowMs` —
+    if these two bounds conflict for a pattern, exclude that pattern from aligned synthesis,
+    record it in `enrichmentConflictPatterns`, and log a structured warning; (d) ensure no
+    cascade member triggers flap-damping (no repeated raise/clear sequence). The non-aligned
+    and noise portions of the stream are NOT subject to these constraints (realistic
+    transients and dups there are correct behavior). Record the count of enrichment-safe
+    aligned cascade alarms as `enrichmentSafeCount` in the per-run summary; this count
+    is the expected-correlatable count measurable against CE `/stats`.
 
 ## Phase applicability
 
@@ -552,9 +608,16 @@ generated to pre-created.
   (optional; absent = fresh randomization), `P3_CONFIG_SNAPSHOT_PATH` (path to persisted P3
   config snapshot; if absent, re-fetches from services). All P3 config items are env/CLI
   overridable; no hard-coded defaults for URLs or fractions. **Network-wide target adds:**
-  `P3_AUTO_CORRELATION_TARGET` (float 0.0-1.0; default unset = single-trail behavior unchanged),
-  `P3_TARGET_TOLERANCE` (float; default 0.05 = ±5 percentage points),
-  `P3_MAX_CASCADES_PER_TRAIL` (int; default recommended by design — see OQ-NW-3), and
+  `P3_AUTO_CORRELATION_TARGET` (float 0.0-1.0; default unset = single-trail behavior unchanged;
+  the target is the CE-measured post-enrichment fraction `correlatedAlarmCount /
+  totalAlarmsProcessed`),
+  `P3_TARGET_TOLERANCE` (float; default 0.03 = ±3 percentage points),
+  `P3_MAX_CASCADES_PER_TRAIL` (int; default 3),
+  `P3_ENRICHMENT_OVER_PROVISION_MARGIN` (float 0.0-1.0; default 0.0 = no over-provision;
+  when non-zero the emitted aligned fraction is `TARGET / (1 − margin)` to compensate for
+  enrichment's legitimate reduction on the live path),
+  `P3_ENRICHMENT_DEDUP_WINDOW_MS` (int milliseconds; default defined in design; drives the
+  inter-arrival spacing lower bound for enrichment-safe cascade synthesis), and
   `P3_NETWORK_WIDE` (bool; when false or unset, network-wide mode is disabled and existing
   single-trail P3 behavior is used). All network-wide config items are env/CLI overridable;
   no hard-coded thresholds.
@@ -587,7 +650,7 @@ config/Knowledge Service** — they are never hard-coded in service code.
 | Pattern coverage of volume | Scenario (in-some-label) alarms ÷ total emitted | **~50-60%** |
 | `p2-demo` / `p3-demo` volume | `simulator_alarms_emitted_total` after the named profile run | **~1000 (P2) / ~500 (P3), within tolerance** |
 | Distinct grounded sites | Distinct `Site` nodes with distinct grounded geo at `SITE_COUNT=10` | **= 10 distinct** |
-| Auto-correlation target hit rate | Fraction of network-wide P3 runs (over repeated executions with fresh seeds) where the realized `alignedFraction` is within `P3_TARGET_TOLERANCE` of `P3_AUTO_CORRELATION_TARGET` | **= 1.0 (every run hits target within tolerance, or logs a measurable shortfall)** |
+| Auto-correlation target hit rate | Fraction of network-wide P3 runs (over repeated executions with fresh seeds) where the CE-measured post-enrichment `correlatedAlarmCount / totalAlarmsProcessed` is within `P3_TARGET_TOLERANCE` (default ±3 pp) of `P3_AUTO_CORRELATION_TARGET` | **= 1.0 (every run hits target within tolerance, or logs a measurable shortfall)** |
 | Network-wide spatial spread | Distinct `trailId`s used per approved pattern across a single network-wide P3 run | **≥ 2 distinct trails per pattern (where compatible trails exist in ≥ 2 igp-areas)** |
 
 ## Acceptance criteria
@@ -935,13 +998,15 @@ Each criterion maps to a single pytest test.
 
 Each criterion maps to a single pytest test.
 
-47. **Compatible-trail discovery applies the hostability rule correctly.**
-    Given a P3 config snapshot containing one approved pattern with `sequence` requiring
-    `objectType`s `IPLink` and `IGPAdjacency` (root type `IPLink`), and a trail list that
-    includes Trail A (members: `IPLink:1`, `IGPAdjacency:2`, `Interface:3`) and Trail B
-    (members: `Interface:4`, `Node:5`), the compatible-trail filter returns Trail A and excludes
-    Trail B (Trail B lacks an `IPLink` member). The discovery trail itself is included in the
-    compatible set if it passes the hostability rule.
+47. **Compatible-trail discovery applies the hostability rule correctly via the existing Trail Builder list endpoint.**
+    The Simulator enumerates the full trail list via Trail Builder `GET /trails?snapshotId&domain&limit&offset`
+    (the existing published endpoint — no contract change required). Given a P3 config snapshot
+    containing one approved pattern with `sequence` requiring `objectType`s `IPLink` and
+    `IGPAdjacency` (root type `IPLink`), and a trail list that includes Trail A (members:
+    `IPLink:1`, `IGPAdjacency:2`, `Interface:3`) and Trail B (members: `Interface:4`, `Node:5`),
+    the compatible-trail filter returns Trail A and excludes Trail B (Trail B lacks an `IPLink`
+    member). The discovery trail itself is included in the compatible set if it passes the
+    hostability rule.
 
 48. **Compatible-trail sets are cached in the P3 config snapshot and not re-fetched on a second run.**
     After a network-wide P3 run that fetches trails, the persisted P3 config snapshot includes the
@@ -960,11 +1025,19 @@ Each criterion maps to a single pytest test.
     values in Trail A's cascade are members of Trail A (not Trail B), and vice versa. No cascade
     instance references an object absent from its assigned trail's `members[]`.
 
-51. **Closed-loop controller hits `P3_AUTO_CORRELATION_TARGET` within `P3_TARGET_TOLERANCE`.**
-    Given `P3_AUTO_CORRELATION_TARGET=0.6`, `P3_TOTAL_ALARMS=300`, `P3_TARGET_TOLERANCE=0.05`,
-    and sufficient compatible trails, the Simulator emits a stream where
-    `alignedAlarms / totalAlarms` is in [0.55, 0.65]. The per-run summary label records
-    `alignedFraction` within this range.
+51. **Closed-loop controller targets CE-measured post-enrichment correlation rate within `P3_TARGET_TOLERANCE`.**
+    `P3_AUTO_CORRELATION_TARGET=0.6` means the target is the CE-measured fraction
+    `correlatedAlarmCount / totalAlarmsProcessed` (post-enrichment ingestion), NOT the raw
+    emitted fraction. Given `P3_AUTO_CORRELATION_TARGET=0.6`, `P3_TOTAL_ALARMS=300`,
+    `P3_TARGET_TOLERANCE=0.03` (default ±3 pp), `P3_ENRICHMENT_OVER_PROVISION_MARGIN=0.0`,
+    and sufficient compatible trails, the Simulator emits a stream of enrichment-safe aligned
+    cascades sized so the expected CE-measured rate is in [0.57, 0.63]. The per-run summary
+    records `alignedFraction` (emitted) and `enrichmentSafeCount` (the expected-correlatable
+    count); an integration assertion cross-checks `enrichmentSafeCount / P3_TOTAL_ALARMS`
+    against CE `/stats` `correlatedAlarmCount / totalAlarmsProcessed` within the tolerance.
+    When `P3_ENRICHMENT_OVER_PROVISION_MARGIN` is set to a non-zero value (e.g. 0.1), the
+    controller emits `TARGET / (1 − margin)` aligned alarms to compensate, and the per-run
+    summary records the over-provisioned emitted fraction separately.
 
 52. **Closed-loop controller recalculates correctly for different target values.**
     Two runs with the same `P3_TOTAL_ALARMS` but `P3_AUTO_CORRELATION_TARGET=0.4` and
@@ -1008,8 +1081,67 @@ Each criterion maps to a single pytest test.
     A P3 synthesis run with `P3_NETWORK_WIDE=false` (or `P3_AUTO_CORRELATION_TARGET` unset)
     emits each approved pattern's cascade on its single discovery trail only — identical behavior
     to the pre-network-wide spec. The compatible-trail enumeration (Task 21) is not performed,
-    and no calls to `GET /trails?snapshotId&domain` are made beyond those already required by
-    the existing P3 synthesis (Task 13).
+    and no calls to `GET /trails?snapshotId&domain&limit&offset` are made beyond those already
+    required by the existing P3 synthesis (Task 13).
+
+### Enrichment-safe cascade acceptance criteria (additive, required for P3 network-wide)
+
+Each criterion maps to a single pytest test.
+
+59. **Every aligned cascade element targets a distinct managedObjectId/alarmType pair within the enrichment dedup window.**
+    Given a synthesized aligned cascade for any approved pattern, no two consecutive cascade
+    elements share the same `managedObjectId` AND `alarmType` within the time span of
+    `P3_ENRICHMENT_DEDUP_WINDOW_MS`. Each cascade element is assigned to a **distinct
+    managed object** (a distinct trail member), so rapid duplicate raises on the same object
+    are structurally impossible by construction. A unit test over 100 synthesized cascades
+    confirms zero same-object/same-type pairs within the dedup window across all elements.
+
+60. **No aligned cascade member is a transient/self-clearing alarm type.**
+    The domain pack's alarm shapes for cascade members in pattern-aligned synthesis are
+    restricted to non-transient alarm types (types that enrichment does not classify as
+    self-clearing transients). A unit test asserts that, for every synthesized cascade across
+    all approved patterns, no cascade element's `alarmType` appears in the configured
+    enrichment transient-suppression set. The transient-alarm type set is config-driven
+    (`P3_ENRICHMENT_TRANSIENT_TYPES` or equivalent), not hard-coded.
+
+61. **Inter-arrival spacing is above the enrichment dedup window and within the session window.**
+    For a synthesized cascade with `P3_ENRICHMENT_DEDUP_WINDOW_MS=2000` and
+    `sessionWindow.windowMs=30000`, the time gap between consecutive cascade elements is:
+    (a) at least 2000 ms (above the dedup window) so enrichment does not collapse them; and
+    (b) at most 30000 ms (within the session window) so CE still matches the sequence.
+    A unit test generates 50 cascades under these parameters and confirms every inter-arrival
+    gap satisfies both bounds.
+
+62. **Patterns whose sessionWindow conflicts with the enrichment dedup window are excluded and logged.**
+    Given a pattern whose `sessionWindow.windowMs` is less than or equal to
+    `P3_ENRICHMENT_DEDUP_WINDOW_MS` (making enrichment-safe synthesis impossible — no
+    inter-arrival gap can be simultaneously above the dedup window and within the session
+    window), the Simulator: (a) excludes that pattern from aligned synthesis; (b) logs a
+    structured warning identifying the pattern by `patternId` and the conflicting bounds;
+    (c) records the pattern's `patternId` in `enrichmentConflictPatterns` in the per-run
+    summary; (d) does NOT abort the run if other patterns are conflict-free.
+
+63. **No aligned cascade member triggers flap-damping.**
+    Aligned cascade members do not include repeated raise/clear sequences on the same object
+    within the pattern's `sessionWindow`. A unit test confirms that, for every synthesized
+    cascade, no `managedObjectId`/`alarmType` pair appears more than once with alternating
+    `state=raised` and `state=cleared` within the cascade window.
+
+64. **Non-aligned and noise alarms are NOT constrained to be enrichment-safe.**
+    The non-aligned and noise portions of a network-wide P3 run may include realistic
+    transients, duplicate raises, and flapping patterns (as those are expected not to correlate
+    and are correct behavior). A unit test confirms that the synthesizer applies enrichment-safe
+    constraints only to alarms labeled `scenarioType="pattern-aligned"` and not to those
+    labeled `"non-aligned"`, `"partial-cascade"`, or `"noise"`.
+
+65. **Per-run summary records enrichmentSafeCount and enrichmentConflictPatterns.**
+    After any network-wide P3 run, the per-run summary metadata includes:
+    `enrichmentSafeCount` (the count of aligned cascade alarms that passed all enrichment-safe
+    checks — the expected-correlatable count for CE cross-check) and
+    `enrichmentConflictPatterns` (list of `patternId` values excluded due to
+    sessionWindow/dedup-window conflicts, which may be empty). These fields are retrievable
+    via the existing label-retrieval surface. A unit test with one conflict-free and one
+    conflicting pattern confirms both fields are populated correctly.
 
 ## Open questions
 
@@ -1096,84 +1228,48 @@ Each criterion maps to a single pytest test.
 
 ### Network-wide emission and closed-loop target open questions
 
-- **OQ-NW-1 (BLOCKS design): Exact target-to-cascade-count math.**
-  How does the closed-loop controller convert `P3_AUTO_CORRELATION_TARGET` into a required
-  number of complete aligned cascades?
+- **OQ-NW-1 (RESOLVED): Exact target-to-cascade-count math.**
+  DECISION: The target is the CE-measured post-enrichment fraction
+  `correlatedAlarmCount / totalAlarmsProcessed`, not the raw emitted fraction. The controller
+  uses per-pattern cascade counts: for each pattern,
+  `cascade_count = ceil(TARGET_EMITTED_FRACTION × P3_TOTAL_ALARMS / sum_of_mandatory_lengths_across_patterns)`,
+  where `TARGET_EMITTED_FRACTION = P3_AUTO_CORRELATION_TARGET / (1 − P3_ENRICHMENT_OVER_PROVISION_MARGIN)`.
+  Each COMPLETE enrichment-safe aligned cascade contributes its full mandatory sequence
+  length as correlatable alarms at CE (all alarms in a completed cascade are placed in the
+  incident). Partial cascades count as non-aligned. Per-pattern computation aggregated to
+  the total. Cascades are synthesized enrichment-safe by construction (Task 24) so the
+  emitted aligned count equals the expected-correlatable count. Ground-truth labels +
+  per-run summary allow the target to be verified against CE `/stats`. Implemented via
+  `P3_ENRICHMENT_OVER_PROVISION_MARGIN` (default 0.0) and `P3_TARGET_TOLERANCE` (default
+  ±3 pp). No further human resolution needed; design proceeds on this model.
 
-  Recommended model: `cascade_count = ceil(TARGET × P3_TOTAL_ALARMS / avg_cascade_length)`,
-  where `avg_cascade_length` is computed from the mandatory (non-optional) elements of the
-  approved patterns' sequences. The reasoning: each COMPLETE cascade contributes exactly
-  `cascade_length` alarms that are expected to auto-correlate (the CE correlates full
-  in-window sequences); partial cascades are counted as non-aligned. The remaining
-  `P3_TOTAL_ALARMS − (cascade_count × avg_cascade_length)` alarms are the non-aligned
-  noise/partial portion.
+- **OQ-NW-2 (RESOLVED): Spread policy defaults and behavior when compatible types are confined to one area.**
+  DECISIONS:
+  (a) `P3_MAX_CASCADES_PER_TRAIL` default = **3**.
+  (b) When all compatible trails for a pattern share one igp-area, the controller falls back
+  to distributing across the available same-area trails up to the per-trail cap and logs a
+  structured info entry that area spread was not achievable for that pattern. This fallback
+  is acceptable.
+  (c) When a pattern has only 1 compatible trail, the controller still runs network-wide for
+  that pattern (stacking cascades on the one trail up to the cap, staggered) and logs the
+  absence of multi-trail spread. No further human resolution needed.
 
-  Edge cases requiring a human decision before design:
-  (a) **Partial cascades:** if a cascade is synthesized but not all members emit before the
-  session window closes (e.g. due to timing jitter), it may partially correlate. Should the
-  controller treat each cascade as atomically contributing `len(sequence)` aligned alarms
-  (optimistic model), or apply a configurable completion-probability factor?
-  (b) **Noise that accidentally correlates:** CE may correlate noise alarms that happen to
-  match a pattern sequence by coincidence. The simulator cannot control this. Should the
-  target be defined as the EMITTED aligned fraction (what the simulator controls) rather
-  than the REALIZED CE correlation fraction (which CE controls)? Recommended: yes — define
-  target as the emitted aligned fraction; the verifiable KPI is
-  `alignedAlarms / totalAlarms` from the label store, cross-checked against CE
-  `correlatedAlarmCount / totalAlarmsProcessed` within a wider tolerance (since noise
-  accidental correlation and enrichment drop both affect the CE number). A human must
-  confirm this framing before design.
-  (c) **Variable cascade length across patterns:** when patterns have different sequence
-  lengths, `avg_cascade_length` may be a poor estimator. Should the controller compute
-  per-pattern cascade counts and then aggregate, or use a single average? Recommend
-  per-pattern computation for accuracy; flag for design confirmation.
+- **OQ-NW-3 (RESOLVED): Target basis and enrichment compensation.**
+  DECISION: The target `P3_AUTO_CORRELATION_TARGET` is defined as the CE-measured
+  post-enrichment fraction (`correlatedAlarmCount / totalAlarmsProcessed`). Enrichment's
+  dedup, transient-suppression, and flap-damping are expected and correct on the live path;
+  the Simulator compensates by (1) synthesizing aligned cascades that are enrichment-safe by
+  construction (Task 24 / AC59-65) so they survive enrichment intact, and (2) offering an
+  optional `P3_ENRICHMENT_OVER_PROVISION_MARGIN` for any residual gap. The default margin is
+  0.0 (no over-provision). The integration assertion cross-checks
+  `enrichmentSafeCount / P3_TOTAL_ALARMS` against CE `/stats` within `P3_TARGET_TOLERANCE`
+  (±3 pp). Note: the separate noise-filter service is P2-only and is NOT in the P3 live path;
+  enrichment's own filtering is the only deduction to account for. No further human
+  resolution needed.
 
-- **OQ-NW-2 (BLOCKS design): Spread policy defaults and behavior when compatible types are confined to one area.**
-  (a) **`P3_MAX_CASCADES_PER_TRAIL` default:** the spec does not fix the default; the
-  recommended starting point is 3 (enough spread without over-concentrating). A human must
-  confirm or override this default before design pins it.
-  (b) **"Prefer different igp-areas" when all compatible trails share one area:** if a
-  pattern's required object types (e.g. a rare SRLG object type) only exist in trails within
-  a single igp-area, the "prefer distinct areas" preference is unsatisfiable. The controller
-  should fall back gracefully to distributing across the available same-area trails (up to
-  the per-trail cap) and log a structured info entry that area spread was not achievable for
-  this pattern. A human must confirm this fallback is acceptable.
-  (c) **Minimum compatible-trail count before network-wide mode proceeds:** if a pattern has
-  only 1 compatible trail (including its discovery trail), should the controller still run
-  network-wide for that pattern (distributing multiple cascades on the one trail up to the
-  cap), or skip it (leaving it at single-trail behavior)? Recommend: still run but log the
-  absence of multi-trail spread. Human confirmation needed.
-
-- **OQ-NW-3 (design decision, does not block spec): Whether enrichment noise-drop should be
-  compensated by over-provisioning.**
-  A prior live finding showed that the Enrichment Service can thin the alarm stream (some
-  alarms are dropped by the deterministic filter before reaching CE). If the CE's realized
-  `correlatedAlarmCount / totalAlarmsProcessed` is systematically below the simulator's
-  emitted `alignedFraction` due to enrichment drop, the target will appear missed even when
-  the simulator's controller did its job correctly.
-
-  Two options for the designer to consider:
-  (a) **Accept the gap:** define the verifiable KPI as the emitted aligned fraction (what
-  the simulator controls); document that CE's realized rate may be lower due to enrichment
-  and tolerate a wider CE-vs-simulator delta (e.g. ±10 pp) in the integration assertion.
-  (b) **Over-provision:** the controller emits `TARGET / (1 − estimated_drop_rate)` aligned
-  alarms, where `estimated_drop_rate` is a configurable env-var (default 0.0 = no
-  compensation). This requires the operator to supply an empirical drop-rate estimate, which
-  may vary by deployment.
-
-  Recommended approach: option (a) for the MVP — the target is the emitted fraction, the
-  cross-check against CE is informational (not a hard gate). Flag as an open question; a
-  human must confirm before the designer chooses option (a) or (b) and pins any default
-  compensation factor.
-
-- **OQ-NW-4 (flag if contract change needed): Does Trail Builder expose `GET /trails?snapshotId&domain`
-  for full trail enumeration?**
-  Compatible-trail discovery (Task 21) requires listing ALL trails for a given snapshot and
-  domain, not just the trails referenced by approved patterns. This is distinct from the
-  existing `GET /trails/{trailId}` point-lookup used in the original P3 fetch (Task 13).
-  If `GET /trails?snapshotId&domain` (or an equivalent list endpoint) is not present in
-  Trail Builder's published OpenAPI, this is a **contract change** to Trail Builder — flag
-  it via the CONVENTIONS.md contract-change procedure (open a `gh` issue labeled
-  `question` + `service:trail-builder`) and stop. Do not design a workaround (e.g. calling
-  Topology or Pattern Manager to derive a trail list indirectly), as that would couple
-  the Simulator to services it has no direct dependency on. A human must confirm the
-  Trail Builder exposes this endpoint before design proceeds.
+- **OQ-NW-4 (RESOLVED — NO contract change): Trail Builder `GET /trails?snapshotId&domain&limit&offset` endpoint.**
+  CONFIRMED: Trail Builder's published OpenAPI already includes
+  `GET /trails?snapshotId&domain&limit&offset` (verified against
+  `services/trail-builder/openapi.json`). No contract change is needed anywhere. The
+  Simulator enumerates the full trail list using this existing endpoint. Design proceeds
+  on this basis.
