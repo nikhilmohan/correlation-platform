@@ -55,6 +55,13 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+correlation:
+  # Persistence backing for the Incident Store + event-dedupe ledger. Defaults to jdbc so the real
+  # PostgreSQL system-of-record is used whenever the service runs against a database; only the
+  # unit/mock profile overrides this to `memory`.
+  persistence:
+    mode: ${PERSISTENCE_MODE:jdbc}
+
 correlation-engine:
   kafka:
     enabled: ${KAFKA_ENABLED:true}

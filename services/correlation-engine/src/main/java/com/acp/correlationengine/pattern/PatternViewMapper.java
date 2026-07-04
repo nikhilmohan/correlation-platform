@@ -43,7 +43,12 @@ public final class PatternViewMapper {
         List<String> sequence = new ArrayList<>();
         JsonNode seq = view.get("sequence");
         if (seq != null && seq.isArray()) {
-            seq.forEach(n -> sequence.add(n.asText()));
+            for (JsonNode n : seq) {
+                String alarmType = sequenceElementAlarmType(n);
+                if (alarmType != null && !alarmType.isEmpty()) {
+                    sequence.add(alarmType);
+                }
+            }
         }
 
         JsonNode sw = view.get("sessionWindow");
@@ -53,6 +58,28 @@ public final class PatternViewMapper {
 
         return new PatternRef(patternId, trailId, sequence, rootCauseAlarmType, confidence,
                 windowMs, windowType);
+    }
+
+    /**
+     * Extract the alarmType token from one {@code sequence} element. The real Pattern Manager
+     * {@code PatternView.sequence} is an array of {@code SequenceElementView} OBJECTS
+     * ({@code {"alarmType": ..., "optional": ...}}), so we read {@code element.alarmType}. A bare
+     * string element (legacy shape) is still accepted for defensiveness. The engine's sequence model
+     * is a {@code List<String>} of alarmType tokens; optionality is applied via the Knowledge
+     * {@code partialMatchTolerance} at full-match evaluation, so the per-element {@code optional}
+     * flag is not carried into {@link PatternRef}.
+     *
+     * @return the alarmType token, or {@code null} if the element carries none.
+     */
+    private static String sequenceElementAlarmType(JsonNode element) {
+        if (element == null || element.isNull()) {
+            return null;
+        }
+        if (element.isTextual()) {
+            return element.asText(); // legacy bare-string element — still handled
+        }
+        JsonNode alarmType = element.get("alarmType");
+        return alarmType == null || alarmType.isNull() ? null : alarmType.asText();
     }
 
     private static String text(JsonNode node, String field) {
