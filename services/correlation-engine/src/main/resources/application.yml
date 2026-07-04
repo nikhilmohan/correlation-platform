@@ -73,10 +73,15 @@ correlation-engine:
   knowledge-refresh-ms: ${KNOWLEDGE_REFRESH_MS:60000}
   expiry-tick-ms: ${EXPIRY_TICK_MS:1000}
   rca-eval-mode: ${RCA_EVAL_MODE:off}
+  # Trail Builder integration (pattern generalization). mock|real; base URL never hard-coded.
+  trail-builder-base-url: ${TRAIL_BUILDER_BASE_URL:http://trail-builder:8080}
+  trail-builder-mode: ${TRAIL_BUILDER_MODE:}
+  trail-builder-max-retries: ${TRAIL_BUILDER_MAX_RETRIES:2}
   topics:
     alarms-persisted-live: ${TOPIC_ALARMS_PERSISTED_LIVE:alarms.persisted.live}
     patterns-approved: ${TOPIC_PATTERNS_APPROVED:patterns.approved}
     codebook-generated: ${TOPIC_CODEBOOK_GENERATED:codebook.generated}
+    trails-built: ${TOPIC_TRAILS_BUILT:trails.built}
     correlation-results: ${TOPIC_CORRELATION_RESULTS:correlation.results}
     alarms-status-changed: ${TOPIC_ALARMS_STATUS_CHANGED:alarms.status.changed}
 

@@ -5,7 +5,7 @@
     "version" : "v0"
   },
   "servers" : [ {
-    "url" : "http://localhost:58185",
+    "url" : "http://localhost:61774",
     "description" : "Generated server url"
   } ],
   "paths" : {
@@ -206,6 +206,9 @@
             "format" : "double"
           },
           "trailId" : {
+            "type" : "string"
+          },
+          "discoveryTrailId" : {
             "type" : "string"
           },
           "createdAt" : {

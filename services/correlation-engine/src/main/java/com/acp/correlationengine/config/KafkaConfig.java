@@ -4,6 +4,7 @@ import com.acp.correlationengine.codebook.CodebookRefreshService;
 import com.acp.correlationengine.correlate.AlarmStatusEmitter;
 import com.acp.correlationengine.correlate.CorrelationEngine;
 import com.acp.correlationengine.correlate.CorrelationResultEmitter;
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
 import com.acp.correlationengine.integration.AlarmIngestConsumer;
 import com.acp.correlationengine.integration.CodebookConsumer;
 import com.acp.correlationengine.integration.DlqProducer;
@@ -13,6 +14,7 @@ import com.acp.correlationengine.integration.KafkaCorrelationResultEmitter;
 import com.acp.correlationengine.integration.PatternApprovedConsumer;
 import com.acp.correlationengine.integration.ProcessedEventStore;
 import com.acp.correlationengine.integration.StartupBootstrapRunner;
+import com.acp.correlationengine.integration.TrailsBuiltConsumer;
 import com.acp.correlationengine.knowledge.KnowledgeParamsProvider;
 import com.acp.correlationengine.observability.CorrelationMetrics;
 import com.acp.correlationengine.pattern.PatternRefreshService;
@@ -61,9 +63,16 @@ public class KafkaConfig {
 
     @Bean
     public PatternApprovedConsumer patternApprovedConsumer(PatternRefreshService refreshService,
-            ProcessedEventStore processedEvents, EventCodec codec, DlqProducer dlq,
-            CorrelationEngineProperties props) {
-        return new PatternApprovedConsumer(refreshService, processedEvents, codec, dlq, props);
+            CompatibilityIndexService indexService, ProcessedEventStore processedEvents,
+            EventCodec codec, DlqProducer dlq, CorrelationEngineProperties props) {
+        return new PatternApprovedConsumer(refreshService, indexService, processedEvents, codec, dlq,
+                props);
+    }
+
+    @Bean
+    public TrailsBuiltConsumer trailsBuiltConsumer(CompatibilityIndexService indexService,
+            ProcessedEventStore processedEvents, EventCodec codec, DlqProducer dlq) {
+        return new TrailsBuiltConsumer(indexService, processedEvents, codec, dlq);
     }
 
     @Bean
@@ -80,7 +89,7 @@ public class KafkaConfig {
 
     @Bean
     public StartupBootstrapRunner startupBootstrapRunner(PatternRefreshService patternRefresh,
-            KnowledgeParamsProvider knowledgeParams) {
-        return new StartupBootstrapRunner(patternRefresh, knowledgeParams);
+            KnowledgeParamsProvider knowledgeParams, CompatibilityIndexService indexService) {
+        return new StartupBootstrapRunner(patternRefresh, knowledgeParams, indexService);
     }
 }

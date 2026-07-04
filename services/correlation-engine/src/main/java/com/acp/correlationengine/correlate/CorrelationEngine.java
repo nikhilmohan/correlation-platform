@@ -2,6 +2,7 @@ package com.acp.correlationengine.correlate;
 
 import com.acp.correlationengine.codebook.CodebookDecoder;
 import com.acp.correlationengine.codebook.CodebookStore;
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
 import com.acp.correlationengine.incident.IncidentFactory;
 import com.acp.correlationengine.incident.IncidentRepository;
 import com.acp.correlationengine.knowledge.KnowledgeParamsProvider;
@@ -13,7 +14,6 @@ import com.acp.correlationengine.model.ObservedAlarm;
 import com.acp.correlationengine.model.PatternRef;
 import com.acp.correlationengine.model.TrailScenarioSignature;
 import com.acp.correlationengine.observability.CorrelationMetrics;
-import com.acp.correlationengine.pattern.PatternStore;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -38,7 +38,7 @@ import java.util.Set;
  */
 public class CorrelationEngine {
 
-    private final PatternStore patternStore;
+    private final CompatibilityIndexService compatibilityIndex;
     private final CodebookStore codebookStore;
     private final CodebookDecoder codebookDecoder;
     private final ConflictResolver conflictResolver;
@@ -57,7 +57,7 @@ public class CorrelationEngine {
     private final Set<String> processedAlarmIds = new LinkedHashSet<>();
 
     public CorrelationEngine(
-            PatternStore patternStore,
+            CompatibilityIndexService compatibilityIndex,
             CodebookStore codebookStore,
             CodebookDecoder codebookDecoder,
             ConflictResolver conflictResolver,
@@ -67,7 +67,7 @@ public class CorrelationEngine {
             CorrelationResultEmitter resultEmitter,
             AlarmStatusEmitter statusEmitter,
             CorrelationMetrics metrics) {
-        this.patternStore = patternStore;
+        this.compatibilityIndex = compatibilityIndex;
         this.codebookStore = codebookStore;
         this.codebookDecoder = codebookDecoder;
         this.conflictResolver = conflictResolver;
@@ -101,7 +101,11 @@ public class CorrelationEngine {
     }
 
     private void dispatchToTrail(ObservedAlarm alarm, String trailId, long nowEpochMs) {
-        List<PatternRef> patterns = patternStore.activePatternsOn(trailId);
+        // Generalized fan-out (spec Task 3): the driver is the compatibility index — every approved
+        // pattern structurally compatible with this trail — NOT the discovery-trail registry. The
+        // matched trail (this trailId) becomes the instance key, so one pattern holds simultaneous
+        // independent instances across trails (AC34/AC45).
+        List<PatternRef> patterns = compatibilityIndex.patternsCompatibleWith(trailId);
         boolean covered = false;
         for (PatternRef pattern : patterns) {
             if (applyToPattern(alarm, trailId, pattern, nowEpochMs)) {
@@ -152,12 +156,13 @@ public class CorrelationEngine {
         if (instance.matchedCount() >= required) {
             MatchCandidate candidate = new MatchCandidate(
                     MatchCandidate.MatchType.PATTERN,
-                    instance.trailId(),
+                    instance.trailId(), // matched trail — CorrelationResultEvent.trailId (AC35/AC43)
                     instance.patternRef().rootCauseAlarmType(),
                     instance.matchedAlarms(),
                     instance.patternRef().confidence(),
                     instance.patternId(),
-                    null);
+                    null,
+                    instance.patternRef().discoveryTrailId()); // provenance -> incident (AC44)
             Optional<MatchCandidate> winner = conflictResolver.resolve(List.of(candidate), params);
             winner.ifPresent(w -> fireIncident(w, nowEpochMs));
             // destroy the instance regardless of whether a root cause could be named (AC4 lifecycle)

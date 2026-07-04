@@ -4,7 +4,9 @@ import com.acp.correlationengine.model.PatternRef;
 import com.acp.correlationengine.model.WindowType;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Maps the Pattern Manager {@code PatternPage} envelope ({@code {items[], total, limit, offset}})
@@ -56,8 +58,40 @@ public final class PatternViewMapper {
         WindowType windowType = WindowType.fromWire(sw != null && sw.has("type")
                 ? sw.get("type").asText() : "gap-based");
 
+        Map<String, String> sampleAlarmObjectTypes = sampleAlarmObjectTypes(view);
+
         return new PatternRef(patternId, trailId, sequence, rootCauseAlarmType, confidence,
-                windowMs, windowType);
+                windowMs, windowType, sampleAlarmObjectTypes);
+    }
+
+    /**
+     * Build the {@code alarmType -> objectType} witness map from {@code PatternView.sampleAlarms[]}
+     * (spec OQ-G2 / Algorithm A). Each sample's objectType is the prefix of its {@code managedObjectId}
+     * ({@code "<objectType>:<id>"}, per {@code managedObjectId.schema.json}) — the SAME vocabulary as
+     * Trail Builder's {@code TrailMember.objectType}, so no mapping layer is needed. First witness per
+     * alarmType wins (multiple samples for one alarmType agree by construction).
+     */
+    private static Map<String, String> sampleAlarmObjectTypes(JsonNode view) {
+        Map<String, String> out = new LinkedHashMap<>();
+        JsonNode samples = view.get("sampleAlarms");
+        if (samples == null || !samples.isArray()) {
+            return out;
+        }
+        for (JsonNode sample : samples) {
+            String alarmType = text(sample, "alarmType");
+            String managedObjectId = text(sample, "managedObjectId");
+            if (alarmType == null || alarmType.isEmpty()
+                    || managedObjectId == null || managedObjectId.isEmpty()) {
+                continue;
+            }
+            int colon = managedObjectId.indexOf(':');
+            if (colon <= 0) {
+                continue; // not a typed managedObjectId — cannot derive objectType
+            }
+            String objectType = managedObjectId.substring(0, colon);
+            out.putIfAbsent(alarmType, objectType);
+        }
+        return out;
     }
 
     /**

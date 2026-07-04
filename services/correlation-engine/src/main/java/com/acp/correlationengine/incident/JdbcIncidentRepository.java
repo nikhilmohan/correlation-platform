@@ -35,6 +35,7 @@ public class JdbcIncidentRepository implements IncidentRepository {
         MapSqlParameterSource p = new MapSqlParameterSource()
                 .addValue("incidentId", incident.incidentId())
                 .addValue("trailId", incident.trailId())
+                .addValue("discoveryTrailId", incident.discoveryTrailId())
                 .addValue("rootCauseAlarmId", incident.rootCauseAlarmId())
                 .addValue("rootCauseAlarmType", incident.rootCauseAlarmType())
                 .addValue("matchedPatternId", incident.matchedPatternId())
@@ -47,13 +48,13 @@ public class JdbcIncidentRepository implements IncidentRepository {
         try {
             inserted = jdbc.update("""
                     INSERT INTO incident.incident
-                        (incident_id, trail_id, root_cause_alarm_id, root_cause_alarm_type,
-                         matched_pattern_id, matched_codebook_id, confidence, match_type,
-                         instance_fingerprint, created_at)
+                        (incident_id, trail_id, discovery_trail_id, root_cause_alarm_id,
+                         root_cause_alarm_type, matched_pattern_id, matched_codebook_id,
+                         confidence, match_type, instance_fingerprint, created_at)
                     VALUES
-                        (:incidentId, :trailId, :rootCauseAlarmId, :rootCauseAlarmType,
-                         :matchedPatternId, :matchedCodebookId, :confidence, :matchType,
-                         :fingerprint, :createdAt)
+                        (:incidentId, :trailId, :discoveryTrailId, :rootCauseAlarmId,
+                         :rootCauseAlarmType, :matchedPatternId, :matchedCodebookId,
+                         :confidence, :matchType, :fingerprint, :createdAt)
                     ON CONFLICT (instance_fingerprint) DO NOTHING
                     """, p);
         } catch (DuplicateKeyException e) {
@@ -189,9 +190,9 @@ public class JdbcIncidentRepository implements IncidentRepository {
                 new MapSqlParameterSource("id", base.incidentId()),
                 (rs, n) -> rs.getString("alarm_id"));
         return new Incident(
-                base.incidentId(), base.trailId(), base.rootCauseAlarmId(), base.rootCauseAlarmType(),
-                children, base.matchedPatternId(), base.matchedCodebookId(), base.confidence(),
-                base.matchType(), base.instanceFingerprint(), base.createdAt());
+                base.incidentId(), base.trailId(), base.discoveryTrailId(), base.rootCauseAlarmId(),
+                base.rootCauseAlarmType(), children, base.matchedPatternId(), base.matchedCodebookId(),
+                base.confidence(), base.matchType(), base.instanceFingerprint(), base.createdAt());
     }
 
     private static Incident mapRow(java.sql.ResultSet rs) throws java.sql.SQLException {
@@ -202,6 +203,7 @@ public class JdbcIncidentRepository implements IncidentRepository {
         return new Incident(
                 rs.getString("incident_id"),
                 rs.getString("trail_id"),
+                rs.getString("discovery_trail_id"),
                 rs.getString("root_cause_alarm_id"),
                 rs.getString("root_cause_alarm_type"),
                 List.of(),

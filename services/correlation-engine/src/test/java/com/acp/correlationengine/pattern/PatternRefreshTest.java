@@ -60,7 +60,11 @@ class PatternRefreshTest {
                       ],
                       "rootCauseAlarmType": "IPLinkDown",
                       "confidence": 0.87,
-                      "sessionWindow": {"windowMs": 45000, "type": "gap-based"}
+                      "sessionWindow": {"windowMs": 45000, "type": "gap-based"},
+                      "sampleAlarms": [
+                        {"alarmType": "IPLinkDown", "managedObjectId": "IpLink:link-1"},
+                        {"alarmType": "LinkBundleDegraded", "managedObjectId": "Bundle:bundle-1"}
+                      ]
                     }
                   ],
                   "total": 1, "limit": 50, "offset": 0
@@ -126,6 +130,11 @@ class PatternRefreshTest {
 
         EngineHarness harness = new EngineHarness();
         new PatternRefreshService(client, harness.patternStore).refreshOnApproval();
+        // Under pattern generalization the fan-out driver is the compatibility index: declare the
+        // discovery trail's members (which host the pattern's IpLink + Bundle object types) and build
+        // the index so the pattern is a candidate on trail "T".
+        harness.declareTrail("T", List.of("IpLink", "Bundle"));
+        harness.rebuild();
 
         long t0 = Fixtures.T0;
         // opening alarm on trail T -> lazily opens an instance for pattern P

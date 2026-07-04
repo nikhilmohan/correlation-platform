@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.acp.correlationengine.correlate.CorrelationEngine;
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
 import com.acp.correlationengine.knowledge.KnowledgeParamsProvider;
 import com.acp.correlationengine.knowledge.KnowledgeUnavailableException;
 import com.acp.correlationengine.pattern.PatternRefreshService;
@@ -30,22 +31,25 @@ class StartupAndExpiryWiringTest {
     void bootstrap_loadsKnowledgeParamsThenSeedsPatterns() {
         KnowledgeParamsProvider knowledge = mock(KnowledgeParamsProvider.class);
         PatternRefreshService patterns = mock(PatternRefreshService.class);
-        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge);
+        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
+        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge, index);
 
         runner.bootstrap();
 
-        InOrder inOrder = Mockito.inOrder(knowledge, patterns);
+        InOrder inOrder = Mockito.inOrder(knowledge, patterns, index);
         inOrder.verify(knowledge).bootstrap();
         inOrder.verify(patterns).bootstrap();
+        inOrder.verify(index).rebuildAll(null, null);
     }
 
     @Test
     void bootstrap_failure_isSwallowed_soReadinessIsHeldNotCrashed() {
         KnowledgeParamsProvider knowledge = mock(KnowledgeParamsProvider.class);
         PatternRefreshService patterns = mock(PatternRefreshService.class);
+        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
         doThrow(new KnowledgeUnavailableException("down"))
                 .when(knowledge).bootstrap();
-        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge);
+        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge, index);
 
         // No exception escapes; pattern seed is not attempted after the params failure.
         runner.bootstrap();

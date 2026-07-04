@@ -1,6 +1,7 @@
 package com.acp.correlationengine.integration;
 
 import com.acp.correlationengine.config.CorrelationEngineProperties;
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
 import com.acp.correlationengine.pattern.PatternRefreshService;
 import com.acp.eventmodel.EventCodec;
 import com.acp.eventmodel.TypedEnvelope;
@@ -22,15 +23,17 @@ public class PatternApprovedConsumer {
     private static final Logger log = LoggerFactory.getLogger(PatternApprovedConsumer.class);
 
     private final PatternRefreshService refreshService;
+    private final CompatibilityIndexService indexService;
     private final ProcessedEventStore processedEvents;
     private final EventCodec codec;
     private final DlqProducer dlq;
     private final String topic;
 
     public PatternApprovedConsumer(PatternRefreshService refreshService,
-            ProcessedEventStore processedEvents, EventCodec codec, DlqProducer dlq,
-            CorrelationEngineProperties props) {
+            CompatibilityIndexService indexService, ProcessedEventStore processedEvents,
+            EventCodec codec, DlqProducer dlq, CorrelationEngineProperties props) {
         this.refreshService = refreshService;
+        this.indexService = indexService;
         this.processedEvents = processedEvents;
         this.codec = codec;
         this.dlq = dlq;
@@ -58,6 +61,11 @@ public class PatternApprovedConsumer {
             return; // redelivered event — idempotent no-op
         }
         refreshService.refreshOnApproval();
-        log.debug("patterns.approved {} handled — pattern set refreshed", envelope.getEventId());
+        // Compute the compatible-trail set for the (re)approved patterns BEFORE ack, so a newly
+        // approved pattern is never matchable before its compatible set exists (spec Refresh
+        // ordering / AC38).
+        indexService.rebuildForApprovedSet();
+        log.debug("patterns.approved {} handled — pattern set refreshed + index updated",
+                envelope.getEventId());
     }
 }

@@ -65,6 +65,7 @@ public class IncidentFactory {
         return Optional.of(new Incident(
                 incidentId,
                 winner.trailId(),
+                winner.discoveryTrailId(),
                 rootCauseAlarmId,
                 rootType,
                 childAlarmIds,

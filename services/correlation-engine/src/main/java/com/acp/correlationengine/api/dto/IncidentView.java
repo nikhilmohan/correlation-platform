@@ -21,6 +21,7 @@ public record IncidentView(
         String matchedCodebookId,
         double confidence,
         String trailId,
+        String discoveryTrailId,
         String createdAt) {
 
     public static IncidentView from(Incident i) {
@@ -33,6 +34,7 @@ public record IncidentView(
                 i.matchedCodebookId(),
                 i.confidence(),
                 i.trailId(),
+                i.discoveryTrailId(),
                 i.createdAt().toString());
     }
 }

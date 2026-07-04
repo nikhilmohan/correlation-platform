@@ -1,5 +1,6 @@
 package com.acp.correlationengine.integration;
 
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
 import com.acp.correlationengine.knowledge.KnowledgeParamsProvider;
 import com.acp.correlationengine.pattern.PatternRefreshService;
 import org.slf4j.Logger;
@@ -19,11 +20,13 @@ public class StartupBootstrapRunner {
 
     private final PatternRefreshService patternRefresh;
     private final KnowledgeParamsProvider knowledgeParams;
+    private final CompatibilityIndexService compatibilityIndex;
 
     public StartupBootstrapRunner(PatternRefreshService patternRefresh,
-            KnowledgeParamsProvider knowledgeParams) {
+            KnowledgeParamsProvider knowledgeParams, CompatibilityIndexService compatibilityIndex) {
         this.patternRefresh = patternRefresh;
         this.knowledgeParams = knowledgeParams;
+        this.compatibilityIndex = compatibilityIndex;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -31,7 +34,11 @@ public class StartupBootstrapRunner {
         try {
             knowledgeParams.bootstrap();
             patternRefresh.bootstrap();
-            log.info("Correlation Engine bootstrap complete (Knowledge params + approved patterns)");
+            // Best-effort full compatibility-index build. No-ops until a topology snapshot is known
+            // (learned from a trails.built event); the trails.built consumer rebuilds thereafter.
+            compatibilityIndex.rebuildAll(null, null);
+            log.info("Correlation Engine bootstrap complete (Knowledge params + approved patterns "
+                    + "+ compatibility index)");
         } catch (RuntimeException e) {
             log.warn("Bootstrap incomplete; readiness held until dependencies recover", e);
         }

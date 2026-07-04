@@ -11,6 +11,11 @@ import com.acp.correlationengine.correlate.AlarmStatusEmitter;
 import com.acp.correlationengine.correlate.ConflictResolver;
 import com.acp.correlationengine.correlate.CorrelationEngine;
 import com.acp.correlationengine.correlate.CorrelationResultEmitter;
+import com.acp.correlationengine.generalize.CompatibilityEvaluator;
+import com.acp.correlationengine.generalize.CompatibilityIndexService;
+import com.acp.correlationengine.generalize.RequiredObjectTypesResolver;
+import com.acp.correlationengine.generalize.RestTrailBuilderClient;
+import com.acp.correlationengine.generalize.TrailBuilderClient;
 import com.acp.correlationengine.incident.IncidentFactory;
 import com.acp.correlationengine.incident.IncidentRepository;
 import com.acp.correlationengine.knowledge.KnowledgeClient;
@@ -83,6 +88,37 @@ public class CorrelationEngineConfig {
         return new KnowledgeParamsProvider(client, props.knowledgeRefreshMs());
     }
 
+    @Bean
+    public TrailBuilderClient trailBuilderClient(RestClient.Builder builder,
+            CorrelationEngineProperties props, CorrelationMetrics metrics) {
+        // Config-switchable mock/real by base URL only — same code path (AC42). In mock mode the
+        // base URL points at a WireMock/MockWebServer stub generated from Trail Builder's openapi.json.
+        return new RestTrailBuilderClient(
+                builder.baseUrl(props.trailBuilderBaseUrl()).build(),
+                props.trailBuilderMaxRetries(), metrics);
+    }
+
+    // --- Pattern generalization: compatibility index ------------------------------------------
+
+    @Bean
+    public CompatibilityEvaluator compatibilityEvaluator() {
+        return new CompatibilityEvaluator();
+    }
+
+    @Bean
+    public RequiredObjectTypesResolver requiredObjectTypesResolver(TrailBuilderClient trailBuilder) {
+        return new RequiredObjectTypesResolver(trailBuilder);
+    }
+
+    @Bean
+    public CompatibilityIndexService compatibilityIndexService(PatternStore patternStore,
+            TrailBuilderClient trailBuilder, RequiredObjectTypesResolver resolver,
+            CompatibilityEvaluator evaluator, CorrelationMetrics metrics,
+            CorrelationEngineProperties props) {
+        return new CompatibilityIndexService(patternStore, trailBuilder, resolver, evaluator,
+                metrics, props.knowledgeDomain());
+    }
+
     // --- Reference stores + refresh services -------------------------------------------------
 
     @Bean
@@ -126,7 +162,7 @@ public class CorrelationEngineConfig {
 
     @Bean
     public CorrelationEngine correlationEngine(
-            PatternStore patternStore,
+            CompatibilityIndexService compatibilityIndex,
             CodebookStore codebookStore,
             CodebookDecoder codebookDecoder,
             ConflictResolver conflictResolver,
@@ -136,9 +172,9 @@ public class CorrelationEngineConfig {
             CorrelationResultEmitter resultEmitter,
             AlarmStatusEmitter statusEmitter,
             CorrelationMetrics metrics) {
-        return new CorrelationEngine(patternStore, codebookStore, codebookDecoder, conflictResolver,
-                incidentFactory, incidentRepository, knowledgeParams, resultEmitter, statusEmitter,
-                metrics);
+        return new CorrelationEngine(compatibilityIndex, codebookStore, codebookDecoder,
+                conflictResolver, incidentFactory, incidentRepository, knowledgeParams, resultEmitter,
+                statusEmitter, metrics);
     }
 
     // --- Read API ----------------------------------------------------------------------------
@@ -157,7 +193,8 @@ public class CorrelationEngineConfig {
     }
 
     @Bean
-    public HealthIndicator correlationReadiness(KnowledgeParamsProvider knowledgeParams) {
-        return new ReadinessHealthIndicator(knowledgeParams);
+    public HealthIndicator correlationReadiness(KnowledgeParamsProvider knowledgeParams,
+            CompatibilityIndexService compatibilityIndex) {
+        return new ReadinessHealthIndicator(knowledgeParams, compatibilityIndex);
     }
 }
