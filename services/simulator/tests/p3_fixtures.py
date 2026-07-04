@@ -20,8 +20,21 @@ def pattern_view(
     max_ms: float = 1500.0,
     stddev_ms: float = 250.0,
     window_ms: int = 6000,
+    sample_alarms: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """A PatternView body (the subset P3 reads) mirroring Pattern Manager's published shape."""
+    """A PatternView body (the subset P3 reads) mirroring Pattern Manager's published shape.
+
+    ``sample_alarms`` is a list of ``(managedObjectId, alarmType)`` mirroring the published
+    ``sampleAlarms[]`` field. When omitted it defaults to one sampleAlarm per sequence element,
+    placing each alarmType on a ``<AffineObjectType>:<id>`` managedObjectId consistent with the
+    canonical trail fixtures — so discovery derives required objectTypes from real sample prefixes
+    exactly like the Correlation Engine does.
+    """
+    if sample_alarms is None:
+        sample_alarms = [
+            (f"{_default_object_type(at)}:{pattern_id}-{i}", at)
+            for i, (at, _opt) in enumerate(sequence)
+        ]
     return {
         "patternId": pattern_id,
         "trailId": trail_id,
@@ -34,7 +47,30 @@ def pattern_view(
             "stddevInterArrivalMs": stddev_ms,
         },
         "sessionWindow": {"windowMs": window_ms, "type": "gap"},
+        "sampleAlarms": [{"managedObjectId": moid, "alarmType": at} for moid, at in sample_alarms],
     }
+
+
+# alarmType -> objectType used to synthesize default sampleAlarm managedObjectIds in fixtures. Kept
+# aligned with the canonical trail members so default fixtures are self-consistently hostable.
+_DEFAULT_SAMPLE_OBJECT_TYPE = {
+    "IPLinkDown": "IPLink",
+    "LinkDown": "IPLink",
+    "ISISAdjacencyDown": "IGPAdjacency",
+    "AdjDown": "IGPAdjacency",
+    "OSPFAdjacencyDown": "IGPAdjacency",
+    "LSPDown": "LSP",
+    "InterfaceDown": "Interface",
+    "InterfaceErrors": "Interface",
+    "CRCErrors": "Port",
+    "PortDown": "Port",
+    "LOS": "FiberSpan",
+    "QueueDrop": "Interface",
+}
+
+
+def _default_object_type(alarm_type: str) -> str:
+    return _DEFAULT_SAMPLE_OBJECT_TYPE.get(alarm_type, "IPLink")
 
 
 def pattern_page(items: list[dict[str, Any]]) -> dict[str, Any]:

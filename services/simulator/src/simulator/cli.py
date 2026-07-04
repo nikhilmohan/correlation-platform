@@ -104,6 +104,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--p3-total-alarms")
     p.add_argument("--p3-rng-seed")
     p.add_argument("--p3-config-snapshot-path")
+    # network-wide emission + closed-loop auto-correlation target (additive)
+    p.add_argument("--p3-network-wide", action="store_true")
+    p.add_argument("--p3-auto-correlation-target")
+    p.add_argument("--p3-target-tolerance")
+    p.add_argument("--p3-max-cascades-per-trail")
+    p.add_argument("--p3-enrichment-over-provision-margin")
+    p.add_argument("--p3-enrichment-dedup-window-ms")
+    p.add_argument("--p3-enrichment-transient-types")
+    p.add_argument("--p3-dedup-spacing-margin")
     p.add_argument("--config")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--help", action="store_true")
@@ -179,6 +188,24 @@ def build_plan(argv: list[str], env: dict[str, str] | None = None) -> CliPlan:
         env_overrides["P3_RNG_SEED"] = ns.p3_rng_seed
     if ns.p3_config_snapshot_path is not None:
         env_overrides["P3_CONFIG_SNAPSHOT_PATH"] = ns.p3_config_snapshot_path
+    if ns.p3_network_wide:
+        env_overrides["P3_NETWORK_WIDE"] = "true"
+    if ns.p3_auto_correlation_target is not None:
+        env_overrides["P3_AUTO_CORRELATION_TARGET"] = ns.p3_auto_correlation_target
+    if ns.p3_target_tolerance is not None:
+        env_overrides["P3_TARGET_TOLERANCE"] = ns.p3_target_tolerance
+    if ns.p3_max_cascades_per_trail is not None:
+        env_overrides["P3_MAX_CASCADES_PER_TRAIL"] = ns.p3_max_cascades_per_trail
+    if ns.p3_enrichment_over_provision_margin is not None:
+        env_overrides["P3_ENRICHMENT_OVER_PROVISION_MARGIN"] = (
+            ns.p3_enrichment_over_provision_margin
+        )
+    if ns.p3_enrichment_dedup_window_ms is not None:
+        env_overrides["P3_ENRICHMENT_DEDUP_WINDOW_MS"] = ns.p3_enrichment_dedup_window_ms
+    if ns.p3_enrichment_transient_types is not None:
+        env_overrides["P3_ENRICHMENT_TRANSIENT_TYPES"] = ns.p3_enrichment_transient_types
+    if ns.p3_dedup_spacing_margin is not None:
+        env_overrides["P3_DEDUP_SPACING_MARGIN"] = ns.p3_dedup_spacing_margin
     env_overrides["phase"] = phase  # settings field name
 
     return CliPlan(

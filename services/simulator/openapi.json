@@ -285,6 +285,22 @@
           "scenarioType": {
             "type": "string",
             "title": "Scenariotype"
+          },
+          "instanceIndex": {
+            "type": "integer",
+            "title": "Instanceindex",
+            "default": 1
+          },
+          "igpArea": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Igparea"
           }
         },
         "type": "object",
@@ -297,7 +313,7 @@
           "scenarioType"
         ],
         "title": "P3CascadeLabelModel",
-        "description": "Additive /labels record for P3 synth cascades (same endpoint, additive fields)."
+        "description": "Additive /labels record for P3 synth cascades (same endpoint, additive fields).\n\n``instanceIndex``/``igpArea`` are additive network-wide fields (AC 54); defaulted so existing\nsingle-trail consumers are unaffected."
       },
       "P3RunSummaryModel": {
         "properties": {
@@ -316,6 +332,44 @@
           "alignedFraction": {
             "type": "number",
             "title": "Alignedfraction"
+          },
+          "distinctTrailsUsed": {
+            "type": "integer",
+            "title": "Distincttrailsused",
+            "default": 0
+          },
+          "distinctAreasUsed": {
+            "type": "integer",
+            "title": "Distinctareasused",
+            "default": 0
+          },
+          "shortfallCascades": {
+            "type": "integer",
+            "title": "Shortfallcascades",
+            "default": 0
+          },
+          "enrichmentSafeCount": {
+            "type": "integer",
+            "title": "Enrichmentsafecount",
+            "default": 0
+          },
+          "enrichmentConflictPatterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Enrichmentconflictpatterns",
+            "default": []
+          },
+          "alignedFractionEmitted": {
+            "type": "number",
+            "title": "Alignedfractionemitted",
+            "default": 0.0
+          },
+          "expectedCorrelatedAlarms": {
+            "type": "integer",
+            "title": "Expectedcorrelatedalarms",
+            "default": 0
           }
         },
         "type": "object",
@@ -326,7 +380,7 @@
           "alignedFraction"
         ],
         "title": "P3RunSummaryModel",
-        "description": "/labels/p3-summary response \u2014 the run summary; the 60-70% KPI is directly computable."
+        "description": "/labels/p3-summary response \u2014 the run summary; the 60-70% KPI is directly computable.\n\nNetwork-wide adds the spread + enrichment fields (all additive, defaulted): distinct trails/\nareas used (AC 53), shortfall cascades (AC 55), enrichmentSafeCount + enrichmentConflictPatterns\n(AC 51/65), and the over-provisioned emitted fraction (AC 51)."
       },
       "ValidationError": {
         "properties": {

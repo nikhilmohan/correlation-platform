@@ -14,10 +14,18 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from simulator.synth.models import PatternView, SnapshotSummary, TrailDetail, TrailMember
+from simulator.synth.models import (
+    CompatibleTrailSet,
+    PatternView,
+    SnapshotSummary,
+    TrailDetail,
+    TrailMember,
+)
 
-SCHEMA_VERSION = 1
-SUPPORTED_MAJOR = {1}
+# schemaVersion 2 adds the additive ``compatibleTrails`` block (Task 21 / AC 48). v1 files load
+# unchanged (no cached compatible trails -> discovery runs on the next network-wide run).
+SCHEMA_VERSION = 2
+SUPPORTED_MAJOR = {1, 2}
 
 
 class P3ConfigSnapshotError(ValueError):
@@ -34,6 +42,14 @@ class P3ConfigSnapshot:
     source_snapshots: list[SnapshotSummary] = field(default_factory=list)
     captured_at: str = ""
     schema_version: int = SCHEMA_VERSION
+    # Network-wide (schemaVersion 2, additive): cached compatible-trail sets keyed by patternId so a
+    # second run makes zero GET /trails calls (AC 48). Absent (empty) -> discovery runs on the next
+    # network-wide run (v1 load compatibility).
+    compatible_trails: dict[str, CompatibleTrailSet] = field(default_factory=dict)
+
+    def has_compatible_trails(self) -> bool:
+        """True when this snapshot already carries a cached compatible-trail set (AC 48)."""
+        return bool(self.compatible_trails)
 
     def moid_universe(self) -> set[str]:
         """Every valid ``managedObjectId`` a P3 alarm may reference (all trail members)."""
@@ -54,6 +70,9 @@ class P3ConfigSnapshot:
                 for trail_id, trail in self.trails.items()
             },
             "patterns": [p.to_json() for p in self.patterns],
+            "compatibleTrails": {
+                pattern_id: cts.to_json() for pattern_id, cts in self.compatible_trails.items()
+            },
         }
 
 
@@ -96,6 +115,10 @@ def load(path: Path) -> P3ConfigSnapshot:
                 f"unresolved trailId {p.trail_id!r}"
             )
 
+    compatible_trails: dict[str, CompatibleTrailSet] = {}
+    for pattern_id, cobj in (obj.get("compatibleTrails") or {}).items():
+        compatible_trails[str(pattern_id)] = CompatibleTrailSet.from_json(str(pattern_id), cobj)
+
     return P3ConfigSnapshot(
         domain=str(obj.get("domain", "")),
         patterns=patterns,
@@ -103,4 +126,5 @@ def load(path: Path) -> P3ConfigSnapshot:
         source_snapshots=[SnapshotSummary.from_json(s) for s in (obj.get("sourceSnapshots") or [])],
         captured_at=str(obj.get("capturedAt", "")),
         schema_version=int(version),
+        compatible_trails=compatible_trails,
     )

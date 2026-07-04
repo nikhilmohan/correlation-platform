@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,11 +25,15 @@ from simulator.obs import metrics
 from simulator.obs.logging import get_logger, log_event
 from simulator.synth import (
     aligned_controller,
+    aligned_synth,
+    enrichment_safe,
     nonaligned_synth,
     p3_config_snapshot,
     p3_fetch,
     p3_schedule,
+    target_controller,
 )
+from simulator.synth.aligned_synth import AlignedCascade
 from simulator.synth.models import P3RunSummary
 from simulator.synth.p3_config_snapshot import P3ConfigSnapshot
 from simulator.synth.p3_labels import P3LabelStore
@@ -54,6 +58,7 @@ def resolve_config(
     pattern_client=None,
     trail_client=None,
     snapshot_client=None,
+    pack: DomainPack | None = None,
 ) -> tuple[P3ConfigSnapshot, bool]:
     """Load the P3 config snapshot from disk if present (zero API calls), else fetch + persist."""
     path = Path(settings.resolved_p3_config_snapshot_path)
@@ -72,6 +77,7 @@ def resolve_config(
         pattern_client=pattern_client,
         trail_client=trail_client,
         snapshot_client=snapshot_client,
+        pack=pack,
     )
     p3_config_snapshot.save(config, path)
     log_event(
@@ -101,6 +107,155 @@ def _seed(settings: Settings) -> tuple[random.Random, int]:
     return random.Random(seed), seed
 
 
+@dataclass
+class _NetworkWideMeta:
+    """Network-wide bookkeeping carried into the run summary (empty for single-trail)."""
+
+    active: bool = False
+    shortfall_cascades: int = 0
+    enrichment_conflict_patterns: list[str] = field(default_factory=list)
+    target_emitted_fraction: float = 0.0
+    # Planned/emitted aligned alarm count and the EXPECTED CE-correlated count (target basis).
+    target_aligned_alarms: int = 0
+    expected_correlated_alarms: int = 0
+
+
+def _plan_single_trail(
+    settings: Settings,
+    config: P3ConfigSnapshot,
+    pack: DomainPack,
+    rng: random.Random,
+    base_time,
+) -> tuple[list[AlignedCascade], int, _NetworkWideMeta]:
+    """Existing single-trail P3 path (AC 58) — byte-for-byte unchanged behaviour."""
+    plan = aligned_controller.plan(
+        pack,
+        config.patterns,
+        config.trails,
+        settings.p3_total_alarms,
+        settings.p3_aligned_fraction,
+        rng,
+        base_time,
+        optional_include_prob=settings.p3_optional_include_prob,
+        stagger_margin=settings.p3_stagger_margin,
+        stagger_jitter_ms=settings.p3_stagger_jitter_ms,
+        in_window_margin=settings.p3_in_window_margin,
+    )
+    return plan.cascades, plan.non_aligned_count, _NetworkWideMeta(active=False)
+
+
+def _plan_network_wide(
+    settings: Settings,
+    config: P3ConfigSnapshot,
+    pack: DomainPack,
+    rng: random.Random,
+    base_time,
+) -> tuple[list[AlignedCascade], int, _NetworkWideMeta]:
+    """Network-wide path: target-controller plan -> one enrichment-safe cascade per PlanEntry.
+
+    Cascades on repeated trails are staggered by strictly more than the pattern's session window
+    (reusing the ``aligned_controller`` stagger primitive) so each becomes its own CE incident
+    (AC 56). Every cascade is built enrichment-safe (distinct objects, reconciled spacing) and
+    asserted safe (AC 59/61/63).
+    """
+    from datetime import timedelta
+
+    patterns_by_id = {p.pattern_id: p for p in config.patterns}
+    nw_plan = target_controller.plan_network_wide(
+        settings, config.patterns, config.compatible_trails, rng
+    )
+
+    cascades: list[AlignedCascade] = []
+    # Per-(trailId, patternId) stagger cursor (ms) so repeats are separated by > windowMs (AC 56).
+    start_cursors: dict[tuple[str, str], float] = {}
+    for entry in nw_plan.entries:
+        pattern = patterns_by_id[entry.pattern_id]
+        trail = config.trails.get(entry.trail_id)
+        if trail is None:
+            continue
+        bounds = nw_plan.spacing[entry.pattern_id]
+        window_ms = (
+            float(pattern.session_window.window_ms)
+            if pattern.session_window and pattern.session_window.window_ms
+            else float(settings.p3_enrichment_dedup_window_ms) * 4
+        )
+        key = (entry.trail_id, entry.pattern_id)
+        offset_ms = aligned_controller._next_start_offset_ms(
+            key,
+            window_ms,
+            start_cursors,
+            rng,
+            stagger_margin=settings.p3_stagger_margin,
+            stagger_jitter_ms=settings.p3_stagger_jitter_ms,
+        )
+        cascade = aligned_synth.build_cascade(
+            pack,
+            pattern,
+            trail,
+            rng,
+            base_time + timedelta(milliseconds=offset_ms),
+            optional_include_prob=settings.p3_optional_include_prob,
+            in_window_margin=settings.p3_in_window_margin,
+            spacing_lo_ms=bounds.lo_ms,
+            spacing_hi_ms=bounds.hi_ms,
+            instance_index=entry.instance_index,
+            igp_area=entry.igp_area,
+        )
+        enrichment_safe.assert_cascade_safe(
+            cascade.alarms,
+            dedup_window_ms=float(settings.p3_enrichment_dedup_window_ms),
+        )
+        cascades.append(cascade)
+
+    aligned_count = sum(len(c.alarms) for c in cascades)
+    non_aligned_count = max(0, settings.p3_total_alarms - aligned_count)
+    metrics.P3_CASCADE_SHORTFALL.set(nw_plan.shortfall_cascades)
+    metrics.P3_ENRICHMENT_CONFLICT.set(len(nw_plan.enrichment_conflict_patterns))
+    meta = _NetworkWideMeta(
+        active=True,
+        shortfall_cascades=nw_plan.shortfall_cascades,
+        enrichment_conflict_patterns=list(nw_plan.enrichment_conflict_patterns),
+        target_emitted_fraction=nw_plan.target_emitted_fraction,
+        target_aligned_alarms=nw_plan.target_aligned_alarms,
+        expected_correlated_alarms=nw_plan.expected_correlated_alarms,
+    )
+    return cascades, non_aligned_count, meta
+
+
+def _apply_network_wide_summary(
+    summary: P3RunSummary, cascades: list[AlignedCascade], meta: _NetworkWideMeta
+) -> None:
+    """Populate network-wide summary fields from the emitted cascades + plan meta (AC 51/53/65)."""
+    if not meta.active:
+        # Single-trail: keep the pre-network-wide summary shape (additive fields defaulted/zero).
+        summary.aligned_fraction_emitted = summary.aligned_fraction
+        return
+    aligned = [c for c in cascades if c.label.scenario_type == "pattern-aligned"]
+    trails = {c.label.trail_id for c in aligned}
+    areas = {c.label.igp_area for c in aligned if c.label.igp_area is not None}
+    summary.distinct_trails_used = len(trails)
+    summary.distinct_areas_used = len(areas)
+    summary.shortfall_cascades = meta.shortfall_cascades
+    summary.enrichment_conflict_patterns = list(meta.enrichment_conflict_patterns)
+    # Closed-loop target basis is CE-CORRELATED alarms, not emitted aligned alarms. A cascade emits
+    # L alarms but the CE counts ~ (L - enrichment trim), bounded by the N-tolerance firing floor,
+    # as correlated members. enrichmentSafeCount is therefore the EXPECTED CORRELATED count (the
+    # plan's yield-model prediction), which is what lands ~= TARGET * T at the CE (AC 51). The
+    # emitted aligned alarm count is recorded separately (alignedAlarms) so the target basis is
+    # transparent. Fall back to the emitted aligned count only if the plan produced no estimate.
+    summary.expected_correlated_alarms = meta.expected_correlated_alarms
+    summary.enrichment_safe_count = (
+        meta.expected_correlated_alarms
+        if meta.expected_correlated_alarms > 0
+        else summary.aligned_alarms
+    )
+    # alignedFractionEmitted is the actually-emitted aligned fraction (emitted aligned / T); the
+    # post-enrichment CORRELATED expectation is enrichmentSafeCount / T (AC 51).
+    summary.aligned_fraction_emitted = meta.target_emitted_fraction
+    metrics.P3_DISTINCT_TRAILS_USED.set(summary.distinct_trails_used)
+    metrics.P3_DISTINCT_AREAS_USED.set(summary.distinct_areas_used)
+
+
 def run_synth(
     settings: Settings,
     producer: AlarmProducer,
@@ -120,6 +275,7 @@ def run_synth(
         pattern_client=pattern_client,
         trail_client=trail_client,
         snapshot_client=snapshot_client,
+        pack=pack,
     )
 
     rng, _seed_value = _seed(settings)
@@ -131,23 +287,18 @@ def run_synth(
     # windows on wall-clock ARRIVAL, so the absolute base is irrelevant to auto-correlation.
     base_time = datetime.now(tz=UTC)
 
-    plan = aligned_controller.plan(
-        pack,
-        config.patterns,
-        config.trails,
-        settings.p3_total_alarms,
-        settings.p3_aligned_fraction,
-        rng,
-        base_time,
-        optional_include_prob=settings.p3_optional_include_prob,
-        stagger_margin=settings.p3_stagger_margin,
-        stagger_jitter_ms=settings.p3_stagger_jitter_ms,
-        in_window_margin=settings.p3_in_window_margin,
-    )
-
     labels = P3LabelStore()
+    if settings.p3_network_wide_active:
+        cascades, non_aligned_count, nw_meta = _plan_network_wide(
+            settings, config, pack, rng, base_time
+        )
+    else:
+        cascades, non_aligned_count, nw_meta = _plan_single_trail(
+            settings, config, pack, rng, base_time
+        )
+
     aligned_alarms: list[SynthAlarm] = []
-    for cascade in plan.cascades:
+    for cascade in cascades:
         aligned_alarms.extend(cascade.alarms)
         labels.record(cascade.label)
     metrics.P3_ALIGNED_ALARMS.inc(len(aligned_alarms))
@@ -156,7 +307,7 @@ def run_synth(
         pack,
         config.patterns,
         config.trails,
-        plan.non_aligned_count,
+        non_aligned_count,
         rng,
         base_time,
         partial_fraction=settings.p3_partial_cascade_fraction,
@@ -170,12 +321,13 @@ def run_synth(
     # noise alarms sprinkled into the gaps BETWEEN cascades — never interleaved INTO a cascade. This
     # is the cascade-timing fix (M2): the prior global sort scattered a single cascade across the
     # timeline so opener+followers never arrived within windowMs at the CE -> ~0 auto-correlation.
-    stream = p3_schedule.build_emission_stream(plan.cascades, non_aligned.alarms, rng)
+    stream = p3_schedule.build_emission_stream(cascades, non_aligned.alarms, rng)
 
     strategy = replay.LiveReplay(producer, pacing_multiplier=settings.pacing_multiplier)
     emitted = strategy.replay_synth(stream)
 
     summary = labels.compute_summary()
+    _apply_network_wide_summary(summary, cascades, nw_meta)
     metrics.P3_ALIGNED_FRACTION.set(summary.aligned_fraction)
 
     out_dir = Path(settings.sim_output_dir)
@@ -191,6 +343,8 @@ def run_synth(
         aligned=summary.aligned_alarms,
         nonAligned=summary.non_aligned_alarms,
         alignedFraction=round(summary.aligned_fraction, 4),
+        expectedCorrelated=summary.expected_correlated_alarms,
+        enrichmentSafeCount=summary.enrichment_safe_count,
     )
     return SynthOutcome(
         run_id=run_id,

@@ -81,6 +81,53 @@ class Settings(BaseSettings):
     p3_random_alarm_fraction: float = Field(default=0.4, alias="P3_RANDOM_ALARM_FRACTION")
     p3_noise_fraction: float = Field(default=0.2, alias="P3_NOISE_FRACTION")
 
+    # P3 network-wide emission + closed-loop auto-correlation target (additive; behind the flag).
+    # When P3_NETWORK_WIDE is off (or the target is unset) the existing single-trail path runs
+    # byte-for-byte unchanged (AC 58). All items env/CLI overridable; no hard-coded thresholds.
+    p3_network_wide: bool = Field(default=False, alias="P3_NETWORK_WIDE")
+    # The CE-measured post-enrichment target correlatedAlarmCount/totalAlarmsProcessed. Unset ->
+    # single-trail behaviour (AC 58). Range [0,1].
+    p3_auto_correlation_target: float | None = Field(
+        default=None, alias="P3_AUTO_CORRELATION_TARGET"
+    )
+    p3_target_tolerance: float = Field(default=0.03, alias="P3_TARGET_TOLERANCE")
+    p3_max_cascades_per_trail: int = Field(default=3, alias="P3_MAX_CASCADES_PER_TRAIL")
+    # Per-cascade CORRELATED yield: the fraction of a cascade's EMITTED alarms that survive to be
+    # counted by the Correlation Engine as correlated members. On the live path each cascade of
+    # emitted length L yields FEWER than L correlated alarms: enrichment legitimately trims ~1
+    # element and CE fires at partialMatchTolerance (needs N-1 of N), so an incident holds ~L-1
+    # members, not L. Live-measured on this platform: emitting 150 aligned alarms yielded 91
+    # CE-correlated => ~0.61 correlated-per-emitted-aligned. The controller sizes the number of
+    # aligned cascades by this yield so P3_AUTO_CORRELATION_TARGET lands the CE-measured rate
+    # without manual over-provision-margin tuning. When > 0 this flat fraction is used directly
+    # (expected correlated per cascade = yield * L); when <= 0 the controller DERIVES the yield
+    # from each pattern's length + tolerance (L - expected_enrichment_trim, bounded by the
+    # N-tolerance firing floor). Default 0.61 matches the live measurement out of the box.
+    p3_cascade_yield: float = Field(default=0.61, alias="P3_CASCADE_YIELD")
+    # CE partial-match tolerance: an incident fires when N - tolerance of a pattern's N elements
+    # match (default 1 => N-1). Used only by the DERIVED yield path (P3_CASCADE_YIELD <= 0) as the
+    # firing floor. Overridable so ops can mirror the deployed Knowledge partialMatchTolerance.
+    p3_partial_match_tolerance: int = Field(default=1, alias="P3_PARTIAL_MATCH_TOLERANCE")
+    # Expected number of cascade elements enrichment legitimately trims on the live path (~1).
+    # Used only by the DERIVED yield path (P3_CASCADE_YIELD <= 0): expected correlated per cascade
+    # = L - trim, bounded below by the N-tolerance firing floor. Overridable per enrichment config.
+    p3_expected_enrichment_trim: int = Field(default=1, alias="P3_EXPECTED_ENRICHMENT_TRIM")
+    # Legacy blunt lever: emitted aligned fraction = TARGET / (1 - margin). SUBSUMED by the yield
+    # model above and now defaulted to 0.0 (no over-provision). Kept as an ADDITIONAL fudge factor
+    # for ops whose enrichment differs materially. Range [0,1).
+    p3_enrichment_over_provision_margin: float = Field(
+        default=0.0, alias="P3_ENRICHMENT_OVER_PROVISION_MARGIN"
+    )
+    # Must match the deployed enrichment FilterParams.dedupWindow (config-not-contract). Drives the
+    # enrichment-safe inter-arrival lower bound; ms; > 0.
+    p3_enrichment_dedup_window_ms: int = Field(default=2000, alias="P3_ENRICHMENT_DEDUP_WINDOW_MS")
+    # Comma-separated transient/self-clearing alarmTypes excluded from aligned cascades (AC 60).
+    # Empty -> pack-derived (the pack's self-clearing noise classes). Never hard-coded in synth.
+    p3_enrichment_transient_types: str = Field(default="", alias="P3_ENRICHMENT_TRANSIENT_TYPES")
+    # epsilon so the enrichment-safe spacing lower bound lo = dedup_ms * (1 + margin) is strictly
+    # above the dedup window (AC 61). >= 0.
+    p3_dedup_spacing_margin: float = Field(default=0.1, alias="P3_DEDUP_SPACING_MARGIN")
+
     # topology shape
     topology_node_count: int = Field(default=20, alias="TOPOLOGY_NODE_COUNT")
     site_count: int = Field(default=3, alias="SITE_COUNT")
@@ -136,6 +183,25 @@ class Settings(BaseSettings):
         if self.p3_config_snapshot_path:
             return self.p3_config_snapshot_path
         return f"{self.sim_output_dir.rstrip('/')}/p3-config-snapshot.json"
+
+    @property
+    def p3_network_wide_active(self) -> bool:
+        """Network-wide P3 is active when the flag is on OR an auto-correlation target is set.
+
+        The target implies network-wide (design config table: "auto-``true`` when target set"); the
+        flag alone also enables it. When both are false/unset the existing single-trail path runs
+        unchanged (AC 58).
+        """
+        return self.p3_network_wide or self.p3_auto_correlation_target is not None
+
+    def p3_transient_type_set(self) -> set[str]:
+        """The configured transient/self-clearing alarmType set excluded from aligned cascades.
+
+        Parsed from ``P3_ENRICHMENT_TRANSIENT_TYPES`` (comma-separated). An empty value means
+        "pack-derived" and the pack fills it in (see ``enrichment_safe.transient_types``); this
+        accessor only parses the explicit override, never a hard-coded default (CLAUDE.md).
+        """
+        return {t.strip() for t in self.p3_enrichment_transient_types.split(",") if t.strip()}
 
     def resolved_history_window(self) -> tuple[datetime, datetime]:
         """Resolve the (start, end) P2 history window from the configured knobs."""
@@ -262,6 +328,41 @@ def _validate_synth(s: Settings) -> None:
         raise ConfigError("TRAIL_BUILDER_API_BASE_URL required when TRAIL_BUILDER_API_MODE=real")
     if s.topology_api_mode == "real" and not s.topology_api_base_url:
         raise ConfigError("TOPOLOGY_API_BASE_URL required when TOPOLOGY_API_MODE=real")
+    _validate_network_wide(s)
+
+
+def _validate_network_wide(s: Settings) -> None:
+    """Fail-fast range checks for the P3 network-wide knobs (design error-handling table).
+
+    Enforced unconditionally so an invalid value never reaches a run; when network-wide is
+    inactive the knobs keep their (valid) defaults so this is a no-op for the single-trail path.
+    """
+    target = s.p3_auto_correlation_target
+    if target is not None and not (0.0 <= target <= 1.0):
+        raise ConfigError(f"P3_AUTO_CORRELATION_TARGET={target} out of range [0,1]")
+    if s.p3_target_tolerance <= 0.0:
+        raise ConfigError(f"P3_TARGET_TOLERANCE={s.p3_target_tolerance} must be > 0")
+    if s.p3_max_cascades_per_trail < 1:
+        raise ConfigError(f"P3_MAX_CASCADES_PER_TRAIL={s.p3_max_cascades_per_trail} must be >= 1")
+    if not (0.0 <= s.p3_enrichment_over_provision_margin < 1.0):
+        raise ConfigError(
+            f"P3_ENRICHMENT_OVER_PROVISION_MARGIN={s.p3_enrichment_over_provision_margin} "
+            "out of range [0,1)"
+        )
+    if s.p3_enrichment_dedup_window_ms <= 0:
+        raise ConfigError(
+            f"P3_ENRICHMENT_DEDUP_WINDOW_MS={s.p3_enrichment_dedup_window_ms} must be > 0"
+        )
+    if s.p3_dedup_spacing_margin < 0.0:
+        raise ConfigError(f"P3_DEDUP_SPACING_MARGIN={s.p3_dedup_spacing_margin} must be >= 0")
+    if s.p3_cascade_yield > 1.0:
+        raise ConfigError(f"P3_CASCADE_YIELD={s.p3_cascade_yield} must be <= 1.0")
+    if s.p3_partial_match_tolerance < 0:
+        raise ConfigError(f"P3_PARTIAL_MATCH_TOLERANCE={s.p3_partial_match_tolerance} must be >= 0")
+    if s.p3_expected_enrichment_trim < 0:
+        raise ConfigError(
+            f"P3_EXPECTED_ENRICHMENT_TRIM={s.p3_expected_enrichment_trim} must be >= 0"
+        )
 
 
 def _minable_floor(num_scenarios: int, background_fraction: float, noise_rate: float) -> int:
