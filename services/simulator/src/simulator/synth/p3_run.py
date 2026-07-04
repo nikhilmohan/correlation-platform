@@ -133,6 +133,9 @@ def run_synth(
         rng,
         base_time,
         optional_include_prob=settings.p3_optional_include_prob,
+        stagger_margin=settings.p3_stagger_margin,
+        stagger_jitter_ms=settings.p3_stagger_jitter_ms,
+        in_window_margin=settings.p3_in_window_margin,
     )
 
     labels = P3LabelStore()

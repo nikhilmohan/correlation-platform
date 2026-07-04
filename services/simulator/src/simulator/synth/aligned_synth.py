@@ -41,12 +41,13 @@ def build_cascade(
     base_time: datetime,
     *,
     optional_include_prob: float = 1.0,
+    in_window_margin: float = 0.9,
 ) -> AlignedCascade:
     """Build one pattern-aligned cascade for ``pattern`` on its ``trail``."""
     affinity = pack.placement_affinity()
     retained = _retain_elements(pattern, rng, optional_include_prob)
 
-    inter_arrivals = _inter_arrival_gaps(pattern, len(retained), rng)
+    inter_arrivals = _inter_arrival_gaps(pattern, len(retained), rng, in_window_margin)
     alarms: list[SynthAlarm] = []
     child_ids: list[str] = []
     root_id = ""
@@ -112,7 +113,9 @@ def _retain_elements(pattern: PatternView, rng: random.Random, include_prob: flo
     return retained
 
 
-def _inter_arrival_gaps(pattern: PatternView, n: int, rng: random.Random) -> list[float]:
+def _inter_arrival_gaps(
+    pattern: PatternView, n: int, rng: random.Random, in_window_margin: float = 0.9
+) -> list[float]:
     """Compute the (n-1) inter-arrival gaps (ms), clamped to fit the session window."""
     if n <= 1:
         return []
@@ -134,8 +137,9 @@ def _inter_arrival_gaps(pattern: PatternView, n: int, rng: random.Random) -> lis
     window_ms = pattern.session_window.window_ms if pattern.session_window else None
     if window_ms is not None and window_ms > 0:
         total = sum(gaps)
-        # leave a small margin so the last alarm lands strictly inside the window
-        budget = window_ms * 0.9
+        # leave a small margin (P3_IN_WINDOW_MARGIN) so the last alarm lands strictly inside the
+        # window — no hard-coded threshold (CLAUDE.md).
+        budget = window_ms * in_window_margin
         if total > budget and total > 0:
             scale = budget / total
             gaps = [g * scale for g in gaps]

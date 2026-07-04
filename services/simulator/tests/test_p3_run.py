@@ -187,7 +187,8 @@ def test_ac43_labels_and_summary_computable(tmp_path: Path) -> None:
     producer = FakeProducer()
     outcome = _run(_settings(tmp_path), producer)
     summary = outcome.summary
-    assert summary.total_alarms == outcome.emitted
+    # AC 43 (explicit): the per-run summary total EQUALS what was actually emitted on alarms.live.
+    assert summary.total_alarms == outcome.emitted == len(producer.sent)
     assert summary.aligned_alarms + summary.non_aligned_alarms == summary.total_alarms
     assert abs(summary.aligned_fraction - summary.aligned_alarms / summary.total_alarms) < 1e-9
     # aligned labels reference a root + children; every label present

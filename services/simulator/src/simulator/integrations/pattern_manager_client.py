@@ -25,15 +25,34 @@ class PatternFetchError(RuntimeError):
 
 
 class MockPatternManagerClient:
-    """In-process stub returning a configured ``PatternView[]`` (mirrors ``PatternPage``)."""
+    """In-process stub serving the frozen ``PatternPage`` envelope (symmetric with the real client).
+
+    Both this mock and :class:`HttpPatternManagerClient` parse the same
+    ``{items, total, limit, offset}`` envelope, so tests exercise the real wire shape (not a bare
+    array). A bare ``PatternView[]`` passed to the constructor is wrapped into the envelope.
+    """
 
     def __init__(self, patterns: list[dict[str, Any]] | None = None) -> None:
-        self._items = list(patterns or [])
+        self._page = _pattern_page(list(patterns or []))
         self.calls = 0
+
+    @property
+    def _items(self) -> list[dict[str, Any]]:
+        """The current page's items (kept for test-injection ergonomics)."""
+        return self._page.get("items", [])
+
+    @_items.setter
+    def _items(self, patterns: list[dict[str, Any]]) -> None:
+        self._page = _pattern_page(list(patterns))
 
     def list_approved(self) -> list[PatternView]:
         self.calls += 1
-        return [PatternView.from_api(p) for p in self._items]
+        return [PatternView.from_api(p) for p in (self._page.get("items") or [])]
+
+
+def _pattern_page(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Wrap a bare ``PatternView[]`` into the frozen ``PatternPage`` envelope."""
+    return {"items": items, "total": len(items), "limit": _PAGE_LIMIT, "offset": 0}
 
 
 class HttpPatternManagerClient:

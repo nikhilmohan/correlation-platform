@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     p3_rng_seed: int | None = Field(default=None, alias="P3_RNG_SEED")
     p3_config_snapshot_path: str | None = Field(default=None, alias="P3_CONFIG_SNAPSHOT_PATH")
     p3_optional_include_prob: float = Field(default=1.0, alias="P3_OPTIONAL_INCLUDE_PROB")
+    # Stagger controls (M1): successive cascades on the same (trailId, patternId) are separated by
+    # windowMs * P3_STAGGER_MARGIN (+ a seeded jitter up to P3_STAGGER_JITTER_MS) so each forms its
+    # own Correlation-Engine session/incident. margin > 1.0 guarantees strictly-more-than-windowMs.
+    p3_stagger_margin: float = Field(default=1.5, alias="P3_STAGGER_MARGIN")
+    p3_stagger_jitter_ms: float = Field(default=2000.0, alias="P3_STAGGER_JITTER_MS")
+    # Fraction of a pattern's sessionWindow the in-window cascade span is compressed to fit inside
+    # (leaves a margin so the last alarm lands strictly inside the window). No hard-coded literal.
+    p3_in_window_margin: float = Field(default=0.9, alias="P3_IN_WINDOW_MARGIN")
     p3_partial_cascade_fraction: float = Field(default=0.4, alias="P3_PARTIAL_CASCADE_FRACTION")
     p3_random_alarm_fraction: float = Field(default=0.4, alias="P3_RANDOM_ALARM_FRACTION")
     p3_noise_fraction: float = Field(default=0.2, alias="P3_NOISE_FRACTION")
@@ -229,6 +237,15 @@ def _validate_synth(s: Settings) -> None:
         raise ConfigError(
             f"P3_OPTIONAL_INCLUDE_PROB={s.p3_optional_include_prob} out of range [0,1]"
         )
+    if s.p3_stagger_margin <= 1.0:
+        raise ConfigError(
+            f"P3_STAGGER_MARGIN={s.p3_stagger_margin} must be > 1.0 (strictly separate cascades "
+            "on the same (trailId, patternId) beyond their sessionWindow)"
+        )
+    if s.p3_stagger_jitter_ms < 0:
+        raise ConfigError("P3_STAGGER_JITTER_MS must be >= 0")
+    if not (0.0 < s.p3_in_window_margin <= 1.0):
+        raise ConfigError(f"P3_IN_WINDOW_MARGIN={s.p3_in_window_margin} out of range (0,1]")
     mix = s.p3_partial_cascade_fraction + s.p3_random_alarm_fraction + s.p3_noise_fraction
     if abs(mix - 1.0) > 1e-6:
         raise ConfigError(
