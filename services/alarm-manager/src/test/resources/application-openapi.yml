@@ -1,0 +1,19 @@
+# Test profile for the OpenAPI contract test — boots only the web/springdoc layer.
+# Kafka, JDBC/DataSource and Flyway autoconfig are excluded so no real infra is opened; the
+# OpenAPI surface is generated purely from the annotated controllers/DTOs.
+spring:
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+  kafka:
+    # No broker in the OpenAPI test — the listener containers must not try to connect.
+    listener:
+      auto-startup: false
+
+springdoc:
+  api-docs:
+    path: /openapi.json
+    version: openapi_3_1

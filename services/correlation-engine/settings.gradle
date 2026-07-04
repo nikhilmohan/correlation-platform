@@ -1,0 +1,10 @@
+// correlation-engine — Spring Boot service build.
+//
+// The frozen event-model Java binding (com.acp:event-model:0.1.0) is consumed as a Gradle
+// composite build (includeBuild) so this service depends on the *published binding artifact*
+// (its generated payload POJOs + codec), never on another service's source. The path resolves
+// libs/event-model/java relative to this service directory (services/correlation-engine ->
+// ../../libs/event-model/java).
+rootProject.name = 'correlation-engine'
+
+includeBuild '../../libs/event-model/java'

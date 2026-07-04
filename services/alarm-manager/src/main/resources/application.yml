@@ -1,0 +1,61 @@
+# Alarm Manager — config from env only (no hard-coded URLs, credentials, or thresholds).
+# Sole owner of the live_alarm PostgreSQL schema; in-line on the P3 real-time path.
+server:
+  port: ${ALARM_MANAGER_PORT:8080}
+
+spring:
+  application:
+    name: alarm-manager
+  datasource:
+    url: ${ALARM_DB_JDBC_URL:jdbc:postgresql://localhost:5432/correlation}
+    username: ${ALARM_DB_USER:correlation}
+    password: ${ALARM_DB_PASSWORD:correlation}
+  flyway:
+    enabled: true
+    # Own + target the live_alarm schema only; flyway_schema_history lives inside it.
+    schemas: live_alarm
+    default-schema: live_alarm
+    create-schemas: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+alarm-manager:
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    enriched-topic: alarms.enriched.live
+    status-topic: alarms.status.changed
+    correlation-topic: correlation.results
+    persisted-topic: alarms.persisted.live
+    enriched-dlq: alarms.enriched.live.dlq
+    status-dlq: alarms.status.changed.dlq
+    correlation-dlq: correlation.results.dlq
+    group-id-enriched: ${KAFKA_GROUP_ID_ENRICHED:alarm-manager-enriched}
+    group-id-status: ${KAFKA_GROUP_ID_STATUS:alarm-manager-status}
+    group-id-correlation: ${KAFKA_GROUP_ID_CORRELATION:alarm-manager-correlation}
+    max-retries: ${KAFKA_CONSUMER_MAX_RETRIES:3}
+    retry-backoff-ms: ${KAFKA_RETRY_BACKOFF_MS:1000}
+  query:
+    max-page-size: ${QUERY_MAX_PAGE_SIZE:500}
+    default-page-size: ${QUERY_DEFAULT_PAGE_SIZE:50}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  metrics:
+    tags:
+      service: alarm-manager
+
+springdoc:
+  api-docs:
+    path: /openapi.json
+    version: openapi_3_1
+  swagger-ui:
+    path: /swagger-ui.html
