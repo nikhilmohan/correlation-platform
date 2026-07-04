@@ -39,14 +39,16 @@ export function alarmTypeLabel(alarmType: string): string {
 }
 
 /**
- * A logical, scannable name for a pattern. Prefers a future `patternName` field once the Pattern
- * Store serves one (cast because it is not yet on the frozen contract); otherwise derives a
- * "<Root cause> Cascade" name from the readable root-cause label.
+ * A logical, scannable name for a pattern. Prefers the served `patternName` field (owned +
+ * persisted by Pattern Manager, of the form "<label> Cascade · <short8>") and renders it verbatim.
+ * Falls back to a plain "<Root cause> Cascade" name derived from the readable root-cause label for
+ * legacy rows that predate the served field (no id suffix — the suffix only exists on the
+ * backend-served name).
  */
 export function derivePatternName(p: PatternView): string {
-  const authored = (p as { patternName?: string }).patternName?.trim();
-  if (authored) {
-    return authored;
+  const served = p.patternName?.trim();
+  if (served) {
+    return served;
   }
   return `${alarmTypeLabel(p.rootCauseAlarmType)} Cascade`;
 }
