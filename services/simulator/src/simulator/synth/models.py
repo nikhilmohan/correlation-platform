@@ -338,6 +338,10 @@ class P3RunSummary:
     enrichment_safe_count: int = 0
     enrichment_conflict_patterns: list[str] = field(default_factory=list)
     aligned_fraction_emitted: float = 0.0
+    # The EXPECTED CE-correlated alarm count the closed-loop controller sized the plan to produce
+    # (== enrichment_safe_count for network-wide runs). Recorded alongside the emitted aligned count
+    # so the target basis (correlated yield, not emitted length) is transparent (AC 51).
+    expected_correlated_alarms: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -351,6 +355,7 @@ class P3RunSummary:
             "enrichmentSafeCount": self.enrichment_safe_count,
             "enrichmentConflictPatterns": list(self.enrichment_conflict_patterns),
             "alignedFractionEmitted": self.aligned_fraction_emitted,
+            "expectedCorrelatedAlarms": self.expected_correlated_alarms,
         }
 
 

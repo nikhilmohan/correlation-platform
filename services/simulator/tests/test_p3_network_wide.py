@@ -102,7 +102,7 @@ def _trail_bodies():
 
 # A larger fleet: ``count`` compatible trails round-robined across 3 igp-areas, so
 # distinct_trails x cap comfortably exceeds the cascade count the target needs (AC 51/52).
-def _fleet_bodies(count: int = 40, discovery_trail: str = "trail-A"):
+def _fleet_bodies(count: int = 80, discovery_trail: str = "trail-A"):
     bodies: dict = {}
     areas = ["area-0", "area-1", "area-2"]
     for i in range(count):
@@ -373,48 +373,73 @@ def test_cascade_moids_belong_to_assigned_trail(tmp_path: Path) -> None:
 
 # --- AC 51: closed-loop hits CE post-enrichment target within tolerance ------------------------
 def test_target_controller_hits_rate_within_tolerance(tmp_path: Path) -> None:
+    """The target basis is CE-CORRELATED alarms (enrichmentSafeCount), NOT emitted length.
+
+    The controller sizes aligned cascades by the per-cascade correlated YIELD, so the EXPECTED
+    CORRELATED count lands ~= TARGET * T. The emitted aligned count is HIGHER (yield < 1), and is
+    reported separately (alignedAlarms) so the target basis is transparent.
+    """
     producer = FakeProducer()
     patterns = [_pattern()]
     outcome = _run(_settings(tmp_path), producer, patterns, trail_bodies=_fleet_bodies())
+    # enrichmentSafeCount is the EXPECTED CORRELATED count; its fraction of T lands within tol.
     rate = outcome.summary.enrichment_safe_count / 300
     assert 0.57 <= rate <= 0.63
-    assert outcome.summary.enrichment_safe_count == outcome.summary.aligned_alarms
-    assert (
-        abs(outcome.summary.aligned_fraction_emitted - 0.6) < 1e-6
-    )  # margin 0 -> emitted == target
+    # It is the expected-correlated count, not the emitted aligned count (which is higher: yield<1).
+    assert outcome.summary.enrichment_safe_count == outcome.summary.expected_correlated_alarms
+    assert outcome.summary.aligned_alarms > outcome.summary.enrichment_safe_count
+    # emitted correlated / emitted aligned ~= the configured yield (default 0.61) within rounding.
+    realized_yield = outcome.summary.enrichment_safe_count / outcome.summary.aligned_alarms
+    assert abs(realized_yield - 0.61) < 0.05
 
 
-def test_target_over_provision_margin_records_emitted_fraction(tmp_path: Path) -> None:
+def test_target_over_provision_margin_inflates_correlated_target(tmp_path: Path) -> None:
+    """The legacy over-provision margin is now an OPTIONAL additional fudge on the target basis.
+
+    With margin 0.1 the correlated target becomes TARGET / (1 - margin) = 0.6 / 0.9 of T, so the
+    expected-correlated fraction overshoots the bare target by the margin factor.
+    """
     producer = FakeProducer()
     patterns = [_pattern()]
+    # Base target 0.4 * 1/(1-0.1) = 0.444 correlated fraction (feasible: below the ~0.61 max the
+    # yield ceiling permits within T).
     outcome = _run(
-        _settings(tmp_path, P3_ENRICHMENT_OVER_PROVISION_MARGIN="0.1"),
+        _settings(
+            tmp_path, P3_AUTO_CORRELATION_TARGET="0.4", P3_ENRICHMENT_OVER_PROVISION_MARGIN="0.1"
+        ),
         producer,
         patterns,
         trail_bodies=_fleet_bodies(),
     )
-    # emitted fraction = TARGET / (1 - margin) = 0.6 / 0.9
-    assert abs(outcome.summary.aligned_fraction_emitted - (0.6 / 0.9)) < 1e-6
+    correlated_fraction = outcome.summary.enrichment_safe_count / 300
+    assert abs(correlated_fraction - (0.4 / 0.9)) < 0.03
 
 
 # --- AC 52: recalculates for different targets ------------------------------------------------
 def test_target_controller_scales_with_target(tmp_path: Path) -> None:
+    # Both targets are below the ~0.61 correlated-yield ceiling (max achievable correlated rate
+    # within T when every alarm is aligned == the per-alarm yield), so both are feasible.
     patterns = [_pattern()]
-    o4 = _run(
-        _settings(tmp_path / "a", P3_AUTO_CORRELATION_TARGET="0.4"),
+    o3 = _run(
+        _settings(tmp_path / "a", P3_AUTO_CORRELATION_TARGET="0.3"),
         FakeProducer(),
         patterns,
         trail_bodies=_fleet_bodies(),
     )
-    o8 = _run(
-        _settings(tmp_path / "b", P3_AUTO_CORRELATION_TARGET="0.8"),
+    o5 = _run(
+        _settings(tmp_path / "b", P3_AUTO_CORRELATION_TARGET="0.5"),
         FakeProducer(),
         patterns,
         trail_bodies=_fleet_bodies(),
     )
-    assert abs(o4.summary.aligned_fraction - 0.4) <= 0.03 + 1e-9
-    assert abs(o8.summary.aligned_fraction - 0.8) <= 0.03 + 1e-9
-    assert o8.summary.aligned_alarms > o4.summary.aligned_alarms
+    # Target basis is CORRELATED yield: the expected-correlated fraction (enrichmentSafeCount / T)
+    # tracks the target, NOT the emitted aligned fraction (which is higher by 1/yield).
+    r3 = o3.summary.enrichment_safe_count / 300
+    r5 = o5.summary.enrichment_safe_count / 300
+    assert abs(r3 - 0.3) <= 0.03 + 1e-9
+    assert abs(r5 - 0.5) <= 0.03 + 1e-9
+    assert o5.summary.enrichment_safe_count > o3.summary.enrichment_safe_count
+    assert o5.summary.aligned_alarms > o3.summary.aligned_alarms
 
 
 # --- AC 53: multiple distinct trails per pattern (labels) --------------------------------------
@@ -665,7 +690,7 @@ def _real_shaped_patterns() -> list[dict]:
     ]
 
 
-def _all_types_fleet(count: int = 40) -> dict:
+def _all_types_fleet(count: int = 80) -> dict:
     """A fleet of ``count`` compatible trails, each hosting every objectType the 5 patterns need."""
     object_types = [
         "FiberSpan",
@@ -698,7 +723,9 @@ def test_five_real_shaped_patterns_not_excluded_and_aligned_positive(tmp_path: P
     aligned = [x for x in outcome.labels.all() if x.scenario_type == "pattern-aligned"]
     assert aligned
     assert outcome.summary.aligned_alarms > 0
-    assert outcome.summary.enrichment_safe_count == outcome.summary.aligned_alarms
+    # enrichmentSafeCount is the EXPECTED CORRELATED count (yield model), not the emitted length.
+    assert outcome.summary.enrichment_safe_count == outcome.summary.expected_correlated_alarms
+    assert outcome.summary.enrichment_safe_count <= outcome.summary.aligned_alarms
     # multiple of the 5 patterns contribute (target distributes across them).
     assert len({x.pattern_id for x in aligned}) >= 2
     # every cascade stays within its 5000ms session window and keeps distinct dedup keys.

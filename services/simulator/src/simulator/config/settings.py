@@ -92,8 +92,29 @@ class Settings(BaseSettings):
     )
     p3_target_tolerance: float = Field(default=0.03, alias="P3_TARGET_TOLERANCE")
     p3_max_cascades_per_trail: int = Field(default=3, alias="P3_MAX_CASCADES_PER_TRAIL")
-    # Emitted aligned fraction = TARGET / (1 - margin) to compensate for enrichment's legitimate
-    # reduction on the live path. Default 0.0 = no over-provision. Range [0,1).
+    # Per-cascade CORRELATED yield: the fraction of a cascade's EMITTED alarms that survive to be
+    # counted by the Correlation Engine as correlated members. On the live path each cascade of
+    # emitted length L yields FEWER than L correlated alarms: enrichment legitimately trims ~1
+    # element and CE fires at partialMatchTolerance (needs N-1 of N), so an incident holds ~L-1
+    # members, not L. Live-measured on this platform: emitting 150 aligned alarms yielded 91
+    # CE-correlated => ~0.61 correlated-per-emitted-aligned. The controller sizes the number of
+    # aligned cascades by this yield so P3_AUTO_CORRELATION_TARGET lands the CE-measured rate
+    # without manual over-provision-margin tuning. When > 0 this flat fraction is used directly
+    # (expected correlated per cascade = yield * L); when <= 0 the controller DERIVES the yield
+    # from each pattern's length + tolerance (L - expected_enrichment_trim, bounded by the
+    # N-tolerance firing floor). Default 0.61 matches the live measurement out of the box.
+    p3_cascade_yield: float = Field(default=0.61, alias="P3_CASCADE_YIELD")
+    # CE partial-match tolerance: an incident fires when N - tolerance of a pattern's N elements
+    # match (default 1 => N-1). Used only by the DERIVED yield path (P3_CASCADE_YIELD <= 0) as the
+    # firing floor. Overridable so ops can mirror the deployed Knowledge partialMatchTolerance.
+    p3_partial_match_tolerance: int = Field(default=1, alias="P3_PARTIAL_MATCH_TOLERANCE")
+    # Expected number of cascade elements enrichment legitimately trims on the live path (~1).
+    # Used only by the DERIVED yield path (P3_CASCADE_YIELD <= 0): expected correlated per cascade
+    # = L - trim, bounded below by the N-tolerance firing floor. Overridable per enrichment config.
+    p3_expected_enrichment_trim: int = Field(default=1, alias="P3_EXPECTED_ENRICHMENT_TRIM")
+    # Legacy blunt lever: emitted aligned fraction = TARGET / (1 - margin). SUBSUMED by the yield
+    # model above and now defaulted to 0.0 (no over-provision). Kept as an ADDITIONAL fudge factor
+    # for ops whose enrichment differs materially. Range [0,1).
     p3_enrichment_over_provision_margin: float = Field(
         default=0.0, alias="P3_ENRICHMENT_OVER_PROVISION_MARGIN"
     )
@@ -334,6 +355,14 @@ def _validate_network_wide(s: Settings) -> None:
         )
     if s.p3_dedup_spacing_margin < 0.0:
         raise ConfigError(f"P3_DEDUP_SPACING_MARGIN={s.p3_dedup_spacing_margin} must be >= 0")
+    if s.p3_cascade_yield > 1.0:
+        raise ConfigError(f"P3_CASCADE_YIELD={s.p3_cascade_yield} must be <= 1.0")
+    if s.p3_partial_match_tolerance < 0:
+        raise ConfigError(f"P3_PARTIAL_MATCH_TOLERANCE={s.p3_partial_match_tolerance} must be >= 0")
+    if s.p3_expected_enrichment_trim < 0:
+        raise ConfigError(
+            f"P3_EXPECTED_ENRICHMENT_TRIM={s.p3_expected_enrichment_trim} must be >= 0"
+        )
 
 
 def _minable_floor(num_scenarios: int, background_fraction: float, noise_rate: float) -> int:

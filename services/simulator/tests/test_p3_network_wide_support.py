@@ -43,6 +43,9 @@ def _base_env(tmp_path: Path, **extra: str) -> dict[str, str]:
         ("P3_ENRICHMENT_OVER_PROVISION_MARGIN", "-0.1"),
         ("P3_ENRICHMENT_DEDUP_WINDOW_MS", "0"),
         ("P3_DEDUP_SPACING_MARGIN", "-0.1"),
+        ("P3_CASCADE_YIELD", "1.5"),
+        ("P3_PARTIAL_MATCH_TOLERANCE", "-1"),
+        ("P3_EXPECTED_ENRICHMENT_TRIM", "-1"),
     ],
 )
 def test_invalid_network_wide_config_fails_fast(tmp_path: Path, key: str, value: str) -> None:
@@ -76,6 +79,123 @@ def test_transient_types_parsed_from_config(tmp_path: Path) -> None:
         _base_env(tmp_path, P3_ENRICHMENT_TRANSIENT_TYPES="A, B ,C", P3_NETWORK_WIDE="true")
     )
     assert s.p3_transient_type_set() == {"A", "B", "C"}
+
+
+# --- Closed-loop CORRELATED-yield count math (the #392 fix) -----------------------------------
+import math  # noqa: E402
+
+from simulator.synth import target_controller  # noqa: E402
+from simulator.synth.models import CompatibleTrail, CompatibleTrailSet, PatternView  # noqa: E402
+from tests import p3_fixtures as fx  # noqa: E402
+
+
+def _yield_settings(tmp_path: Path, **extra: str):
+    return load_settings(
+        _base_env(
+            tmp_path,
+            P3_NETWORK_WIDE="true",
+            P3_AUTO_CORRELATION_TARGET="0.6",
+            P3_TARGET_TOLERANCE="0.03",
+            P3_RNG_SEED="4242",
+            **extra,
+        )
+    )
+
+
+def test_flat_yield_scales_correlated_per_cascade_with_length(tmp_path: Path) -> None:
+    """Default flat yield (0.61): expected correlated per cascade == yield * L (bounded [1, L])."""
+    s = _yield_settings(tmp_path)  # P3_CASCADE_YIELD default 0.61
+    assert s.p3_cascade_yield == 0.61
+    assert target_controller._correlated_per_cascade(s, 5) == 0.61 * 5
+    assert target_controller._correlated_per_cascade(s, 2) == 0.61 * 2
+    # Never below 1 (a cascade that fires yields at least one correlated member) nor above L.
+    assert target_controller._correlated_per_cascade(s, 1) == 1.0
+    assert target_controller._correlated_per_cascade(s, 3) <= 3.0
+
+
+def test_derived_yield_is_length_minus_trim_bounded_by_firing_floor(tmp_path: Path) -> None:
+    """P3_CASCADE_YIELD<=0 -> derived L - trim, but 0 when survivors < N - tolerance (no fire)."""
+    # trim 1, tolerance 1: survived = L-1, floor = L-1 -> survives exactly at floor -> L-1.
+    s = _yield_settings(
+        tmp_path,
+        P3_CASCADE_YIELD="0",
+        P3_EXPECTED_ENRICHMENT_TRIM="1",
+        P3_PARTIAL_MATCH_TOLERANCE="1",
+    )
+    assert target_controller._correlated_per_cascade(s, 5) == 4.0  # (L-1)/L survivors
+    # trim 2, tolerance 1: survived = L-2 < firing floor (L-1) -> cannot fire -> 0 correlated.
+    s2 = _yield_settings(
+        tmp_path / "b",
+        P3_CASCADE_YIELD="0",
+        P3_EXPECTED_ENRICHMENT_TRIM="2",
+        P3_PARTIAL_MATCH_TOLERANCE="1",
+    )
+    assert target_controller._correlated_per_cascade(s2, 5) == 0.0
+    # trim 2, tolerance 2: survived = L-2 == firing floor -> fires -> L-2 survivors.
+    s3 = _yield_settings(
+        tmp_path / "c",
+        P3_CASCADE_YIELD="0",
+        P3_EXPECTED_ENRICHMENT_TRIM="2",
+        P3_PARTIAL_MATCH_TOLERANCE="2",
+    )
+    assert target_controller._correlated_per_cascade(s3, 5) == 3.0
+
+
+def _pat(pattern_id: str, length: int) -> PatternView:
+    seq = [(f"T{i}", False) for i in range(length)]
+    return PatternView.from_api(fx.pattern_view(pattern_id, "trail-A", seq, "T0", window_ms=30000))
+
+
+def test_count_math_targets_correlated_yield_not_emitted_length(tmp_path: Path) -> None:
+    """The planned aligned-alarm count == needed_correlated / yield (within rounding), and the
+    plan's EXPECTED correlated fraction is within tolerance of TARGET — proving the math now
+    targets CORRELATED yield, not emitted length."""
+    s = _yield_settings(tmp_path)  # TARGET 0.6, T 300, yield 0.61
+    total = s.p3_total_alarms  # 300
+    target = s.p3_auto_correlation_target  # 0.6
+    yield_f = s.p3_cascade_yield  # 0.61
+    length = 4
+    needed_correlated = round(target * total)  # 180
+
+    pattern = _pat("pat-01", length)
+    # A large compatible-trail fleet so per-trail caps never clip the target (isolate the math).
+    trails = tuple(CompatibleTrail(f"trail-{i:03d}", f"area-{i % 3}") for i in range(400))
+    compatible = {"pat-01": CompatibleTrailSet("pat-01", "area-0", trails)}
+    import random
+
+    plan = target_controller.plan_network_wide(s, [pattern], compatible, random.Random(1))
+
+    # 1. sizing target basis is CORRELATED, == round(TARGET * T).
+    assert plan.target_correlated_alarms == needed_correlated
+    # 2. number of cascades == ceil(needed_correlated / (yield * L)); emitted == cascades * L.
+    y_l = yield_f * length
+    expected_cascades = math.ceil(needed_correlated / y_l)
+    assert len(plan.entries) == expected_cascades
+    assert plan.target_aligned_alarms == expected_cascades * length
+    # 3. EXPECTED correlated fraction (expected_correlated / T) is within tolerance of TARGET.
+    correlated_fraction = plan.expected_correlated_alarms / total
+    assert abs(correlated_fraction - target) <= s.p3_target_tolerance + 1e-9
+    # 4. and the EMITTED fraction is HIGHER than the target by ~1/yield (the point of the fix).
+    emitted_fraction = plan.target_aligned_alarms / total
+    assert emitted_fraction > target
+    assert abs(emitted_fraction - target / yield_f) <= 0.05
+
+
+def test_shortfall_caps_do_not_over_report_correlated(tmp_path: Path) -> None:
+    """Under per-trail caps that clip the target, expected_correlated_alarms reflects only the
+    PLACED cascades (never the unreachable sizing target) so the summary stays honest (AC 55)."""
+    s = _yield_settings(tmp_path, P3_MAX_CASCADES_PER_TRAIL="1")
+    # 2 trails, cap 1 -> at most 2 cascades placeable; TARGET 0.6 * 300 needs far more.
+    trails = (CompatibleTrail("trail-A", "area-0"), CompatibleTrail("trail-B", "area-1"))
+    compatible = {"pat-01": CompatibleTrailSet("pat-01", "area-0", trails)}
+    import random
+
+    plan = target_controller.plan_network_wide(s, [_pat("pat-01", 4)], compatible, random.Random(1))
+    assert len(plan.entries) == 2  # capped
+    assert plan.shortfall_cascades > 0
+    # expected correlated == placed cascades * yield*L, NOT the unreachable sizing target.
+    assert plan.expected_correlated_alarms == round(2 * s.p3_cascade_yield * 4)
+    assert plan.expected_correlated_alarms < plan.target_correlated_alarms
 
 
 # --- v1 -> v2 config-snapshot load compatibility ----------------------------------------------
@@ -245,5 +365,6 @@ def test_p3_summary_model_has_additive_network_wide_fields() -> None:
         "enrichmentSafeCount",
         "enrichmentConflictPatterns",
         "alignedFractionEmitted",
+        "expectedCorrelatedAlarms",
     ):
         assert key in fields

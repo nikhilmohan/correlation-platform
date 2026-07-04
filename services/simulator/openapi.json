@@ -365,6 +365,11 @@
             "type": "number",
             "title": "Alignedfractionemitted",
             "default": 0.0
+          },
+          "expectedCorrelatedAlarms": {
+            "type": "integer",
+            "title": "Expectedcorrelatedalarms",
+            "default": 0
           }
         },
         "type": "object",

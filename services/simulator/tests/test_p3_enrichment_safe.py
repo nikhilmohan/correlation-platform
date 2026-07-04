@@ -363,7 +363,11 @@ def test_summary_enrichment_fields(tmp_path: Path) -> None:
     producer = FakeProducer()
     outcome = _run(_settings(tmp_path), producer, [small, ok])
     d = outcome.summary.to_json()
-    assert d["enrichmentSafeCount"] == outcome.summary.aligned_alarms > 0
+    # enrichmentSafeCount is the EXPECTED CORRELATED count (closed-loop yield basis), not the
+    # emitted aligned length; it is <= aligned_alarms (yield < 1) and > 0.
+    assert d["enrichmentSafeCount"] == outcome.summary.expected_correlated_alarms > 0
+    assert d["enrichmentSafeCount"] <= outcome.summary.aligned_alarms
+    assert d["expectedCorrelatedAlarms"] == d["enrichmentSafeCount"]
     assert d["enrichmentConflictPatterns"] == []
 
 

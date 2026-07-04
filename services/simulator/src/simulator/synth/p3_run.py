@@ -115,6 +115,9 @@ class _NetworkWideMeta:
     shortfall_cascades: int = 0
     enrichment_conflict_patterns: list[str] = field(default_factory=list)
     target_emitted_fraction: float = 0.0
+    # Planned/emitted aligned alarm count and the EXPECTED CE-correlated count (target basis).
+    target_aligned_alarms: int = 0
+    expected_correlated_alarms: int = 0
 
 
 def _plan_single_trail(
@@ -213,6 +216,8 @@ def _plan_network_wide(
         shortfall_cascades=nw_plan.shortfall_cascades,
         enrichment_conflict_patterns=list(nw_plan.enrichment_conflict_patterns),
         target_emitted_fraction=nw_plan.target_emitted_fraction,
+        target_aligned_alarms=nw_plan.target_aligned_alarms,
+        expected_correlated_alarms=nw_plan.expected_correlated_alarms,
     )
     return cascades, non_aligned_count, meta
 
@@ -232,10 +237,20 @@ def _apply_network_wide_summary(
     summary.distinct_areas_used = len(areas)
     summary.shortfall_cascades = meta.shortfall_cascades
     summary.enrichment_conflict_patterns = list(meta.enrichment_conflict_patterns)
-    # enrichmentSafeCount == emitted aligned alarms (all safe by construction) = correlatable count.
-    summary.enrichment_safe_count = summary.aligned_alarms
-    # alignedFraction is the post-enrichment expectation (== enrichmentSafeCount/T); the emitted
-    # (over-provisioned) fraction is recorded separately (AC 51).
+    # Closed-loop target basis is CE-CORRELATED alarms, not emitted aligned alarms. A cascade emits
+    # L alarms but the CE counts ~ (L - enrichment trim), bounded by the N-tolerance firing floor,
+    # as correlated members. enrichmentSafeCount is therefore the EXPECTED CORRELATED count (the
+    # plan's yield-model prediction), which is what lands ~= TARGET * T at the CE (AC 51). The
+    # emitted aligned alarm count is recorded separately (alignedAlarms) so the target basis is
+    # transparent. Fall back to the emitted aligned count only if the plan produced no estimate.
+    summary.expected_correlated_alarms = meta.expected_correlated_alarms
+    summary.enrichment_safe_count = (
+        meta.expected_correlated_alarms
+        if meta.expected_correlated_alarms > 0
+        else summary.aligned_alarms
+    )
+    # alignedFractionEmitted is the actually-emitted aligned fraction (emitted aligned / T); the
+    # post-enrichment CORRELATED expectation is enrichmentSafeCount / T (AC 51).
     summary.aligned_fraction_emitted = meta.target_emitted_fraction
     metrics.P3_DISTINCT_TRAILS_USED.set(summary.distinct_trails_used)
     metrics.P3_DISTINCT_AREAS_USED.set(summary.distinct_areas_used)
@@ -328,6 +343,8 @@ def run_synth(
         aligned=summary.aligned_alarms,
         nonAligned=summary.non_aligned_alarms,
         alignedFraction=round(summary.aligned_fraction, 4),
+        expectedCorrelated=summary.expected_correlated_alarms,
+        enrichmentSafeCount=summary.enrichment_safe_count,
     )
     return SynthOutcome(
         run_id=run_id,

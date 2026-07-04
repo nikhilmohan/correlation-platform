@@ -80,6 +80,9 @@ class P3RunSummaryModel(BaseModel):
     enrichmentSafeCount: int = 0
     enrichmentConflictPatterns: list[str] = []
     alignedFractionEmitted: float = 0.0
+    # The EXPECTED CE-correlated alarm count the closed-loop controller sized the plan to produce
+    # (== enrichmentSafeCount for network-wide runs). Additive, defaulted (AC 51 transparency).
+    expectedCorrelatedAlarms: int = 0
 
 
 class HealthModel(BaseModel):

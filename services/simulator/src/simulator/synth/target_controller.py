@@ -44,10 +44,17 @@ class NetworkWidePlan:
     shortfall_cascades: int = 0
     target_emitted_fraction: float = 0.0
     target_aligned_alarms: int = 0
+    # The CE-correlated count the plan is SIZED to produce (needed_correlated = round(TARGET * T)).
+    target_correlated_alarms: int = 0
+    # The plan's EXPECTED CE-correlated alarm count = sum over cascades of (per-cascade yield).
+    # This is the target-basis number (correlated, not emitted) recorded for transparency (AC 51).
+    expected_correlated_alarms: int = 0
     # Per-pattern spacing bounds for eligible patterns (reused by the emit step).
     spacing: dict[str, SpacingBounds] = field(default_factory=dict)
     # Per-pattern emitted cascade length (L_P) used by the count math.
     cascade_lengths: dict[str, int] = field(default_factory=dict)
+    # Per-pattern expected CORRELATED alarms per cascade (float y_L_P) — the yield model output.
+    correlated_per_cascade: dict[str, float] = field(default_factory=dict)
 
 
 def _emitted_cascade_length(pattern: PatternView) -> int:
@@ -109,45 +116,116 @@ def _eligible_patterns(
             continue
         plan.spacing[pattern.pattern_id] = reconciled
         plan.cascade_lengths[pattern.pattern_id] = length
+        plan.correlated_per_cascade[pattern.pattern_id] = _correlated_per_cascade(settings, length)
         eligible.append(pattern)
     return eligible
+
+
+def _correlated_per_cascade(settings: Settings, length: int) -> float:
+    """Expected CE-CORRELATED alarms produced by one cascade of emitted length ``length`` (y_L).
+
+    This is the crux of the closed-loop fix: a cascade emits ``L`` alarms but the Correlation Engine
+    counts FEWER as correlated members, because (a) enrichment legitimately trims ~1 element on the
+    live path and (b) CE fires at partialMatchTolerance (needs ``N - tolerance`` of ``N``), so an
+    incident holds ~``L - tolerance`` members, not ``L``. Live-measured on this platform: emitting
+    150 aligned alarms yielded 91 CE-correlated => ~0.61 correlated-per-emitted-aligned.
+
+    Two principled estimators, selected by config (no hard-coded literals in code — all from env):
+
+    * **Flat yield** (default, ``P3_CASCADE_YIELD > 0``): ``y_L = yield * L``. The default 0.61
+      reproduces the live measurement directly, so the controller sizes the right number of
+      cascades out of the box.
+    * **Derived** (``P3_CASCADE_YIELD <= 0``): survivors after enrichment trim, bounded below by
+      the CE firing floor. ``survived = L - expected_enrichment_trim``; a cascade only produces
+      correlated members if ``survived >= N - tolerance`` (else the partial match never fires and it
+      yields 0). ``N`` is the emitted length ``L`` (include-prob 1.0). Otherwise ``y_L = survived``.
+
+    Kept a FLOAT (not rounded per cascade) so the aggregate cascade count = needed_correlated / y_L
+    is not distorted by per-cascade integer rounding.
+    """
+    length_f = float(max(1, length))
+    yield_fraction = settings.p3_cascade_yield
+    if yield_fraction > 0.0:
+        return max(1.0, min(length_f, yield_fraction * length_f))
+    # Derived from length + tolerance + expected enrichment trim.
+    trim = settings.p3_expected_enrichment_trim
+    tolerance = settings.p3_partial_match_tolerance
+    survived = float(length) - float(trim)
+    firing_floor = float(length) - float(tolerance)
+    if survived < firing_floor or survived < 1.0:
+        # Too few elements survive enrichment to fire the partial match -> no correlated members.
+        return 0.0
+    return min(length_f, survived)
 
 
 def _target_counts(
     settings: Settings, eligible: list[PatternView], plan: NetworkWidePlan
 ) -> dict[str, int]:
-    """Greedy cascade-count math (§B): per-pattern cascade counts closest to A within tolerance."""
+    """Per-pattern cascade-count math sized by the per-cascade CORRELATED YIELD (§B, closed-loop).
+
+    The target basis is CE-CORRELATED alarms, NOT emitted length. Given ``needed_correlated =
+    round(TARGET * T)``, and a per-cascade expected-correlated yield ``y_L`` (see
+    :func:`_correlated_per_cascade`), the number of aligned cascades is
+    ``ceil(needed_correlated / y_L)`` distributed greedily round-robin across eligible patterns.
+    This replaces the old assumption that each cascade contributed its FULL emitted length as
+    correlated alarms (which under-provisioned the live rate by the yield factor). The legacy
+    ``P3_ENRICHMENT_OVER_PROVISION_MARGIN`` remains an OPTIONAL additional fudge (default 0) applied
+    to the target basis; the yield model now carries the load.
+    """
     target = settings.p3_auto_correlation_target or 0.0
     margin = settings.p3_enrichment_over_provision_margin
     total = settings.p3_total_alarms
-    emitted_fraction = target / (1.0 - margin) if margin < 1.0 else target
-    plan.target_emitted_fraction = emitted_fraction
-    a = round(emitted_fraction * total)
-    plan.target_aligned_alarms = a
-    tol_alarms = round(settings.p3_target_tolerance * total)
+    # Target basis is CORRELATED alarms. The over-provision margin (default 0, subsumed) may still
+    # inflate the correlated target for ops whose enrichment differs materially.
+    correlated_fraction = target / (1.0 - margin) if margin < 1.0 else target
+    needed_correlated = round(correlated_fraction * total)
+    plan.target_correlated_alarms = needed_correlated
 
     counts: dict[str, int] = {p.pattern_id: 0 for p in eligible}
-    if a <= 0 or not eligible:
+    if needed_correlated <= 0 or not eligible:
+        plan.target_aligned_alarms = 0
+        plan.target_emitted_fraction = 0.0
         return counts
 
-    # Greedy round-robin over eligible patterns, each cascade contributing its own L_P, stopping at
-    # the whole-cascade count whose accumulated aligned-alarm total lands closest to A within TOL.
-    accumulated = 0
+    # Greedy round-robin: each cascade contributes its pattern's y_L expected-correlated alarms;
+    # stop once the accumulated expected-correlated reaches the needed count (± tolerance handled by
+    # the fractional yield). Patterns whose derived yield is 0 (can't fire) are skipped for sizing.
+    tol_correlated = settings.p3_target_tolerance * total
+    accumulated_correlated = 0.0
+    accumulated_emitted = 0
     idx = 0
     guard = 0
-    max_iters = 1_000_000
+    max_iters = 10_000_000
+    sizeable = [p for p in eligible if plan.correlated_per_cascade[p.pattern_id] > 0.0]
+    if not sizeable:
+        plan.target_aligned_alarms = 0
+        plan.target_emitted_fraction = 0.0
+        return counts
     while guard < max_iters:
         guard += 1
-        pattern = eligible[idx % len(eligible)]
+        pattern = sizeable[idx % len(sizeable)]
         idx += 1
+        y_l = plan.correlated_per_cascade[pattern.pattern_id]
         length = plan.cascade_lengths[pattern.pattern_id]
-        prospective = accumulated + length
-        if prospective > a + tol_alarms and accumulated >= max(0, a - tol_alarms):
+        prospective = accumulated_correlated + y_l
+        # Stop when adding another cascade would overshoot beyond tolerance, provided we are already
+        # within the lower tolerance band (so we don't stop short of the target).
+        if prospective > needed_correlated + tol_correlated and accumulated_correlated >= max(
+            0.0, needed_correlated - tol_correlated
+        ):
             break
         counts[pattern.pattern_id] += 1
-        accumulated = prospective
-        if accumulated >= a:
+        accumulated_correlated = prospective
+        accumulated_emitted += length
+        if accumulated_correlated >= needed_correlated:
             break
+
+    # These are the SIZING-target aggregates (pre-distribution). The realized emitted/correlated
+    # counts are recomputed from the actually-placed entries after distribution (caps may clip
+    # them, in which case the shortfall path records it). See plan_network_wide.
+    plan.target_aligned_alarms = accumulated_emitted
+    plan.expected_correlated_alarms = round(accumulated_correlated)
+    plan.target_emitted_fraction = accumulated_emitted / total if total else 0.0
     return counts
 
 
@@ -253,6 +331,21 @@ def plan_network_wide(
         entries, shortfall = _distribute(settings, pattern, n_p, comp, rng)
         plan.entries.extend(entries)
         total_shortfall += shortfall
+
+    # Recompute the REALIZED emitted-aligned + expected-correlated aggregates from the entries that
+    # were actually placed (caps may have clipped the sizing target -> shortfall). This keeps
+    # target_aligned_alarms/expected_correlated_alarms honest under shortfall (AC 55): the summary
+    # never over-reports correlated alarms the plan could not actually place.
+    placed_emitted = 0
+    placed_correlated = 0.0
+    for entry in plan.entries:
+        length = plan.cascade_lengths.get(entry.pattern_id, 0)
+        placed_emitted += length
+        placed_correlated += plan.correlated_per_cascade.get(entry.pattern_id, 0.0)
+    plan.target_aligned_alarms = placed_emitted
+    plan.expected_correlated_alarms = round(placed_correlated)
+    total = settings.p3_total_alarms
+    plan.target_emitted_fraction = placed_emitted / total if total else 0.0
 
     plan.shortfall_cascades = total_shortfall
     if total_shortfall > 0:
