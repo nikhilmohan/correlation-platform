@@ -4,17 +4,18 @@ import type { Page, Route, Request } from '@playwright/test';
  * CONTRACT BOUNDARY MOCKS for the not-yet-built P2/P3 collaborators + Enrichment chatter.
  *
  * ── Real-vs-mocked boundary (per the incremental-E2E gate decision) ──────────────────────────
- *  REAL in `E2E_MODE=real`:  Topology, Trail Builder, Codebook, Knowledge — the P1 read-API
- *                            stack in docker-compose. The browser reaches them SAME-ORIGIN via
- *                            the web-ui nginx reverse proxy: the SPA base URLs are the path
- *                            prefixes /api/topology, /api/trail-builder, /api/codebook,
- *                            /api/knowledge (set in compose), which nginx forwards to the real
- *                            backends by docker service name. No cross-origin call, no CORS.
- *  CONTRACT-MOCKED:          Pattern Manager, Correlation Engine, Alarm Manager, Noise Filter
- *                            (P2/P3) and Enrichment chatter — these services are not in the P1
- *                            compose yet, so they are stubbed here at the HTTP boundary, pointed
- *                            at the sentinel origins below (distinct from the /api/* same-origin
- *                            proxy prefixes, so the real P1 paths are never intercepted).
+ *  REAL in `E2E_MODE=real`:  Topology, Trail Builder, Codebook, Knowledge (P1) AND Pattern
+ *                            Manager (P2) — the read/approve API stack in docker-compose. The
+ *                            browser reaches them SAME-ORIGIN via the web-ui nginx reverse proxy:
+ *                            the SPA base URLs are the path prefixes /api/topology,
+ *                            /api/trail-builder, /api/codebook, /api/knowledge,
+ *                            /api/pattern-manager (set in compose), which nginx forwards to the
+ *                            real backends by docker service name. No cross-origin call, no CORS.
+ *  CONTRACT-MOCKED:          Correlation Engine, Alarm Manager, Noise Filter (P3) and Enrichment
+ *                            chatter — these services are not in the compose stack yet, so they
+ *                            are stubbed here at the HTTP boundary, pointed at the sentinel origins
+ *                            below (distinct from the /api/* same-origin proxy prefixes, so the
+ *                            real backend paths are never intercepted).
  *
  * The response BODIES below are shaped 1:1 to the consumer view-models in
  * `src/app/api/models.ts`, which the app's typed clients build against each producer's PUBLISHED
@@ -56,7 +57,6 @@ export const P1_SAME_ORIGIN_BASE_URLS = {
 
 /** Sentinel origins the env-overlay points the mocked services at; intercepted below. */
 export const MOCK_ORIGINS = {
-  patternManager: 'http://e2e-mock.pattern-manager',
   correlationEngine: 'http://e2e-mock.correlation-engine',
   alarmManager: 'http://e2e-mock.alarm-manager',
   noiseFilter: 'http://e2e-mock.noise-filter',
@@ -119,33 +119,6 @@ const ALARM_DETAIL: Record<string, unknown> = Object.fromEntries(
   ]),
 );
 
-// ── Pattern Manager (frozen PM OpenAPI — PatternView page; approve/edit) ──────────────────────
-const PATTERNS = [
-  {
-    patternId: 'PAT-3',
-    trailId: 'TR-7',
-    sequence: [
-      { alarmType: 'LOS', optional: false },
-      { alarmType: 'LinkDown', optional: false },
-      { alarmType: 'AdjDown', optional: true },
-    ],
-    rootCauseAlarmType: 'LOS',
-    support: 0.12,
-    confidence: 0.9,
-    lift: 4.2,
-    timing: { medianIatMs: 1200 },
-    sessionWindow: { windowMs: 30000, type: 'session-gap' },
-    codebookMatchId: 'CB-2',
-    structurallyValidated: true,
-    structuralValidationReason: null,
-    instanceCount: 18,
-    supportingInstances: [{ id: 'inst-1' }],
-    lifecycle: 'draft',
-    domain: 'core-ip',
-    createdAt: '2026-05-01T00:00:00Z',
-  },
-];
-
 // ── Noise Filter (frozen NF OpenAPI — RunStatsRow page) ───────────────────────────────────────
 const RUN_STATS = [
   { runId: 'RUN-9', runTimestamp: '2026-05-10T00:00:00Z', trailId: 'TR-7', snapshotId: 'current', domain: 'core-ip', windowStart: '2026-05-10T00:00:00Z', windowEnd: '2026-05-10T00:10:00Z', eps: 0.5, minSamples: 3, windowSize: 60, algorithm: 'dbscan', alarmsIn: 240, clustersFormed: 12, alarmsKept: 180, alarmsDropped: 60, noiseRatio: 0.25 },
@@ -154,20 +127,17 @@ const RUN_STATS = [
 
 const ENRICHMENT_CHATTER = { source: 'nms-alpha', chatterList: [{ managedObjectId: 'Interface:e1-12', eventType: 'linkDown' }] };
 
-/** A persisted approval, so a "subsequent read" reflects the approved lifecycle (AC 39). */
-let approved = false;
-
 /**
  * Install the contract mocks. No-op in `mock` mode (the in-app interceptor already serves these).
  * In `real` mode this:
- *   1. overrides env.js so the SPA points the P2/P3 + chatter base URLs at the sentinel origins;
- *   2. intercepts those origins with contract-shaped responses.
- * P1 base URLs (topology/trail-builder/codebook/knowledge) are NOT overridden — they keep
- * resolving to the real compose stack.
+ *   1. overrides env.js so the SPA points the REAL Pattern Manager at its same-origin nginx proxy
+ *      (/api/pattern-manager) and the still-unbuilt P3 collaborators + chatter at sentinel origins;
+ *   2. intercepts those sentinel origins with contract-shaped responses.
+ * Pattern Manager is now a REAL P2 backend in compose, so its mock has been dropped: the browser
+ * hits it end-to-end via the proxy. P1 base URLs (topology/trail-builder/codebook/knowledge) are
+ * likewise NOT overridden — they keep resolving to the real compose stack.
  */
 export async function installContractMocks(p: Page): Promise<void> {
-  approved = false;
-
   // (1) Re-assert the REAL P1 same-origin proxy base URLs and re-point ONLY the not-yet-built
   // collaborators at the sentinel mock origins. This route FULFILLS /env.js with our own script,
   // so the container-generated window.__ACP_ENV__ has not run yet — we therefore set the P1 URLs
@@ -176,7 +146,8 @@ export async function installContractMocks(p: Page): Promise<void> {
   await p.route('**/env.js', async (route) => {
     const overlay = {
       ...P1_SAME_ORIGIN_BASE_URLS,
-      PATTERN_MANAGER_API_BASE_URL: MOCK_ORIGINS.patternManager,
+      // Pattern Manager is REAL in real mode — reach it same-origin via the nginx proxy.
+      PATTERN_MANAGER_API_BASE_URL: '/api/pattern-manager',
       CORRELATION_ENGINE_API_BASE_URL: MOCK_ORIGINS.correlationEngine,
       ALARM_MANAGER_API_BASE_URL: MOCK_ORIGINS.alarmManager,
       NOISE_FILTER_API_BASE_URL: MOCK_ORIGINS.noiseFilter,
@@ -191,10 +162,10 @@ export async function installContractMocks(p: Page): Promise<void> {
     await route.fulfill({ status: 200, contentType: 'application/javascript', body });
   });
 
-  // (2) Intercept the mocked origins with contract-shaped responses.
+  // (2) Intercept the still-mocked P3 origins with contract-shaped responses. Pattern Manager is
+  // NOT intercepted — it is a real backend reached via the same-origin proxy.
   await mockCorrelationEngine(p);
   await mockAlarmManager(p);
-  await mockPatternManager(p);
   await mockNoiseFilter(p);
   await mockEnrichment(p);
 }
@@ -223,29 +194,6 @@ async function mockAlarmManager(p: Page): Promise<void> {
     if (path.endsWith('/alarms')) {
       const state = url.searchParams.get('state');
       const items = state ? ALARMS.filter((a) => a.lifecycleState === state) : ALARMS;
-      return json(route, page(items));
-    }
-    return json(route, {}, 404);
-  });
-}
-
-async function mockPatternManager(p: Page): Promise<void> {
-  await p.route(`${MOCK_ORIGINS.patternManager}/**`, (route: Route, req: Request) => {
-    const url = new URL(req.url());
-    const path = url.pathname;
-    if (path.endsWith('/approve') && req.method() === 'POST') {
-      approved = true;
-      return json(route, { ...PATTERNS[0], lifecycle: 'approved' });
-    }
-    if (/\/patterns\/[^/]+$/.test(path) && req.method() === 'PATCH') {
-      return json(route, { ...PATTERNS[0] });
-    }
-    if (path.endsWith('/patterns')) {
-      const lifecycle = url.searchParams.get('lifecycle');
-      // After approval, PAT-3 reads back as approved on a subsequent fetch (AC 39).
-      const items = PATTERNS.map((pat) => (approved ? { ...pat, lifecycle: 'approved' } : pat)).filter(
-        (pat) => !lifecycle || pat.lifecycle === lifecycle,
-      );
       return json(route, page(items));
     }
     return json(route, {}, 404);

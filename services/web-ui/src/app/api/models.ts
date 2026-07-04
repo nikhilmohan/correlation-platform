@@ -129,22 +129,75 @@ export interface SessionWindow {
   windowMs: number;
   type: string;
 }
+/**
+ * Inter-arrival / span timing for a pattern. All fields optional numerics — the Pattern Store
+ * populates whichever it computed. Types-only widening of the wire shape; no contract change.
+ */
+export interface PatternTiming {
+  timeframeMs?: number;
+  medianInterArrivalMs?: number;
+  maxInterArrivalMs?: number;
+  stddevInterArrivalMs?: number;
+}
+/**
+ * One supporting-instance / provenance reference behind a pattern — a window + snapshot handle.
+ * These are the source-window / snapshot provenance handles (demoted to a sub-section now that
+ * the store serves real member alarms on `PatternView.sampleAlarms`). Extra occurrence keys are
+ * preserved via the index signature.
+ */
+export interface SupportingInstance {
+  sourceWindowId?: string;
+  snapshotId?: string;
+  occurrence?: { anchorScenarioId?: string | null; [k: string]: unknown };
+}
+/**
+ * A concrete member alarm supporting a pattern — the REAL per-alarm evidence now served by the
+ * Pattern Store (Pattern Manager OpenAPI `SampleAlarmView`). Bounded by K (miner-side, ~10) and
+ * may be absent/empty for older patterns that predate the feature.
+ */
+export interface SampleAlarmView {
+  alarmId: string;
+  alarmType: string;
+  /** ISO-8601 date-time string. */
+  raisedAt: string;
+  managedObjectId: string;
+  perceivedSeverity: string;
+}
 export interface PatternView {
   patternId: string;
+  /**
+   * Readable pattern name served by the Pattern Store, of the form
+   * `"<label> Cascade · <short8>"` (e.g. "IP Link Down Cascade · 02007ff1"). The name is owned +
+   * persisted by Pattern Manager; the UI renders it verbatim. Optional for backward-compat with
+   * older responses / mock fixtures that predate the field.
+   */
+  patternName?: string;
   trailId: string;
   sequence: SequenceElement[];
   rootCauseAlarmType: string;
   support: number;
   confidence: number;
   lift: number;
-  timing?: Readonly<Record<string, unknown>>;
+  timing?: PatternTiming;
   sessionWindow?: SessionWindow;
   codebookMatchId?: string | null;
   reconcileStatus?: string;
   structurallyValidated?: boolean;
   structuralValidationReason?: string | null;
   instanceCount: number;
-  supportingInstances?: unknown[];
+  /**
+   * Pattern impact / popularity metrics (Pattern Manager PR #360). `occurrenceCount` = times the
+   * signature was observed (mined); `trailCount` = number of DISTINCT trails the signature spans
+   * (the cross-trail significance signal); `firstSeen`/`lastSeen` = ISO-8601 observation span.
+   * The producer serves these always-present now; kept optional for backward-compat with older
+   * responses that predate the feature (the UI degrades gracefully — no NaN/undefined shown).
+   */
+  occurrenceCount?: number;
+  trailCount?: number;
+  firstSeen?: string;
+  lastSeen?: string;
+  supportingInstances?: SupportingInstance[];
+  sampleAlarms?: SampleAlarmView[];
   lifecycle: PatternLifecycle;
   domain?: string | null;
   createdAt?: string;
@@ -256,6 +309,9 @@ export interface RunStatsRow {
   alarmsDropped: number;
   noiseRatio: number;
   stormReductionRatio?: number;
+  stormMaxClusterSize?: number;
+  retentionVsOracle?: number | null;
+  hopFeatureEnabled?: boolean;
 }
 export type RunStatsPage = Page<RunStatsRow>;
 export interface ObservedChatterSignature {
