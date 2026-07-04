@@ -132,9 +132,11 @@ def _correlated_per_cascade(settings: Settings, length: int) -> float:
 
     Two principled estimators, selected by config (no hard-coded literals in code — all from env):
 
-    * **Flat yield** (default, ``P3_CASCADE_YIELD > 0``): ``y_L = yield * L``. The default 0.61
-      reproduces the live measurement directly, so the controller sizes the right number of
-      cascades out of the box.
+    * **Flat yield** (default, ``P3_CASCADE_YIELD > 0``): ``y_L = yield * L``. The default 0.66 is
+      the MEASURED ACTUAL correlated-per-emitted-aligned yield on this platform (an initial 0.61
+      bench read left TARGET=0.6 realizing ~0.653; back-solving realized = emitted_fraction *
+      actual_yield gives ~0.66), so the controller sizes the right number of cascades out of the box
+      and TARGET centers on the realized rate.
     * **Derived** (``P3_CASCADE_YIELD <= 0``): survivors after enrichment trim, bounded below by
       the CE firing floor. ``survived = L - expected_enrichment_trim``; a cascade only produces
       correlated members if ``survived >= N - tolerance`` (else the partial match never fires and it

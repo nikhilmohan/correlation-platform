@@ -103,11 +103,11 @@ def _yield_settings(tmp_path: Path, **extra: str):
 
 
 def test_flat_yield_scales_correlated_per_cascade_with_length(tmp_path: Path) -> None:
-    """Default flat yield (0.61): expected correlated per cascade == yield * L (bounded [1, L])."""
-    s = _yield_settings(tmp_path)  # P3_CASCADE_YIELD default 0.61
-    assert s.p3_cascade_yield == 0.61
-    assert target_controller._correlated_per_cascade(s, 5) == 0.61 * 5
-    assert target_controller._correlated_per_cascade(s, 2) == 0.61 * 2
+    """Default flat yield (0.66): expected correlated per cascade == yield * L (bounded [1, L])."""
+    s = _yield_settings(tmp_path)  # P3_CASCADE_YIELD default 0.66
+    assert s.p3_cascade_yield == 0.66
+    assert target_controller._correlated_per_cascade(s, 5) == 0.66 * 5
+    assert target_controller._correlated_per_cascade(s, 2) == 0.66 * 2
     # Never below 1 (a cascade that fires yields at least one correlated member) nor above L.
     assert target_controller._correlated_per_cascade(s, 1) == 1.0
     assert target_controller._correlated_per_cascade(s, 3) <= 3.0
@@ -150,10 +150,10 @@ def test_count_math_targets_correlated_yield_not_emitted_length(tmp_path: Path) 
     """The planned aligned-alarm count == needed_correlated / yield (within rounding), and the
     plan's EXPECTED correlated fraction is within tolerance of TARGET — proving the math now
     targets CORRELATED yield, not emitted length."""
-    s = _yield_settings(tmp_path)  # TARGET 0.6, T 300, yield 0.61
+    s = _yield_settings(tmp_path)  # TARGET 0.6, T 300, yield 0.66
     total = s.p3_total_alarms  # 300
     target = s.p3_auto_correlation_target  # 0.6
-    yield_f = s.p3_cascade_yield  # 0.61
+    yield_f = s.p3_cascade_yield  # 0.66
     length = 4
     needed_correlated = round(target * total)  # 180
 
