@@ -4,6 +4,7 @@ import com.acp.patternmanager.config.SampleAlarmProperties;
 import com.acp.patternmanager.enrichment.EnrichedPattern;
 import com.acp.patternmanager.enrichment.SampleAlarm;
 import com.acp.patternmanager.enrichment.SupportingInstance;
+import com.acp.patternmanager.naming.PatternNaming;
 import com.acp.patternmanager.store.entity.LifecycleTransitionEntity;
 import com.acp.patternmanager.store.entity.PatternEntity;
 import com.acp.patternmanager.store.entity.ProcessedEventEntity;
@@ -113,6 +114,11 @@ public class PatternStoreService {
         entity.setPatternId(patternId);
         entity.setTrailId(enriched.trailId());
         entity.setRootCauseAlarmType(enriched.rootCauseAlarmType());
+        // Compute + persist the deterministic readable name at head-create time. Set once here on
+        // BOTH write paths (consolidateAnchored + persistUnexplained route through createDraftRow);
+        // the name is stable per signature so subsequent folds deliberately leave it untouched.
+        entity.setPatternName(
+                PatternNaming.patternName(enriched.rootCauseAlarmType(), patternId.toString()));
         entity.setSupport(enriched.support());
         entity.setConfidence(enriched.confidence());
         entity.setLift(enriched.lift());

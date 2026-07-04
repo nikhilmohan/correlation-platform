@@ -42,6 +42,12 @@ class SignatureFoldOpenApiContractTest {
                 .contains("total number of individual alarm instances")
                 .contains("occurrenceCount");
 
+        // [PATTERN-NAME] The Pattern Manager-owned readable name is exposed as a string.
+        JsonNode patternName = props.get("patternName");
+        assertThat(patternName).as("PatternView must expose patternName").isNotNull();
+        assertThat(patternName.path("type").asText()).isEqualTo("string");
+        assertThat(patternName.path("description").asText()).contains("Cascade");
+
         // Existing fields still present (no removal/rename).
         for (String kept : new String[] {"patternId", "trailId", "sequence", "rootCauseAlarmType",
                 "support", "confidence", "lift", "sessionWindow", "reconcileStatus",

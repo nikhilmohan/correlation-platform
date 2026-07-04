@@ -92,6 +92,29 @@ class PatternConsolidationServiceIT {
         assertThat(contributingEventRepository.countByPatternId(o1.patternId())).isEqualTo(2);
     }
 
+    // [PATTERN-NAME] An anchored pattern head persists the deterministic readable pattern_name at
+    // create (Pattern Manager owns + persists it). rootCauseAlarmType "LOS" -> "Loss of Signal
+    // Cascade · <short8>"; the name is stable across the later fold.
+    @Test
+    void anchoredPatternPersistsDeterministicPatternName() {
+        String anchor = "SC-NAME-" + UUID.randomUUID();
+        EnrichedPattern e1 = anchored(anchor, "snap-1", "cb-1", 10, 0.4, "w1");
+
+        UUID pid = consolidationService.consolidate(e1, id(), "pattern-miner").patternId();
+
+        PatternEntity row = patternRepository.findById(pid).orElseThrow();
+        String expected =
+                com.acp.patternmanager.naming.PatternNaming.patternName("LOS", pid.toString());
+        assertThat(row.getPatternName()).isEqualTo(expected);
+        assertThat(row.getPatternName()).startsWith("Loss of Signal Cascade · ");
+
+        // Fold another contributor -> the stable name is unchanged.
+        EnrichedPattern e2 = anchored(anchor, "snap-1", "cb-1", 30, 0.6, "w2");
+        consolidationService.consolidate(e2, id(), "pattern-miner");
+        assertThat(patternRepository.findById(pid).orElseThrow().getPatternName())
+                .isEqualTo(expected);
+    }
+
     // AC-C3: re-delivering the SAME eventId does NOT double-count (belt-and-braces guard bypasses the
     // processed_event gate by calling consolidate directly with the same eventId again).
     @Test

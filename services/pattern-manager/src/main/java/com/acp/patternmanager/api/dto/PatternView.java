@@ -12,6 +12,9 @@ import java.util.List;
  * vocabulary token (P2-GAP-04), and the derived {@code sessionWindow}.
  *
  * @param patternId stable pattern id
+ * @param patternName deterministic, readable pattern name owned + persisted by the Pattern Manager
+ *     ({@code "<label> Cascade · <short8-of-patternId>"}); consumers render this instead of deriving
+ *     a name client-side
  * @param trailId the trail this pattern was mined from (from {@code PatternMinedEvent.trailId})
  * @param sequence ordered sequence elements ({@code alarmType} + {@code optional})
  * @param rootCauseAlarmType RCA-designated root cause (alarmType vocab token)
@@ -42,6 +45,10 @@ import java.util.List;
  */
 public record PatternView(
         String patternId,
+        @Schema(description = "deterministic, readable pattern name owned + persisted by the Pattern "
+                + "Manager (\"<label> Cascade · <short8-of-patternId>\", e.g. \"IP Link Down Cascade "
+                + "· 02007ff1\"); consumers render this instead of deriving a name client-side")
+        String patternName,
         String trailId,
         List<SequenceElementView> sequence,
         String rootCauseAlarmType,

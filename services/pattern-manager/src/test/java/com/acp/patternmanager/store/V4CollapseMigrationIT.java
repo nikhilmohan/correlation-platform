@@ -170,14 +170,16 @@ class V4CollapseMigrationIT {
 
     private void insertLegacyPattern(Connection c, UUID pid, String trailId, String snap, int occ,
             int inst, double support, OffsetDateTime createdAt, OffsetDateTime updatedAt) throws Exception {
+        // pattern_name is NOT NULL after V6 (already applied at Flyway startup); supply a placeholder
+        // for this legacy-row seeding (its exact value is irrelevant to the V4 collapse assertions).
         try (PreparedStatement ps = c.prepareStatement("""
                 INSERT INTO pattern.pattern
-                    (pattern_id, trail_id, root_cause_alarm_type, support, confidence, lift, timing,
-                     reconcile_status, structurally_validated, session_window_ms, session_window_type,
-                     instance_count, occurrence_count, trail_count, first_seen, last_seen, lifecycle,
-                     domain, snapshot_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, '{}'::jsonb, 'unexplained', true, 20000, 'gap-based',
-                        ?, ?, 1, ?, ?, 'draft', ?, ?, ?, ?)
+                    (pattern_id, trail_id, root_cause_alarm_type, pattern_name, support, confidence,
+                     lift, timing, reconcile_status, structurally_validated, session_window_ms,
+                     session_window_type, instance_count, occurrence_count, trail_count, first_seen,
+                     last_seen, lifecycle, domain, snapshot_id, created_at, updated_at)
+                VALUES (?, ?, ?, 'seed Cascade · seeded01', ?, ?, ?, '{}'::jsonb, 'unexplained', true,
+                        20000, 'gap-based', ?, ?, 1, ?, ?, 'draft', ?, ?, ?, ?)
                 """)) {
             ps.setObject(1, pid);
             ps.setString(2, trailId);
