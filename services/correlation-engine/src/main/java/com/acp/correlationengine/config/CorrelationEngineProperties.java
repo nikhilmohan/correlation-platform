@@ -22,6 +22,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param trailBuilderMode {@code mock} | {@code real} for the Trail Builder integration point;
  *     falls back to {@code integrationMode} when blank.
  * @param trailBuilderMaxRetries bounded per-trail member-fetch retry count (AC41).
+ * @param topologyBaseUrl base URL of the Topology Service read API (startup current-snapshot
+ *     discovery via {@code GET /topology/snapshots} — an existing Topology read; no contract change).
+ * @param topologyMode {@code mock} | {@code real} for the Topology integration point; falls back to
+ *     {@code integrationMode} when blank.
  * @param topics the in/out Kafka topic names (frozen contract).
  */
 @ConfigurationProperties(prefix = "correlation-engine")
@@ -37,6 +41,8 @@ public record CorrelationEngineProperties(
         String trailBuilderBaseUrl,
         String trailBuilderMode,
         int trailBuilderMaxRetries,
+        String topologyBaseUrl,
+        String topologyMode,
         Topics topics) {
 
     public CorrelationEngineProperties {
@@ -69,6 +75,11 @@ public record CorrelationEngineProperties(
 
     public boolean isRcaEvalOn() {
         return "on".equalsIgnoreCase(rcaEvalMode);
+    }
+
+    /** @return the effective Topology integration mode: {@code topologyMode} or, if blank, {@code integrationMode}. */
+    public String effectiveTopologyMode() {
+        return (topologyMode == null || topologyMode.isBlank()) ? integrationMode : topologyMode;
     }
 
     /** The frozen in/out topic names (contract). */

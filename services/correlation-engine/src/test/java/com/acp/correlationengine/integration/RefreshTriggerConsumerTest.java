@@ -31,7 +31,7 @@ class RefreshTriggerConsumerTest {
 
     private final EventCodec codec = new EventCodec();
     private final CorrelationEngineProperties props = new CorrelationEngineProperties(
-            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", "u", "mock", 2, null);
+            "mock", "u", "u", "u", "core-ip", 1000, 1000, "off", "u", "mock", 2, "u", "mock", null);
 
     // ---- codebook.generated ------------------------------------------------
 

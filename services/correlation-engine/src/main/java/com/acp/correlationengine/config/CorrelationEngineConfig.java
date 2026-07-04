@@ -28,6 +28,9 @@ import com.acp.correlationengine.pattern.PatternManagerClient;
 import com.acp.correlationengine.pattern.PatternRefreshService;
 import com.acp.correlationengine.pattern.PatternStore;
 import com.acp.correlationengine.pattern.RestPatternManagerClient;
+import com.acp.correlationengine.generalize.StartupSnapshotDiscovery;
+import com.acp.correlationengine.topology.RestTopologyClient;
+import com.acp.correlationengine.topology.TopologyClient;
 import com.acp.eventmodel.EventCodec;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
@@ -98,6 +101,15 @@ public class CorrelationEngineConfig {
                 props.trailBuilderMaxRetries(), metrics);
     }
 
+    @Bean
+    public TopologyClient topologyClient(RestClient.Builder builder,
+            CorrelationEngineProperties props) {
+        // Config-switchable mock/real by base URL only — same code path. In mock mode the base URL
+        // points at a stub generated from Topology's published openapi.json. Used solely for the
+        // startup GET /topology/snapshots current-snapshot discovery (an existing Topology read).
+        return new RestTopologyClient(builder.baseUrl(props.topologyBaseUrl()).build());
+    }
+
     // --- Pattern generalization: compatibility index ------------------------------------------
 
     @Bean
@@ -117,6 +129,14 @@ public class CorrelationEngineConfig {
             CorrelationEngineProperties props) {
         return new CompatibilityIndexService(patternStore, trailBuilder, resolver, evaluator,
                 metrics, props.knowledgeDomain());
+    }
+
+    @Bean
+    public StartupSnapshotDiscovery startupSnapshotDiscovery(TopologyClient topologyClient,
+            PatternManagerClient patternManagerClient, CompatibilityIndexService compatibilityIndex,
+            CorrelationEngineProperties props) {
+        return new StartupSnapshotDiscovery(topologyClient, patternManagerClient, compatibilityIndex,
+                props.knowledgeDomain());
     }
 
     // --- Reference stores + refresh services -------------------------------------------------

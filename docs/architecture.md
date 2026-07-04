@@ -185,6 +185,15 @@ This requirement is captured per service in each `services/<svc>/spec.md` (Contr
 and detailed in `design.md` (API contracts + integration points), and is checked by the
 `code-review` and `integration-test` skills.
 
+> **Correlation Engine startup snapshot discovery (existing Topology read; no contract change).**
+> On startup the Correlation Engine discovers the current topology snapshot to build its
+> pattern-compatibility index immediately, rather than waiting for a live `trails.built` event a
+> running system already consumed. It reads the **existing** Topology Service API
+> `GET /topology/snapshots` (picks `status == "current"` for the `core-ip` domain) via a
+> config-switchable (`mock|real`, `TOPOLOGY_BASE_URL`/`TOPOLOGY_MODE`) client, with a fallback to the
+> approved patterns' `PatternView.supportingInstances[].snapshotId` if Topology is unreachable. This
+> is a read of an already-published API — no new topic/payload/field, no event-model change.
+
 ## Topology snapshot file & ingestion API
 Topology is loaded by **file upload to an API**, not by a Kafka event:
 

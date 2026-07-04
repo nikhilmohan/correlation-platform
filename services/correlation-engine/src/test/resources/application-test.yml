@@ -13,6 +13,8 @@ correlation-engine:
   pattern-manager-base-url: http://localhost:0
   codebook-generator-base-url: http://localhost:0
   knowledge-base-url: http://localhost:0
+  trail-builder-base-url: http://localhost:0
+  topology-base-url: http://localhost:0
   knowledge-domain: core-ip
   knowledge-refresh-ms: 60000
   expiry-tick-ms: 60000

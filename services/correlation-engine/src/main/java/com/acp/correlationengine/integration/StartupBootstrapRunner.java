@@ -1,6 +1,6 @@
 package com.acp.correlationengine.integration;
 
-import com.acp.correlationengine.generalize.CompatibilityIndexService;
+import com.acp.correlationengine.generalize.StartupSnapshotDiscovery;
 import com.acp.correlationengine.knowledge.KnowledgeParamsProvider;
 import com.acp.correlationengine.pattern.PatternRefreshService;
 import org.slf4j.Logger;
@@ -13,6 +13,12 @@ import org.springframework.context.event.EventListener;
  * Knowledge match-params. Readiness gates on both succeeding (the engine never invents thresholds —
  * no hard-coded defaults, AC21). Failures are logged; the readiness indicator stays down until both
  * succeed. Runs after the context is ready so the HTTP/Kafka layers are up.
+ *
+ * <p>It then DISCOVERS the current topology snapshot (via {@link StartupSnapshotDiscovery}) and builds
+ * the compatibility index against it — so the index is populated immediately on restart, rather than
+ * staying empty until a live {@code trails.built} event arrives (which, in a running system, was
+ * already consumed and committed long ago). The {@code trails.built} consumer still rebuilds on any
+ * NEW trail catalog thereafter.
  */
 public class StartupBootstrapRunner {
 
@@ -20,13 +26,13 @@ public class StartupBootstrapRunner {
 
     private final PatternRefreshService patternRefresh;
     private final KnowledgeParamsProvider knowledgeParams;
-    private final CompatibilityIndexService compatibilityIndex;
+    private final StartupSnapshotDiscovery snapshotDiscovery;
 
     public StartupBootstrapRunner(PatternRefreshService patternRefresh,
-            KnowledgeParamsProvider knowledgeParams, CompatibilityIndexService compatibilityIndex) {
+            KnowledgeParamsProvider knowledgeParams, StartupSnapshotDiscovery snapshotDiscovery) {
         this.patternRefresh = patternRefresh;
         this.knowledgeParams = knowledgeParams;
-        this.compatibilityIndex = compatibilityIndex;
+        this.snapshotDiscovery = snapshotDiscovery;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -34,9 +40,10 @@ public class StartupBootstrapRunner {
         try {
             knowledgeParams.bootstrap();
             patternRefresh.bootstrap();
-            // Best-effort full compatibility-index build. No-ops until a topology snapshot is known
-            // (learned from a trails.built event); the trails.built consumer rebuilds thereafter.
-            compatibilityIndex.rebuildAll(null, null);
+            // Discover the current topology snapshot and build the compatibility index against it
+            // NOW (Topology GET /topology/snapshots, with an approved-pattern fallback) instead of
+            // waiting for a live trails.built event that a running system already consumed.
+            snapshotDiscovery.discoverAndBuild();
             log.info("Correlation Engine bootstrap complete (Knowledge params + approved patterns "
                     + "+ compatibility index)");
         } catch (RuntimeException e) {

@@ -5,6 +5,7 @@ import com.acp.correlationengine.correlate.AlarmStatusEmitter;
 import com.acp.correlationengine.correlate.CorrelationEngine;
 import com.acp.correlationengine.correlate.CorrelationResultEmitter;
 import com.acp.correlationengine.generalize.CompatibilityIndexService;
+import com.acp.correlationengine.generalize.StartupSnapshotDiscovery;
 import com.acp.correlationengine.integration.AlarmIngestConsumer;
 import com.acp.correlationengine.integration.CodebookConsumer;
 import com.acp.correlationengine.integration.DlqProducer;
@@ -89,7 +90,7 @@ public class KafkaConfig {
 
     @Bean
     public StartupBootstrapRunner startupBootstrapRunner(PatternRefreshService patternRefresh,
-            KnowledgeParamsProvider knowledgeParams, CompatibilityIndexService indexService) {
-        return new StartupBootstrapRunner(patternRefresh, knowledgeParams, indexService);
+            KnowledgeParamsProvider knowledgeParams, StartupSnapshotDiscovery snapshotDiscovery) {
+        return new StartupBootstrapRunner(patternRefresh, knowledgeParams, snapshotDiscovery);
     }
 }

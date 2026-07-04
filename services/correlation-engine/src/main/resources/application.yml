@@ -77,6 +77,11 @@ correlation-engine:
   trail-builder-base-url: ${TRAIL_BUILDER_BASE_URL:http://trail-builder:8080}
   trail-builder-mode: ${TRAIL_BUILDER_MODE:}
   trail-builder-max-retries: ${TRAIL_BUILDER_MAX_RETRIES:2}
+  # Topology integration — startup current-snapshot discovery (GET /topology/snapshots, an existing
+  # Topology read). mock|real; base URL never hard-coded. Builds the compatibility index at boot so
+  # it is populated without waiting for a live trails.built event a running system already consumed.
+  topology-base-url: ${TOPOLOGY_BASE_URL:http://topology:8080}
+  topology-mode: ${TOPOLOGY_MODE:}
   topics:
     alarms-persisted-live: ${TOPIC_ALARMS_PERSISTED_LIVE:alarms.persisted.live}
     patterns-approved: ${TOPIC_PATTERNS_APPROVED:patterns.approved}

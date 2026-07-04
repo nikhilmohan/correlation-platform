@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Maps the Pattern Manager {@code PatternPage} envelope ({@code {items[], total, limit, offset}})
@@ -33,6 +34,39 @@ public final class PatternViewMapper {
             out.add(fromView(view));
         }
         return out;
+    }
+
+    /**
+     * @return the first topology snapshot id derivable from a {@code PatternPage} envelope — read off
+     *     {@code PatternView.supportingInstances[].snapshotId} (the top-level {@code PatternView
+     *     .snapshotId} is null in practice; the snapshot lives on the supporting instances). Used as
+     *     the startup snapshot-discovery FALLBACK when the Topology Service is unreachable.
+     */
+    public static Optional<String> snapshotIdFromPage(JsonNode page) {
+        if (page == null) {
+            return Optional.empty();
+        }
+        JsonNode items = page.get("items");
+        if (items == null || !items.isArray()) {
+            return Optional.empty();
+        }
+        for (JsonNode view : items) {
+            // Prefer the top-level snapshotId if a future read model ever populates it.
+            String top = text(view, "snapshotId");
+            if (top != null && !top.isBlank()) {
+                return Optional.of(top);
+            }
+            JsonNode instances = view.get("supportingInstances");
+            if (instances != null && instances.isArray()) {
+                for (JsonNode inst : instances) {
+                    String snap = text(inst, "snapshotId");
+                    if (snap != null && !snap.isBlank()) {
+                        return Optional.of(snap);
+                    }
+                }
+            }
+        }
+        return Optional.empty();
     }
 
     /** @return one {@link PatternRef} from a single {@code PatternView} node. */

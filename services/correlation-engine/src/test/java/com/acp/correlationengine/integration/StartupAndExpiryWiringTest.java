@@ -9,7 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.acp.correlationengine.correlate.CorrelationEngine;
-import com.acp.correlationengine.generalize.CompatibilityIndexService;
+import com.acp.correlationengine.generalize.StartupSnapshotDiscovery;
 import com.acp.correlationengine.knowledge.KnowledgeParamsProvider;
 import com.acp.correlationengine.knowledge.KnowledgeUnavailableException;
 import com.acp.correlationengine.pattern.PatternRefreshService;
@@ -31,25 +31,25 @@ class StartupAndExpiryWiringTest {
     void bootstrap_loadsKnowledgeParamsThenSeedsPatterns() {
         KnowledgeParamsProvider knowledge = mock(KnowledgeParamsProvider.class);
         PatternRefreshService patterns = mock(PatternRefreshService.class);
-        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
-        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge, index);
+        StartupSnapshotDiscovery discovery = mock(StartupSnapshotDiscovery.class);
+        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge, discovery);
 
         runner.bootstrap();
 
-        InOrder inOrder = Mockito.inOrder(knowledge, patterns, index);
+        InOrder inOrder = Mockito.inOrder(knowledge, patterns, discovery);
         inOrder.verify(knowledge).bootstrap();
         inOrder.verify(patterns).bootstrap();
-        inOrder.verify(index).rebuildAll(null, null);
+        inOrder.verify(discovery).discoverAndBuild();
     }
 
     @Test
     void bootstrap_failure_isSwallowed_soReadinessIsHeldNotCrashed() {
         KnowledgeParamsProvider knowledge = mock(KnowledgeParamsProvider.class);
         PatternRefreshService patterns = mock(PatternRefreshService.class);
-        CompatibilityIndexService index = mock(CompatibilityIndexService.class);
+        StartupSnapshotDiscovery discovery = mock(StartupSnapshotDiscovery.class);
         doThrow(new KnowledgeUnavailableException("down"))
                 .when(knowledge).bootstrap();
-        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge, index);
+        StartupBootstrapRunner runner = new StartupBootstrapRunner(patterns, knowledge, discovery);
 
         // No exception escapes; pattern seed is not attempted after the params failure.
         runner.bootstrap();

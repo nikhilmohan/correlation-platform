@@ -9,6 +9,7 @@ import com.acp.correlationengine.support.EngineHarness;
 import com.acp.correlationengine.support.Fixtures;
 import java.io.IOException;
 import java.util.List;
+import java.util.Optional;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
@@ -70,6 +71,52 @@ class PatternRefreshTest {
                   "total": 1, "limit": 50, "offset": 0
                 }
                 """;
+    }
+
+    /**
+     * Startup-bootstrap fallback: the top-level {@code PatternView.snapshotId} is null (verified
+     * live), but the snapshot lives on {@code supportingInstances[].snapshotId}. The
+     * {@code discoverSnapshotId()} fallback used when Topology is unreachable at startup must read it
+     * from there so the compatibility index can still be built.
+     */
+    private static String patternPageWithSupportingInstances() {
+        return """
+                {
+                  "items": [
+                    {
+                      "patternId": "P",
+                      "trailId": "T",
+                      "snapshotId": null,
+                      "sequence": [{"alarmType": "IPLinkDown", "optional": false}],
+                      "rootCauseAlarmType": "IPLinkDown",
+                      "supportingInstances": [
+                        {"instanceId": "I1", "snapshotId": "SNAP-FROM-INSTANCE"}
+                      ]
+                    }
+                  ],
+                  "total": 1, "limit": 50, "offset": 0
+                }
+                """;
+    }
+
+    @Test
+    void discoverSnapshotId_readsSnapshotFromSupportingInstances() {
+        server.enqueue(new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody(patternPageWithSupportingInstances()));
+
+        Optional<String> snap = client.discoverSnapshotId();
+
+        assertThat(snap).contains("SNAP-FROM-INSTANCE");
+    }
+
+    @Test
+    void discoverSnapshotId_emptyWhenNoSupportingInstances() {
+        server.enqueue(new MockResponse()
+                .setHeader("Content-Type", "application/json")
+                .setBody(patternPageBody())); // no supportingInstances, no top-level snapshotId
+
+        assertThat(client.discoverSnapshotId()).isEmpty();
     }
 
     @Test
