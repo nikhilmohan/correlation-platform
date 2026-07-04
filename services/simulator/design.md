@@ -30,7 +30,12 @@ All dependencies are permissive (MIT / BSD / Apache-2.0). No GPL/AGPL/copyleft c
 
 ## Task breakdown (from the spec)
 
-Every spec Task (1–9) is realized below and traceable to concrete modules/flows.
+Every spec Task (1–20) is realized below and traceable to concrete modules/flows. Tasks 13–20 are
+the **additive P3 topology-and-pattern-driven synthesis** mode — a new `synth` sub-mode that leaves
+generate/ingest/export and P1/P2 untouched. The full P3 design (modules, data, algorithm, flows,
+alternatives, error handling, tests) is in **[P3 topology-and-pattern-driven synthesis
+(additive mode)](#p3-topology-and-pattern-driven-synthesis-additive-mode)** below; the table rows
+13–20 point into it.
 
 | Spec task | Realized by (modules / flow) |
 |---|---|
@@ -46,6 +51,14 @@ Every spec Task (1–9) is realized below and traceable to concrete modules/flow
 | **10. Ingest mode — skip generation, replay a pre-created dataset verbatim** | `ingest/corpus_loader.py` (loader/validator) loads the pre-created files and the engine's *generation* stage is **skipped**: for P1 it loads the **topology snapshot file** (`INGEST_TOPOLOGY_FILE` / `--topology-file`), validates against the **canonical `services/topology/schema/snapshot.schema.json`** (reusing `engine/snapshot_writer`'s validator) and uploads it via the **existing** `integrations/topology_client` (no `topology_builder` run); for P2/P3 it loads the **alarm corpus file** (`INGEST_ALARMS_FILE` / `--alarms-file`), reconstructs each `TypedEnvelope[AlarmEvent]` via `acp_event_model` (validating the frozen `AlarmEvent` incl. `alarmType`), and replays it **verbatim** through the **existing** `engine/replay.py` (`BatchReplay` to `alarms.history` / `LiveReplay` to `alarms.live`) — `scenario_runner`/`cascade`/`noise` are **not** invoked; and it loads the **labels file** (`INGEST_LABELS_FILE` / `--labels-file`) into the **existing** `engine/labels.py` store so `/labels` plus the oracle work unchanged. Malformed input fails fast (criteria 36-39). Mode selected by `SIM_MODE=ingest` / `--ingest`. |
 | **11. Export mode — generate-and-export round-trip** | `engine/snapshot_writer` already writes the snapshot file (reused as the ingestible topology file); `engine/labels.export_to_file` already writes the labels file (reused); **new** `ingest/corpus_writer.py` writes the **alarm corpus file** (`EXPORT_CORPUS_FILE` / `--export-corpus`) — the ordered emitted `TypedEnvelope[AlarmEvent]` stream plus target topic, JSONL, in emit order, tapped at the **same `kafka_producer` emit point** so the file is exactly what went on the wire. Round-trip: generate then export then ingest reproduces the same stream (criterion 40). |
 | **12. Surface generate / ingest / export in the CLI** | `main.py` CLI gains the mode selector plus per-file flags (`--ingest`, `--topology-file`, `--alarms-file`, `--labels-file`, `--export-corpus`) with env equivalents (`SIM_MODE`, `INGEST_TOPOLOGY_FILE`, `INGEST_ALARMS_FILE`, `INGEST_LABELS_FILE`, `EXPORT_CORPUS_FILE`); `config/settings.py` validates the mode/file combination per phase at startup (fail-fast). Usage documents generate vs. ingest, which files, which phase/topic (criterion 41). |
+| **13. Fetch + validate deployed topology + trail + approved-pattern state (P3)** | New `synth/p3_fetch.py` orchestrates three new config-switchable clients — `integrations/pattern_manager_client.py` (`GET /patterns?lifecycle=approved` → `PatternView[]`), `integrations/trail_builder_client.py` (`GET /trails/{trailId}` → `TrailDetail.members[]`), `integrations/topology_snapshot_client.py` (`GET /topology/snapshots` → `SnapshotSummaryDto[]`) — each mirroring `integrations/topology_client.py`'s mock/real make-client pattern, stubs generated from the collaborators' **published OpenAPI**. Fails fast (before any emission) on empty/inconsistent state. See [P3 §Fetch](#p3-fetch--validate-deployed-state-task-13) (AC 32, 33, 44). |
+| **14. Persist the fetched P3 config snapshot for reuse** | `synth/p3_config_snapshot.py` writes a single versioned JSON **P3 config snapshot** file under `SIM_OUTPUT_DIR` (`P3_CONFIG_SNAPSHOT_PATH`), holding the topology snapshot summary, resolved trail members, and approved patterns; a later run loads it with **zero** API calls (validated on load, fail-fast if stale/corrupt). See [P3 §Config snapshot](#p3-config-snapshot--persistence-format-oq-p3-2-task-14) (AC 34, 42). |
+| **15. Synthesize pattern-aligned cascades on real trails** | `synth/aligned_synth.py` maps each `sequence[i].alarmType` → a real trail member via the pack's **alarmType→objectType affinity table** (`domains/coreip/p3_placement.py`, OQ-P3-1) + trail fallback, emits a wall-clock-paced cascade using the pattern's `timing`/`sessionWindow`, marks the `rootCauseAlarmType` alarm as root cause, and records a P3 cascade label. See [P3 §Aligned cascades](#p3-aligned-cascade-synthesis-tasks-15-17--oq-p3-1-oq-p3-4) (AC 35, 36, 37). |
+| **16. Synthesize the non-aligned remainder (mix)** | `synth/nonaligned_synth.py` produces the `1 − P3_ALIGNED_FRACTION` remainder as a **configurable mix** (OQ-P3-3): truncated/partial pattern cascades, random single alarms on real topology objects, and the existing noise machinery (`engine/noise.py`) — all on real `managedObjectId`s, each labeled `partial-cascade`/`non-aligned`/`noise`. See [P3 §Non-aligned mix](#p3-non-aligned-remainder-oq-p3-3-task-16) (AC 38, 39). |
+| **17. Emit the synthesized P3 stream wall-clock-paced on `alarms.live`** | Reuses the **existing** `engine/replay:LiveReplay` (topic `alarms.live`, frozen `AlarmEvent`, fresh `eventId` per emit) fed the interleaved aligned+non-aligned `SynthAlarm` stream ordered by `raisedAt`. No new topic, no event-model change. See [P3 §Emit](#p3-emit--interleave-task-17) (AC 40). |
+| **18. Expose P3 ground-truth labels for oracle evaluation** | `synth/p3_labels.py` records per-cascade `P3CascadeLabel {patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType}` + a per-run `P3RunSummary {totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}`, both persisted (JSONL) and served via the **existing** `/labels` surface (extended with `GET /labels/p3-summary`). See [P3 §Labels + KPI](#p3-ground-truth-labels--kpi-verification-task-18) (AC 43). |
+| **19. Support seeded + fresh randomization** | `synth/*` draw from a single `random.Random(P3_RNG_SEED)`; absent seed → fresh `random.randrange` (logged). Determinism is exercised **only** by placement/ordering/`alarmId`/`raisedAt`, never by the persisted config snapshot. See [P3 §Reproducibility](#p3-reproducibility--seeding-task-19--oq-3) (AC 41). |
+| **20. Surface P3 synthesis in the CLI** | `main.py`/`cli.py` gain a `synth` mode (`--synth` / `SIM_MODE=synth`, or `--phase p3 --synth`) + options `--p3-aligned-fraction`, `--p3-total-alarms`, `--p3-rng-seed`, `--p3-config-snapshot-path` (env equivalents `P3_*`); fail-fast on missing required P3 config. See [P3 §CLI](#p3-cli--config-surface-task-20) (AC 46). |
 
 ## Phase applicability (design view)
 
@@ -57,10 +70,11 @@ The Simulator is **Active in all three runtime phases** and is the evaluation or
 |---|---|---|---|
 | **P1 — Topology onboarding** | **Active** | `engine/topology_builder`, `engine/snapshot_writer`, `integrations/topology_client` (upload). Replay/cascade modules dormant. | Out: topology snapshot **file** → Topology ingestion API (HTTP upload, mock/real). No Kafka. |
 | **P2 — Pattern learning** | **Active** | `config/scenario_loader`, `engine/scenario_runner`, `engine/cascade`, `engine/noise`, `engine/labels`, `engine/replay:BatchReplay`, `integrations/kafka_producer`. Topology builder dormant (snapshot already uploaded; same graph reused for ID sharing). | Out: `alarms.history` (`AlarmEvent`, batch). Label export written. |
-| **P3 — Real-time correlation** | **Active** | Same scenario/cascade/noise/label modules + `engine/replay:LiveReplay` (wall-clock paced). | Out: `alarms.live` (`AlarmEvent`, wall-clock paced). Label export written. |
+| **P3 — Real-time correlation** | **Active** | **(a) existing replay sub-mode:** scenario/cascade/noise/label modules + `engine/replay:LiveReplay` (or ingest corpus → `LiveReplay`). **(b) P3 synthesis sub-mode (additive):** `synth/p3_fetch` (Pattern Manager / Trail Builder / Topology snapshot clients) → `synth/p3_config_snapshot` → `synth/aligned_synth` + `synth/nonaligned_synth` → `synth/p3_labels` → **reuses** `engine/replay:LiveReplay`. The P3 clients are **only** instantiated in the synthesis sub-mode (AC 45). | (a) Out: `alarms.live` (`AlarmEvent`, wall-clock paced). (b) In: Topology `GET /topology/snapshots`, Trail Builder `GET /trails/{trailId}`, Pattern Manager `GET /patterns?lifecycle=approved` (config-switchable mock/real), optionally the persisted P3 config snapshot file. Out: `alarms.live` + P3 label store. |
 
-The ground-truth labels persisted in P2/P3 and the integration thresholds (see below) are the oracle
-the `integration-test` harness asserts across all phases.
+The ground-truth labels persisted in P2/P3 (incl. the P3 synthesis cascade labels + run summary) and
+the integration thresholds (see below) are the oracle the `integration-test` harness asserts across
+all phases.
 
 **Ingest mode (design view) — per phase.** Ingest **replaces the generation stage** within each
 phase; the phase role (Active) and outputs (topic/upload) are unchanged. The modules exercised
@@ -525,7 +539,17 @@ change is a contract change). Request/response models are Pydantic.
 | GET | `/labels` | query `?scenarioId=` optional | `GroundTruthLabel[]` — **frozen shape** `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId, rootCauseAlarmType, children[]}` | `404` unknown `scenarioId` |
 | GET | `/labels/{scenarioId}` | path | one `GroundTruthLabel` (same frozen shape) | `404` |
 | GET | `/scenarios` | — | scenario-def summary (type, root-cause object type, root-cause `alarmType`, expected child count) | — |
+| GET | `/labels/p3-summary` | — | **(P3 synth)** `P3RunSummary {totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}` for the last synth run | `404` if no synth run |
 | POST | `/runs` (optional control) | `{mode:"history"|"live", config?}` | `{runId}` accepted `202` | `400` invalid config, `409` run in progress |
+
+**P3 synth labels are additive on the same surface.** In `synth` mode `/labels` returns the
+per-cascade records with the additive P3 fields `{patternId, trailId, rootCauseAlarmId,
+rootCauseAlarmType, childAlarmIds, scenarioType}` (the existing frozen generate/ingest shape is a
+subset; the P3 fields are added for synth records only — no breaking change to the existing shape),
+and `GET /labels/p3-summary` exposes the run summary so the 60-70% KPI is directly computable
+(AC 43). The checked-in `openapi.json` is regenerated to include `/labels/p3-summary` +
+`P3RunSummary`/`P3CascadeLabel` schemas; the drift-guard test re-freezes it. This is the Simulator's
+**own** OpenAPI surface (self-owned) — not a collaborator contract change.
 
 **`/labels` response is frozen** at `{scenarioId, scenarioType, rootCause, rootCauseManagedObjectId,
 rootCauseAlarmType, children[]}`. `rootCauseAlarmType` is the canonical `alarmType` token of the
@@ -545,6 +569,16 @@ collaborator's **published OpenAPI** (used in unit tests); real = the live servi
 | **Topology Service — ingestion API** (`POST /topology/snapshots`; upload snapshot file; lift → graph → `topology.changed`) | `TOPOLOGY_API_MODE` (`mock`\|`real`), `TOPOLOGY_API_BASE_URL` | local stub generated from Topology's published OpenAPI 3.1 — records the uploaded file, returns a synthetic **200** `SnapshotIngestResponse` `{snapshotId, domain, status, nodeCount, edgeCount, changeType}`; never contacts a real service | `httpx` client `POST {TOPOLOGY_API_BASE_URL}/topology/snapshots` → reads `snapshotId` from the **200** `SnapshotIngestResponse` body |
 | **Knowledge Service — scenario config** (optional read of scenario/jitter/noise params) | `KNOWLEDGE_MODE` (`local`\|`real`), `KNOWLEDGE_API_BASE_URL` | `local` = read scenario/threshold config from local files (default) | `real` = fetch from Knowledge Service API |
 | **Kafka** (produce `alarms.history`/`alarms.live`) | `KAFKA_BOOTSTRAP_SERVERS` | embedded/in-memory producer double in unit tests | real broker in integration |
+| **[P3 synth] Pattern Manager — approved patterns** (`GET /patterns?lifecycle=approved` → `PatternView[]`) | `PATTERN_MANAGER_API_MODE` (`mock`\|`real`), `PATTERN_MANAGER_API_BASE_URL` | `respx` stub from PM's published `openapi.json` — returns `PatternView[]` (`trailId`, `SequenceElementView[]`, `rootCauseAlarmType`, `timing`, `SessionWindowView`); call-counted | `httpx` `GET {base}/patterns?lifecycle=approved` (paged) |
+| **[P3 synth] Trail Builder — trail members** (`GET /trails/{trailId}` → `TrailDetail.members[]`) | `TRAIL_BUILDER_API_MODE`, `TRAIL_BUILDER_API_BASE_URL` | `respx` stub from TB's published `openapi.json` — returns `TrailDetail` w/ `members[]` of `TrailMember {managedObjectId, objectType}`; 404 path testable; call-counted | `httpx` `GET {base}/trails/{trailId}` |
+| **[P3 synth] Topology — snapshot listing** (`GET /topology/snapshots` → `SnapshotSummaryDto[]`) | `TOPOLOGY_API_MODE`, `TOPOLOGY_API_BASE_URL` (shared w/ P1 upload) | `respx` stub from Topology's published `openapi.json` — returns `SnapshotListDto.snapshots[]`; call-counted | `httpx` `GET {base}/topology/snapshots?domain=core-ip` |
+
+**P3 integration points are only instantiated in `synth` mode** (AC 45): in generate/ingest/export
+none of the three P3 clients are constructed. All are config-switchable with no code change (AC 44);
+mocks are stubs from the collaborators' **published OpenAPI** (contract-first — no cross-service
+source coupling). **No contract change:** `PatternView`/`SequenceElementView`/`SessionWindowView`,
+`TrailDetail`/`TrailMember {managedObjectId, objectType}`, and `SnapshotListDto`/`SnapshotSummaryDto`
+are all **already published + verified** on the collaborators' frozen OpenAPI — consumed as-is.
 
 The Topology upload client is built **against Topology's published OpenAPI, never its source**
 (invariant: contract-first, no cross-service code coupling). `TOPOLOGY_API_MODE` switching requires
@@ -993,6 +1027,20 @@ TOPOLOGY_API_MODE=mock python -m simulator.main --ingest --phase p1 \
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --ingest --phase p2 \
   --alarms-file out/p2-corpus.jsonl --labels-file out/labels-<runId>.jsonl
 # (equivalent env form: SIM_MODE=ingest INGEST_ALARMS_FILE=... INGEST_LABELS_FILE=...)
+
+# P3 SYNTH — read deployed topology+trails+approved patterns, synthesize a live stream
+#   (full cycle: fetch from the running services, persist the config snapshot, then synth)
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 SIM_OUTPUT_DIR=out \
+  PATTERN_MANAGER_API_MODE=real PATTERN_MANAGER_API_BASE_URL=http://pattern-manager:8080 \
+  TRAIL_BUILDER_API_MODE=real   TRAIL_BUILDER_API_BASE_URL=http://trail-builder:8080 \
+  TOPOLOGY_API_MODE=real        TOPOLOGY_API_BASE_URL=http://topology:8080 \
+  python -m simulator.main --synth --p3-aligned-fraction 0.65 --p3-total-alarms 500
+#   -> emits to alarms.live; writes out/p3-config-snapshot.json + out/p3-labels-<runId>.jsonl
+
+#   (standalone / repeatable: reuse the persisted config, no re-fetch, seeded + reproducible)
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 python -m simulator.main --synth \
+  --p3-config-snapshot-path out/p3-config-snapshot.json --p3-rng-seed 42
+# (equivalent env form: SIM_MODE=synth P3_ALIGNED_FRACTION=0.65 P3_TOTAL_ALARMS=500 P3_RNG_SEED=42)
 ```
 
 ### Generation scripts & knobs
@@ -1356,6 +1404,29 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 40 | **Export-then-ingest round-trips identically** (spec AC 30) | `test_export_then_ingest_round_trips` | a generate P2 run with `--export-corpus C` (and the snapshot + labels exports) followed by an ingest run from C reproduces the **same ordered `(topic, AlarmEvent payload)` sequence** (equal on `alarmId`/`alarmType`/`managedObjectId`/`raisedAt`/seq), the **same uploaded snapshot**, and the **same labels** — differing only in fresh envelope `eventId`s; the exported corpus content equals what `kafka_producer` emitted in the generate run (emit-point tap) |
 | 41 | **CLI exposes generate / ingest / export options** (spec AC 31) | `test_cli_exposes_generate_ingest_export` | `--help` documents the generate path (incl. `--export-corpus`) and the ingest path (`--ingest`/`--topology-file`/`--alarms-file`/`--labels-file`) and exits 0; each flag has an env equivalent (`SIM_MODE`/`EXPORT_CORPUS_FILE`/`INGEST_TOPOLOGY_FILE`/`INGEST_ALARMS_FILE`/`INGEST_LABELS_FILE`); `--ingest --phase p2` without `--alarms-file` exits 2 (usage); `--ingest --export-corpus` together exits 2 (conflicting) |
 
+**P3 topology-and-pattern-driven synthesis criteria (spec ACs 32-46 — no contract change; new `synth`
+mode; reuses `LiveReplay` + `/labels`).** Each spec AC maps to one pytest test. Mocks are `respx`
+stubs generated from each collaborator's **published OpenAPI** (Pattern Manager / Trail Builder /
+Topology); no live services in the unit suite.
+
+| # (spec AC) | Acceptance criterion | Test | Asserts |
+|---|---|---|---|
+| **32** | P3 reads approved patterns from Pattern Manager; fails fast if none | `test_p3_reads_approved_patterns_or_fails_fast` | `SIM_MODE=synth`, `PATTERN_MANAGER_API_MODE=mock`: mock returns non-empty `PatternView[]` → run proceeds and issues `GET /patterns?lifecycle=approved`; mock returns `[]` → structured error `p3.no_approved_patterns`, exit 3, **zero** alarms produced (producer double records 0) |
+| **33** | Reads trail members per pattern `trailId` (deduped); 404 skips that pattern | `test_p3_fetches_trail_members_deduped_and_handles_404` | config snapshot with 3 patterns over 2 distinct `trailId`s → **exactly 2** `GET /trails/{trailId}` calls (trail-builder mock call counter == 2), members stored; a `trailId` returning 404 → structured warning `p3.trail_not_found`, that pattern excluded, run continues if ≥1 pattern remains |
+| **34** | Config snapshot persisted; subsequent run loads without re-fetching | `test_p3_config_snapshot_persist_and_reload_no_refetch` | after a fetch run the file exists at `P3_CONFIG_SNAPSHOT_PATH`; a second run with that path set makes **zero** calls to Pattern Manager / Trail Builder / Topology mocks (all three call counters == 0) and still emits the configured volume |
+| **35** | Synth alarms carry valid `managedObjectId` from the deployed topology | `test_p3_alarms_moid_in_topology` | every emitted P3 `AlarmEvent.managedObjectId` ∈ the trail-member moid set stored in the P3 config snapshot; no emitted alarm references an absent object |
+| **36** | Pattern-aligned cascades follow sequence + timing | `test_p3_aligned_cascade_sequence_and_timing` | pattern `sequence=[{IPLinkDown},{ISISAdjacencyDown}]`, `medianInterArrivalMs=500`, trail with an `IPLink` + `IGPAdjacency` member → cascade of 2 alarms: 1st `IPLinkDown` on the `IPLink` member, 2nd `ISISAdjacencyDown` on the `IGPAdjacency` member; inter-arrival ∈ `[0, maxInterArrivalMs]` (near median in expectation); label tags the `rootCauseAlarmType` alarm as root, the other as child |
+| **37** | Root-cause alarm matches pattern `rootCauseAlarmType` | `test_p3_root_cause_matches_pattern` | for every aligned cascade the `P3CascadeLabel.rootCauseAlarmType == pattern.rootCauseAlarmType`; the root `AlarmEvent.alarmType` equals it and its `managedObjectId` is a trail member of the affine `objectType` (or fallback member) per the placement rule |
+| **38** | Configured aligned fraction honored within tolerance | `test_p3_aligned_fraction_honored` | `P3_ALIGNED_FRACTION=0.65`, `P3_TOTAL_ALARMS=200` → aligned alarms ∈ `[120,145]` (65% ±5pp), remainder non-aligned/noise; `P3RunSummary.alignedFraction` within the same band; `=0.0` → zero aligned; `=1.0` → zero non-aligned (subject to patterns) |
+| **39** | Non-aligned alarms carry valid moid + canonical `alarmType` | `test_p3_nonaligned_moid_and_alarmtype_valid` | every non-aligned `AlarmEvent.managedObjectId` ∈ the config-snapshot topology moids; `alarmType` a non-empty token ∈ the pack `alarm_type_vocabulary()`; the three mix classes each label their alarms `scenarioType ∈ {partial-cascade, non-aligned, noise}` |
+| **40** | Stream emitted on `alarms.live` only + validates vs frozen binding | `test_p3_emits_live_only_and_validates` | all synth alarms produced to `alarms.live`, **zero** to `alarms.history`; every payload constructs as `AlarmEvent` w/o `ValidationError` (all required fields incl. `alarmType`) |
+| **41** | Seeded run reproducible; unseeded fresh | `test_p3_seeded_reproducible_unseeded_fresh` | two runs, same `P3_RNG_SEED` + same persisted config snapshot → identical `alarmId`/`alarmType`/`managedObjectId`/`raisedAt`/ordering; two runs no-seed (or distinct seeds) → first-10 `alarmId`s + ordering differ with high probability |
+| **42** | Runs standalone without a prior P1/P2 step | `test_p3_standalone_from_persisted_snapshot` | given a pre-populated persisted config snapshot, a `synth` run completes with **no** `POST /topology/snapshots` call and no dependency on a prior alarm corpus; produces a full stream + labels from the persisted config alone |
+| **43** | Labels retrievable; 60-70% KPI directly computable | `test_p3_labels_and_kpi_computable` | after a run the store has one `P3CascadeLabel` per cascade (`{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType}`) + one `P3RunSummary` (`{totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}`); `alignedFraction == alignedAlarms/totalAlarms` from the per-cascade records; both retrievable via `/labels` + `/labels/p3-summary` with no extra config |
+| **44** | All P3 integration points config-switchable (mock vs real) | `test_p3_integration_points_switchable` | `TOPOLOGY_API_MODE=TRAIL_BUILDER_API_MODE=PATTERN_MANAGER_API_MODE=mock` → full fetch+synthesize using only stubs (from each published OpenAPI), **zero** live calls; switching any to `real` with a base URL requires no code change (parametrized `make_client` test) |
+| **45** | Backward compatible — existing modes unaffected | `test_p3_backward_compatible_existing_modes` | a `generate`/`ingest`/`export` run with no P3 options → the P3 clients (`pattern_manager_client`/`trail_builder_client`/`topology_snapshot_client`) are **never instantiated** (import/spy assertion) and **zero** P3 API calls made; the existing AC 1-31 tests pass unchanged (regression run) |
+| **46** | CLI exposes synth options; missing required P3 config fails fast | `test_p3_cli_and_failfast` | `--help` documents the `synth` sub-command with `--p3-aligned-fraction`/`--p3-total-alarms`/`--p3-rng-seed`/`--p3-config-snapshot-path`; starting `synth` with `PATTERN_MANAGER_API_MODE=real` and no `PATTERN_MANAGER_API_BASE_URL` → structured JSON `config.invalid`, exit 3, **zero** alarms; `P3_ALIGNED_FRACTION` out of `[0,1]` / mix not summing to 1 also exit 3 |
+
 ### E2E scenarios (from this design unit's point of view)
 
 | # | Scenario | Trigger → path | Expected outcome |
@@ -1386,6 +1457,15 @@ These cover the new evaluation-grade synthesis knobs; the spec's 1–20 mapping 
 | 23 | **Ingest — generation modules never run** | `--ingest --phase p2` with `topology_builder`/`scenario_runner`/`cascade`/`noise` spied | none of the generation modules are invoked; alarms come solely from the corpus file (proves generation is skipped, not run-and-discarded) |
 | 24 | **Failure — malformed ingest corpus** | `--ingest --phase p2 --alarms-file C` where one line's payload omits `alarmType` / is bad JSON | run aborts before any emission with a structured error naming file+line; `simulator_ingest_validation_errors_total`>0; **zero** alarms produced (no partial replay from a partially-valid file) |
 | 25 | **Failure — ingest missing required file for the phase** | `--ingest --phase p1` without `--topology-file` (or P2 without `--alarms-file`/`--labels-file`) | usage error, exit 2, structured log, zero emission/upload |
+| 26 | **P3 synth full cycle (all mocks)** | `--synth` (or `SIM_MODE=synth`), all three `*_API_MODE=mock`, `P3_ALIGNED_FRACTION=0.65`, `P3_TOTAL_ALARMS=200` | fetch approved patterns → dedup+fetch trail members → list snapshots → persist config snapshot → synthesize aligned cascades + non-aligned mix → emit to `alarms.live` only; `P3RunSummary.alignedFraction`≈0.65 (±5pp); per-cascade labels retrievable; zero on `alarms.history` |
+| 27 | **P3 synth against the real integration stack** | `--synth`, `*_API_MODE=real` against running Pattern Manager / Trail Builder / Topology; then read CE `/stats` + `/incidents` | aligned cascades on real trails fire CE incidents inside the session window with the correct `rootCauseAlarmType`; CE `/stats correlatedAlarmCount/totalAlarmsProcessed` ≈ the Simulator `alignedFraction` (0.60-0.70); RCA accuracy (labels vs `/incidents`) ≥0.80 |
+| 28 | **P3 standalone from persisted config (offline)** | pre-populated `P3_CONFIG_SNAPSHOT_PATH`, live services **down** | run completes with zero API calls + no `POST /topology/snapshots`; produces the full stream + labels from the file alone (AC 42) |
+| 29 | **P3 reproducibility** | two `--synth` runs, same `P3_RNG_SEED` + same persisted config | identical alarm streams (`alarmId`/`alarmType`/`moid`/`raisedAt`/order); a no-seed run differs (AC 41) |
+| 30 | **Failure — no approved patterns** | `--synth`, Pattern Manager mock returns `[]` | fail fast `p3.no_approved_patterns`, exit 3, zero alarms (AC 32) |
+| 31 | **Partial path — a pattern's trail 404s** | `--synth`, one `trailId` returns 404, others OK | that pattern dropped with a structured warning, run continues on the remaining patterns, only their cascades emitted (AC 33) |
+| 32 | **Partial path — partial cascades revert-open in CE** | `--synth`, `P3_PARTIAL_CASCADE_FRACTION` high | the partial-cascade subset opens CE `(trailId,patternId)` instances that expire without a match → `AlarmStatusChange(reverted-open)`, **no** incident; the aligned subset still fires incidents — so the achieved auto-correlation fraction matches the configured one |
+| 33 | **Backward compat — generate/ingest/export unaffected** | run each existing mode with no P3 options | P3 clients never instantiated, zero P3 API calls; AC 1-31 behaviour identical (AC 45) |
+| 34 | **Failure — real mode without base URL** | `--synth`, `PATTERN_MANAGER_API_MODE=real`, no base URL | config-invalid fail-fast, exit 3, zero alarms (AC 46) |
 
 ## Config & observability
 
@@ -1432,6 +1512,15 @@ only `KAFKA_BOOTSTRAP_SERVERS` set. "required" rows have no default and fail fas
 | Integration thresholds | `INTEGRATION_THRESHOLDS` | checked-in `integration-thresholds.yaml` | §10 targets (harness reads; not asserted here) |
 | HTTP port | `HTTP_PORT` | `8080` | `/health`, `/metrics`, `/labels` |
 | Log level | `LOG_LEVEL` | `INFO` | structured-log verbosity |
+| **[P3] Synth mode selector** | `SIM_MODE=synth` (or `--synth`) | (mode) | select P3 topology-and-pattern-driven synthesis (pinned to P3 / `alarms.live`) |
+| **[P3] Aligned fraction** | `P3_ALIGNED_FRACTION` | `0.65` (range 0.0–1.0; `p3-demo` band 0.60–0.70) | target pattern-aligned fraction (AC 38) |
+| **[P3] Total alarms** | `P3_TOTAL_ALARMS` | `500` (or `p3-demo`) | P3 synth total volume |
+| **[P3] RNG seed** | `P3_RNG_SEED` | unset → fresh (logged) | reproducibility seed (AC 41); no effect on the persisted config snapshot |
+| **[P3] Config snapshot path** | `P3_CONFIG_SNAPSHOT_PATH` | `{SIM_OUTPUT_DIR}/p3-config-snapshot.json` | load-from-persisted (present) vs. re-fetch + persist (absent) (AC 34/42) |
+| **[P3] Pattern Manager mode/URL** | `PATTERN_MANAGER_API_MODE` / `PATTERN_MANAGER_API_BASE_URL` | `mock` / unset (required if `real`) | approved-pattern read (AC 32/44) |
+| **[P3] Trail Builder mode/URL** | `TRAIL_BUILDER_API_MODE` / `TRAIL_BUILDER_API_BASE_URL` | `mock` / unset (required if `real`) | trail-member read (AC 33/44) |
+| **[P3] Non-aligned mix** | `P3_PARTIAL_CASCADE_FRACTION` / `P3_RANDOM_ALARM_FRACTION` / `P3_NOISE_FRACTION` | `0.4` / `0.4` / `0.2` (must sum to 1) | non-aligned remainder mix (OQ-P3-3, AC 39) |
+| **[P3] Optional include prob** | `P3_OPTIONAL_INCLUDE_PROB` | `1.0` (range 0.0–1.0) | probability an `optional=true` sequence element is emitted (OQ-P3-4) |
 
 These defaults make a default P2 run produce 8 instances each of the **9** scenarios (fiber-cut,
 line-card-fault, port-fault, interface-fault, node-failure, ip-link-failure, lsp-te-failure,
@@ -1463,7 +1552,15 @@ stamped with a grounded `igpArea` (`IGP_AREA_COUNT=3`), and the well-known devic
   `simulator_ingest_validation_errors_total` (malformed corpus/snapshot lines rejected — fail-fast),
   `simulator_exported_corpus_records_total` (alarms written to the export corpus file). In ingest
   mode `simulator_alarms_emitted_total` still counts the replayed alarms under their preserved
-  `alarmType`, so the same emitted-count assertions hold.
+  `alarmType`, so the same emitted-count assertions hold. **P3 synth adds:**
+  `simulator_p3_aligned_alarms_total`, `simulator_p3_nonaligned_alarms_total{class}`
+  (`class ∈ partial-cascade|non-aligned|noise`), `simulator_p3_aligned_fraction` (gauge, the realized
+  fraction — AC 38), `simulator_p3_cascades_total`, `simulator_p3_placement_fallback_total{alarmType}`
+  (affine-objectType-absent fallbacks — OQ-P3-1), `simulator_p3_pattern_fetch_total`,
+  `simulator_p3_trail_fetch_total`, `simulator_p3_trail_not_found_total` (404-skipped patterns),
+  `simulator_p3_config_snapshot_loaded{source="fetch"|"persisted"}`. In synth mode
+  `simulator_alarms_emitted_total{topic="alarms.live",scenario,alarmType}` counts every emitted alarm
+  under its `alarmType` (scenario label = `patternId` for aligned, the mix class for non-aligned).
 - **Logging** — structured JSON on stdout (one object per line): `ts, level, event, runId,
   scenarioId?, msg`; ingest/export runs additionally log `mode`, the input/output file paths, and
   the validated/replayed/exported counts.
@@ -1471,10 +1568,13 @@ stamped with a grounded `igpArea` (`IGP_AREA_COUNT=3`), and the well-known devic
 ## Build & run
 
 - **Layout:** `services/simulator/src/simulator/{main.py, config/ (incl. demo_profiles.py),
-  engine/, domains/coreip/ (incl. scenario_library.py, geo_catalogue.py), ingest/ (corpus_loader.py,
-  corpus_writer.py), integrations/, api/,
+  engine/, domains/coreip/ (incl. scenario_library.py, geo_catalogue.py, **p3_placement.py**),
+  ingest/ (corpus_loader.py, corpus_writer.py), **synth/ (p3_fetch.py, p3_config_snapshot.py,
+  aligned_synth.py, nonaligned_synth.py, aligned_controller.py, p3_labels.py, p3_run.py)**,
+  integrations/ (incl. **pattern_manager_client.py, trail_builder_client.py,
+  topology_snapshot_client.py**), api/,
   obs/}`, `services/simulator/openapi.json`, `services/simulator/integration-thresholds.yaml`,
-  `services/simulator/tests/`. The
+  `services/simulator/tests/` (incl. `tests/test_p3_*.py`). The
   snapshot file is validated against the **single canonical `services/topology/schema/snapshot.schema.json`**
   (Topology-owned; synced/vendored at build time — no independent Simulator schema copy).
 - **Build/test:** `ruff check . && black --check . && pytest` (Python 3.13).
@@ -1483,6 +1583,423 @@ stamped with a grounded `igpArea` (`IGP_AREA_COUNT=3`), and the well-known devic
   `KAFKA_BOOTSTRAP_SERVERS` + `TOPOLOGY_API_BASE_URL` to the integration stack.
 - **Local run (minimal — all defaults apply):** `KAFKA_BOOTSTRAP_SERVERS=localhost:9092
   python -m simulator.main --phase p2` produces an evaluation-grade corpus with no further env.
+
+## P3 topology-and-pattern-driven synthesis (additive mode)
+
+This section is the buildable detail for spec Tasks 13–20 and ACs 32–46. It is a **new `synth`
+mode** on top of the existing engine: it reads the **already-deployed** topology + trails + approved
+patterns from the running services' published APIs and synthesizes a live `alarms.live` stream
+grounded in those real objects/patterns, targeting a configurable **~60-70% pattern-aligned
+auto-correlation + RCA rate** with full ground-truth labels. It **regenerates nothing** (no
+topology build, no pattern mining, no `POST /topology/snapshots`) and introduces **no contract
+change** (no new topic, no event-model change, no collaborator OpenAPI change).
+
+**No contract change — explicit confirmation.** All three P3 reads consume collaborators'
+**already-published, verified** OpenAPI surfaces as-is: Pattern Manager `GET /patterns?lifecycle=…`
+→ `PatternView[]` with `SequenceElementView {alarmType, optional}` / `SessionWindowView {windowMs,
+type}` / `timing` (JsonNode: `timeframeMs, medianInterArrivalMs, maxInterArrivalMs,
+stddevInterArrivalMs`); Trail Builder `GET /trails/{trailId}` → `TrailDetail.members[]` of
+`TrailMember {managedObjectId, objectType}` (**OQ-P3-5 resolved — `objectType` is formally declared
+per member; the Simulator consumes it as-is and does NOT derive it from the moid prefix**); Topology
+`GET /topology/snapshots` → `SnapshotListDto.snapshots[]` of `SnapshotSummaryDto {snapshotId, domain,
+…}`. Output is the **frozen `AlarmEvent`** on the **existing `alarms.live`** topic.
+
+### Module breakdown (P3 additions)
+
+All P3 code lives under a new `synth/` package + three new `integrations/` clients + one new
+`domains/coreip/` mapping module. The engine core (`engine/*`), the P1/P2 pack content, and
+generate/ingest/export are **untouched**; `engine/replay:LiveReplay` and `engine/labels` are
+**reused**.
+
+| Module | Responsibility |
+|---|---|
+| `integrations/pattern_manager_client.py` | `GET /patterns?lifecycle=approved` (paged via `limit`/`offset`), returns typed `PatternView[]`. Mock stub (from PM `openapi.json`) / real `httpx`; `make_client(mode, base_url)` like `topology_client`. Counts calls (test-observable). |
+| `integrations/trail_builder_client.py` | `GET /trails/{trailId}` → `TrailDetail`; returns `members[]` of `TrailMember {managedObjectId, objectType}`. 404 → typed `TrailNotFound` (not an exception the run aborts on). Mock/real. |
+| `integrations/topology_snapshot_client.py` | `GET /topology/snapshots?domain=core-ip` → `SnapshotSummaryDto[]`. Mock/real. (Distinct from the P1 `topology_client` which only *uploads*; this only *lists*.) |
+| `synth/p3_fetch.py` | Orchestrates the three clients (Task 13): fetch approved patterns → dedupe `trailId`s → fetch each trail's members → list snapshots; assemble a `P3ConfigSnapshot`; fail-fast on empty patterns; skip (warn) patterns whose trail 404s. |
+| `synth/p3_config_snapshot.py` | Read/write the versioned **P3 config snapshot** JSON (Task 14 / OQ-P3-2); `save(path)`, `load(path)` with schema/version validation (fail-fast on stale/corrupt). |
+| `domains/coreip/p3_placement.py` | The pack-authored **alarmType→objectType affinity table** + fallback (OQ-P3-1). Pure pack data; the engine/synth reads it via a `placement_affinity()` pack method. |
+| `synth/aligned_synth.py` | Build pattern-aligned cascades (Tasks 15/17): sequence→member placement, timing pacing, root-cause tagging, optional-element handling (OQ-P3-4). Emits `SynthAlarm[]` + `P3CascadeLabel`. |
+| `synth/nonaligned_synth.py` | Build the non-aligned mix (Task 16 / OQ-P3-3): partial cascades + random single alarms + noise, all on real moids. |
+| `synth/aligned_controller.py` | The **aligned-fraction controller** (Task 16, AC 38): given `P3_TOTAL_ALARMS`/`P3_ALIGNED_FRACTION`, solve how many aligned cascades vs. non-aligned alarms to synthesize, within tolerance. |
+| `synth/p3_labels.py` | `P3LabelStore`: per-cascade `P3CascadeLabel` + `P3RunSummary`; JSONL persist; served via `/labels` (+ `/labels/p3-summary`) (Task 18, AC 43). |
+| `synth/p3_run.py` | Top-level `run_synth(settings)`: fetch/load → controller → aligned+non-aligned → interleave by `raisedAt` → `LiveReplay` → summary. Called from `main.py` in `synth` mode. |
+| pack: `CoreIPPack.placement_affinity()` | New `DomainPack` Protocol method returning the affinity table (keeps the engine/synth domain-agnostic — Task 8 / AC-19 invariant preserved: no Core-IP literal enters `synth/` or `engine/`). |
+
+### P3 fetch + validate deployed state (Task 13)
+
+`p3_fetch.fetch_config(settings)`:
+1. **Patterns:** `pattern_manager_client.list_approved()` → `PatternView[]`. **Empty → fail fast**
+   (structured error `p3.no_approved_patterns`, exit 3, zero alarms — AC 32).
+2. **Trails:** collect the distinct `trailId`s across the patterns (dedupe), issue **exactly one**
+   `GET /trails/{trailId}` per distinct id (AC 33). A `404` (`TrailNotFound`) → log a structured
+   **warning** `p3.trail_not_found` and **drop the patterns on that trail** from synthesis; the run
+   continues if ≥1 pattern still has a trail. If **every** pattern loses its trail → fail fast.
+3. **Topology snapshots:** `topology_snapshot_client.list_snapshots(domain)` →
+   `SnapshotSummaryDto[]`. The union of all trail-member `managedObjectId`s (plus, when Topology
+   later exposes node listing, the full moid pool) is the **valid moid universe**; for the MVP the
+   moid universe is the set of trail members (every P3 alarm's moid is a trail member, so AC 35/39
+   hold by construction). The snapshot list gives `snapshotId` for provenance in the config snapshot.
+4. Assemble a `P3ConfigSnapshot` (below) and hand it to `p3_config_snapshot.save()` (Task 14).
+
+Each client is **config-switchable** (`*_API_MODE` ∈ `{mock, real}`, `*_API_BASE_URL`), stub from
+the collaborator's published OpenAPI, real via `httpx` — no hard-coded URL (AC 44).
+
+### P3 config snapshot — persistence format (OQ-P3-2, Task 14)
+
+**Decision: a single versioned JSON file** under `SIM_OUTPUT_DIR` (default
+`{SIM_OUTPUT_DIR}/p3-config-snapshot.json`, overridable via `P3_CONFIG_SNAPSHOT_PATH`). One
+self-contained file — consistent with the existing snapshot/corpus/labels file model, trivially
+shareable, diffable, and reusable across runs and across different (topology, pattern-set) inputs. It
+holds everything a standalone P3 run needs, so **repeated randomized runs never re-fetch** and a
+captured config drives runs even when the live services are down or have moved on.
+
+```jsonc
+{
+  "schemaVersion": 1,                       // versioned; load fails fast on unknown major
+  "capturedAt": "2026-06-29T12:00:00Z",
+  "domain": "core-ip",
+  "sourceSnapshots": [                       // from GET /topology/snapshots (provenance)
+    { "snapshotId": "snap-000123", "domain": "core-ip", "nodeCount": 312, "edgeCount": 540 }
+  ],
+  "trails": {                                // keyed by trailId → its members (deduped fetch)
+    "trail-A": { "snapshotId": "snap-000123", "igpArea": "area-0",
+      "members": [ { "managedObjectId": "IPLink:ip-7", "objectType": "IPLink" },
+                   { "managedObjectId": "IGPAdjacency:adj-3", "objectType": "IGPAdjacency" },
+                   { "managedObjectId": "LSP:lsp-9", "objectType": "LSP" } ] }
+  },
+  "patterns": [                              // approved PatternView[] as fetched, verbatim
+    { "patternId": "pat-01", "trailId": "trail-A", "rootCauseAlarmType": "IPLinkDown",
+      "sequence": [ { "alarmType": "IPLinkDown", "optional": false },
+                    { "alarmType": "ISISAdjacencyDown", "optional": false },
+                    { "alarmType": "LSPDown", "optional": true } ],
+      "timing": { "timeframeMs": 4000, "medianInterArrivalMs": 500,
+                  "maxInterArrivalMs": 1500, "stddevInterArrivalMs": 250 },
+      "sessionWindow": { "windowMs": 6000, "type": "gap" } }
+  ]
+}
+```
+
+`load(path)`: parse → validate `schemaVersion` (unknown major → fail fast `p3.config_snapshot_stale`)
+→ validate each pattern's `trailId` resolves in `trails` and each pattern is well-formed → return a
+typed `P3ConfigSnapshot`. **Standalone run (AC 42):** with `P3_CONFIG_SNAPSHOT_PATH` set and the
+file present, `p3_run` loads it and makes **zero** calls to Pattern Manager / Trail Builder /
+Topology (verified via mock call counters — AC 34) and **never** calls `POST /topology/snapshots`.
+The RNG seed does **not** affect the persisted config snapshot (Task 19) — the file is pure fetched
+state; only synthesis is randomized.
+
+### alarmType → objectType placement (OQ-P3-1, Task 15)
+
+**Authored in the Core-IP domain pack** (`domains/coreip/p3_placement.py`), exposed via the new
+`DomainPack.placement_affinity()` Protocol method — the pack already owns alarm shapes, propagation
+templates, and the object-type set, so the affinity belongs there; the engine/synth stay
+domain-generic (AC-19 invariant). The table maps each canonical `alarmType` to the **object-type it
+is naturally raised on**; synthesis then picks a real trail member of that `objectType`.
+
+| alarmType (canonical) | Affine objectType |
+|---|---|
+| `FiberCut`, `FiberFault`, `LOS`, `LOF`, `OpticalPowerLow` | `FiberSpan` |
+| `LineCardFault` | `LineCard` |
+| `PortDown`, `PortFlapping`, `CRCErrors` | `Port` |
+| `InterfaceDown`, `InterfaceErrors`, `LinkBundleDegraded` | `Interface` |
+| `IPLinkDown`, `LinkDown` | `IPLink` |
+| `ISISAdjacencyDown`, `AdjDown`, `OSPFAdjacencyDown`, `BGPPeerDown`, `RouteFlap`, `LDPSessionDown` | `IGPAdjacency` |
+| `LSPDown`, `TETunnelDown`, `FRRSwitchover` | `LSP` |
+| `VPNReachabilityLoss`, `ReachabilityLoss`, `ServiceDegraded`, `Congestion`, `QueueDrop`, `HighLatency` | `VPNService` |
+
+**Fallback (when the trail has no member of the affine `objectType`):** place the alarm on **ANY
+member of the same trail** (deterministic pick under the seeded RNG). This keeps two invariants that
+make the Correlation Engine match: the alarm is on a **real object present in the deployed topology**
+(AC 35), and it is on the **pattern's own trail** — so CE's `(trailId, patternId)` instance still
+admits it and the sequence still advances (CE keys on trail + `alarmType` sequence, not on the
+member's objectType). The fallback is logged (`simulator_p3_placement_fallback_total{alarmType}`) so
+its rate is observable. Placement applies identically to mandatory and optional elements (the
+optional decision is made *before* placement — see below).
+
+### P3 aligned cascade synthesis (Tasks 15–17 + OQ-P3-1, OQ-P3-4)
+
+For each approved pattern, `aligned_synth.build_cascade(pattern, trail, rng, base_time)`:
+1. **Optional-element decision (OQ-P3-4) — decided per element, before placement.**
+2. For each retained sequence element, apply the placement rule (table + fallback) to pick a member
+   `managedObjectId`; construct a `SynthAlarm` with `alarmType` = the element's `alarmType`, the
+   X.733 shape from `pack.alarm_shape(alarmType)`, `managedObjectId` = the picked member, and
+   `raisedAt` paced from the pattern timing (below).
+3. **Timing / session-window pacing:** the first element lands at `base_time`; each subsequent
+   element lands after an inter-arrival gap drawn from a truncated-normal
+   `N(medianInterArrivalMs, stddevInterArrivalMs)` clamped to `[0, maxInterArrivalMs]`, and the
+   whole cascade span is clamped to **fit inside `sessionWindow.windowMs`** (if the running total
+   would exceed `windowMs`, remaining gaps are compressed proportionally). This lands the cascade
+   **inside the pattern's session window** so CE's per-`(trailId, patternId)` session window admits
+   the whole set and fires **within** the window — AC 36. When `timing`/`sessionWindow` fields are
+   absent, fall back to `BASE_INTERVAL_MS`/`JITTER_STDDEV_MS`.
+4. **Root cause:** the element whose `alarmType == pattern.rootCauseAlarmType` is tagged
+   `is_root=True`; its `alarmId` becomes the label's `rootCauseAlarmId` (AC 37). (If the root type is
+   itself optional and was omitted, it is force-included — the root is never dropped.)
+5. Record a `P3CascadeLabel {patternId, trailId, rootCauseAlarmId, rootCauseAlarmType,
+   childAlarmIds, scenarioType:"pattern-aligned"}`.
+
+**Optional-element strategy (OQ-P3-4) — decision + CE alignment.** The CE (see its design) matches a
+pattern via `matchProgress.satisfiedIndices` and fires when the **decisive match condition is met
+within `match.partialMatchTolerance`** (a Knowledge param, seeded default **1** = tolerate N-1 of N),
+and it treats `optional=true` elements as **non-mandatory**. To make aligned cascades **reliably
+auto-correlate** we choose **default-include optional elements** with a configurable inclusion
+probability `P3_OPTIONAL_INCLUDE_PROB` (default **1.0** = always include; range 0.0–1.0), evaluated
+per element under the seeded RNG (so a run is reproducible — AC 41):
+- Including optional elements is **safe** for CE matching (an extra non-mandatory symptom never
+  *breaks* a match; it can only strengthen coverage), and it **preserves the tolerance budget** —
+  the CE's N-1 tolerance is then free to absorb a genuinely dropped *mandatory* symptom rather than
+  being pre-spent on a deliberately omitted optional one. This is why we do **not** default to
+  "always omit": omitting an optional element plus any real drop could push past N-1 and miss the
+  match.
+- A lowered `P3_OPTIONAL_INCLUDE_PROB` deliberately omits some optional elements to model realistic
+  incomplete cascades; because CE treats them as non-mandatory, the cascade **still matches**. This
+  is the knob that, combined with `partialMatchTolerance`, exercises CE's partial-match path without
+  tipping an aligned cascade into a miss.
+
+```mermaid
+flowchart TD
+  A["sequence element (alarmType, optional)"] --> B{"optional and roll exceeds P3_OPTIONAL_INCLUDE_PROB"}
+  B -->|omit| Z["skip this element (tolerated by CE partialMatchTolerance)"]
+  B -->|include| C["look up affinity: alarmType to objectType (pack table)"]
+  C --> D{"trail has a member of that objectType"}
+  D -->|yes| E["place alarm on a member of the affine objectType"]
+  D -->|no, fallback| F["place alarm on ANY trail member (real object, correct trail)"]
+  E --> G["set alarmType, X.733 shape from pack, managedObjectId from member"]
+  F --> G
+  G --> H{"alarmType equals pattern rootCauseAlarmType"}
+  H -->|yes| I["mark root cause, record rootCauseAlarmId"]
+  H -->|no| J["mark child, append to childAlarmIds"]
+```
+
+### P3 non-aligned remainder (OQ-P3-3, Task 16)
+
+**Decision: a configurable MIX** of three sub-classes (proportions env-tunable, defaults sum to 1.0
+of the non-aligned budget):
+- **`partial-cascade`** (`P3_PARTIAL_CASCADE_FRACTION`, default 0.4): start a **real** approved
+  pattern's cascade on its real trail but **stop before the decisive condition** (emit fewer than
+  `sequenceLen − partialMatchTolerance` elements, and/or omit the root). CE opens a `(trailId,
+  patternId)` instance that then **expires without a match → destroyed, no incident,
+  `AlarmStatusChange(reverted-open)`** — this is exactly the realistic "opened then reverted" traffic
+  the CE design describes. Labeled `scenarioType:"partial-cascade"`.
+- **`non-aligned`** (`P3_RANDOM_ALARM_FRACTION`, default 0.4): random **single** alarms on real
+  topology objects (trail members) with a random canonical `alarmType`, **not** forming any approved
+  pattern sequence. Labeled `scenarioType:"non-aligned"`.
+- **`noise`** (`P3_NOISE_FRACTION`, default 0.2): the **existing** `engine/noise.py` noise machinery
+  (flapping / self-clearing / chatty), placed on real moids. Labeled `scenarioType:"noise"`.
+
+All non-aligned alarms carry a **canonical `alarmType`** token from the pack vocabulary and a
+`managedObjectId` that is a real trail member (AC 39). Every non-aligned alarm is labeled with its
+`scenarioType` so it is **excluded from the aligned-fraction count** (AC 43). The three fractions are
+validated to sum to 1.0 (±ε) at startup, else fail fast.
+
+### Aligned-fraction controller (Task 16, AC 38)
+
+`aligned_controller.plan(settings, patterns)`:
+- Inputs `P3_TOTAL_ALARMS` (T) and `P3_ALIGNED_FRACTION` (f, default 0.65, range 0.0–1.0).
+- Target aligned alarms `A = round(f · T)`; non-aligned `= T − A`.
+- Aligned cascades are whole (a cascade emits its retained sequence length L_i alarms), so the
+  controller greedily instantiates cascades (round-robin over the available approved patterns, seeded
+  order) accumulating alarm counts until within the **±5-percentage-point tolerance** band of A;
+  it picks the cascade set whose total lands closest to A. Non-aligned alarms fill the remainder via
+  the mix.
+- **Edge cases (AC 38):** `f=0.0` → zero aligned cascades (all non-aligned); `f=1.0` → zero
+  non-aligned (subject to available patterns — if patterns can't fill T exactly, cascades repeat
+  until ≥ T, then truncate at a cascade boundary). If **no** approved patterns exist the run already
+  failed fast at fetch (AC 32).
+- The realized `alignedFraction` is written to `P3RunSummary` and asserted within tolerance (AC 38).
+
+### P3 emit + interleave (Task 17)
+
+Aligned cascade alarms + non-aligned alarms are merged into one stream **ordered by `raisedAt`**,
+then handed to the **existing** `engine/replay:LiveReplay` (topic `alarms.live`, `PACING_MULTIPLIER`
+wall-clock pacing, fresh `eventId` per emit, frozen `AlarmEvent` payload). **Zero** alarms go to
+`alarms.history` (AC 40). Every emitted payload validates against the frozen `libs/event-model`
+`AlarmEvent` binding (all required fields incl. `alarmType`) — reusing `replay.synth_to_event`.
+
+```mermaid
+sequenceDiagram
+  participant CLI as main (synth mode)
+  participant Fetch as p3_fetch
+  participant PM as Pattern Manager (mock/real)
+  participant TB as Trail Builder (mock/real)
+  participant TS as Topology snapshots (mock/real)
+  participant Snap as p3_config_snapshot
+  participant AS as aligned_synth
+  participant NA as nonaligned_synth
+  participant Lab as p3_labels
+  participant LR as LiveReplay
+  participant K as Kafka (alarms.live)
+  CLI->>Fetch: load-from-persisted or re-fetch
+  alt persisted snapshot present
+    Fetch->>Snap: load + validate P3 config snapshot (zero API calls)
+  else re-fetch
+    Fetch->>PM: GET /patterns?lifecycle=approved
+    PM-->>Fetch: PatternView[] (trailId, sequence, timing, sessionWindow)
+    Fetch->>Fetch: fail-fast if empty
+    Fetch->>TS: GET /topology/snapshots
+    TS-->>Fetch: SnapshotSummaryDto[]
+    loop each distinct trailId (deduped)
+      Fetch->>TB: GET /trails/(trailId)
+      TB-->>Fetch: TrailDetail.members[] of (managedObjectId, objectType)
+    end
+    Fetch->>Snap: persist P3 config snapshot (versioned JSON)
+  end
+  Snap-->>AS: patterns + trail members + moid pool
+  Snap-->>NA: moid pool + patterns
+  AS->>Lab: aligned cascades + P3CascadeLabel(scenarioType=pattern-aligned)
+  NA->>Lab: non-aligned mix + labels(partial-cascade / non-aligned / noise)
+  AS->>LR: aligned SynthAlarm[]
+  NA->>LR: non-aligned SynthAlarm[]
+  LR->>K: TypedEnvelope(AlarmEvent) wall-clock paced, fresh eventId
+  Lab->>Lab: write P3RunSummary(alignedFraction)
+```
+
+### P3 ground-truth labels + KPI verification (Task 18)
+
+`P3LabelStore` holds two record types, both persisted as JSONL under `SIM_OUTPUT_DIR` and served via
+the existing FastAPI label surface:
+
+```jsonc
+// P3CascadeLabel (one per synthesized cascade)
+{ "patternId": "pat-01", "trailId": "trail-A",
+  "rootCauseAlarmId": "alm-…", "rootCauseAlarmType": "IPLinkDown",
+  "childAlarmIds": ["alm-…", "alm-…"], "scenarioType": "pattern-aligned" }
+// P3RunSummary (one per run)
+{ "totalAlarms": 200, "alignedAlarms": 132, "nonAlignedAlarms": 68, "alignedFraction": 0.66 }
+```
+
+`alignedFraction == alignedAlarms / totalAlarms` computed from the per-cascade records (AC 43). Both
+are retrievable without extra config: `GET /labels` returns the cascade labels (the existing frozen
+shape is extended with the P3 fields for `synth`-mode records — same endpoint, additive fields) and a
+new `GET /labels/p3-summary` returns the `P3RunSummary`.
+
+**How the 60-70% KPI is verified end-to-end.** The oracle (integration harness) computes the
+**achieved auto-correlation + RCA fraction** by joining the Simulator's P3 labels with the
+Correlation Engine's read APIs on the shared `alarmId`/`alarmType` join space:
+- CE `GET /stats` yields `correlatedAlarmCount / totalAlarmsProcessed` — the **auto-correlation
+  rate**; asserted ≈ the Simulator's `alignedFraction` (within the CE's partial-match tolerance),
+  i.e. in the **0.60–0.70** band.
+- CE `GET /incidents` yields each incident's tagged `rootCauseAlarmId`/`rootCauseAlarmType`; the
+  oracle checks it against the P3 label's `rootCauseAlarmType` for the same cascade → **RCA
+  accuracy** (the §10 `≥0.80` threshold on the canonical `alarmType` token space).
+- Because every aligned cascade lands on a real trail, inside the session window, with the root type
+  present, an aligned cascade **should** produce exactly one CE incident with the correct root cause;
+  the non-aligned remainder (esp. `partial-cascade`) should **not** produce incidents (it should
+  revert-open), which is what makes the achieved fraction match the configured one.
+
+### P3 reproducibility + seeding (Task 19 / OQ-3)
+
+A single `random.Random` is seeded from `P3_RNG_SEED` when present; absent → seeded from
+`random.randrange(1<<30)` and the chosen seed is **logged** so a fresh run is reproducible by
+re-supplying it. The RNG drives: cascade ordering, optional-element inclusion rolls, placement member
+picks (incl. fallback), non-aligned sampling, and per-alarm `alarmId`/`raisedAt` jitter. With the
+**same seed + same persisted P3 config snapshot** two runs produce **identical** `alarmId`,
+`alarmType`, `managedObjectId`, `raisedAt`, and ordering (AC 41). No seed / distinct seeds → different
+`alarmId`s + ordering with high probability. The seed **never** touches the persisted config snapshot
+(that is pure fetched state — Task 19).
+
+### P3 CLI + config surface (Task 20)
+
+`synth` is selected by `SIM_MODE=synth` (or `--synth`), pinned to phase P3 (emit target is
+`alarms.live`). New options (all with `P3_*` env equivalents, all overridable, no hard-coded URL or
+fraction — spec Non-functional):
+
+| CLI flag | Env | Default | Meaning |
+|---|---|---|---|
+| `--synth` | `SIM_MODE=synth` | (mode selector) | select P3 topology-and-pattern-driven synthesis |
+| `--p3-aligned-fraction` | `P3_ALIGNED_FRACTION` | `0.65` (range 0.0–1.0) | target pattern-aligned fraction |
+| `--p3-total-alarms` | `P3_TOTAL_ALARMS` | `500` (or `p3-demo` profile) | total alarm volume |
+| `--p3-rng-seed` | `P3_RNG_SEED` | unset → fresh (logged) | reproducibility seed |
+| `--p3-config-snapshot-path` | `P3_CONFIG_SNAPSHOT_PATH` | `{SIM_OUTPUT_DIR}/p3-config-snapshot.json` | load-from-persisted vs. re-fetch + persist |
+| (fetch clients) | `PATTERN_MANAGER_API_MODE`/`_BASE_URL`, `TRAIL_BUILDER_API_MODE`/`_BASE_URL`, `TOPOLOGY_API_MODE`/`_BASE_URL` | `mock` / unset | config-switchable collaborators |
+| (mix) | `P3_PARTIAL_CASCADE_FRACTION`/`P3_RANDOM_ALARM_FRACTION`/`P3_NOISE_FRACTION` | `0.4`/`0.4`/`0.2` | non-aligned mix proportions |
+| (optional) | `P3_OPTIONAL_INCLUDE_PROB` | `1.0` | probability an optional sequence element is emitted |
+
+**Fail-fast (AC 46):** starting `synth` with `PATTERN_MANAGER_API_MODE=real` and **no**
+`PATTERN_MANAGER_API_BASE_URL` (or a `real` Trail Builder / Topology mode without its base URL) →
+structured JSON config error `config.invalid` + non-zero exit **before any alarm**. Same for
+`P3_ALIGNED_FRACTION` outside `[0,1]`, a non-existent `P3_CONFIG_SNAPSHOT_PATH` when
+load-from-persisted is requested with no live services reachable, or mix fractions not summing to 1.
+Validation is added to `config/settings.py::_validate` (extends the existing pattern). `--help`
+documents the `synth` sub-command with all P3 options (standalone vs. full-cycle use).
+
+### P3 data model (owned artifacts)
+
+No new datastore. P3 owns two **files** under `SIM_OUTPUT_DIR` (the same file model as
+snapshot/corpus/labels): the **P3 config snapshot** (`p3-config-snapshot.json`, versioned — schema
+above) and the **P3 labels** (`p3-labels-{runId}.jsonl` + `p3-summary-{runId}.json`). Both are
+Simulator-owned artifacts, not Kafka, not shared with other services (spec "Data owned"). The wire
+output is the frozen `AlarmEvent` on `alarms.live` — nothing new.
+
+```mermaid
+erDiagram
+  P3ConfigSnapshot ||--o{ ApprovedPattern : contains
+  P3ConfigSnapshot ||--o{ TrailMembers : contains
+  ApprovedPattern }o--|| TrailMembers : "trailId places on"
+  ApprovedPattern ||--|| P3CascadeLabel : "synthesizes"
+  P3CascadeLabel ||--o{ ChildAlarm : childAlarmIds
+  P3RunSummary ||--o{ P3CascadeLabel : "aggregates alignedFraction"
+  P3ConfigSnapshot {
+    int schemaVersion
+    string domain
+    string capturedAt
+  }
+  ApprovedPattern {
+    string patternId
+    string trailId
+    string rootCauseAlarmType
+    json sequence
+    json timing
+    json sessionWindow
+  }
+  TrailMembers {
+    string trailId
+    string managedObjectId
+    string objectType
+  }
+  P3CascadeLabel {
+    string patternId
+    string trailId
+    string rootCauseAlarmId
+    string rootCauseAlarmType
+    string scenarioType
+  }
+  P3RunSummary {
+    int totalAlarms
+    int alignedAlarms
+    int nonAlignedAlarms
+    float alignedFraction
+  }
+```
+
+### P3 error handling
+
+| Failure mode | Handling |
+|---|---|
+| No approved patterns (empty `PatternView[]`) | Fail fast `p3.no_approved_patterns`, exit 3, zero alarms (AC 32). |
+| A pattern's trail 404s | Structured **warning** `p3.trail_not_found`; drop that pattern; continue if ≥1 pattern remains; fail fast only if all trails are gone (AC 33). |
+| Collaborator unreachable / 5xx (real mode) | Bounded retry (mirrors `topology_client`); on exhaustion, structured error `p3.dependency_failure`, exit 4, zero alarms; `/health` non-200. |
+| Missing base URL when `*_API_MODE=real` | Config-invalid fail-fast (exit 3) before any call (AC 44/46). |
+| Stale/corrupt persisted config snapshot | `p3.config_snapshot_stale` on unknown `schemaVersion` or unresolvable `trailId`; exit 3, zero alarms. |
+| `P3_ALIGNED_FRACTION` out of `[0,1]` / mix fractions not summing to 1 | Config-invalid fail-fast (exit 3). |
+| Affine objectType missing on a trail | **Not an error** — fallback to any trail member (logged, counted); synthesis continues (OQ-P3-1). |
+| Kafka produce error | Logged + `simulator_produce_errors_total`; `/health` non-200; run exits non-zero; no silent drop (as existing replay). |
+
+No inbound Kafka in P3 either, so **no DLQ**; the P3 reads are HTTP GETs (bounded retry, no DLQ).
+`schemaVersion` rejection applies to the **P3 config snapshot file** (own versioned artifact) — the
+`AlarmEvent` schema is unchanged.
+
+### P3 design alternatives
+
+| Consideration | Alternatives considered | Chosen + rationale |
+|---|---|---|
+| alarmType→objectType placement authorship (OQ-P3-1) | (a) Knowledge Service vocabulary; (b) derive from `managedObjectId` prefix; (c) **pack-authored affinity table** | **(c)** — the pack already owns alarm shapes + object types; keeps the engine/synth domain-generic (AC-19). (b) would couple to the moid encoding (forbidden by OQ-P3-5). (a) adds a Knowledge round-trip + contract surface for pure generation-side data. |
+| Placement fallback when affine objectType absent | (a) skip the element; (b) fabricate a new object; (c) **place on ANY trail member** | **(c)** — keeps the alarm on a **real** object (AC 35) on the **pattern's own trail** so CE still matches on trail+sequence. (a) shrinks the cascade below tolerance (miss); (b) violates "no fabricated identities". |
+| P3 config persistence format (OQ-P3-2) | (a) multiple files; (b) SQLite; (c) **single versioned JSON file** | **(c)** — matches the existing snapshot/corpus/labels file model, human-diffable, trivially shareable/reusable across runs + inputs, simple fail-fast load. SQLite adds a dependency + opacity for a read-mostly config. |
+| Non-aligned strategy (OQ-P3-3) | (a) noise only; (b) random singles only; (c) **configurable MIX** (partial cascades + random singles + noise) | **(c, user-resolved)** — partial cascades exercise CE's reverted-open path (realistic "opened-then-expired"), random singles model unrelated traffic, noise reuses existing machinery; proportions are env-tunable so the non-correlated tail is representative and controllable. |
+| Optional-element emission (OQ-P3-4) | (a) always omit; (b) always emit; (c) **configurable include-prob, default include (1.0)** | **(c/default-b)** — CE treats optional as non-mandatory and fires within `partialMatchTolerance` (default N-1); including optionals keeps the tolerance budget for a real dropped mandatory symptom, so aligned cascades **reliably** auto-correlate; lowering the prob deliberately models incomplete cascades that still match. |
+| P3 emit path | (a) new synthesis-specific producer; (b) **reuse `engine/replay:LiveReplay`** | **(b)** — same topic, pacing, fresh-`eventId` envelope, frozen `AlarmEvent`; no new code path, no contract change, guaranteed identical wire behaviour to existing P3 replay. |
+| Fetch vs. persist decoupling | (a) always re-fetch; (b) **persist once, load-from-file for repeated runs** | **(b)** — spec Task 14/AC 34/42: repeated randomized runs must align without re-fetching and must run standalone/offline; the persisted snapshot isolates synthesis from service availability. |
 
 ## UI wireframes
 
