@@ -27,6 +27,14 @@ All events emitted use the frozen `libs/event-model` Python/Pydantic binding; al
 `managedObjectId` values follow the `<objectType>:<id>` scheme defined in that contract,
 ensuring topology and alarm identities are shared.
 
+A third operating mode — **P3 topology-and-pattern-driven live alarm synthesis** — extends the
+Simulator so it can synthesize a live alarm stream grounded in the **already-deployed topology,
+trails, and approved patterns** read back from the running services' APIs, without regenerating
+topology or re-mining patterns. This mode targets a configurable ~60-70% auto-correlation +
+RCA rate (the fraction of emitted alarms that form cascades matching approved patterns on their
+real trails) and provides full ground-truth labels for verifying that KPI against the
+Correlation Engine's `/stats` and `/incidents` responses.
+
 ## Scope
 
 **In scope:**
@@ -130,6 +138,48 @@ ensuring topology and alarm identities are shared.
   are surfaced as **CLI options** in the Simulator usage (with env-var equivalents), so an operator
   can `generate --export-corpus …` then later `ingest --topology-file … --alarms-file …
   --labels-file …`.
+- **P3 topology-and-pattern-driven live alarm synthesis (additive mode).** A new operating
+  mode that synthesizes a P3 live alarm stream grounded in the **already-deployed, already-approved
+  state of the platform** — no topology regeneration, no pattern re-mining:
+  - **Read** the deployed topology snapshots (Topology Service `GET /topology/snapshots`), trail
+    members (Trail Builder `GET /trails/{trailId}` → `members[]` of `{managedObjectId, objectType}`),
+    and approved patterns (Pattern Manager `GET /patterns?lifecycle=approved` → `PatternView[]` with
+    `trailId`, ordered `sequence[]` of `{alarmType, optional}`, `rootCauseAlarmType`,
+    `timing{timeframeMs, medianInterArrivalMs, maxInterArrivalMs, stddevInterArrivalMs}`,
+    `sessionWindow{windowMs, type}`, `snapshotId`). These three integrations are each
+    **config-switchable** (mock from the collaborator's published OpenAPI for unit tests; real
+    service for integration). No Topology Service graph queries are made beyond the snapshot
+    listing; no NebulaGraph access.
+  - **Persist** the fetched topology+trail+pattern data as a **reusable P3 config snapshot** so
+    that repeated P3 runs do not require re-fetching, and a captured (topology, approved-pattern-set)
+    config is reusable across runs. The persistence mechanism is a design decision.
+  - **Synthesize** pattern-aligned cascades: for each approved pattern, map its `sequence[]`
+    alarmTypes onto real `managedObjectId` members of the pattern's trail (from the trail's
+    `members[]`), emit the cascade wall-clock-paced using the pattern's `timing` and
+    `sessionWindow`, and mark the alarm matching `rootCauseAlarmType` as the root cause. The
+    remaining ~30-40% of the alarm stream consists of realistic non-aligned alarms: partial
+    cascades, alarms on real managed objects whose sequence does not match any approved pattern,
+    and noise — representative of real-world non-correlated traffic.
+  - **Configurable aligned fraction and total volume:** the fraction of alarms that are
+    pattern-aligned (default range ~60-70%) and the total alarm count are configurable via
+    env/profile; no hard-coded thresholds.
+  - **Seeded randomization for reproducibility:** P3 synthesis uses a configurable RNG seed so
+    that a run with the same seed + same persisted P3 config snapshot produces the same alarm
+    sequence (deterministic replay when desired); an absent/null seed produces a fresh
+    randomization. The mode is otherwise stateless across runs — topology and patterns change
+    rarely, alarm synthesis runs often.
+  - **Emit on `alarms.live` only** (wall-clock paced; the existing frozen `AlarmEvent` payload;
+    no new topic, no event-model change). The full live path — enrichment → `alarms.enriched.live`
+    → alarm-manager → `alarms.persisted.live` → correlation-engine — is unchanged.
+  - **Ground-truth labels** for each synthesized cascade (which alarm is root-cause, which are
+    children, which pattern it matches) are persisted and retrievable via the same label surface
+    already defined, so the auto-correlation + RCA accuracy KPI is verifiable against CE
+    `/stats` (`correlatedAlarmCount` / `totalAlarmsProcessed`) and `/incidents`.
+  - **Standalone or full-cycle:** P3 synthesis runs either standalone (given a pre-fetched or
+    pre-persisted P3 config snapshot) or as the P3 step in a full P1→P2→P3 cycle; behavior is
+    identical in both cases.
+  - **Backward compatible:** all existing generate/ingest/export modes and P1/P2 behavior are
+    unaffected; P3 synthesis is an additive mode selected by config/CLI.
 
 ## Out of scope
 
@@ -146,6 +196,20 @@ ensuring topology and alarm identities are shared.
 - **Domain packs beyond Core IP.** Only the Core IP domain pack is built for the MVP. Adding
   a new domain pack in the future must be achievable without reworking the reusable engine,
   but no non-Core-IP domain pack is in scope for this release.
+- **Generating or modifying topology in P3 synthesis mode.** The P3 topology-and-pattern-driven
+  mode reads the deployed topology/trails/patterns; it does not generate, upload, or alter the
+  topology graph. Topology generation is P1 only.
+- **Re-mining or re-approving patterns in P3 synthesis mode.** P3 synthesis reads already-approved
+  patterns from Pattern Manager; it does not run or trigger the P2 learning pipeline.
+- **Raising alarms on non-existent managed objects.** Every `managedObjectId` in a P3-synthesized
+  alarm must be present in the deployed topology snapshot. The Simulator does not fabricate object
+  identities.
+- **Writing directly to Pattern Manager, Topology Service, or any service's data store.** The
+  Simulator is a read-only consumer of those services' APIs in P3 mode; it never mutates their
+  state.
+- **Reading non-approved patterns in P3 synthesis.** Only lifecycle=approved patterns from Pattern
+  Manager are used for pattern-aligned cascade synthesis (see Open Questions for whether
+  non-approved patterns should be included in any future mode).
 
 ## Tasks (high-level)
 
@@ -205,6 +269,65 @@ ensuring topology and alarm identities are shared.
     `--alarms-file`, `--labels-file`, `--export-corpus`), alongside the existing generate CLI, with
     clear usage (generate vs. ingest, which files, which phase/topic).
 
+### P3 topology-and-pattern-driven synthesis tasks (additive)
+
+13. **Fetch and validate the deployed topology + trail + approved-pattern state.** In P3 synthesis
+    mode, read the current topology snapshot list from the Topology Service (`GET /topology/snapshots`),
+    fetch trail members for each trail referenced by an approved pattern from the Trail Builder
+    (`GET /trails/{trailId}`), and fetch all approved patterns from the Pattern Manager
+    (`GET /patterns?lifecycle=approved`). Each integration point is config-switchable (mock/real).
+    Fail fast (before any alarm emission) if the deployed state is empty or inconsistent (no approved
+    patterns, no matching trail for a pattern's `trailId`).
+
+14. **Persist the fetched P3 config snapshot for reuse.** After a successful fetch, persist the
+    topology snapshot list, trail members, and approved patterns as a reusable **P3 config snapshot**
+    (the persistence mechanism is a design decision). A subsequent P3 run can load from the persisted
+    snapshot without re-fetching, so repeated randomized alarm runs are isolated from service
+    availability and the (topology, approved-pattern) config is reusable across runs.
+
+15. **Synthesize pattern-aligned cascades on real trails.** For each approved pattern, construct one
+    or more alarm cascades: map each `sequence[i].alarmType` onto a real `managedObjectId` drawn from
+    the pattern's trail's `members[]` (using a placement rule described in Open Questions OQ-P3-1),
+    mark the alarm matching the pattern's `rootCauseAlarmType` as the root-cause alarm, and record the
+    cascade's ground-truth label `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType,
+    childAlarmIds, scenarioType="pattern-aligned"}`. The number of cascade instances per pattern is
+    configurable. Optional sequence elements (`optional=true`) may be emitted or omitted per the
+    configured strategy.
+
+16. **Synthesize the non-aligned remainder.** Generate the remaining ~30-40% of the alarm volume as
+    realistic non-aligned alarms on real `managedObjectId` values drawn from the deployed topology:
+    partial cascades (sequences that do not fully match any approved pattern), single-object alarms
+    that do not participate in any approved-pattern trail, and noise. Non-aligned alarms carry
+    ground-truth labels `{scenarioType="non-aligned"|"partial-cascade"|"noise"}` so they are excluded
+    from the aligned-fraction count. All `managedObjectId` values must exist in the deployed topology
+    snapshot.
+
+17. **Emit the synthesized P3 stream wall-clock-paced on `alarms.live`.** Emit the interleaved
+    pattern-aligned and non-aligned alarms to `alarms.live` (frozen `AlarmEvent` payload;
+    wall-clock-paced using the pattern's `timing.medianInterArrivalMs` /
+    `timing.maxInterArrivalMs` / `sessionWindow.windowMs` for aligned cascades; configurable pacing
+    for non-aligned alarms). Every emitted `AlarmEvent` carries a valid canonical `alarmType` token
+    (from the Knowledge `alarmTypeVocabulary`) and a `managedObjectId` present in the deployed
+    topology snapshot. No new topic; no event-model change.
+
+18. **Expose P3 ground-truth labels for oracle evaluation.** Persist and make retrievable the P3
+    cascade ground-truth labels (same label-retrieval surface as existing generate/ingest modes)
+    including `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds,
+    scenarioType}` per cascade, and the overall synthesized-run metadata
+    `{totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}` so the 60-70% KPI is
+    directly computable.
+
+19. **Support seeded and fresh randomization.** Accept a configurable RNG seed (`P3_RNG_SEED` env /
+    `--p3-rng-seed` CLI). With a seed present and the same persisted P3 config snapshot, a P3 run
+    produces the same alarm ordering, `managedObjectId` placements, and timing; with no seed it
+    produces a fresh randomization. The seed has no effect on the persisted P3 config snapshot itself.
+
+20. **Surface P3 synthesis in the CLI.** Extend the CLI with a `synth` subcommand (or equivalent
+    mode flag) for P3 topology-and-pattern-driven synthesis, with options for: load-from-persisted-
+    snapshot vs. re-fetch, `--p3-rng-seed`, `--p3-aligned-fraction`, `--p3-total-alarms`, and
+    `--p3-config-snapshot-path`. Env-var equivalents for all options. `--help` documents standalone
+    vs. full-cycle use.
+
 ## Phase applicability
 
 The Simulator is **Active in all three runtime phases** and serves as the **evaluation oracle
@@ -216,7 +339,7 @@ harness asserts across the learning and real-time phases.
 |---|---|---|---|
 | P1 — Topology onboarding | Generates the domain-grounded topology snapshot file and uploads it to the Topology Service ingestion API, establishing the graph that all subsequent phases depend on | Active | Output: topology snapshot file (versioned JSON contract) → Topology ingestion API (HTTP upload, config-switchable mock/real) |
 | P2 — Pattern learning | Replays the labeled historical alarm corpus (batch) onto `alarms.history`, feeding the enrichment → noise-filter → pattern-miner learning pipeline; ground-truth labels serve as the oracle for pattern-quality evaluation | Active | Output: `alarms.history` (`AlarmEvent` payloads, batch) |
-| P3 — Real-time correlation | Replays the labeled live alarm stream (wall-clock paced) onto `alarms.live`, feeding the enrichment → correlation-engine real-time pipeline; ground-truth labels and integration thresholds are the oracle for RCA accuracy and alarm-reduction evaluation | Active | Output: `alarms.live` (`AlarmEvent` payloads, wall-clock paced) |
+| P3 — Real-time correlation | Two operating sub-modes: (a) **existing** — replays the labeled live alarm stream (wall-clock paced) onto `alarms.live` from a generated or ingested corpus; (b) **P3 synthesis (additive)** — reads deployed topology + trail + approved-pattern state from Topology, Trail Builder, and Pattern Manager APIs; synthesizes a live alarm stream grounded in those real objects/patterns; emits wall-clock-paced to `alarms.live`; persists and exposes ground-truth labels. Both sub-modes serve as the evaluation oracle for the RCA accuracy + alarm-reduction KPIs. | Active | Inputs (synthesis sub-mode): Topology `GET /topology/snapshots`; Trail Builder `GET /trails/{trailId}`; Pattern Manager `GET /patterns?lifecycle=approved`; optionally: persisted P3 config snapshot file. Output: `alarms.live` (`AlarmEvent` payloads, wall-clock paced); ground-truth label store. |
 
 **Ingest mode is available in every phase** (it replaces the *generation* stage, not the phase
 role): P1 ingests a **topology snapshot file** (validated, uploaded via the existing ingestion API);
@@ -295,6 +418,21 @@ generated to pre-created.
   - **Knowledge Service scenario config endpoint (optional):** read scenario configuration
     parameters. Config-switchable: local-file mode (default/mock for unit tests) vs. real
     Knowledge Service (for integration). URL and mode controlled by environment variable.
+  - **[P3 synthesis] Topology Service — snapshot listing:** `GET /topology/snapshots` to read
+    the current snapshot(s) and their `snapshotId`. Client built against Topology's published
+    OpenAPI 3.1 spec. Config-switchable: mock (from Topology's OpenAPI) for unit tests; real
+    Topology Service for integration. Base URL: `TOPOLOGY_API_BASE_URL`; mode: `TOPOLOGY_API_MODE`.
+  - **[P3 synthesis] Trail Builder — trail member lookup:** `GET /trails/{trailId}` to fetch
+    the `members[]` of `{managedObjectId, objectType}` for each trail referenced by an approved
+    pattern. Client built against Trail Builder's published OpenAPI 3.1 spec. Config-switchable:
+    mock (from Trail Builder's OpenAPI) for unit tests; real Trail Builder for integration.
+    Base URL: `TRAIL_BUILDER_API_BASE_URL`; mode: `TRAIL_BUILDER_API_MODE`.
+  - **[P3 synthesis] Pattern Manager — approved pattern listing:** `GET /patterns?lifecycle=approved`
+    to fetch all approved `PatternView` objects with `trailId`, `sequence[]`, `rootCauseAlarmType`,
+    `timing`, `sessionWindow`, `snapshotId`. Client built against Pattern Manager's published
+    OpenAPI 3.1 spec. Config-switchable: mock (from Pattern Manager's OpenAPI) for unit tests;
+    real Pattern Manager for integration. Base URL: `PATTERN_MANAGER_API_BASE_URL`; mode:
+    `PATTERN_MANAGER_API_MODE`.
 - **Data owned:**
   - Ground-truth scenario labels (`{rootCause, rootCauseManagedObjectId, rootCauseAlarmType,
     children}` per injected scenario) — persisted in a store or file; medium is a design decision.
@@ -302,6 +440,15 @@ generated to pre-created.
     time; the Simulator does not author them).
   - Exported **alarm corpus file** (the ordered emitted `AlarmEvent` stream + topic, JSONL) when
     export is enabled — the Simulator-owned, versioned, re-ingestible dataset artifact.
+  - **[P3 synthesis] P3 config snapshot** — the persisted (topology snapshot list, trail members,
+    approved patterns) fetched from the deployed services, stored in a Simulator-owned artifact
+    (mechanism is a design decision). This snapshot is the input to repeated P3 synthesis runs; it
+    is not a Kafka artifact and is not shared with other services. Reusable: a captured
+    (topology, approved-pattern-set) config can drive multiple P3 runs.
+  - **[P3 synthesis] P3 ground-truth cascade labels** — per-cascade labels
+    `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds, scenarioType}` and
+    per-run metadata `{totalAlarms, alignedAlarms, nonAlignedAlarms, alignedFraction}`, retrievable
+    via the existing label-retrieval surface.
 - **Files consumed (ingest mode):** a pre-created topology snapshot file, a pre-created alarm
   corpus file, and a pre-created labels file (the same formats the Simulator exports). These are
   read from local paths (config/CLI); they are not Kafka inputs and require no DLQ.
@@ -317,7 +464,13 @@ generated to pre-created.
   count, scenario selection, timing jitter parameters, noise class mix and rates, replay
   speed/pacing, Kafka broker addresses, Topology Service base URL, Knowledge Service base URL,
   integration-point mode (mock vs. real). Config MUST be validated at startup; missing
-  required config is a fatal error reported via structured log before exit.
+  required config is a fatal error reported via structured log before exit. **P3 synthesis
+  adds:** `TOPOLOGY_API_BASE_URL` + `TOPOLOGY_API_MODE`, `TRAIL_BUILDER_API_BASE_URL` +
+  `TRAIL_BUILDER_API_MODE`, `PATTERN_MANAGER_API_BASE_URL` + `PATTERN_MANAGER_API_MODE`,
+  `P3_ALIGNED_FRACTION` (default 0.65, range 0.0-1.0), `P3_TOTAL_ALARMS`, `P3_RNG_SEED`
+  (optional; absent = fresh randomization), `P3_CONFIG_SNAPSHOT_PATH` (path to persisted P3
+  config snapshot; if absent, re-fetches from services). All P3 config items are env/CLI
+  overridable; no hard-coded defaults for URLs or fractions.
 - **Observability:** `/health` (liveness probe), `/metrics` (Prometheus-compatible), structured
   JSON logs on stdout. Cohort is Python (per CLAUDE.md); test framework is pytest.
 - **API contract:** if an HTTP API is exposed, it publishes OpenAPI 3.1 at `/openapi.json`
@@ -581,6 +734,114 @@ Each criterion is phrased to map to a single pytest test.
     `INGEST_LABELS_FILE`). `--help` documents both paths; selecting ingest without the file(s) the
     phase requires fails fast with a clear usage/config error.
 
+### P3 topology-and-pattern-driven synthesis acceptance criteria
+
+Each criterion maps to a single pytest test.
+
+32. **P3 synthesis mode reads approved patterns from Pattern Manager and fails fast if none.**
+    When P3 synthesis mode is selected and `PATTERN_MANAGER_API_MODE=mock`, the Simulator fetches
+    patterns from the mock stub (generated from Pattern Manager's published OpenAPI); the mock
+    returns a non-empty `PatternView[]` list and the run proceeds. When the mock returns an empty
+    list the Simulator logs a structured error and exits with a non-zero code before emitting any
+    alarm.
+
+33. **P3 synthesis mode reads trail members from Trail Builder for each pattern's `trailId`.**
+    Given a P3 config snapshot with 3 approved patterns referencing 2 distinct `trailId` values,
+    the Simulator issues exactly 2 calls to `GET /trails/{trailId}` (deduplication on `trailId`),
+    and the returned `members[]` are stored in the P3 config snapshot. When the Trail Builder
+    returns HTTP 404 for a `trailId`, the Simulator logs a structured warning and excludes that
+    pattern from synthesis (it does not abort the run if other patterns are available).
+
+34. **P3 config snapshot is persisted and a subsequent run loads from it without re-fetching.**
+    After a P3 run that fetches from live services, the persisted P3 config snapshot is present
+    at the configured path (`P3_CONFIG_SNAPSHOT_PATH`). A second P3 run with
+    `P3_CONFIG_SNAPSHOT_PATH` pointing to the persisted file makes zero calls to the Topology,
+    Trail Builder, or Pattern Manager APIs (verifiable via the mock call count) and produces an
+    alarm stream of the configured volume.
+
+35. **P3 synthesized alarms carry valid `managedObjectId` values from the deployed topology.**
+    Every `AlarmEvent` emitted in a P3 synthesis run carries a `managedObjectId` that is present
+    in the topology snapshot stored in the P3 config snapshot. No P3-emitted alarm references an
+    object absent from the topology snapshot.
+
+36. **Pattern-aligned cascades follow the pattern's sequence and timing.**
+    Given an approved pattern with `sequence=[{alarmType:"IPLinkDown"},{alarmType:"ISISAdjacencyDown"}]`,
+    `timing.medianInterArrivalMs=500`, and a trail with members including an `IPLink` object and
+    an `IGPAdjacency` object, the Simulator emits a cascade of two alarms: the first with
+    `alarmType="IPLinkDown"` on the `IPLink` member and the second with
+    `alarmType="ISISAdjacencyDown"` on the `IGPAdjacency` member. The inter-arrival time between
+    the two alarms is in the range `[0, timing.maxInterArrivalMs]` (and near
+    `timing.medianInterArrivalMs` in expectation). The cascade ground-truth label records the
+    alarm with `alarmType` matching the pattern's `rootCauseAlarmType` as root cause and the
+    other(s) as children.
+
+37. **Root-cause alarm in a pattern-aligned cascade matches the pattern's `rootCauseAlarmType`.**
+    For every synthesized pattern-aligned cascade, the ground-truth label's `rootCauseAlarmType`
+    equals the approved pattern's `rootCauseAlarmType`. The emitted `AlarmEvent` for the root-cause
+    alarm carries that same `alarmType` value and the `managedObjectId` of a trail member of the
+    appropriate `objectType` (placement rule applied — see OQ-P3-1).
+
+38. **Configured aligned fraction is honored within tolerance.**
+    Given `P3_ALIGNED_FRACTION=0.65` and `P3_TOTAL_ALARMS=200`, a P3 synthesis run emits between
+    120 and 145 pattern-aligned alarms (65% ± a tolerance of 5 percentage points) and the
+    remainder are non-aligned/noise. The per-run metadata label `alignedFraction` is within the
+    same tolerance. The aligned fraction is configurable: a run with `P3_ALIGNED_FRACTION=0.0`
+    emits zero pattern-aligned alarms; a run with `P3_ALIGNED_FRACTION=1.0` emits no non-aligned
+    alarms (subject to available approved patterns).
+
+39. **P3 non-aligned alarms also carry valid `managedObjectId` values and canonical `alarmType` tokens.**
+    Every non-aligned `AlarmEvent` emitted in a P3 synthesis run carries a `managedObjectId`
+    present in the P3 config snapshot topology, and an `alarmType` that is a non-empty token from
+    the Knowledge `alarmTypeVocabulary`. No fabricated object identities.
+
+40. **P3 stream is emitted on `alarms.live` only.**
+    In a P3 synthesis run, all synthesized alarms are produced to `alarms.live` and zero alarms
+    are produced to `alarms.history`. Every emitted `AlarmEvent` passes validation against the
+    frozen `libs/event-model` Python/Pydantic binding (all required fields present, including
+    `alarmType`).
+
+41. **Seeded P3 run is reproducible; unseeded run produces a fresh randomization.**
+    Two P3 synthesis runs with the same `P3_RNG_SEED` value and the same persisted P3 config
+    snapshot produce alarm streams that are identical in `alarmId`, `alarmType`, `managedObjectId`,
+    `raisedAt`, and ordering. Two runs without a seed (or with distinct seeds) produce different
+    `alarmId` values and a different ordering with high probability (verified by comparing the
+    first 10 alarms' `alarmId`s across runs).
+
+42. **P3 synthesis runs standalone without a prior P1/P2 step.**
+    Given a pre-populated persisted P3 config snapshot (with topology, trail members, and approved
+    patterns), a P3 synthesis run completes successfully with no call to the Topology ingestion
+    API (`POST /topology/snapshots`) and no dependency on a previously generated alarm corpus —
+    the run produces a complete alarm stream and ground-truth labels from the persisted config
+    alone.
+
+43. **P3 ground-truth labels are retrievable and the 60-70% KPI is directly computable.**
+    After a P3 synthesis run, the ground-truth label store contains: one record per synthesized
+    cascade with `{patternId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds,
+    scenarioType}`, and one per-run summary with `{totalAlarms, alignedAlarms, nonAlignedAlarms,
+    alignedFraction}`. The `alignedFraction` in the summary equals
+    `alignedAlarms / totalAlarms` computed from the per-cascade records. These are retrievable via
+    the existing label-retrieval surface without additional configuration.
+
+44. **P3 integration points are all config-switchable (mock vs. real).**
+    With `TOPOLOGY_API_MODE=mock`, `TRAIL_BUILDER_API_MODE=mock`, and
+    `PATTERN_MANAGER_API_MODE=mock`, the P3 synthesis mode completes a full fetch-and-synthesize
+    cycle using only mock stubs (generated from each collaborator's published OpenAPI spec) and
+    makes zero calls to live services. Switching any mode to `real` (with a valid base URL)
+    requires no code change.
+
+45. **P3 synthesis is backward compatible: existing modes are unaffected.**
+    A run in `generate` mode, `ingest` mode, or `export` mode with no P3 synthesis options set
+    produces identical behavior to the pre-P3-spec behavior: the P3 integration clients are not
+    instantiated and no P3-related API calls are made. The existing P1/P2 acceptance criteria
+    (AC 1-31) pass unchanged.
+
+46. **P3 CLI exposes synthesis options; missing required P3 config fails fast.**
+    `--help` documents the P3 synthesis subcommand/mode with all P3 options
+    (`--p3-aligned-fraction`, `--p3-total-alarms`, `--p3-rng-seed`,
+    `--p3-config-snapshot-path`). Starting P3 synthesis without a Pattern Manager URL configured
+    (and `PATTERN_MANAGER_API_MODE=real`) produces a structured JSON config-error log and exits
+    with a non-zero code before emitting any alarm.
+
 ## Open questions
 
 - **OQ-2 (design decision — does not block spec): How are ground-truth labels retrieved?**
@@ -603,3 +864,63 @@ Each criterion is phrased to map to a single pytest test.
   **`services/topology/schema/snapshot.schema.json`, owned by the Topology Service** (the validating
   owner), and the Simulator validates its generated file against **that same file** — it keeps **no
   independent copy** (eliminating producer/validator drift). See `design.md` for the rationale.
+
+### P3 synthesis open questions (require human resolution before design)
+
+- **OQ-P3-1 (BLOCKS design): `alarmType`-to-`objectType` placement rules for P3 cascade synthesis.**
+  To map each `sequence[i].alarmType` onto a real `managedObjectId` from the trail's `members[]`,
+  the Simulator needs a placement rule: which `objectType` in the trail's members is the valid
+  target for each `alarmType` (e.g. `IPLinkDown` is raised on an `IPLink` member;
+  `ISISAdjacencyDown` on an `IGPAdjacency` member; `InterfaceDown` on an `Interface` member).
+  **Unresolved:** (a) Where is this mapping authored — in the Simulator's Core IP domain pack
+  (generation-side, not in Knowledge), in the Knowledge Service's domain vocabulary, or derived
+  from the pattern's own sequence plus the trail member list at fetch time? (b) What is the
+  fallback when no member of the required `objectType` exists in the trail (e.g. the trail has no
+  `IGPAdjacency`)? (c) Does the placement apply to optional sequence elements differently than
+  mandatory ones? This mapping is a first-class contract input to AC-36 and AC-37; the designer
+  cannot proceed without a human decision on authorship and fallback policy.
+
+- **OQ-P3-2 (design decision, does not block spec): P3 config snapshot persistence format.**
+  The spec requires that the fetched topology + trail members + approved patterns be persisted as a
+  reusable P3 config snapshot. The format and storage mechanism (e.g. a single JSON file,
+  multiple files, a local SQLite, a named directory) are left to the designer. The requirement is:
+  the snapshot must be loadable without re-fetching, and a given (topology, approved-pattern-set)
+  captured at one point in time must be reusable in later P3 runs even if the live services are
+  unavailable or have changed state. The designer should confirm the format is versioned and
+  validates on load (fail-fast if stale/corrupt).
+
+- **OQ-P3-3 (design decision, does not block spec): Non-aligned alarm generation strategy.**
+  The spec requires ~30-40% of the alarm stream to be realistic non-aligned alarms (partial
+  cascades, single-object alarms, noise). The strategy for generating these (e.g. randomly
+  sampling managed objects from the topology, applying truncated pattern sequences, or reusing
+  the existing noise-class machinery from the domain pack) is a design decision. The spec
+  requires only that: (a) every non-aligned alarm's `managedObjectId` exists in the topology
+  snapshot; (b) non-aligned alarms carry a canonical `alarmType` token; (c) the volume is
+  configurable to the `P3_ALIGNED_FRACTION` remainder; (d) each non-aligned alarm carries a
+  ground-truth label (`scenarioType="non-aligned"` or `"partial-cascade"` or `"noise"`).
+
+- **OQ-P3-4 (design decision, does not block spec): Optional sequence element handling.**
+  Approved patterns have `sequence[].optional` flags. The spec requires that optional elements
+  may be emitted or omitted; the strategy (always omit, always emit, randomly emit per seed,
+  configurable probability) is a design decision. The chosen strategy must be consistent for a
+  given seed (reproducibility) and must not cause a synthesized cascade to fail the Correlation
+  Engine's session-window match when the CE's matching logic treats `optional=true` elements as
+  non-mandatory.
+
+- **OQ-P3-5 (does not block spec — flag if contract change needed): Does the Trail Builder
+  `GET /trails/{trailId}` response include `objectType` per member?**
+  The user confirmed (feasibility probe) that the response carries `members[]` of
+  `{managedObjectId, objectType}`. The Simulator's P3 placement logic (OQ-P3-1) depends on
+  `objectType` being present per member. If the live Trail Builder API does not include
+  `objectType` in its `members[]` response, this is a **contract change** to Trail Builder's
+  published OpenAPI — flag it as a contract-change issue per the CONVENTIONS.md procedure and
+  stop. Do not design a workaround that derives `objectType` from the `managedObjectId` prefix,
+  as that would couple the Simulator to the `<objectType>:<id>` encoding rather than the
+  published API contract.
+
+- **OQ-P3-6 (does not block spec): Should non-approved patterns (e.g. lifecycle=discovered) be
+  usable in P3 synthesis for a "lookahead" or evaluation-only mode?**
+  The current spec restricts P3 synthesis to `lifecycle=approved` patterns only. The user
+  requirement says "approved patterns"; if future use cases need to synthesize against
+  `discovered` (not-yet-approved) patterns for evaluation purposes, that would be a scope
+  extension. Flag for human confirmation; do not implement until confirmed.
