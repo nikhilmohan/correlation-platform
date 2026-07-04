@@ -1,0 +1,458 @@
+{
+  "openapi" : "3.1.0",
+  "info" : {
+    "title" : "Pattern Manager API",
+    "description" : "Pattern Store read API + human-approval lifecycle for discovered correlation patterns (RCA, structural validation, codebook reconciliation, session-window, XAI).",
+    "version" : "0.1.0"
+  },
+  "servers" : [ {
+    "url" : "/"
+  } ],
+  "paths" : {
+    "/patterns/{patternId}/deprecate" : {
+      "post" : {
+        "tags" : [ "pattern-controller" ],
+        "summary" : "Deprecate a draft or approved pattern",
+        "operationId" : "deprecate",
+        "parameters" : [ {
+          "name" : "patternId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/DeprecateIntent"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PatternView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/patterns/{patternId}/approve" : {
+      "post" : {
+        "tags" : [ "pattern-controller" ],
+        "summary" : "Approve or reject a draft pattern",
+        "operationId" : "approve",
+        "parameters" : [ {
+          "name" : "patternId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/ApprovalIntent"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "404" : {
+            "description" : "No pattern with the given id"
+          },
+          "200" : {
+            "description" : "Decision applied; updated PatternView returned",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PatternView"
+                }
+              }
+            }
+          },
+          "422" : {
+            "description" : "Decision body fails validation (invalid decision/semantics)"
+          },
+          "409" : {
+            "description" : "Pattern is not in a lifecycle state that permits approval/rejection"
+          }
+        }
+      }
+    },
+    "/patterns/{patternId}" : {
+      "get" : {
+        "tags" : [ "pattern-controller" ],
+        "summary" : "Get a single pattern by id (full PatternView incl. XAI + sessionWindow)",
+        "operationId" : "get",
+        "parameters" : [ {
+          "name" : "patternId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PatternView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch" : {
+        "tags" : [ "pattern-controller" ],
+        "summary" : "Edit a draft pattern (per-position optional markers; frozen PatternEdit body)",
+        "operationId" : "edit",
+        "parameters" : [ {
+          "name" : "patternId",
+          "in" : "path",
+          "required" : true,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "requestBody" : {
+          "content" : {
+            "application/json" : {
+              "schema" : {
+                "$ref" : "#/components/schemas/PatternEdit"
+              }
+            }
+          },
+          "required" : true
+        },
+        "responses" : {
+          "404" : {
+            "description" : "No pattern with the given id"
+          },
+          "409" : {
+            "description" : "Pattern is not editable in its current lifecycle state (only drafts are editable)"
+          },
+          "422" : {
+            "description" : "Edit body is un-processable (e.g. out-of-range position index)"
+          },
+          "200" : {
+            "description" : "Edit applied; updated PatternView returned",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PatternView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/patterns" : {
+      "get" : {
+        "tags" : [ "pattern-controller" ],
+        "summary" : "List patterns (PatternPage envelope), filterable by lifecycle",
+        "operationId" : "list",
+        "parameters" : [ {
+          "name" : "lifecycle",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        }, {
+          "name" : "limit",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }, {
+          "name" : "offset",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }, {
+          "name" : "sort",
+          "in" : "query",
+          "required" : false,
+          "schema" : {
+            "type" : "string"
+          }
+        } ],
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/PatternPage"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components" : {
+    "schemas" : {
+      "DeprecateIntent" : {
+        "properties" : {
+          "reviewer" : {
+            "type" : "string"
+          },
+          "notes" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "reviewer" ]
+      },
+      "JsonNode" : { },
+      "PatternView" : {
+        "properties" : {
+          "patternId" : {
+            "type" : "string"
+          },
+          "patternName" : {
+            "type" : "string",
+            "description" : "deterministic, readable pattern name owned + persisted by the Pattern Manager (\"<label> Cascade · <short8-of-patternId>\", e.g. \"IP Link Down Cascade · 02007ff1\"); consumers render this instead of deriving a name client-side"
+          },
+          "trailId" : {
+            "type" : "string"
+          },
+          "sequence" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SequenceElementView"
+            }
+          },
+          "rootCauseAlarmType" : {
+            "type" : "string"
+          },
+          "support" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "confidence" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "lift" : {
+            "type" : "number",
+            "format" : "double"
+          },
+          "timing" : {
+            "$ref" : "#/components/schemas/JsonNode"
+          },
+          "sessionWindow" : {
+            "$ref" : "#/components/schemas/SessionWindowView"
+          },
+          "codebookMatchId" : {
+            "type" : "string"
+          },
+          "reconcileStatus" : {
+            "type" : "string"
+          },
+          "structurallyValidated" : {
+            "type" : "boolean"
+          },
+          "structuralValidationReason" : {
+            "type" : "string"
+          },
+          "instanceCount" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "total number of individual alarm instances across all folded occurrences (sum of per-occurrence mined support counts); see also occurrenceCount for the number of distinct occurrences folded"
+          },
+          "occurrenceCount" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "number of mined occurrences (distinct PatternMinedEvent eventIds) folded into this pattern; counts events, not alarms"
+          },
+          "trailCount" : {
+            "type" : "integer",
+            "format" : "int32",
+            "description" : "number of DISTINCT trails from which this cascade signature has been observed (cross-trail spread / significance)"
+          },
+          "firstSeen" : {
+            "type" : "string",
+            "format" : "date-time",
+            "description" : "timestamp of the first occurrence folded (earliest contributing event)"
+          },
+          "lastSeen" : {
+            "type" : "string",
+            "format" : "date-time",
+            "description" : "timestamp of the most recent occurrence folded (bumped on each fold)"
+          },
+          "supportingInstances" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SupportingInstanceView"
+            }
+          },
+          "sampleAlarms" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SampleAlarmView"
+            }
+          },
+          "lifecycle" : {
+            "type" : "string"
+          },
+          "domain" : {
+            "type" : "string"
+          },
+          "createdAt" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "updatedAt" : {
+            "type" : "string",
+            "format" : "date-time"
+          }
+        }
+      },
+      "SampleAlarmView" : {
+        "properties" : {
+          "alarmId" : {
+            "type" : "string"
+          },
+          "alarmType" : {
+            "type" : "string"
+          },
+          "raisedAt" : {
+            "type" : "string",
+            "format" : "date-time"
+          },
+          "managedObjectId" : {
+            "type" : "string"
+          },
+          "perceivedSeverity" : {
+            "type" : "string"
+          }
+        }
+      },
+      "SequenceElementView" : {
+        "properties" : {
+          "alarmType" : {
+            "type" : "string"
+          },
+          "optional" : {
+            "type" : "boolean"
+          }
+        }
+      },
+      "SessionWindowView" : {
+        "properties" : {
+          "windowMs" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "type" : {
+            "type" : "string"
+          }
+        }
+      },
+      "SupportingInstanceView" : {
+        "properties" : {
+          "sourceWindowId" : {
+            "type" : "string"
+          },
+          "snapshotId" : {
+            "type" : "string"
+          },
+          "occurrence" : {
+            "$ref" : "#/components/schemas/JsonNode"
+          }
+        }
+      },
+      "ApprovalIntent" : {
+        "properties" : {
+          "decision" : {
+            "type" : "string",
+            "pattern" : "approve|reject"
+          },
+          "reviewer" : {
+            "type" : "string"
+          },
+          "notes" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "decision", "reviewer" ]
+      },
+      "PatternEdit" : {
+        "properties" : {
+          "sequenceFlags" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/SequenceFlag"
+            }
+          },
+          "reviewer" : {
+            "type" : "string"
+          },
+          "notes" : {
+            "type" : "string"
+          }
+        },
+        "required" : [ "reviewer", "sequenceFlags" ]
+      },
+      "SequenceFlag" : {
+        "properties" : {
+          "index" : {
+            "type" : "integer",
+            "format" : "int32",
+            "minimum" : 0
+          },
+          "optional" : {
+            "type" : "boolean"
+          }
+        },
+        "required" : [ "index", "optional" ]
+      },
+      "PatternPage" : {
+        "properties" : {
+          "items" : {
+            "type" : "array",
+            "items" : {
+              "$ref" : "#/components/schemas/PatternView"
+            }
+          },
+          "total" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "limit" : {
+            "type" : "integer",
+            "format" : "int32"
+          },
+          "offset" : {
+            "type" : "integer",
+            "format" : "int32"
+          }
+        }
+      }
+    }
+  }
+}

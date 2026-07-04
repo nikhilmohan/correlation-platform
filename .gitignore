@@ -5,11 +5,16 @@ build/
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
+# The above negation is anchored to the repo root; nested service/lib Gradle wrappers
+# need their own un-ignore so the wrapper jar is tracked on a clean checkout (else
+# `./gradlew build` dies with ClassNotFoundException in CI/Docker).
+!**/gradle/wrapper/gradle-wrapper.jar
 
 # --- Python ---
 __pycache__/
 *.py[cod]
 .venv/
+.nfvenv/
 venv/
 .env
 .pytest_cache/

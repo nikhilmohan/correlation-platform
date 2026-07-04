@@ -1,0 +1,191 @@
+// enrichment — source-aware, configuration-driven alarm normalizer + deterministic filter
+// pipeline + trail-tagger. Active in P2 (alarms.history -> alarms.enriched) and P3
+// (alarms.live -> alarms.enriched.live). Java 17 / Spring Boot 3 / Gradle.
+//
+// Depends ONLY on the frozen event-model Java binding (com.acp:event-model:0.1.0, via
+// includeBuild), the Kafka topic contracts, and the Trail Builder published OpenAPI — never on
+// another service's source. All dependencies are permissive (Apache-2.0 / MIT / BSD / EPL-2.0 /
+// PostgreSQL). No GPL/AGPL/BSL.
+
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.4'
+    id 'io.spring.dependency-management' version '1.1.6'
+    id 'jacoco'
+}
+
+group = 'com.acp'
+version = '0.1.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    springdocVersion = '2.6.0'
+    resilience4jVersion = '2.2.0'
+    caffeineVersion = '3.1.8'
+    logstashEncoderVersion = '7.4'
+    testcontainersVersion = '1.20.1'
+    wiremockVersion = '3.9.1'
+    awaitilityVersion = '4.2.2'
+}
+
+dependencies {
+    // --- The frozen contract: event-model Java binding (generated AlarmEvent POJO + EventCodec).
+    implementation 'com.acp:event-model:0.1.0'
+
+    // --- Spring Boot: web (chatter API + springdoc), validation, actuator (health/metrics).
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+    // --- Kafka: plain consumer/producer model (idempotent producer), no Kafka Streams.
+    implementation 'org.springframework.kafka:spring-kafka'
+
+    // --- Resilience4j: retry + circuit-breaker around the Trail Builder client.
+    implementation "io.github.resilience4j:resilience4j-spring-boot3:${resilience4jVersion}"
+    implementation "io.github.resilience4j:resilience4j-retry:${resilience4jVersion}"
+    implementation "io.github.resilience4j:resilience4j-circuitbreaker:${resilience4jVersion}"
+
+    // --- Caffeine: bounded, time-expiring in-process windowed state (dedup/self-clear/flap).
+    implementation "com.github.ben-manes.caffeine:caffeine:${caffeineVersion}"
+
+    // --- OpenAPI 3.1 (springdoc) — /openapi.json + Swagger UI for the chatter-management API.
+    implementation "org.springdoc:springdoc-openapi-starter-webmvc-ui:${springdocVersion}"
+
+    // --- Observability: Prometheus registry + structured JSON logging.
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation "net.logstash.logback:logstash-logback-encoder:${logstashEncoderVersion}"
+
+    // --- Tests: JUnit 5, Mockito, Testcontainers (Kafka), WireMock (mock Trail Builder from its
+    //     published OpenAPI), Awaitility (async Kafka assertions).
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.kafka:spring-kafka-test'
+    testImplementation "org.testcontainers:junit-jupiter:${testcontainersVersion}"
+    testImplementation "org.testcontainers:kafka:${testcontainersVersion}"
+    testImplementation "org.wiremock:wiremock-standalone:${wiremockVersion}"
+    testImplementation "org.awaitility:awaitility:${awaitilityVersion}"
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.testcontainers:testcontainers-bom:${testcontainersVersion}"
+    }
+}
+
+// Unit/contract tests (default). The integration test (embedded-Kafka + real Spring Boot context
+// over real HTTP — no Docker required) is tagged "integration" and excluded from the fast unit run;
+// it runs via the `integrationTest` task. The OpenAPI drift check is tagged "openapi-gen" and runs
+// via `verifyOpenApi`. BOTH are wired into `check` below (see `check.dependsOn`), so a plain
+// `./gradlew build` is the single green gate (DoD): unit tests + JaCoCo coverage + the
+// embedded-Kafka integration entrypoint test + the OpenAPI byte-drift verification.
+tasks.named('test', Test) {
+    useJUnitPlatform {
+        // Exclude the slow real-context tests from the fast unit gate: 'integration' (embedded
+        // Kafka + WireMock entrypoint) and 'openapi-gen' (boots a context to regenerate openapi.json).
+        excludeTags 'integration', 'openapi-gen'
+    }
+    finalizedBy jacocoTestReport
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Testcontainers + real-context integration tests (Kafka, real HTTP entrypoint).'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'integration'
+    }
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    shouldRunAfter test
+}
+
+// Regenerate the checked-in services/enrichment/openapi.json from the live springdoc surface.
+// Output is normalised (recursively key-sorted + static server URL) so it is byte-stable across
+// runs and the drift check below is meaningful.
+tasks.register('generateOpenApi', Test) {
+    description = 'Boots the app and writes services/enrichment/openapi.json (springdoc 3.1).'
+    group = 'documentation'
+    useJUnitPlatform {
+        includeTags 'openapi-gen'
+    }
+    systemProperty 'enrichment.openapi-out', "${projectDir}/openapi.json"
+    systemProperty 'enrichment.openapi-verify', 'false'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    outputs.upToDateWhen { false }
+}
+
+// Verify the checked-in services/enrichment/openapi.json has not drifted from the live springdoc
+// surface (byte-identical after the same normalisation generateOpenApi applies). Wired into `check`.
+tasks.register('verifyOpenApi', Test) {
+    description = 'Fails the build if services/enrichment/openapi.json drifted from the served spec.'
+    group = 'verification'
+    useJUnitPlatform {
+        includeTags 'openapi-gen'
+    }
+    workingDir = projectDir
+    systemProperty 'enrichment.openapi-verify', 'true'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    outputs.upToDateWhen { false }
+    shouldRunAfter test
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/enrichment/EnrichmentApplication.class',
+                    // Spring @Configuration wiring + observability adapters are exercised by the
+                    // integration-tagged real-context test, not unit-counted.
+                    'com/acp/enrichment/config/**',
+                    'com/acp/enrichment/observability/**'
+                ])
+            })
+        )
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn jacocoTestReport
+    violationRules {
+        rule {
+            element = 'BUNDLE'
+            limit {
+                counter = 'LINE'
+                minimum = 0.70
+            }
+        }
+    }
+    afterEvaluate {
+        classDirectories.setFrom(
+            files(classDirectories.files.collect {
+                fileTree(dir: it, exclude: [
+                    'com/acp/enrichment/EnrichmentApplication.class',
+                    'com/acp/enrichment/config/**',
+                    'com/acp/enrichment/observability/**'
+                ])
+            })
+        )
+    }
+}
+
+// The single green gate (DoD): `./gradlew build` runs unit tests + JaCoCo coverage AND the
+// embedded-Kafka integration entrypoint test AND the OpenAPI byte-drift verification.
+check.dependsOn jacocoTestCoverageVerification
+check.dependsOn integrationTest
+check.dependsOn verifyOpenApi

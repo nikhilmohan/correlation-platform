@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Structured JSON logging. MDC carries traceId (propagated from the consumed event envelope)
+     where in scope. Chatter-API edits log the source, op, and entry key for an audit trail. -->
+<configuration>
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+      <includeMdcKeyName>traceId</includeMdcKeyName>
+      <customFields>{"service":"enrichment"}</customFields>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>

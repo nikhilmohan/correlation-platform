@@ -428,14 +428,14 @@ services:
       TRAIL_BUILDER_API_BASE_URL: "/api/trail-builder"  # → nginx → trail-builder:8000
       CODEBOOK_API_BASE_URL: "/api/codebook"            # → nginx → codebook-api:8000
       KNOWLEDGE_API_BASE_URL: "/api/knowledge"          # → nginx → knowledge:8080
-      # P2/P3 services not yet in this compose — left UNSET on purpose (graceful degrade). The
-      # nginx /api/<svc> proxy routes for them already exist (resolved at request time), so the
-      # moment those services land we just set the same-origin base URL below — no proxy change:
-      #   PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"
+      # P2 services (now in this compose) — same-origin prefixes proxied by nginx BY SERVICE NAME:
+      PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"  # → nginx → pattern-manager:8080
+      NOISE_FILTER_API_BASE_URL: "/api/noise-filter"        # → nginx → noise-filter:8080
+      ENRICHMENT_CHATTER_API_BASE_URL: "/api/enrichment"    # → nginx → enrichment:8080
+      # P3 services not yet in this compose — left UNSET on purpose (graceful degrade). The nginx
+      # /api/<svc> proxy routes already exist, so the moment those land we just set the URL here:
       #   CORRELATION_ENGINE_API_BASE_URL: "/api/correlation-engine"
       #   ALARM_MANAGER_API_BASE_URL: "/api/alarm-manager"
-      #   NOISE_FILTER_API_BASE_URL: "/api/noise-filter"
-      #   ENRICHMENT_CHATTER_API_BASE_URL: "/api/enrichment"
       STREAMING_REFRESH_INTERVAL_MS: "3000"
       DOMAIN: "core-ip"
       SNAPSHOT_ID: "current"
@@ -453,19 +453,217 @@ services:
     networks:
       - cp-net
 
+  # ===== P2 cohort ========================================================================
+  # The correlation stage: noise-filter → pattern-miner → pattern-manager, plus enrichment.
+  # All consume the frozen event-model contract; each owns its schema/state per the invariants.
+
+  # --- Enrichment — source-aware alarm normalization + noise-tagging. Consumes alarms.history /
+  #     alarms.live, tags trail context (Trail Builder by-object API) + chatter, emits enriched
+  #     streams. Owns NO DB: the per-source ruleset is a MOUNTED, Enrichment-owned YAML validated
+  #     against Knowledge's alarmType vocabulary; the writable chatter overlay persists operator
+  #     promotions across restarts. ---
+  enrichment:
+    build:
+      context: .
+      dockerfile: services/enrichment/Dockerfile
+    image: acp/enrichment:0.1.0
+    container_name: cp-enrichment
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      trail-builder:
+        condition: service_started
+      knowledge:
+        condition: service_started
+    environment:
+      SERVER_PORT: "8080"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      # Frozen Trail Builder by-object contract on the in-cluster port 8000 (NO /api/v1 prefix).
+      TRAIL_BUILDER_BASE_URL: "http://trail-builder:8000"
+      TRAIL_BUILDER_MODE: "real"
+      TRAIL_BUILDER_MAX_RETRIES: "3"
+      TRAIL_BUILDER_RETRY_BACKOFF_MS: "200"
+      # Knowledge: authoritative alarmTypeVocabulary fetched at startup (validation only, NOT
+      # pipeline params). Degrades to the built-in fallback vocab if Knowledge is unreachable.
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_MODE: "real"
+      ENRICHMENT_DOMAIN: "core-ip"
+      # Per-source rulesets: mounted, Enrichment-owned config (NOT Knowledge). Hot-reload on.
+      ENRICHMENT_RULESETS_FILE: "/config/rulesets.yaml"
+      ENRICHMENT_RULESETS_RELOAD: "true"
+      # Writable chatter overlay: operator promotions persisted here, durable across restart.
+      ENRICHMENT_CHATTER_OVERLAY_FILE: "/config/overlay/chatter-overlay.json"
+    volumes:
+      # Read-only base rulesets (committed) + a writable named volume for chatter overlay edits.
+      - ./services/enrichment/config/rulesets.yaml:/config/rulesets.yaml:ro
+      - enrichment-overlay:/config/overlay
+    ports:
+      - "8088:8080"      # chatter API + /openapi.json + Swagger UI + /actuator/health + /actuator/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # JVM Spring Boot context init can take ~100-140s on a busy host; allow the startup window.
+      start_period: 180s
+    networks:
+      - cp-net
+
+  # --- Noise Filter — session-windowing + ML noise classification (scikit-learn). Consumes the
+  #     enriched alarm stream, groups into trail-scoped session windows, drops noise, emits
+  #     `transactions.clean`. Reads Knowledge (params), Trail Builder + Topology (scope). Owns its
+  #     own `noise_filter` state in the shared DB. Thresholds come only from Knowledge. ---
+  noise-filter:
+    build:
+      context: .
+      dockerfile: services/noise-filter/Dockerfile
+    image: acp/noise-filter:0.1.0
+    container_name: cp-noise-filter
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      knowledge:
+        condition: service_started
+      trail-builder:
+        condition: service_started
+      topology:
+        condition: service_started
+    environment:
+      HTTP_PORT: "8080"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      NOISE_FILTER_DB_URL: "postgresql://correlation:correlation@postgres:5432/correlation"
+      KNOWLEDGE_SERVICE_URL: "http://knowledge:8080"
+      KNOWLEDGE_CLIENT_MODE: "real"
+      TRAIL_BUILDER_URL: "http://trail-builder:8000"
+      TRAIL_BUILDER_CLIENT_MODE: "real"
+      TOPOLOGY_SERVICE_URL: "http://topology:8080"
+      TOPOLOGY_CLIENT_MODE: "real"
+      # Session-window finalization tuning (event-time watermark + backstop; see design).
+      WINDOW_IDLE_GRACE_SECONDS: "90"
+      WINDOW_BACKSTOP_SECONDS: "90"
+      WINDOW_ALLOWED_LATENESS_BUCKETS: "10"
+    ports:
+      - "8087:8080"      # /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 120s
+    networks:
+      - cp-net
+
+  # --- Pattern Miner — trail-scoped session windowing + domain-knowledge anchoring + bounded
+  #     PrefixSpan (Spark MLlib, container-only). Consumes `transactions.clean`, mines cascade
+  #     signatures, emits `patterns.mined` (+ sampleAlarms[] XAI). Reads Knowledge (params, no
+  #     hard-coded thresholds) + Codebook (anchoring). Stateless — owns no store. ---
+  pattern-miner:
+    build:
+      context: .
+      dockerfile: services/pattern-miner/Dockerfile
+    image: acp/pattern-miner:0.1.0
+    container_name: cp-pattern-miner
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      knowledge:
+        condition: service_started
+      codebook-api:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      CONSUMER_GROUP_ID: "pattern-miner-transactions.clean"
+      TRANSACTIONS_CLEAN_TOPIC: "transactions.clean"
+      PATTERNS_MINED_TOPIC: "patterns.mined"
+      DLQ_TOPIC: "transactions.clean.dlq"
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+      KNOWLEDGE_CLIENT_MODE: "real"
+      KNOWLEDGE_DOMAIN: "core-ip"
+      KNOWLEDGE_MODEL_PARAMS_RECORD_ID: "core-ip/modelParams/pattern-miner"
+      CODEBOOK_BASE_URL: "http://codebook-api:8000"
+      CODEBOOK_CLIENT_MODE: "real"
+      # Spark/PySpark runtime (container-only). Bounded resources + trail batching keep the driver
+      # within a modest container; on a higher-spec host raise SPARK_MASTER parallelism / driver mem
+      # via env only (no code change) — these are the OOM-safety knobs.
+      MINING_ENGINE: "spark"
+      SPARK_MASTER: "local[2]"
+      PYSPARK_SUBMIT_ARGS: "--driver-memory 2g pyspark-shell"
+      MAX_TRAILS_PER_BATCH: "2"
+      BATCH_FLUSH_SECONDS: "60"
+      LOG_LEVEL: "INFO"
+    ports:
+      - "8089:8080"      # /health + /metrics
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # PySpark JVM + first SparkContext init is slow to warm; allow a generous startup window.
+      start_period: 180s
+    networks:
+      - cp-net
+
+  # --- Pattern Manager — sole owner of the Pattern Store + pattern lifecycle. Consumes
+  #     `patterns.mined`, runs RCA (Topology API), structural validation, codebook reconciliation
+  #     (Codebook API), session-window derivation, signature-fold consolidation + impact metrics,
+  #     and computes/persists the readable patternName. Persists DRAFT patterns in its own
+  #     `pattern` schema (Flyway) and emits `patterns.discovered`; REST approval promotes
+  #     DRAFT→APPROVED (`patterns.approved`). Reads collaborators via their APIs only. ---
+  pattern-manager:
+    build:
+      context: .
+      dockerfile: services/pattern-manager/Dockerfile
+    image: acp/pattern-manager:0.1.0
+    container_name: cp-pattern-manager
+    # Explicit alias so the web-ui nginx proxy resolves `pattern-manager` on cp-net.
+    networks:
+      cp-net:
+        aliases:
+          - pattern-manager
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      knowledge:
+        condition: service_started
+      topology:
+        condition: service_started
+      codebook-api:
+        condition: service_started
+    environment:
+      SERVER_PORT: "8080"
+      DB_URL: "jdbc:postgresql://postgres:5432/correlation"
+      DB_USER: "correlation"
+      DB_PASSWORD: "correlation"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+      KAFKA_ENABLED: "true"
+      # Real collaborator wiring (in-compose service names); mock|real is config-switchable.
+      INTEGRATION_MODE: "real"
+      TOPOLOGY_BASE_URL: "http://topology:8080"
+      CODEBOOK_BASE_URL: "http://codebook-api:8000"
+      KNOWLEDGE_BASE_URL: "http://knowledge:8080"
+    ports:
+      - "8090:8080"      # /health + /metrics + /openapi.json + pattern review REST
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      # JVM Spring Boot + Flyway migration on startup; allow the startup window on a busy host.
+      start_period: 180s
+
 # -----------------------------------------------------------------------------------------
-# DEFERRED — added as services are built (each needs a real Dockerfile + image):
+# DEFERRED — not yet built (source stubs only, no build.gradle). Add a real Dockerfile +
+# compose entry once each is implemented, following the P2 services above:
 #
-#   enrichment,
-#   noise-filter, pattern-manager, correlation-engine
+#   correlation-engine — consumes patterns.approved + transactions.clean → correlation.results
+#   alarm-manager      — owns the alarm store / incident read model
 #
-#   (kafka-init is now defined above — the topic catalog is provisioned, auto-create OFF.)
 #   Also deferred:
-#     - spark: PySpark runtime for pattern-miner (container-only)
 #     - prometheus / superset: metrics + dashboards (Apache-2.0)
-#     - nebula-init: NO LONGER NEEDED as a separate one-shot — the Topology Service now runs the
-#       idempotent `ADD HOSTS "nebula-storaged":9779;` + CREATE SPACE/TAG/EDGE bootstrap itself on
-#       startup (see the `topology` service above), so storaged registration is owned by it.
 # -----------------------------------------------------------------------------------------
 
 volumes:
@@ -473,7 +671,8 @@ volumes:
   pg-data:
   nebula-meta:
   nebula-storage:
-  sim-data:        # Simulator persistent artifacts (ground-truth labels + snapshot + corpus)
+  sim-data:              # Simulator persistent artifacts (ground-truth labels + snapshot + corpus)
+  enrichment-overlay:    # Enrichment chatter overlay (operator promotions, durable across restart)
 
 networks:
   cp-net:
