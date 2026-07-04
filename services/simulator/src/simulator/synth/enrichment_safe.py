@@ -4,9 +4,21 @@ On the P3 live path the **Enrichment** service (NOT the P2-only noise-filter) le
 dedup, self-clear/transient suppression, and flap-damping. Aligned cascades must survive it intact
 so the whole cascade reaches the Correlation Engine and auto-correlates. These are **pure** helpers
 (no I/O): they compute the reconciled inter-arrival spacing bounds, decide whether a pattern can be
-synthesized enrichment-safe at all, resolve the effective transient-type set (config override or
-pack-derived), and assert a built cascade is safe (used as a runtime belt-and-braces + heavily in
-unit tests). Non-aligned/noise synthesis is exempt (AC 64) and never calls into here.
+synthesized enrichment-safe at all, and assert a built cascade is safe (used as a runtime
+belt-and-braces + heavily in unit tests). Non-aligned/noise synthesis is exempt (AC 64) and never
+calls into here.
+
+Corrected enrichment-safe model (AC 60 premise fix): self-clear (``SelfClearStep``) and
+flap-damping (``FlapDampStep``) are properties of RAISE+CLEAR BEHAVIOUR, **not** of alarmType
+identity. ``SelfClearStep`` suppresses a raise only when a matching CLEARED event (same key incl.
+alarmType) arrives within the source hold-time (a genuine transient raise/clear pair); with no
+clear it releases the raise downstream intact. ``FlapDampStep`` collapses repeated raise/clear
+flapping of the same alarm. Aligned cascade elements are **sustained single raises** — the
+simulator emits each cascade element as one ``raised`` AlarmEvent and NEVER emits a matching
+``cleared`` for it — so they are self-clear-safe and flap-safe regardless of alarmType. The same
+alarmType being ALSO used as self-clearing NOISE (a raise+clear pair) elsewhere does not make a
+sustained cascade raise a transient. There is therefore NO alarmType blocklist on aligned cascades;
+enrichment-safety = distinct dedup keys + the sustained single-raise (no clear) construction.
 """
 
 from __future__ import annotations
@@ -96,11 +108,17 @@ def reconcile_spacing(
 
 
 def transient_types(pack: DomainPack, override: Iterable[str]) -> frozenset[str]:
-    """The effective transient/self-clearing alarmType set excluded from aligned cascades (AC 60).
+    """The effective transient/self-clearing alarmType set (noise-only; NOT an aligned blocklist).
 
     Config override wins when non-empty (``P3_ENRICHMENT_TRANSIENT_TYPES``); otherwise the set is
     **pack-derived** from the domain pack's self-clearing noise classes — never hard-coded in
     ``synth`` (CLAUDE.md). Returns an immutable set.
+
+    NOTE (AC 60 premise correction): this set is **no longer** used to exclude aligned-cascade
+    elements. Transience is a per-instance raise/clear property, not an alarmType property, and
+    aligned cascade elements are sustained single raises (no clear) so they are self-clear-safe and
+    flap-safe regardless of alarmType. The knob/derivation is retained for the non-aligned/noise
+    path only (noise IS allowed to be transient); it must never gate aligned cascades.
     """
     override_set = {t for t in override if t}
     if override_set:
@@ -120,23 +138,28 @@ def assert_cascade_safe(
     alarms: list[SynthAlarm],
     *,
     dedup_window_ms: float,
-    transients: frozenset[str],
 ) -> None:
-    """Assert a built aligned cascade is enrichment-safe (design §D; AC 59, 60, 63).
+    """Assert a built aligned cascade is enrichment-safe (design §D; AC 59, 63; AC 60 corrected).
 
-    Checks, by construction, that: (1) no two elements share ``(managedObjectId, alarmType)`` within
-    the dedup window (AC 59); (2) no element's ``alarmType`` is a transient/self-clearing type
-    (AC 60); (3) every element is ``state="raised"`` and no ``(managedObjectId, alarmType)`` repeats
-    with an alternating raised/cleared pair (AC 63). Raises :class:`EnrichmentSafetyError` on any
-    violation. Used as a cheap runtime guard and heavily in unit tests.
+    The genuine enrichment-safety invariants for an aligned cascade — all by construction:
+    (1) every element is a SUSTAINED single ``state="raised"`` event; the simulator never emits a
+    matching ``cleared`` for a cascade member, so enrichment's ``SelfClearStep`` (release when no
+    clear arrives) and ``FlapDampStep`` never suppress it — regardless of alarmType (AC 63);
+    (2) no two elements share ``(managedObjectId, alarmType)`` within the dedup window — each
+    element is on a DISTINCT managedObjectId so every element has a distinct enrichment dedup key
+    and ``DedupStep`` never collapses them (AC 59).
+
+    There is **no** alarmType blocklist: the former AC-60 "no transient/self-clearing alarmType as a
+    cascade member" check conflated transience (a per-instance raise/clear property) with alarmType
+    identity and wrongly excluded real patterns (QueueDrop -> ... -> CRCErrors; CRCErrors root
+    cause). Since cascade elements are sustained raises with no clear, they are self-clear-safe and
+    flap-safe even when the same alarmType is used as self-clearing NOISE elsewhere.
+
+    Raises :class:`EnrichmentSafetyError` on any violation. Cheap runtime guard + used in tests.
     """
     ordered = sorted(alarms, key=lambda a: a.raised_at)
     seen: dict[tuple[str, str], SynthAlarm] = {}
     for alarm in ordered:
-        if alarm.alarm_type in transients:
-            raise EnrichmentSafetyError(
-                f"transient alarmType {alarm.alarm_type!r} in aligned cascade (AC 60)"
-            )
         if alarm.state != "raised":
             raise EnrichmentSafetyError(
                 f"non-raised state {alarm.state!r} in aligned cascade (AC 63)"

@@ -129,21 +129,118 @@ def test_cascade_elements_distinct_objects(tmp_path: Path) -> None:
         assert len(moids) == len(set(moids))  # each element on a distinct managed object
 
 
-# --- AC 60: no transient/self-clearing cascade members ----------------------------------------
-def test_cascade_excludes_transient_types(tmp_path: Path) -> None:
-    producer = FakeProducer()
-    outcome = _run(_settings(tmp_path), producer, [_pattern()])
+# --- AC 60 (corrected): transient ALARMTYPE is NOT excluded from aligned cascades --------------
+# Premise correction: transience is a per-instance RAISE+CLEAR property (SelfClearStep releases a
+# raise with no matching clear; FlapDampStep collapses raise/clear flapping), NOT an alarmType
+# identity. Aligned cascade elements are sustained single raises (no clear emitted) so they are
+# self-clear-safe and flap-safe regardless of alarmType — even when the same alarmType is used as
+# self-clearing NOISE elsewhere. assert_cascade_safe therefore applies NO alarmType blocklist.
+def test_cascade_with_transient_alarmtypes_is_safe() -> None:
+    """A sustained-raise aligned cascade whose members ARE pack self-clearing types is safe."""
     transients = enrichment_safe.transient_types(CoreIPPack(), set())
-    assert transients  # pack-derived, non-empty
+    assert transients  # pack-derived, non-empty (PortDown/CRCErrors/InterfaceErrors etc.)
+    from simulator.engine.models import SynthAlarm
+
+    base = datetime.now(tz=UTC)
+    # Each element: a sustained raise on a DISTINCT managedObjectId; alarmType IS a transient type.
+    cascade = [
+        SynthAlarm(
+            alarm_id=f"alm-{i}",
+            managed_object_id=f"Port:p{i}",  # distinct object per element -> distinct dedup key
+            alarm_type=t,
+            event_type="e",
+            probable_cause="p",
+            perceived_severity="warning",
+            raised_at=base,
+        )
+        for i, t in enumerate(sorted(transients))
+    ]
+    # No EnrichmentSafetyError: transient alarmType on a sustained raise is enrichment-safe.
+    enrichment_safe.assert_cascade_safe(cascade, dedup_window_ms=2000)
+
+
+def test_queuedrop_cascade_with_transient_members_not_rejected(tmp_path: Path) -> None:
+    """The real QueueDrop pattern (QueueDrop,PortDown,InterfaceDown,CRCErrors,InterfaceErrors) and a
+    CRCErrors-rooted pattern synthesize aligned cascades and are NOT excluded (AC 60 corrected).
+
+    PortDown/CRCErrors/InterfaceErrors are pack self-clearing NOISE types; as SUSTAINED cascade
+    raises they must pass. Drives the full synth and asserts >0 aligned cascades emitted, none of
+    the patterns is dropped, and every emitted cascade member is a `raised` event (no `cleared`).
+    """
+    queuedrop = fx.pattern_view(
+        "pat-queuedrop",
+        "trail-A",
+        [
+            ("QueueDrop", False),
+            ("PortDown", False),
+            ("InterfaceDown", False),
+            ("CRCErrors", False),
+            ("InterfaceErrors", False),
+        ],
+        "QueueDrop",
+        window_ms=30000,
+    )
+    crc = fx.pattern_view(
+        "pat-crc",
+        "trail-B",
+        [("CRCErrors", False), ("InterfaceErrors", False)],
+        "CRCErrors",  # root cause IS a self-clearing type -> must not be excluded
+        window_ms=30000,
+    )
+    # Trails must host the required objectTypes these patterns manifest on (Interface, Port) per the
+    # default sampleAlarm prefixes; build a fleet that hosts them across 3 igp-areas.
+    areas = ["area-0", "area-1", "area-2"]
+    bodies: dict = {}
+    for i in range(40):
+        tid = f"trail-{i:03d}"
+        bodies[tid] = fx.trail_detail(
+            tid,
+            [
+                (f"Interface:{i}", "Interface"),
+                (f"Port:{i}", "Port"),
+                (f"IPLink:{i}", "IPLink"),
+            ],
+            igp_area=areas[i % 3],
+        )
+    for tid, area in (("trail-A", "area-0"), ("trail-B", "area-1")):
+        bodies[tid] = fx.trail_detail(
+            tid,
+            [
+                (f"Interface:{tid}", "Interface"),
+                (f"Port:{tid}", "Port"),
+                (f"IPLink:{tid}", "IPLink"),
+            ],
+            igp_area=area,
+        )
+    producer = FakeProducer()
+    pm = MockPatternManagerClient([queuedrop, crc])
+    tb = MockTrailBuilderClient(bodies)
+    ts = MockTopologySnapshotClient([fx.snapshot_summary()])
+    outcome = p3_run.run_synth(
+        _settings(tmp_path),
+        producer,
+        run_id="es-crc-test",
+        pattern_client=pm,
+        trail_client=tb,
+        snapshot_client=ts,
+    )
+
+    # Nothing excluded for a transient alarmType; both patterns produce aligned cascades.
+    assert outcome.summary.enrichment_conflict_patterns == []
+    aligned = [x for x in outcome.labels.all() if x.scenario_type == "pattern-aligned"]
+    assert aligned
+    assert {x.pattern_id for x in aligned} == {"pat-queuedrop", "pat-crc"}
     cascades = _aligned_cascades(outcome, producer)
+    assert len(cascades) > 0
+    # Every emitted cascade member is a `raised` event; NO `cleared` is emitted for cascade members.
     for cascade in cascades:
         for a in cascade:
-            assert a.alarmType not in transients
+            assert str(getattr(a.state, "value", a.state)) == "raised"
 
 
 def test_transient_types_config_override_wins() -> None:
     override = enrichment_safe.transient_types(CoreIPPack(), {"CustomTransient"})
-    assert override == frozenset({"CustomTransient"})  # config override, not pack-derived
+    assert override == frozenset({"CustomTransient"})  # config override, not pack-derived (noise)
 
 
 # --- AC 61 (corrected): natural timing within the session window ------------------------------
@@ -232,19 +329,20 @@ def test_nonaligned_not_enrichment_constrained(tmp_path: Path) -> None:
     outcome = _run(_settings(tmp_path), producer, [_pattern()])
     transients = enrichment_safe.transient_types(CoreIPPack(), set())
     non_aligned_labels = [x for x in outcome.labels.all() if x.scenario_type != "pattern-aligned"]
-    # non-aligned/noise labels exist and were NOT filtered through the enrichment-safe transient
-    # exclusion — they may legitimately carry transient types (the synthesizer never asserts them).
+    # non-aligned/noise labels exist and are NOT constrained by the aligned enrichment-safe guard —
+    # noise IS allowed to be transient (raise+clear self-clearing pairs). The synthesizer never
+    # calls assert_cascade_safe on non-aligned output.
     assert non_aligned_labels
     scenario_types = {x.scenario_type for x in non_aligned_labels}
     assert scenario_types & {"non-aligned", "partial-cascade", "noise"}
-    # assert_cascade_safe raises if a transient is present -> confirm it would flag non-aligned,
-    # i.e. the guard is aligned-only by design (we never call it on non-aligned).
+    # The aligned guard applies NO alarmType blocklist: a sustained raise carrying a transient
+    # alarmType (distinct object) is enrichment-safe and must NOT be rejected (AC 60 corrected).
     from simulator.engine.models import SynthAlarm
 
-    bad = [
+    sustained_transient = [
         SynthAlarm(
             alarm_id="x",
-            managed_object_id="m",
+            managed_object_id="Port:m1",
             alarm_type=next(iter(transients)),
             event_type="e",
             probable_cause="p",
@@ -252,12 +350,8 @@ def test_nonaligned_not_enrichment_constrained(tmp_path: Path) -> None:
             raised_at=datetime.now(tz=UTC),
         )
     ]
-    try:
-        enrichment_safe.assert_cascade_safe(bad, dedup_window_ms=2000, transients=transients)
-        raised = False
-    except enrichment_safe.EnrichmentSafetyError:
-        raised = True
-    assert raised  # the guard WOULD reject a transient -> proving it is applied only to aligned
+    # No EnrichmentSafetyError: transient alarmType on a sustained raise is safe.
+    enrichment_safe.assert_cascade_safe(sustained_transient, dedup_window_ms=2000)
 
 
 # --- AC 65: summary records enrichmentSafeCount + enrichmentConflictPatterns -------------------

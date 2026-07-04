@@ -161,7 +161,6 @@ def _plan_network_wide(
     nw_plan = target_controller.plan_network_wide(
         settings, config.patterns, config.compatible_trails, rng
     )
-    transients = enrichment_safe.transient_types(pack, settings.p3_transient_type_set())
 
     cascades: list[AlignedCascade] = []
     # Per-(trailId, patternId) stagger cursor (ms) so repeats are separated by > windowMs (AC 56).
@@ -202,7 +201,6 @@ def _plan_network_wide(
         enrichment_safe.assert_cascade_safe(
             cascade.alarms,
             dedup_window_ms=float(settings.p3_enrichment_dedup_window_ms),
-            transients=transients,
         )
         cascades.append(cascade)
 
