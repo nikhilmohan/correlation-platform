@@ -9,7 +9,6 @@ authoritative surface). ``/labels`` returns the frozen shape
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Response
