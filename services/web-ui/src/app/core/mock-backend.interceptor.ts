@@ -1,8 +1,8 @@
-import { HttpEvent, HttpHandlerFn, HttpRequest, HttpResponse } from '@angular/common/http';
+import { HttpErrorResponse, HttpEvent, HttpHandlerFn, HttpRequest, HttpResponse } from '@angular/common/http';
 import { inject } from '@angular/core';
-import { Observable, of } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
 import { ApiConfigService } from './api-config.service';
-import { MOCK_FIXTURES } from './mock-fixtures';
+import { MOCK_NOT_FOUND, MOCK_FIXTURES } from './mock-fixtures';
 
 /**
  * Mock backend (active only under `INTEGRATION_MODE=mock`). Serves the frozen producer shapes
@@ -24,5 +24,12 @@ export function mockBackendInterceptor(
     return next(req);
   }
   const body = handler.respond(req);
+  // A handler may signal a 404 (e.g. an alarm id that does not exist) by returning the
+  // MOCK_NOT_FOUND sentinel — mirror the real backend so by-id resilience is exercised.
+  if (body === MOCK_NOT_FOUND) {
+    return throwError(
+      () => new HttpErrorResponse({ status: 404, statusText: 'Not Found', url: req.url }),
+    );
+  }
   return of(new HttpResponse({ status: 200, body }));
 }
