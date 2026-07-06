@@ -101,6 +101,20 @@ describe('#276 — geo-map native GeoJSON clustering', () => {
     expect(spy).toHaveBeenCalledWith(siteId);
   });
 
+  it('EMITS the siteId via (siteSelected) when a host listener is bound (in-place dashboard drill)', async () => {
+    const fixture = await mount();
+    const nav = TestBed.inject(NavigationService);
+    const navSpy = vi.spyOn(nav, 'toSiteGraph').mockResolvedValue(true);
+    // Bind a listener to the output so `observed` is true (mirrors the dashboard host binding).
+    const emitted: string[] = [];
+    fixture.componentInstance.siteSelected.subscribe((id) => emitted.push(id));
+
+    fixture.componentInstance.select('Site:LON');
+    // With a listener bound, the component emits and does NOT fall back to router navigation.
+    expect(emitted).toEqual(['Site:LON']);
+    expect(navSpy).not.toHaveBeenCalled();
+  });
+
   it('clicking a CLUSTER eases into its expansion zoom (getClusterExpansionZoom → easeTo)', async () => {
     const fixture = await mount();
     const map = makeMapStub();
