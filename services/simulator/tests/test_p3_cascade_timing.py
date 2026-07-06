@@ -106,13 +106,16 @@ def _emit_with_fake_clock(settings, producer) -> list[tuple[float, TypedEnvelope
 
     real_live = replay.LiveReplay
 
-    def factory(prod, pacing_multiplier=1.0, tap=None, sleeper=None, clock_fn=None):  # noqa: ANN001
+    def factory(  # noqa: ANN001
+        prod, pacing_multiplier=1.0, tap=None, sleeper=None, clock_fn=None, progress=None
+    ):
         strat = real_live(
             prod,
             pacing_multiplier=pacing_multiplier,
             tap=tap,
             sleeper=clock.sleep,
             clock=clock.now,
+            progress=progress,
         )
         orig = strat._producer.produce
 
