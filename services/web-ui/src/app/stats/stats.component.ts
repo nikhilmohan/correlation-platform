@@ -1,9 +1,11 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
-import { DecimalPipe, PercentPipe } from '@angular/common';
+import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { StatsStore } from './stats.store';
 import { NavigationService } from '../core/navigation.service';
-import { LifecycleState } from '../api/models';
+import { AlarmSummary, LifecycleState } from '../api/models';
+import { alarmTypeLabel } from '../patterns/alarm-type-labels';
+import { relativeTime } from '../core/relative-time';
 
 type Tab = 'incidents' | 'alarms' | 'noise';
 
@@ -17,7 +19,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [StatsStore],
-  imports: [DecimalPipe, PercentPipe, RouterLink],
+  imports: [DatePipe, DecimalPipe, PercentPipe, RouterLink],
   template: `
     <h1>Correlation stats</h1>
 
@@ -60,10 +62,15 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       @case ('incidents') {
         <section class="card" aria-labelledby="inc-h">
           <h2 id="inc-h">Incidents</h2>
-          @if (store.incidents().length) {
+          @if (store.sortedIncidents().length) {
             <ul class="list">
-              @for (inc of store.incidents(); track inc.incidentId) {
+              @for (inc of store.sortedIncidents(); track inc.incidentId) {
                 <li data-testid="stats-incident">
+                  @if (inc.createdAt) {
+                    <span class="ts" data-testid="incident-created-at" [title]="rel(inc.createdAt)">{{ inc.createdAt | date: TS_FMT }}</span>
+                  } @else {
+                    <span class="ts" data-testid="incident-created-at">{{ '—' }}</span>
+                  }
                   <a [routerLink]="['/incidents', inc.incidentId]">{{ inc.incidentId }}</a>
                   — root {{ inc.rootCauseAlarmType ?? inc.rootCauseAlarmId }}
                   · children: {{ inc.childAlarmIds.join(', ') || 'none' }}
@@ -78,6 +85,7 @@ type Tab = 'incidents' | 'alarms' | 'noise';
       @case ('alarms') {
         <section class="card" aria-labelledby="alarm-h">
           <h2 id="alarm-h">Alarm lifecycle</h2>
+          <p class="hint">Alarms grouped by correlation. Each incident's root cause is highlighted; correlated child alarms are nested below it.</p>
           <label>
             filter state
             <select data-testid="alarm-filter" (change)="onAlarmFilter($event)">
@@ -88,29 +96,77 @@ type Tab = 'incidents' | 'alarms' | 'noise';
               <option value="cleared">cleared</option>
             </select>
           </label>
-          <table>
-            <caption class="visually-hidden">Alarm lifecycle states</caption>
-            <thead>
-              <tr><th scope="col">Alarm</th><th scope="col">State</th><th scope="col">Role</th><th scope="col">Incident</th></tr>
-            </thead>
-            <tbody>
-              @for (a of store.visibleAlarms(); track a.alarmId) {
-                <tr data-testid="lifecycle-row">
-                  <td>{{ a.alarmId }}</td>
-                  <td data-testid="lifecycle-state">{{ a.lifecycleState }}</td>
-                  <td>{{ a.role }}</td>
-                  <td>
-                    @if (a.incidentId) {
-                      <a [routerLink]="['/incidents', a.incidentId]">{{ a.incidentId }}</a>
+
+          @for (g of store.correlationGroups(); track g.incidentId) {
+            <div class="corr-group" data-testid="corr-group">
+              <div class="corr-head">
+                @if (g.groupRaisedAt) {
+                  <span class="ts" data-testid="group-raised-at" [title]="rel(g.groupRaisedAt)">{{ g.groupRaisedAt | date: TS_FMT }}</span>
+                } @else {
+                  <span class="ts" data-testid="group-raised-at">{{ '—' }}</span>
+                }
+                <a class="corr-inc" [routerLink]="['/incidents', g.incidentId]">{{ g.incidentId }}</a>
+                <span class="corr-count">root cause + {{ g.children.length }} {{ g.children.length === 1 ? 'child' : 'children' }}</span>
+              </div>
+
+              <!-- Root-cause alarm (highlighted) or graceful placeholder -->
+              @if (g.rootCause; as rc) {
+                <div class="alarm rca" data-testid="lifecycle-row" data-role="root-cause">
+                  <span class="ts" data-testid="alarm-raised-at" [title]="rc.raisedAt ? rel(rc.raisedAt) : ''">{{ rc.raisedAt ? (rc.raisedAt | date: TS_FMT) : '—' }}</span>
+                  <span class="badge rca-badge" aria-label="Root cause alarm">&#9733; Root cause</span>
+                  <span class="alarm-type">{{ label(rc) }}</span>
+                  <span class="alarm-mo" [title]="rc.managedObjectId">{{ rc.managedObjectId }}</span>
+                  <span class="badge state" [class]="stateClass(rc.lifecycleState)" data-testid="lifecycle-state">{{ rc.lifecycleState }}</span>
+                  <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ rc.alarmId }}</a>
+                </div>
+              } @else {
+                <div class="alarm rca rca-missing" data-testid="lifecycle-row" data-role="root-cause">
+                  <span class="badge rca-badge" aria-label="Root cause alarm">&#9733; Root cause</span>
+                  <span class="alarm-type muted">
+                    @if (g.rootCauseAlarmType) {
+                      {{ alarmTypeLabel(g.rootCauseAlarmType) }} — not yet resolved
                     } @else {
-                      —
+                      not yet resolved
                     }
-                  </td>
-                </tr>
+                  </span>
+                  <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ g.incidentId }}</a>
+                </div>
               }
-            </tbody>
-          </table>
-          @if (!store.visibleAlarms().length) {
+
+              <!-- Child alarms (nested, subordinate) -->
+              @for (c of g.children; track c.alarmId) {
+                <div class="alarm child" data-testid="lifecycle-row" data-role="child">
+                  <span class="ts" data-testid="alarm-raised-at" [title]="c.raisedAt ? rel(c.raisedAt) : ''">{{ c.raisedAt ? (c.raisedAt | date: TS_FMT) : '—' }}</span>
+                  <span class="tree" aria-hidden="true">&#9492;&#9472;</span>
+                  <span class="alarm-type">{{ label(c) }}</span>
+                  <span class="alarm-mo" [title]="c.managedObjectId">{{ c.managedObjectId }}</span>
+                  <span class="badge state" [class]="stateClass(c.lifecycleState)" data-testid="lifecycle-state">{{ c.lifecycleState }}</span>
+                  <a class="alarm-id" [routerLink]="['/incidents', g.incidentId]">{{ c.alarmId }}</a>
+                </div>
+              }
+            </div>
+          }
+
+          <!-- Uncorrelated alarms -->
+          @if (store.uncorrelatedAlarms().length) {
+            <div class="corr-group uncorr" data-testid="uncorrelated-group">
+              <div class="corr-head">
+                <span class="corr-inc">Uncorrelated alarms</span>
+                <span class="corr-count">{{ store.uncorrelatedAlarms().length }} not tied to an incident</span>
+              </div>
+              @for (u of store.uncorrelatedAlarms(); track u.alarmId) {
+                <div class="alarm uncorr-row" data-testid="lifecycle-row" data-role="none">
+                  <span class="ts" data-testid="alarm-raised-at" [title]="u.raisedAt ? rel(u.raisedAt) : ''">{{ u.raisedAt ? (u.raisedAt | date: TS_FMT) : '—' }}</span>
+                  <span class="alarm-type">{{ label(u) }}</span>
+                  <span class="alarm-mo" [title]="u.managedObjectId">{{ u.managedObjectId }}</span>
+                  <span class="badge state" [class]="stateClass(u.lifecycleState)" data-testid="lifecycle-state">{{ u.lifecycleState }}</span>
+                  <span class="alarm-id">{{ u.alarmId }}</span>
+                </div>
+              }
+            </div>
+          }
+
+          @if (!store.correlationGroups().length && !store.uncorrelatedAlarms().length) {
             <p class="empty-state">No alarms.</p>
           }
         </section>
@@ -202,6 +258,128 @@ type Tab = 'incidents' | 'alarms' | 'noise';
         border-radius: 6px;
         padding: 0.25rem;
       }
+      .hint {
+        color: var(--text-muted);
+        margin: 0 0 0.6rem;
+        font-size: 0.9rem;
+      }
+      .corr-group {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        margin-bottom: 0.9rem;
+        overflow: hidden;
+        background: var(--surface);
+      }
+      .corr-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        padding: 0.5rem 0.75rem;
+        background: var(--surface-2);
+        border-bottom: 1px solid var(--border);
+      }
+      .corr-inc {
+        font-weight: 700;
+      }
+      .corr-count {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+      }
+      .alarm {
+        display: grid;
+        grid-template-columns: auto auto 1fr auto auto auto;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.45rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+      }
+      .alarm:last-child {
+        border-bottom: 0;
+      }
+      /* RCA highlight: accent left border + tinted background + bold type. */
+      .alarm.rca {
+        border-left: 4px solid var(--accent);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+      .alarm.rca .alarm-type {
+        font-weight: 700;
+      }
+      .rca-badge {
+        background: var(--accent-strong);
+        color: var(--on-accent);
+      }
+      /* Children: indented + muted + connecting tree glyph. */
+      .alarm.child {
+        padding-left: 1.75rem;
+        color: var(--text-muted);
+      }
+      .alarm.child .tree {
+        color: var(--text-muted);
+        font-family: monospace;
+      }
+      .rca-missing .alarm-type {
+        font-style: italic;
+      }
+      .alarm-type {
+        min-width: 0;
+      }
+      .alarm-mo {
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .alarm-id {
+        font-family: monospace;
+        font-size: 0.82rem;
+      }
+      .badge.state {
+        text-transform: lowercase;
+      }
+      .state-correlated {
+        background: var(--accent);
+        color: var(--on-accent);
+      }
+      .state-cleared {
+        background: var(--ok);
+        color: #06280f;
+      }
+      .state-in-progress {
+        background: var(--warn);
+        color: #3a2a00;
+      }
+      .state-open {
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+      }
+      .uncorr .corr-inc {
+        color: var(--text-muted);
+      }
+      /* Leading absolute timestamp: fixed-width monospace so rows line up; hover title
+         shows the relative "… ago" form. */
+      .ts {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        white-space: nowrap;
+        cursor: default;
+        font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      .list li {
+        display: flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+      }
+      .list .ts {
+        flex: 0 0 auto;
+      }
+      .muted {
+        color: var(--text-muted);
+      }
     `,
   ],
 })
@@ -209,6 +387,14 @@ export class StatsComponent implements OnInit {
   readonly store = inject(StatsStore);
   readonly nav = inject(NavigationService);
   readonly tab = signal<Tab>('incidents');
+
+  /**
+   * Compact, unambiguous absolute-timestamp format for the leading timestamp column:
+   * `05 Jul 26 00:57:18.123` (day, short month, 2-digit year, 24h time WITH milliseconds).
+   * Milliseconds matter — alarms/incidents can be sub-second apart. The relative "… ago"
+   * form is kept only as a hover title, not the visible value.
+   */
+  readonly TS_FMT = 'dd MMM yy HH:mm:ss.SSS';
 
   ngOnInit(): void {
     this.store.loadStats();
@@ -223,6 +409,24 @@ export class StatsComponent implements OnInit {
     if (tab === 'noise' && !this.store.runStats().length) {
       this.store.loadRunStats();
     }
+  }
+
+  /** Expose the shared readable-label helper to the template (fallback labels). */
+  readonly alarmTypeLabel = alarmTypeLabel;
+
+  /** Readable alarm-type label, preferring `alarmType` then falling back to `eventType`. */
+  label(a: AlarmSummary): string {
+    return alarmTypeLabel(a.alarmType ?? a.eventType);
+  }
+
+  /** Tone class for the lifecycle-state badge. */
+  stateClass(state: LifecycleState): string {
+    return `state-${state}`;
+  }
+
+  /** Relative "… ago" form of an ISO-8601 timestamp for the timestamp cells (shared helper). */
+  rel(iso: string | null | undefined): string {
+    return relativeTime(iso);
   }
 
   onAlarmFilter(event: Event): void {
