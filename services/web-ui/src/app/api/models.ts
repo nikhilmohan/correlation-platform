@@ -368,3 +368,57 @@ export interface GroundTruthLabel {
   rootCauseAlarmType: string;
   children: string[];
 }
+
+// ---- Simulator synth-run trigger (frozen Simulator OpenAPI: /synth/run, /synth/status) ----
+
+/** POST /synth/run body — all optional; the server fills env defaults for an omitted field. */
+export interface SynthRunRequest {
+  target?: number;
+  totalAlarms?: number;
+  seed?: number;
+}
+
+/** 202 Accepted from POST /synth/run — a run was started. */
+export interface SynthRunResponse {
+  runId: string;
+  status: 'running';
+}
+
+/** 409 Conflict from POST /synth/run — a run is already active for `runId`. */
+export interface SynthConflictResponse {
+  detail: string;
+  runId: string;
+}
+
+/** The four lifecycle states of a synth run (string in the schema; these are the only values). */
+export type SynthRunStatus = 'idle' | 'running' | 'completed' | 'failed';
+
+/** Live progress counters (all default 0). */
+export interface SynthProgress {
+  alarmsEmitted: number;
+  alarmsTotal: number;
+  alignedEmitted: number;
+  nonAlignedEmitted: number;
+}
+
+/** Terminal-state summary (present only when a run has completed or failed). */
+export interface SynthSummaryModel {
+  runId: string;
+  status: string;
+  alarmsEmitted: number;
+  alignedFraction: number;
+  enrichmentSafeCount: number;
+  shortfallCascades: number;
+  enrichmentConflictPatterns: number;
+  failureReason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** GET /synth/status — current run state, live progress, and terminal summary. */
+export interface SynthStatusResponse {
+  status: SynthRunStatus;
+  runId: string | null;
+  progress: SynthProgress;
+  summary: SynthSummaryModel | null;
+}
