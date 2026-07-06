@@ -64,9 +64,11 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
    * Screenshot: ac-33-1-geo-map (map view).
    */
   test('AC 33.1 — geo-site map renders the seeded PoP sites [P1-1, P1-6]', async ({ page }, testInfo) => {
-    await page.goto('/topology');
+    await page.goto('/dashboard');
 
-    await expect(page.getByRole('heading', { name: /Topology .* sites/i })).toBeVisible();
+    // Topology now lives on the DASHBOARD (no separate /topology page): the embedded map's own
+    // <h1> heading is suppressed; the dashboard supplies the section heading below the KPIs.
+    await expect(page.getByRole('heading', { name: /Network topology .* trails/i })).toBeVisible();
 
     // The geo map canvas carries an ARIA label (spec AC 52 — accessible map surface).
     await expect(page.getByRole('application', { name: /map of network sites/i })).toBeVisible();
@@ -188,7 +190,7 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   test('AC 33.2 — drilling into London Docklands renders its device graph + attributes [P1-2, P1-6]', async ({
     page,
   }, testInfo) => {
-    await page.goto('/topology');
+    await page.goto('/dashboard');
 
     // Drill in via the ACCESSIBLE site list (#276 — native clustering hides individual canvas pins
     // at the default zoom, and the dense set was the source of the overlapping-pin click intercept;
@@ -203,9 +205,10 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await expect(anchor).toBeVisible();
     await anchor.click();
 
-    // Site graph route + device/connection lists rendered from objects-at-site.
+    // IN-PLACE site graph (no separate route): the map panel swaps for the site graph on the
+    // dashboard; device/connection lists rendered from objects-at-site. URL stays on /dashboard.
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
-    await expect(page).toHaveURL(/\/topology\/.+/);
+    await expect(page).toHaveURL(/\/dashboard/);
 
     // UX redesign: disclose the (default-collapsed) accessible Devices/Connections lists.
     await openListView(page);
@@ -265,7 +268,7 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   test('AC 33.3 — trail clusters overlay the site graph as area-bounded clusters [P1-4, P1-6]', async ({
     page,
   }, testInfo) => {
-    await page.goto('/topology');
+    await page.goto('/dashboard');
     const markers = page.getByTestId('site-marker');
     const anchor =
       MODE === 'real' ? markers.filter({ hasText: DRILL_ANCHOR.name }).first() : markers.first();
@@ -321,7 +324,7 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   test('AC 28 — toggling logical layers drives the rendered Cytoscape edge count [P1-2]', async ({
     page,
   }, testInfo) => {
-    await page.goto('/topology');
+    await page.goto('/dashboard');
     // Drill in via the accessible site list (#276 — clustering hides individual canvas pins at the
     // default zoom; the list is the robust drill-in surface).
     const markers = page.getByTestId('site-marker');
@@ -391,7 +394,7 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
    * (No screenshot — covered by 33.3's overlay capture; this test asserts interaction, not layout.)
    */
   test('AC 33 — selecting a trail-member device highlights its trails [P1-4]', async ({ page }) => {
-    await page.goto('/topology');
+    await page.goto('/dashboard');
     // Drill in via the accessible site list (#276 — robust to clustering / pin overlap).
     const markers = page.getByTestId('site-marker');
     const anchor =
@@ -443,8 +446,10 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   test('status bar summarises the fleet — Monitored == markers, Fault/Warning == 0', async ({
     page,
   }, testInfo) => {
-    await page.goto('/topology');
-    await expect(page.getByRole('heading', { name: /Topology .* sites/i })).toBeVisible();
+    await page.goto('/dashboard');
+    // Topology lives on the dashboard now; the embedded map's <h1> is suppressed — assert the
+    // dashboard section heading instead. The status bar is still rendered by the embedded map.
+    await expect(page.getByRole('heading', { name: /Network topology .* trails/i })).toBeVisible();
 
     // #276 — site count comes from the accessible site list (one entry per site, robust to
     // clustering); the status-bar counts are derived from the same store.sites() signal.
@@ -466,12 +471,13 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
   });
 
   /**
-   * ── geo → site → topology breadcrumb ─────────────────────────────────────────────────────────
-   * Drilling into a site exposes a breadcrumb back to the topology entry view. Clicking it returns
-   * to /topology and re-renders the geo heading — the geo→site→topology navigation loop is wired.
+   * ── dashboard map → in-place site graph → Close ──────────────────────────────────────────────
+   * Drilling into a site swaps the dashboard map panel for the site graph IN-PLACE (no separate
+   * page). Both the site-graph breadcrumb and the dashboard "Back to map" Close button return to the
+   * map — the map→site→map loop is wired without any route change (URL stays on /dashboard).
    */
-  test('site-graph breadcrumb navigates back to the geo topology view', async ({ page }) => {
-    await page.goto('/topology');
+  test('dashboard site-graph Close returns to the in-place map', async ({ page }) => {
+    await page.goto('/dashboard');
     // Drill in via the accessible site list (#276 — robust to clustering / pin overlap).
     const markers = page.getByTestId('site-marker');
     const anchor =
@@ -480,8 +486,10 @@ test.describe('P1 demonstrable journey — topology → trails → codebook, vis
     await anchor.click();
     await expect(page.getByRole('heading', { name: /Site graph/i })).toBeVisible();
 
-    await page.getByTestId('breadcrumb-topology').click();
-    await expect(page).toHaveURL(/\/topology$/);
-    await expect(page.getByRole('heading', { name: /Topology .* sites/i })).toBeVisible();
+    // The dashboard Close button swaps back to the map (site-graph-close), still on /dashboard.
+    await page.getByTestId('site-graph-close').click();
+    await expect(page).toHaveURL(/\/dashboard/);
+    await expect(page.getByRole('heading', { name: /Network topology .* trails/i })).toBeVisible();
+    await expect(page.getByTestId('site-marker').first()).toBeVisible();
   });
 });

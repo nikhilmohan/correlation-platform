@@ -1,31 +1,49 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
 import { DecimalPipe, PercentPipe } from '@angular/common';
-import { RouterLink } from '@angular/router';
 import { DashboardStore } from './dashboard.store';
 import { NavigationService } from '../core/navigation.service';
+import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
+import { SiteGraphComponent } from '../topology/site-graph.component';
 
+/**
+ * Landing dashboard (default route). Shows the fleet KPI widgets across the top, then embeds the
+ * FULL topology & trails view below them — real basemap, site pins + native clustering, layer/trail
+ * features and IN-PLACE site drill-in, all on the dashboard (there is no separate `/topology` page).
+ *
+ * The topology panel swaps between two states driven by `selectedSiteId`:
+ *   - null  → the geo-site MAP (`<app-geo-site-map>`). Clicking a site emits its id via the map's
+ *             `(siteSelected)` output, which the dashboard captures into selectedSiteId.
+ *   - set   → the in-place SITE GRAPH (`<app-site-graph [siteId]=…>`) filling the same panel, with a
+ *             Close button (data-testid="site-graph-close") that clears selectedSiteId → back to map.
+ *
+ * The map heading is suppressed on the embed (`[showHeading]="false"`); the dashboard supplies its
+ * own section header. The former "Recent incidents" and "Quick links" cards were removed.
+ */
 @Component({
   selector: 'app-dashboard',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [DashboardStore],
-  imports: [RouterLink, DecimalPipe, PercentPipe],
+  imports: [DecimalPipe, PercentPipe, GeoSiteMapComponent, SiteGraphComponent],
   template: `
-    <h1>Platform overview</h1>
-    <div class="toolbar">
+    <div class="page-head">
+      <h1>Platform overview</h1>
       <button class="btn btn-secondary" type="button" (click)="store.load()">Refresh</button>
     </div>
 
     <section class="kpis" aria-label="Key performance indicators">
       <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-incidents">
+        <span class="kpi-icon" aria-hidden="true">◆</span>
         <span class="kpi-label">Live incidents</span>
         <span class="kpi-value">{{ store.incidentCount() }}</span>
       </button>
       <button class="card kpi" type="button" (click)="nav.toPatterns()" data-testid="kpi-patterns">
+        <span class="kpi-icon" aria-hidden="true">❖</span>
         <span class="kpi-label">Active patterns</span>
         <span class="kpi-value">{{ store.activePatternCount() }}</span>
       </button>
       <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-reduction">
+        <span class="kpi-icon" aria-hidden="true">▼</span>
         <span class="kpi-label">Alarm reduction</span>
         <span class="kpi-value">
           @if (store.alarmReductionRatio() !== null) {
@@ -36,10 +54,12 @@ import { NavigationService } from '../core/navigation.service';
         </span>
       </button>
       <div class="card kpi" data-testid="kpi-processed">
+        <span class="kpi-icon" aria-hidden="true">∑</span>
         <span class="kpi-label">Alarms processed</span>
         <span class="kpi-value">{{ store.stats()?.totalAlarmsProcessed ?? 0 }}</span>
       </div>
       <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-rca">
+        <span class="kpi-icon" aria-hidden="true">◎</span>
         <span class="kpi-label">RCA accuracy</span>
         <span class="kpi-value">
           @if (store.rcaAccuracy().value !== null) {
@@ -51,6 +71,7 @@ import { NavigationService } from '../core/navigation.service';
         </span>
       </button>
       <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-autocorr">
+        <span class="kpi-icon" aria-hidden="true">⇄</span>
         <span class="kpi-label">Auto-correlation</span>
         <span class="kpi-value">
           @if (store.autoCorrelationPct() !== null) {
@@ -62,84 +83,137 @@ import { NavigationService } from '../core/navigation.service';
       </button>
     </section>
 
-    <div class="grid">
-      <section class="card" aria-labelledby="recent-h">
-        <h2 id="recent-h">Recent incidents</h2>
-        @if (store.incidents().length) {
-          <ul class="incident-list">
-            @for (inc of store.incidents(); track inc.incidentId) {
-              <li>
-                <a [routerLink]="['/incidents', inc.incidentId]" data-testid="recent-incident">
-                  {{ inc.incidentId }} — root {{ inc.rootCauseAlarmType ?? inc.rootCauseAlarmId }}
-                </a>
-              </li>
-            }
-          </ul>
-        } @else {
-          <p class="empty-state">No incidents yet.</p>
-        }
-      </section>
+    <section class="topology-embed" aria-labelledby="dash-topo-h" data-testid="dashboard-topology">
+      <div class="topo-head">
+        <!-- When a site is selected the embedded SiteGraphComponent renders its own "Site graph — …"
+             heading; keep THIS section heading distinct ("Site: …") so there is a single
+             "Site graph" heading on the page (avoids a duplicate-heading strict-mode collision). -->
+        <h2 id="dash-topo-h">
+          @if (selectedSiteId(); as sid) {
+            Site: {{ sid }}
+          } @else {
+            Network topology &amp; trails
+          }
+        </h2>
+      </div>
 
-      <nav class="card" aria-labelledby="quick-h">
-        <h2 id="quick-h">Quick links</h2>
-        <ul class="quick-links">
-          <li><a routerLink="/streaming">Streaming (live)</a></li>
-          <li><a routerLink="/topology">Topology + trails</a></li>
-          <li><a routerLink="/patterns">Pattern review</a></li>
-          <li><a routerLink="/chatter">Chatter management</a></li>
-          <li><a routerLink="/config">Config (Knowledge)</a></li>
-          <li><a routerLink="/stats">Correlation stats</a></li>
-        </ul>
-      </nav>
-    </div>
+      <!-- SHARED PANEL: the map and the in-place site graph render into the SAME fixed-size box, so
+           swapping between them causes ZERO layout shift — the site view directly overlaps where the
+           map was. Both children fill 100% of this panel (their own vh defaults only apply when the
+           components are used standalone). -->
+      <div class="topology-panel" [class.is-graph]="!!selectedSiteId()">
+        @if (selectedSiteId(); as sid) {
+          <!-- IN-PLACE site graph: fills the same panel as the map. Its own "← Back to map" button
+               (data-testid="site-graph-close") emits (closed) → back to the map. -->
+          <app-site-graph [siteId]="sid" [embedded]="true" (closed)="closeSite()" />
+        } @else {
+          <!-- Geo-site MAP. A site click emits its id → we swap to the site graph in-place. -->
+          <app-geo-site-map [showHeading]="false" [embedded]="true" (siteSelected)="openSite($event)" />
+        }
+      </div>
+    </section>
   `,
   styles: [
     `
-      .toolbar {
-        margin: 0.5rem 0 1rem;
+      .page-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        margin: 0.25rem 0 1.1rem;
+      }
+      .page-head h1 {
+        margin: 0;
       }
       .kpis {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-        gap: 0.8rem;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        gap: 0.9rem;
       }
       .kpi {
+        position: relative;
         display: flex;
         flex-direction: column;
-        gap: 0.3rem;
+        gap: 0.25rem;
         text-align: left;
         color: var(--text);
+        overflow: hidden;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease,
+          transform 0.15s ease;
       }
       button.kpi {
         cursor: pointer;
       }
+      button.kpi:hover {
+        border-color: var(--accent);
+        box-shadow: var(--shadow-md);
+        transform: translateY(-1px);
+      }
+      .kpi-icon {
+        position: absolute;
+        top: 0.6rem;
+        right: 0.75rem;
+        font-size: 1.15rem;
+        color: var(--accent);
+        opacity: 0.55;
+        line-height: 1;
+      }
       .kpi-label {
         color: var(--text-muted);
-        font-size: 0.85rem;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        font-weight: 600;
       }
       .kpi-value {
-        font-size: 1.6rem;
+        font-size: 1.75rem;
         font-weight: 700;
+        line-height: 1.15;
       }
-      .grid {
-        display: grid;
-        grid-template-columns: 2fr 1fr;
+      .kpi-value small {
+        font-size: 0.7rem;
+        font-weight: 500;
+        color: var(--text-muted);
+      }
+      .topology-embed {
+        margin-top: 1.6rem;
+      }
+      .topo-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         gap: 1rem;
-        margin-top: 1rem;
+        margin: 0 0 0.75rem;
       }
-      .incident-list,
-      .quick-links {
-        list-style: none;
+      .topo-head h2 {
         margin: 0;
-        padding: 0;
+        font-size: 1.2rem;
+      }
+      /* SHARED topology panel: ONE fixed box hosting either the map or the site graph, so switching
+         between them never shifts the page vertically. Both embedded children fill 100% of this box. */
+      .topology-panel {
+        position: relative;
+        height: min(64vh, 720px);
+        min-height: 480px;
+        /* A flex column so the single child (map OR site-graph host) stretches to fill the fixed box
+           height regardless of the child's own display. This is the parent that guarantees the
+           embedded child has a resolved, non-zero height before Cytoscape / MapLibre mount + fit. */
         display: flex;
         flex-direction: column;
-        gap: 0.4rem;
       }
-      @media (max-width: 800px) {
-        .grid {
-          grid-template-columns: 1fr;
-        }
+      /* Do NOT set the display property here: the embedded child's own :host(.embedded-host) rule
+         sets display:flex to make it a flex COLUMN (compact header + graph/map filling the rest). A
+         display:block on this parent-child selector would win on specificity (parent .class > child
+         :host) and collapse the child's flex chain -> the Cytoscape canvas gets zero height and the
+         graph renders empty (the regression). We only stretch the child to the panel height via flex
+         + min-height:0. */
+      .topology-panel > app-geo-site-map,
+      .topology-panel > app-site-graph {
+        flex: 1 1 auto;
+        min-height: 0;
+        height: 100%;
       }
     `,
   ],
@@ -147,6 +221,19 @@ import { NavigationService } from '../core/navigation.service';
 export class DashboardComponent implements OnInit {
   readonly store = inject(DashboardStore);
   readonly nav = inject(NavigationService);
+
+  /** null → show the geo-site map; a siteId → show the in-place site graph for that site. */
+  readonly selectedSiteId = signal<string | null>(null);
+
+  /** Drill into a site IN-PLACE (map → site graph) — wired from the map's (siteSelected) output. */
+  openSite(siteId: string): void {
+    this.selectedSiteId.set(siteId);
+  }
+
+  /** Close the in-place site graph and return to the map (Close button / site-graph `closed`). */
+  closeSite(): void {
+    this.selectedSiteId.set(null);
+  }
 
   ngOnInit(): void {
     this.store.load();

@@ -56,6 +56,60 @@ describe('Landing dashboard', () => {
     expect(spy).toHaveBeenCalledWith(['/stats']);
   });
 
+  it('embeds the full topology & trails map below the KPIs (no recent-incidents / quick-links)', async () => {
+    configure();
+    const fixture = TestBed.createComponent(DashboardComponent);
+    fixture.detectChanges();
+    await flush();
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    // The embedded topology view is the GeoSiteMapComponent, wrapped in the dashboard section.
+    expect(el.querySelector('[data-testid="dashboard-topology"]')).toBeTruthy();
+    expect(el.querySelector('app-geo-site-map')).toBeTruthy();
+    // The removed sections must be gone.
+    expect(el.querySelector('[data-testid="recent-incident"]')).toBeNull();
+    expect(el.textContent).not.toMatch(/Quick links/i);
+    // KPI testids are preserved.
+    for (const id of ['kpi-incidents', 'kpi-patterns', 'kpi-reduction', 'kpi-processed', 'kpi-rca', 'kpi-autocorr']) {
+      expect(el.querySelector(`[data-testid="${id}"]`)).toBeTruthy();
+    }
+  });
+
+  it('swaps the map for the IN-PLACE site graph on site selection, and Close returns to the map', async () => {
+    configure();
+    const fixture = TestBed.createComponent(DashboardComponent);
+    fixture.detectChanges();
+    await flush();
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    const cmp = fixture.componentInstance;
+
+    // Default: the geo-site MAP is shown, no site graph, no Close button.
+    expect(el.querySelector('app-geo-site-map')).toBeTruthy();
+    expect(el.querySelector('app-site-graph')).toBeNull();
+    expect(el.querySelector('[data-testid="site-graph-close"]')).toBeNull();
+
+    // Drill into a site (the map's (siteSelected) output) → the site graph fills the panel in-place.
+    cmp.openSite('Site:LON');
+    fixture.detectChanges();
+    await flush();
+    fixture.detectChanges();
+    expect(cmp.selectedSiteId()).toBe('Site:LON');
+    expect(el.querySelector('app-site-graph')).toBeTruthy();
+    expect(el.querySelector('app-geo-site-map')).toBeNull();
+    const close = el.querySelector('[data-testid="site-graph-close"]') as HTMLButtonElement | null;
+    expect(close).toBeTruthy();
+
+    // Close → back to the map.
+    close!.click();
+    fixture.detectChanges();
+    await flush();
+    fixture.detectChanges();
+    expect(cmp.selectedSiteId()).toBeNull();
+    expect(el.querySelector('app-geo-site-map')).toBeTruthy();
+    expect(el.querySelector('app-site-graph')).toBeNull();
+  });
+
   it('AC 57 — RCA accuracy: eval-mode value, else client-side join, else N/A', () => {
     const svc = new RcaAccuracyService();
     const incidents: IncidentVM[] = [

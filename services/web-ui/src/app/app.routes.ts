@@ -13,16 +13,9 @@ export const APP_ROUTES: Routes = [
     title: 'Streaming (live)',
     loadComponent: () => import('./streaming/streaming-view.component').then((m) => m.StreamingViewComponent),
   },
-  {
-    path: 'topology',
-    title: 'Topology & trails',
-    loadComponent: () => import('./topology/geo-site-map.component').then((m) => m.GeoSiteMapComponent),
-  },
-  {
-    path: 'topology/:siteId',
-    title: 'Site graph',
-    loadComponent: () => import('./topology/site-graph.component').then((m) => m.SiteGraphComponent),
-  },
+  // Topology & trails is no longer a separate page — the geo-site map + in-place site graph now
+  // live on the DASHBOARD. The former `/topology` and `/topology/:siteId` routes were removed;
+  // trail deep links land on `/dashboard?trailId=<id>` (the embedded map reads the query param).
   {
     path: 'patterns',
     title: 'Pattern review',
