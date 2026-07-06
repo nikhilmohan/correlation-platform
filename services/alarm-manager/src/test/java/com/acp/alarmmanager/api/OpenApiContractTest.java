@@ -3,6 +3,7 @@ package com.acp.alarmmanager.api;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.acp.alarmmanager.repository.AlarmRepository;
+import com.acp.alarmmanager.repository.PendingStatusRepository;
 import com.acp.alarmmanager.repository.ProcessedEventRepository;
 import com.acp.alarmmanager.repository.StateTransitionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -39,6 +40,8 @@ class OpenApiContractTest {
     private StateTransitionRepository stateTransitionRepository;
     @MockBean
     private ProcessedEventRepository processedEventRepository;
+    @MockBean
+    private PendingStatusRepository pendingStatusRepository;
     @MockBean
     private KafkaTemplate<String, String> kafkaTemplate;
 

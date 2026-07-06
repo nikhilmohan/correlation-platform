@@ -9,10 +9,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * AC23 — V1 baseline creates the owned {@code live_alarm} schema + the three base tables; the full
- * V1->V2->V3 chain applies cleanly. AC24 — all tables live in {@code live_alarm} (never
- * {@code public}); post-migration shapes (in-progress constraint, audit source/changed_at, NOT
- * NULL alarm_type, the indexes) are present.
+ * AC23 — V1 baseline creates the owned {@code live_alarm} schema + the base tables; the full
+ * V1->V2->V3->V4 chain applies cleanly (V4 adds the ordering-race {@code pending_status} store).
+ * AC24 — all tables live in {@code live_alarm} (never {@code public}); post-migration shapes
+ * (in-progress constraint, audit source/changed_at, NOT NULL alarm_type, the indexes) are present.
  */
 class FlywayMigrationIT extends PostgresIntegrationBase {
 
@@ -33,8 +33,9 @@ class FlywayMigrationIT extends PostgresIntegrationBase {
                 Integer.class);
         assertThat(schema).isEqualTo(1);
 
-        // the three base tables exist in live_alarm, none in public
-        for (String table : List.of("alarm", "state_transition", "processed_event")) {
+        // the base tables (incl. V4 pending_status) exist in live_alarm, none in public
+        for (String table : List.of("alarm", "state_transition", "processed_event",
+                "pending_status")) {
             Integer inLiveAlarm = jdbc.queryForObject("""
                     SELECT count(*) FROM information_schema.tables
                     WHERE table_schema = 'live_alarm' AND table_name = ?
@@ -52,7 +53,7 @@ class FlywayMigrationIT extends PostgresIntegrationBase {
                 SELECT version FROM live_alarm.flyway_schema_history
                 WHERE success = true ORDER BY installed_rank
                 """, String.class);
-        assertThat(versions).contains("1", "2", "3");
+        assertThat(versions).contains("1", "2", "3", "4");
     }
 
     @Test
