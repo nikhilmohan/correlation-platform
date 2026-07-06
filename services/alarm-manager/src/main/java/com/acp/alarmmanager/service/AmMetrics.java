@@ -39,12 +39,22 @@ public class AmMetrics {
         Counter.builder("dlq_routed_total").tag("topic", topic).register(registry).increment();
     }
 
-    public void statusForUnknownAlarm() {
-        registry.counter("status_for_unknown_alarm_total").increment();
+    /**
+     * A STATE status change arrived for a not-yet-persisted alarm and was PARKED (durably stored for
+     * re-apply once the alarm is persisted) — NOT dropped. Named "..._parked_..." so dashboards read
+     * it as a recoverable ordering-race park, not a lost/dropped event.
+     */
+    public void statusParkedForUnknownAlarm() {
+        registry.counter("status_parked_for_unknown_alarm_total").increment();
     }
 
-    public void clearForUnknownAlarm() {
-        registry.counter("clear_for_unknown_alarm_total").increment();
+    /**
+     * A {@code cleared} status change arrived for a not-yet-persisted alarm and was PARKED for
+     * re-apply — NOT dropped. Named "..._parked_..." so dashboards read it as a recoverable
+     * ordering-race park, not a lost/dropped clear.
+     */
+    public void clearParkedForUnknownAlarm() {
+        registry.counter("clear_parked_for_unknown_alarm_total").increment();
     }
 
     public void correlationForUnknownAlarm() {
