@@ -147,11 +147,13 @@ export class AppComponent {
   readonly theme = inject(ThemeService);
   readonly links: NavLink[] = [
     { path: '/dashboard', label: 'Dashboard' },
-    { path: '/streaming', label: 'Streaming' },
+    // Unified Alarms view (Part 3) replaces the separate Streaming + Stats items: live alarm state,
+    // KPI header, correlation/RCA rows. Noise (Part 4) is its own graphical top-level tab.
+    { path: '/alarms', label: 'Alarms' },
     // Topology & trails now lives on the Dashboard (no separate page) — nav item removed.
     { path: '/patterns', label: 'Patterns' },
+    { path: '/noise', label: 'Noise' },
     { path: '/chatter', label: 'Chatter' },
     { path: '/config', label: 'Config' },
-    { path: '/stats', label: 'Stats' },
   ];
 }

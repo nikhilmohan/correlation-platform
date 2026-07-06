@@ -9,10 +9,19 @@ export const APP_ROUTES: Routes = [
     loadComponent: () => import('./dashboard/dashboard.component').then((m) => m.DashboardComponent),
   },
   {
-    path: 'streaming',
-    title: 'Streaming (live)',
-    loadComponent: () => import('./streaming/streaming-view.component').then((m) => m.StreamingViewComponent),
+    path: 'alarms',
+    title: 'Alarms',
+    loadComponent: () => import('./alarms/alarms.component').then((m) => m.AlarmsComponent),
   },
+  {
+    path: 'noise',
+    title: 'Noise filter',
+    loadComponent: () => import('./noise/noise-view.component').then((m) => m.NoiseViewComponent),
+  },
+  // The former Streaming view + Stats module merged into the unified /alarms view (Part 3) + the
+  // graphical /noise view (Part 4). Keep the old paths as redirects so deep links still land.
+  { path: 'streaming', redirectTo: 'alarms', pathMatch: 'full' },
+  { path: 'stats', redirectTo: 'alarms', pathMatch: 'full' },
   // Topology & trails is no longer a separate page — the geo-site map + in-place site graph now
   // live on the DASHBOARD. The former `/topology` and `/topology/:siteId` routes were removed;
   // trail deep links land on `/dashboard?trailId=<id>` (the embedded map reads the query param).
@@ -30,11 +39,6 @@ export const APP_ROUTES: Routes = [
     path: 'config',
     title: 'Config',
     loadComponent: () => import('./config/model-params-form.component').then((m) => m.ModelParamsFormComponent),
-  },
-  {
-    path: 'stats',
-    title: 'Correlation stats',
-    loadComponent: () => import('./stats/stats.component').then((m) => m.StatsComponent),
   },
   {
     path: 'chatter',

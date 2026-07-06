@@ -43,7 +43,7 @@ describe('Landing dashboard', () => {
     expect(router.url).toBe('/dashboard');
   });
 
-  it('AC 4 — clicking the incident-count KPI navigates to stats', async () => {
+  it('AC 4 — clicking the incident-count KPI navigates to the unified Alarms view', async () => {
     configure();
     const router = TestBed.inject(Router);
     const spy = vi.spyOn(router, 'navigate');
@@ -53,7 +53,8 @@ describe('Landing dashboard', () => {
     fixture.detectChanges();
     const kpi = fixture.nativeElement.querySelector('[data-testid="kpi-incidents"]') as HTMLButtonElement;
     kpi.click();
-    expect(spy).toHaveBeenCalledWith(['/stats']);
+    // Streaming + Stats merged into /alarms (Part 3); toStats() now targets it.
+    expect(spy).toHaveBeenCalledWith(['/alarms']);
   });
 
   it('embeds the full topology & trails map below the KPIs (no recent-incidents / quick-links)', async () => {

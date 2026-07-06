@@ -32,15 +32,24 @@ export class NavigationService {
   }
 
   toAlarmInStreaming(alarmId: string): Promise<boolean> {
-    return this.router.navigate(['/streaming'], { queryParams: { alarmId } });
+    return this.router.navigate(['/alarms'], { queryParams: { alarmId } });
   }
 
   toStreamingForSite(siteId: string): Promise<boolean> {
-    return this.router.navigate(['/streaming'], { queryParams: { siteId } });
+    return this.router.navigate(['/alarms'], { queryParams: { siteId } });
   }
 
+  /** Live alarm state now lives on the unified /alarms view (Streaming + Stats merged, Part 3). */
   toStats(): Promise<boolean> {
-    return this.router.navigate(['/stats']);
+    return this.router.navigate(['/alarms']);
+  }
+
+  toAlarms(): Promise<boolean> {
+    return this.router.navigate(['/alarms']);
+  }
+
+  toNoise(): Promise<boolean> {
+    return this.router.navigate(['/noise']);
   }
 
   toPatterns(): Promise<boolean> {
@@ -56,7 +65,7 @@ export class NavigationService {
   }
 
   toStreaming(): Promise<boolean> {
-    return this.router.navigate(['/streaming']);
+    return this.router.navigate(['/alarms']);
   }
 
   /** Topology home is the dashboard now (no separate `/topology` route). */
