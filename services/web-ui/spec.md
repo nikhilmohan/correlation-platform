@@ -965,6 +965,24 @@ service APIs directly.
     zoom-in control, the rendered graph's visual zoom level is demonstrably increased (e.g.
     the graph viewport scale is larger). (Playwright E2E)
 
+77. Given the in-place site graph is shown on the dashboard, the graph AUTO-FITS all its nodes
+    inside the visible panel on load (no node cut off or rendered outside the container),
+    re-fits after a node EXPAND / trail explode adds nodes (the newly-revealed nodes are brought
+    on-screen in-bounds), and re-fits after the container resizes. The fit resizes the Cytoscape
+    canvas to its real box before fitting (so it never fits to a stale/zero size and overflows),
+    fits ALL current elements with padding, and caps the zoom (maxZoom) so a small graph is not
+    hugely magnified. The "Fit" control performs the same fit-all. (Vitest/TestBed — Cytoscape.js
+    spy: `fit()` is called on ALL elements after `resize()`, and the zoom is clamped to the cap)
+
+78. Given the dashboard swaps between the geo-site map and the in-place site graph, both render
+    into a single SHARED topology panel of identical width and height, so switching causes ZERO
+    vertical layout shift — the site graph directly overlaps where the map was. The site graph
+    (when embedded) presents a prominent, clearly-labelled "← Back to map" button
+    (`data-testid="site-graph-close"`) at the top-left of the view that returns to the map
+    (clears the dashboard's selected site). (Vitest/TestBed — the embedded site graph reflects
+    `.embedded-host` and renders the Back button which emits `closed`; the map + graph fill 100%
+    of the shared fixed-height panel)
+
 ## Open questions
 
 The items below are **design-stage integration dependencies** — inherent to contract-first

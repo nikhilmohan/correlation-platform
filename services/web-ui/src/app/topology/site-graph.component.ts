@@ -4,8 +4,12 @@ import {
   Component,
   ElementRef,
   EffectRef,
+  EventEmitter,
+  HostBinding,
   HostListener,
   NgZone,
+  Input,
+  Output,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -66,20 +70,39 @@ import type {
   changeDetection: ChangeDetectionStrategy.OnPush,
   imports: [AttributeDetailPanelComponent, LayerToggleComponent],
   template: `
-    <nav class="breadcrumb" aria-label="Breadcrumb">
+    <!-- SITE HEADER — a single clean bar carrying the prominent "← Back to map" button (top-left), the
+         "Site graph — <site>" title and the layer/planes toggle. When embedded on the dashboard the
+         verbose breadcrumb + <h1> chrome is suppressed (the dashboard supplies its section header) so
+         the graph canvas gets the full panel; the Back button IS the primary return affordance. When
+         standalone (the /topology/:siteId route) the breadcrumb is kept for route context. -->
+    @if (!embedded) {
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <button
+          type="button"
+          class="crumb-link"
+          data-testid="breadcrumb-topology"
+          (click)="toTopology()"
+        >
+          ‹ Topology &amp; trails
+        </button>
+        <span class="crumb-sep" aria-hidden="true">/</span>
+        <span class="crumb-current" aria-current="page">Site: {{ siteId() }}</span>
+      </nav>
+    }
+
+    <div class="site-header">
       <button
         type="button"
-        class="crumb-link"
-        data-testid="breadcrumb-topology"
-        (click)="toTopology()"
+        class="back-to-map"
+        data-testid="site-graph-close"
+        aria-label="Back to map"
+        (click)="backToMap()"
       >
-        ‹ Topology &amp; trails
+        <span class="back-glyph" aria-hidden="true">←</span> Back to map
       </button>
-      <span class="crumb-sep" aria-hidden="true">/</span>
-      <span class="crumb-current" aria-current="page">Site: {{ siteId() }}</span>
-    </nav>
+      <h1 class="site-title">Site graph — {{ siteId() }}</h1>
+    </div>
 
-    <h1>Site graph — {{ siteId() }}</h1>
     @if (errors.forService('Topology Service'); as err) {
       <div class="error-banner" role="alert">{{ err.message }}</div>
     }
@@ -523,6 +546,87 @@ import type {
       .cap-note {
         color: var(--warn);
         font-size: 0.85rem;
+      }
+      /* SITE HEADER — the Back-to-map button (top-left) + title, on one clean row. */
+      .site-header {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin: 0 0 0.6rem;
+      }
+      .site-title {
+        margin: 0;
+        font-size: 1.15rem;
+        font-weight: 700;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      /* Prominent, professional "← Back to map" button — a real button (not a buried breadcrumb),
+         top-left of the site view. Accent-tinted so it reads as the primary return affordance in both
+         themes; clear focus ring for keyboard use. */
+      .back-to-map {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex: 0 0 auto;
+        background: var(--surface);
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 0.4rem 0.8rem;
+        font: inherit;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+        transition:
+          background 0.15s ease,
+          box-shadow 0.15s ease;
+      }
+      .back-to-map:hover {
+        background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+      }
+      .back-to-map:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      .back-to-map .back-glyph {
+        font-size: 1.05rem;
+        line-height: 1;
+      }
+      /* EMBEDDED in the dashboard SHARED panel: the host fills 100% of the panel as a flex column —
+         the compact site header on top, the graph area (and its .cy-wrap/.cy-canvas) grow to fill the
+         rest — so the site-graph panel is the SAME box as the map panel and swapping causes zero
+         vertical shift. Standalone the host keeps its natural block flow + the canvas' own vh height. */
+      :host {
+        display: block;
+      }
+      :host(.embedded-host) {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      :host(.embedded-host) .layout,
+      :host(.embedded-host) .graph-area {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      :host(.embedded-host) .cy-wrap {
+        flex: 1 1 auto;
+        /* A small non-zero min-height FALLBACK so the graph area is never fully collapsed even if the
+           flex chain briefly fails to resolve (mirrors the geo-map's canvas fallback). The flex:1 fill
+           is the primary sizing; this only guarantees Cytoscape mounts + fits into a real box. */
+        min-height: 240px;
+        margin-bottom: 0;
+      }
+      :host(.embedded-host) .cy-canvas {
+        height: 100%;
+        min-height: 240px;
+        margin-bottom: 0;
       }
       /* CHANGE 3: single-column layout — the graph fills the full width; the detail panel is an
          OVERLAY drawer pinned inside .cy-wrap (below), not a permanent column. */
@@ -1139,8 +1243,30 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly theme = inject(ThemeService);
   private readonly zone = inject(NgZone);
 
-  /** Route param binding (withComponentInputBinding). */
+  /** Site to render. Bound by the dashboard as `[siteId]="selectedSiteId()"` for the in-place
+   *  (embedded) site graph; also satisfied by route input-binding when used standalone. */
   readonly siteId = input<string>('');
+
+  /**
+   * Emitted when the operator dismisses the site graph via the breadcrumb / back affordance. The
+   * dashboard listens and returns to the map (clears its selectedSiteId). When NO listener is bound
+   * (standalone use) the breadcrumb falls back to navigating to the dashboard.
+   */
+  @Output() closed = new EventEmitter<void>();
+
+  /**
+   * True when embedded in the dashboard's SHARED topology panel. The host then fills 100% of the
+   * panel (a flex column: the compact site header on top, the graph canvas grows to fill the rest),
+   * so the site-graph panel is the EXACT SAME box as the map panel and swapping between them causes
+   * ZERO vertical shift. Standalone (`/topology/:siteId`) it is false and the canvas keeps its own vh
+   * height + the full breadcrumb/heading chrome.
+   */
+  @Input() embedded = false;
+
+  /** Reflects `embedded` onto the host so the `:host(.embedded-host)` flex-fill rules apply. */
+  @HostBinding('class.embedded-host') get embeddedHost(): boolean {
+    return this.embedded;
+  }
 
   @ViewChild('cyEl') private cyEl?: ElementRef<HTMLDivElement>;
 
@@ -1195,14 +1321,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   /** Small deterministic palette for site-boundary boxes (by site index). */
   static readonly SITE_COLORS = ['#22d3ee', '#f59e0b', '#a78bfa', '#34d399', '#f472b6', '#60a5fa', '#fb7185', '#facc15'];
 
-  /** CHANGE 3: readability floor for the FIRST/scope-grow auto-fit. A small site (a couple of device
-   *  stacks) fits to a tiny scale; we never let the default first view drop below this zoom so the
-   *  device boxes render legibly (matches the operator's readable-zoom screenshot). Larger graphs fit
-   *  above the floor and keep cy.fit's scale, so they never overflow.
-   *  Lowered from 0.75 → 0.52 (≈ 0.75 ÷ 1.2 ÷ 1.2, i.e. two zoom-out steps): the operator found
-   *  the default opened too zoomed-IN and routinely clicked zoom-out twice; this opens sites at the
-   *  comfortable level. The operator can still zoom in. */
-  static readonly READABLE_ZOOM_FLOOR = 0.52;
+  /** Padding (px) left around the graph when auto-fitting ALL nodes into the panel, so no node hugs
+   *  or overflows the container edge (the screenshot bug). */
+  static readonly FIT_PADDING = 40;
+  /** Ceiling on the auto-fit zoom so a small site (a couple of device boxes) isn't hugely magnified
+   *  to fill the panel; cy.fit handles the lower bound for a large graph. */
+  static readonly FIT_MAX_ZOOM = 1.5;
 
   private cytoscape: typeof cytoscape | null = null;
   private cy: CyCore | null = null;
@@ -1571,9 +1695,20 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  /** Breadcrumb: back to the geo-site map (topology entry view). */
+  /** Breadcrumb: back to the map. When embedded on the dashboard (a listener is bound to `closed`)
+   *  this emits so the dashboard swaps back to the map in-place; standalone it navigates home. */
   toTopology(): void {
-    this.nav.toTopology();
+    if (this.closed.observed) {
+      this.closed.emit();
+    } else {
+      this.nav.toTopology();
+    }
+  }
+
+  /** The prominent "← Back to map" button — same semantics as the breadcrumb: emit `closed` so the
+   *  dashboard swaps back to the map in-place; standalone it navigates to the topology map. */
+  backToMap(): void {
+    this.toTopology();
   }
 
   /** Site of a device for the accessible row tag (friendly name), or null if unknown. */
@@ -1624,8 +1759,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
         }),
       );
 
-      // SIZE GUARD: don't flip cyReady (first layout) until the canvas has a real, non-zero box —
-      // laying out into a 0x0 container collapses every node onto the origin (the blob).
+      // SIZE GUARD + AUTO-FIT ON RESIZE: don't flip cyReady (first layout) until the canvas has a
+      // real, non-zero box — laying out into a 0x0 container collapses every node onto the origin (the
+      // blob). Once ready, a container RESIZE (embed swap-in, the dashboard panel becoming visible, or
+      // a window resize) must cy.resize() the canvas to its new box and re-fit so the whole graph
+      // stays framed in-bounds at the new size — otherwise Cytoscape keeps a stale size and the graph
+      // overflows the panel (the screenshot bug). We re-fit only while the graph HAS content and a
+      // real box, so it settles the auto-fit view; the operator's subsequent manual zoom/pan is not
+      // continuously overridden because the observer only fires on an actual size change.
       this.resizeObserver = new ResizeObserver(() => {
         if (!this.cy) {
           return;
@@ -1634,7 +1775,12 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
           if (!this.cyReady()) {
             this.zone.run(() => this.cyReady.set(true));
           } else {
-            this.cy.resize();
+            this.zone.run(() => {
+              this.cy?.resize();
+              if (this.firstFitDone && (this.cy?.nodes('[!isSiteParent]').length ?? 0) > 0) {
+                this.fitAll();
+              }
+            });
           }
         }
       });
@@ -1763,9 +1909,11 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     } as unknown as LayoutOptions);
     layout.run();
 
-    // No re-fit / re-center / re-zoom on an additive merge — the viewport must NOT jump. The operator drags
-    // or hits Fit to reach the new cluster. (Contract reuses this path too: removed nodes simply vanish and
-    // every surviving base node keeps its prevPos.)
+    // RE-FIT after an additive merge so the newly-revealed nodes (an EXPAND / cross-site reveal /
+    // trail explode adds nodes to the RIGHT of the locked base) are brought ON-SCREEN and in-bounds —
+    // this is the exact screenshot bug (expand pushed nodes outside the panel). fitAll() re-frames
+    // ALL elements (base + new) centred with padding and the maxZoom cap, so nothing is cut off.
+    this.fitAll();
     this.publishSpread();
     this.refreshOverlayMarkers();
   }
@@ -1871,38 +2019,52 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
             avoidOverlap: true,
           } as unknown as LayoutOptions);
     layout.run();
-    // Auto-fit ONLY on the FIRST layout of a site (fresh selectSite / reset). We deliberately DROPPED the
-    // former re-fit-on-scope-grow (siteCount > lastFittedSiteCount): additive changes (expand / trail
-    // explode) no longer reach runLayout at all (they go through layoutAdditive, which never re-fits), so
-    // the viewport never jumps on explode. The operator drags or hits Fit to reach new nodes. Pad
-    // generously so the first laid-out graph fills the canvas centred rather than hugging the top edge.
+    // Auto-fit ONLY on the FIRST layout of a site (fresh selectSite / reset). fitAll() resizes the
+    // canvas to its REAL box then cy.fit()s ALL elements with generous padding and a maxZoom cap, so
+    // the whole graph is framed IN-BOUNDS and centred (no node cut off / overflowing the panel), and
+    // a tiny site is not absurdly magnified. Additive changes (expand / trail explode) re-fit via
+    // layoutAdditive → fitAll so newly-revealed nodes are always brought on-screen.
     if (!this.firstFitDone) {
-      cy.fit(undefined, 50);
-      // CHANGE 2 (v3): PIN the READABLE zoom as the default first view. cy.fit() shrinks a small/tall
-      // site to a tiny, hard-to-read scale; with the shorter links (CHANGE 4) the whole site now fits
-      // at the readable level anyway. The operator explicitly chose the bigger readable zoom over
-      // fit-everything and said "no need to zoom out, user can drag". So: if cy.fit settled BELOW the
-      // readability floor, always raise the zoom to the floor (devices large, like the screenshot) —
-      // we no longer suppress this when the graph is taller than the viewport; we keep the readable
-      // zoom and let the operator DRAG to follow a tall tree / exploded path. Then re-centre so the
-      // top of the tree (site box / routers, where the external-link cue lives) stays reachable.
-      // Guarded by the cy.zoom API (real core / a stub with it).
-      if (typeof cy.zoom === 'function' && cy.zoom() < SiteGraphComponent.READABLE_ZOOM_FLOOR) {
-        const floorZoom = SiteGraphComponent.READABLE_ZOOM_FLOOR;
-        const ext = cy.extent();
-        cy.zoom({
-          level: floorZoom,
-          position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
-        });
-      }
-      // Re-centre so the graph sits centred (top edge reachable by drag) regardless of the zoom path.
-      if (typeof cy.center === 'function') {
-        cy.center();
-      }
+      this.fitAll();
       this.firstFitDone = true;
       this.lastFittedSiteCount = siteCount;
     }
     this.publishSpread();
+    this.refreshOverlayMarkers();
+  }
+
+  /**
+   * Fit the WHOLE graph inside the visible container: resize the Cytoscape canvas to its real box
+   * (so we never fit to a stale/zero size and overflow — the exact screenshot bug when the site graph
+   * swaps into a container that only just became visible), then cy.fit() ALL elements with generous
+   * padding so every node is framed with a margin and centred. A maxZoom cap (FIT_MAX_ZOOM) stops a
+   * small site from being hugely magnified; cy.fit's own scaling frames a large site without clipping.
+   * Guarded so a narrow test stub (fit/zoom only) still works. This is the single source of the
+   * fit-all behaviour shared by the initial load, layoutstop, expand re-fit, the Fit button and the
+   * embed swap-in / resize path.
+   */
+  private fitAll(): void {
+    const cy = this.cy;
+    if (!cy || typeof cy.fit !== 'function') {
+      return;
+    }
+    if (typeof cy.resize === 'function') {
+      cy.resize();
+    }
+    const els = typeof cy.elements === 'function' ? cy.elements() : undefined;
+    cy.fit(els as never, SiteGraphComponent.FIT_PADDING);
+    // Cap the zoom so a tiny graph (a couple of device boxes) is not magnified to fill the panel.
+    if (typeof cy.zoom === 'function' && cy.zoom() > SiteGraphComponent.FIT_MAX_ZOOM) {
+      const ext = typeof cy.extent === 'function' ? cy.extent() : { x1: 0, x2: 0, y1: 0, y2: 0 };
+      cy.zoom({
+        level: SiteGraphComponent.FIT_MAX_ZOOM,
+        position: { x: (ext.x1 + ext.x2) / 2, y: (ext.y1 + ext.y2) / 2 },
+      });
+      if (typeof cy.center === 'function') {
+        cy.center();
+      }
+    }
+    this.zoomLevel.set(this.roundZoom());
     this.refreshOverlayMarkers();
   }
 
@@ -2104,13 +2266,9 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     this.refreshOverlayMarkers();
   }
   fit(): void {
-    const cy = this.cy;
-    if (!cy) {
-      return;
-    }
-    cy.fit(undefined, 70);
-    this.zoomLevel.set(this.roundZoom());
-    this.refreshOverlayMarkers();
+    // The Fit button does the SAME fit-all as the auto-fit: resize to the real box, cy.fit() ALL
+    // elements with padding + maxZoom cap, so the whole graph is framed in-bounds and centred.
+    this.fitAll();
   }
   reset(): void {
     // Reset re-roots the graph at the site (discards expansions) and re-fits on the next layout.

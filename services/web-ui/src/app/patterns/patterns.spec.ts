@@ -83,7 +83,7 @@ describe('Pattern review & XAI module (P2)', () => {
     expect(approved.some((p) => p.patternId === 'PAT-1')).toBe(true);
   });
 
-  it('AC 21 / AC 54 — "View trail" navigates to /topology?trailId=<id>; edit is offered only for draft patterns', async () => {
+  it('AC 21 / AC 54 — "View trail" navigates to /dashboard?trailId=<id>; edit is offered only for draft patterns', async () => {
     TestBed.configureTestingModule({ providers: [...testProviders()] });
     const router = TestBed.inject(Router);
     const nav = TestBed.inject(NavigationService);
@@ -100,7 +100,7 @@ describe('Pattern review & XAI module (P2)', () => {
     // AC 21 — view-trail deep link
     (cmp.nativeElement.querySelector('[data-testid="view-trail-btn"]') as HTMLButtonElement).click();
     void nav;
-    expect(spy).toHaveBeenCalledWith(['/topology'], { queryParams: { trailId: 'TR-7' } });
+    expect(spy).toHaveBeenCalledWith(['/dashboard'], { queryParams: { trailId: 'TR-7' } });
   });
 
   it('AC 54 — edit placeholder marks a sequence alarm optional and PATCHes the Pattern Manager; only draft patterns', async () => {

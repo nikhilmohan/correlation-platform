@@ -4,7 +4,11 @@ import {
   Component,
   ElementRef,
   EffectRef,
+  EventEmitter,
+  HostBinding,
+  Input,
   NgZone,
+  Output,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -61,7 +65,9 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <h1>Topology &amp; trails — sites</h1>
+    @if (showHeading) {
+      <h1>Topology &amp; trails — sites</h1>
+    }
     @if (errors.forService('Topology Service'); as err) {
       <div class="error-banner" role="alert">{{ err.message }}</div>
     }
@@ -84,6 +90,8 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       <div
         #mapEl
         class="geo-map"
+        [class.geo-map-tall]="!showHeading && !embedded"
+        [class.geo-map-fill]="embedded"
         role="application"
         aria-label="Geographic map of network sites over a UK and Europe basemap. Each site is selectable below."
       ></div>
@@ -93,12 +101,16 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
            aria-hidden — the accessible site list below is the SR-reachable source of every site. -->
       <div class="cluster-badges" aria-hidden="true"></div>
 
-      <!-- Explicit zoom / fit / reset controls (operator-driven, keyboard-reachable). MapLibre's
-           NavigationControl provides zoom-in/out too; these mirror the device-graph controls and add
-           fit-to-sites + reset-to-default so both canvases offer the same affordances (AC 74/75). -->
-      <div class="map-controls" role="group" aria-label="Map zoom controls">
-        <button type="button" data-testid="map-zoom-in" aria-label="Zoom in" (click)="mapZoomIn()">+</button>
-        <button type="button" data-testid="map-zoom-out" aria-label="Zoom out" (click)="mapZoomOut()">−</button>
+      <!-- Offline-safe CITY labels: same DOM-overlay pattern as the cluster badges (no glyph stack
+           shipped). City name text is synced to each city point's projected screen position.
+           aria-hidden — decorative basemap context; the accessible site list carries site names. -->
+      <div class="city-labels" aria-hidden="true"></div>
+
+      <!-- FIT / RESET controls only (bottom-right, clear of MapLibre's top-right NavigationControl).
+           The redundant custom LEFT zoom-in/out buttons were removed — zoom lives on MapLibre's own
+           NavigationControl (top-right). Fit-to-sites + reset-to-default are NOT pure zoom (they
+           re-frame the whole fleet), so they are kept as a small right-aligned group. -->
+      <div class="map-controls" role="group" aria-label="Map view controls">
         <button type="button" data-testid="map-zoom-fit" aria-label="Fit to all sites" (click)="mapFit()">Fit</button>
         <button type="button" data-testid="map-zoom-reset" aria-label="Reset map to default view" (click)="mapReset()">
           Reset
@@ -181,6 +193,39 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         position: relative;
         overflow: hidden;
       }
+      /* Embedded on the dashboard (no heading) → give the map more vertical presence. */
+      .geo-map-tall {
+        height: min(58vh, 620px);
+        min-height: 420px;
+      }
+      /* Embedded in the dashboard's SHARED topology panel: the map FILLS the space the panel gives it
+         (the host is a flex column; the status bar sits on top, the accessible site list scrolls
+         below), so the panel height is controlled by the host — identical to the site-graph panel and
+         to itself before/after a drill-in, so swapping never shifts the page. */
+      :host {
+        display: block;
+      }
+      :host(.embedded-host) {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      :host(.embedded-host) .map-wrap {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        margin-bottom: 0.6rem;
+      }
+      :host(.embedded-host) .site-markers {
+        flex: 0 0 auto;
+        max-height: 8.5rem;
+        overflow-y: auto;
+      }
+      .geo-map-fill {
+        flex: 1 1 auto;
+        min-height: 240px;
+      }
       .cluster-badges {
         position: absolute;
         inset: 0;
@@ -197,31 +242,49 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         text-shadow: 0 0 3px #0b1220, 0 0 3px #0b1220;
         pointer-events: none;
       }
+      .city-labels {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 1;
+        overflow: hidden;
+      }
+      .city-label {
+        position: absolute;
+        transform: translate(6px, -50%);
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: var(--text-muted);
+        text-shadow:
+          0 0 2px var(--canvas-bg),
+          0 0 2px var(--canvas-bg),
+          0 0 4px var(--canvas-bg);
+        pointer-events: none;
+        white-space: nowrap;
+        opacity: 0.9;
+      }
+      /* FIT / RESET group — pinned bottom-right so it clears MapLibre's top-right NavigationControl
+         (zoom) and no longer clutters the LEFT of the map (the redundant left zoom was removed). */
       .map-controls {
         position: absolute;
-        top: 8px;
-        left: 8px;
+        bottom: 8px;
+        right: 8px;
         display: flex;
-        flex-direction: column;
+        flex-direction: row;
         gap: 4px;
         z-index: 2;
       }
       .map-controls button {
-        width: 2rem;
-        height: 2rem;
         border: 1px solid var(--border);
         background: var(--surface);
         color: var(--text);
         border-radius: 6px;
         cursor: pointer;
-        font-size: 0.9rem;
         line-height: 1;
-      }
-      .map-controls button[data-testid='map-zoom-fit'],
-      .map-controls button[data-testid='map-zoom-reset'] {
-        width: auto;
-        padding: 0 0.4rem;
-        font-size: 0.7rem;
+        padding: 0 0.5rem;
+        height: 1.9rem;
+        font-size: 0.72rem;
       }
       .map-controls button:hover {
         border-color: var(--accent);
@@ -258,6 +321,35 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly zone = inject(NgZone);
 
   @ViewChild('mapEl') private mapEl?: ElementRef<HTMLDivElement>;
+
+  /**
+   * Whether to render the standalone `<h1>Topology &amp; trails — sites</h1>` heading. Default ON for
+   * the `/topology` route; the dashboard sets it OFF (it supplies its own section header) and the
+   * map is given more height (`.geo-map-tall`). A MapLibre `resize()` is issued after embed so the
+   * canvas fills the taller container it becomes visible in.
+   */
+  @Input() showHeading = true;
+
+  /**
+   * True when embedded in the dashboard's SHARED topology panel. The host then becomes a flex column
+   * filling 100% of the panel (map grows, status bar on top, site list scrolls below) so the map
+   * panel has the EXACT SAME box as the in-place site graph — swapping between them causes zero
+   * vertical shift. Standalone (`/topology`) it is false and the component keeps its own vh height.
+   */
+  @Input() embedded = false;
+
+  /** Reflects `embedded` onto the host so the `:host(.embedded-host)` flex-fill rules apply. */
+  @HostBinding('class.embedded-host') get embeddedHost(): boolean {
+    return this.embedded;
+  }
+
+  /**
+   * Emits the siteId when the operator drills into a site (pin click or accessible site-list click).
+   * The dashboard listens and swaps the map panel for the in-place site graph (no separate
+   * `/topology/:siteId` page). When NO listener is bound (`observed === false`) the component falls
+   * back to legacy router navigation so it stays usable standalone.
+   */
+  @Output() siteSelected = new EventEmitter<string>();
 
   /** Proves the guarded real-render path ran (asserted by the unit test even when WebGL is absent). */
   mapInitAttempted = false;
@@ -344,35 +436,54 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     };
     setPaint('sea', 'background-color', paint.sea);
+    setPaint('graticule', 'line-color', paint.graticule);
     setPaint('land', 'fill-color', paint.land);
     setPaint('borders', 'line-color', paint.border);
     setPaint('coast', 'line-color', paint.coast);
+    setPaint('cities', 'circle-color', paint.city);
+    setPaint('cities', 'circle-stroke-color', paint.cityHalo);
     setPaint('site-clusters', 'circle-stroke-color', paint.clusterStroke);
-    setPaint('site-unclustered', 'circle-stroke-color', paint.canvasBg);
+    // Keep the site-pin ring a fixed dark colour in both themes so the pins stay high-contrast on
+    // the natural green LAND / blue SEA of the basemap (a canvas-coloured ring would vanish on land).
+    setPaint('site-unclustered', 'circle-stroke-color', '#0b1220');
   }
 
   /** Theme-dependent basemap + stroke colours read from the CSS palette (with dark fallbacks). */
   private basemapPaint(): {
     sea: string;
+    graticule: string;
     land: string;
     border: string;
     coast: string;
+    city: string;
+    cityHalo: string;
     clusterStroke: string;
     canvasBg: string;
   } {
     const canvasBg = this.cssVar('--canvas-bg') || '#0b1220';
-    const surface = this.cssVar('--surface') || '#1e293b';
-    const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
+    // NATURAL-COLOUR MAP TOKENS (dedicated --map-* palette, theme-aware). These give the offline
+    // basemap real geographic colours (blue sea / green land / darker borders) instead of the pale
+    // app surface/canvas tokens, so it reads as a genuine map in both light and dark themes. Solid
+    // hex/rgb literals only — MapLibre paint rejects color-mix() and aborts the style load.
+    const water = this.cssVar('--map-water') || '#a9d3ec';
+    const land = this.cssVar('--map-land') || '#cfe3b0';
+    const mapBorder = this.cssVar('--map-border') || '#6b8f4e';
+    const coast = this.cssVar('--map-coast') || '#4a7fa5';
+    const city = this.cssVar('--map-city') || '#334155';
+    const graticule = this.cssVar('--map-graticule') || '#7fa8c4';
     return {
-      // MapLibre paint properties require LITERAL colour strings (hex/rgb/rgba/hsl) — it does NOT
-      // accept CSS color-mix(); passing one aborts the entire style load and the map renders blank.
-      // The land sits over the opaque sea backdrop, so the 90% "lift" is applied via a separate
-      // `fill-opacity` paint property (see `land` layer) rather than baked into the colour.
-      sea: canvasBg,
-      land: surface,
-      border,
-      coast: accent,
+      graticule,
+      // City marker fill from the dedicated token; halo = the sea backdrop so the dot stays legible.
+      city,
+      cityHalo: water,
+      // Land sits over the opaque sea backdrop; the land `fill-opacity` (see `land` layer) keeps the
+      // graticule faintly visible through it.
+      sea: water,
+      land,
+      border: mapBorder,
+      coast,
+      // Cluster/pin STROKE follows the theme accent (kept separate from the natural land/sea fills).
       clusterStroke: accent,
       canvasBg,
     };
@@ -394,9 +505,16 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     }
     const maplibregl = (await import('maplibre-gl')).default;
 
-    // Local offline basemap — NO network: no remote tiles, glyphs or sprite. The country outlines
-    // come from the committed `geo/europe.json` GeoJSON asset (Natural Earth 110m, Public Domain).
+    // Local offline basemap — NO network: no remote tiles, glyphs or sprite. All geodata is served
+    // from committed static assets:
+    //   - `geo/europe.json`    — Natural Earth 110m admin-0 country polygons (Public Domain) → land
+    //                            fill + country borders + coastline.
+    //   - `geo/graticule.json` — a lat/long grid (generated from the viewport bbox) for depth/scale.
+    //   - `geo/cities.json`    — major EU/UK PoP-region cities (public-domain centroids) → city dots
+    //                            (labels are DOM overlays, see syncCityLabels — offline-safe).
     const geoUrl = new URL('geo/europe.json', document.baseURI).href;
+    const gratUrl = new URL('geo/graticule.json', document.baseURI).href;
+    const citiesUrl = new URL('geo/cities.json', document.baseURI).href;
     // NOTE: do NOT include `glyphs`/`sprite` keys at all (not even as undefined) — MapLibre's
     // style validator rejects `undefined` for them ("string expected, undefined found") and the
     // style never finishes loading. Omitting the keys keeps the basemap fully offline.
@@ -405,16 +523,39 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       version: 8,
       sources: {
         countries: { type: 'geojson', data: geoUrl },
+        graticule: { type: 'geojson', data: gratUrl },
+        cities: { type: 'geojson', data: citiesUrl },
       },
       layers: [
         // Sea backdrop.
         { id: 'sea', type: 'background', paint: { 'background-color': p.sea } },
+        // Graticule (lat/long grid) — drawn under the land so it reads only over water for depth.
+        {
+          id: 'graticule',
+          type: 'line',
+          source: 'graticule',
+          paint: { 'line-color': p.graticule, 'line-width': 0.5, 'line-opacity': 0.35 },
+        },
         // Land fill.
         { id: 'land', type: 'fill', source: 'countries', paint: { 'fill-color': p.land, 'fill-opacity': 0.9 } },
         // Country borders.
         { id: 'borders', type: 'line', source: 'countries', paint: { 'line-color': p.border, 'line-width': 1 } },
         // Coastline accent (the outer ring of land features reads as coast against the sea).
         { id: 'coast', type: 'line', source: 'countries', paint: { 'line-color': p.coast, 'line-width': 0.5, 'line-opacity': 0.6 } },
+        // Major-city markers (dots). City NAMES are rendered as DOM overlays (offline-safe — no glyph
+        // stack shipped); the dot itself is a small filled circle with a soft halo.
+        {
+          id: 'cities',
+          type: 'circle',
+          source: 'cities',
+          paint: {
+            'circle-color': p.city,
+            'circle-radius': 2.6,
+            'circle-stroke-color': p.cityHalo,
+            'circle-stroke-width': 1.2,
+            'circle-opacity': 0.9,
+          },
+        },
       ],
     };
 
@@ -444,7 +585,16 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     this.map.on('load', () =>
       this.zone.run(() => {
         this.installClusterLayers();
+        // Keep the DOM city labels synced to the moving/zooming basemap (offline-safe — same overlay
+        // pattern as the cluster-count badges).
+        this.map?.on('render', () => this.syncCityLabels());
         this.mapReady.set(true);
+        // The map may have been built into a container that only just became visible/sized (e.g.
+        // embedded on the dashboard). Force a resize so the WebGL canvas fills its box, then re-fit
+        // to the site extent in the NOW-correct container size so the fit + city labels are settled.
+        this.map?.resize();
+        this.mapFit();
+        this.syncCityLabels();
       }),
     );
   }
@@ -501,11 +651,13 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       source: src,
       filter: ['!', ['has', 'point_count']],
       paint: {
-        // Status pin FILL identical in both themes (per decision); STROKE = canvas backdrop colour.
+        // Status pin FILL identical in both themes (per decision). STROKE = a dark ring (not the
+        // canvas colour) so the pins — including the GREEN 'monitored' dot — stay high-contrast and
+        // never blend into the green LAND fill of the natural-colour basemap.
         'circle-color': ['get', 'statusColor'],
         'circle-radius': 7,
-        'circle-stroke-color': paint.canvasBg,
-        'circle-stroke-width': 2,
+        'circle-stroke-color': '#0b1220',
+        'circle-stroke-width': 2.5,
       },
     });
 
@@ -547,9 +699,16 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       });
     }
 
-    // Sync the DOM cluster-count badges (offline-safe substitute for a glyph symbol layer) on
-    // every paint so each cluster shows its point count at its projected centre.
+    // Sync the DOM overlays (cluster-count badges + city labels — offline-safe substitutes for a
+    // glyph symbol layer) on every paint AND when the map comes to rest ('idle'/'moveend'), so the
+    // labels track the FINAL settled projection and never freeze at a mid-motion position.
+    const syncOverlays = (): void => {
+      this.syncClusterCountBadges();
+      this.syncCityLabels();
+    };
     map.on('render', () => this.syncClusterCountBadges());
+    map.on('idle', syncOverlays);
+    map.on('moveend', syncOverlays);
   }
 
   /**
@@ -590,6 +749,57 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   /** The absolutely-positioned overlay host for the DOM cluster-count badges (inside .map-wrap). */
   private clusterBadgeHost(): HTMLElement | null {
     return this.mapEl?.nativeElement?.parentElement?.querySelector<HTMLElement>('.cluster-badges') ?? null;
+  }
+
+  /** The absolutely-positioned overlay host for the DOM city-name labels (inside .map-wrap). */
+  private cityLabelHost(): HTMLElement | null {
+    return this.mapEl?.nativeElement?.parentElement?.querySelector<HTMLElement>('.city-labels') ?? null;
+  }
+
+  /**
+   * Render each major-city NAME as a DOM label positioned at its projected screen point (offline-safe
+   * — MapLibre symbol text would need a bundled glyph stack the basemap omits, so we reuse the same
+   * DOM-overlay technique as the cluster-count badges). Cities are queried from the rendered `cities`
+   * circle layer so labels track the exact dot positions as the map pans/zooms.
+   */
+  private syncCityLabels(): void {
+    const map = this.map;
+    const host = this.cityLabelHost();
+    if (!map || !host || !map.getLayer('cities')) {
+      return;
+    }
+    const features = map.queryRenderedFeatures(undefined, { layers: ['cities'] });
+    host.replaceChildren();
+    const seen = new Set<string>();
+    const canvas = map.getCanvas();
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    for (const f of features) {
+      const name = f.properties?.['name'] as string | undefined;
+      const geom = f.geometry as Point;
+      if (!name || seen.has(name) || geom?.type !== 'Point') {
+        continue;
+      }
+      seen.add(name);
+      const pt = map.project(geom.coordinates as [number, number]);
+      // Only label cities whose dot is actually inside the visible map viewport — otherwise
+      // off-screen cities (above/beside the fitted extent) clamp to the edge and pile up.
+      if (pt.x < 0 || pt.y < 0 || pt.x > w || pt.y > h) {
+        continue;
+      }
+      const label = document.createElement('span');
+      label.className = 'city-label';
+      label.dataset['testid'] = 'city-label';
+      label.setAttribute('aria-hidden', 'true');
+      label.textContent = name;
+      // Positioning is set INLINE (not via the component's scoped .city-label rule): these spans are
+      // created imperatively, so they lack the component's style-encapsulation attribute and the
+      // scoped `position:absolute` would not apply — the same reason the styling is kept minimal here.
+      label.style.position = 'absolute';
+      label.style.left = `${pt.x}px`;
+      label.style.top = `${pt.y}px`;
+      host.appendChild(label);
+    }
   }
 
   /** Build the site FeatureCollection (status colour + ids carried as feature properties). */
@@ -676,15 +886,9 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  // ── Map zoom / fit / reset controls ───────────────────────────────────────────────────────────
-  /** Zoom the map in one step (no-op until the real map exists, e.g. in jsdom unit tests). */
-  mapZoomIn(): void {
-    this.map?.zoomIn();
-  }
-  /** Zoom the map out one step. */
-  mapZoomOut(): void {
-    this.map?.zoomOut();
-  }
+  // ── Map fit / reset controls ──────────────────────────────────────────────────────────────────
+  // NOTE: the custom zoom-in/out handlers were removed with the redundant left zoom buttons — zoom
+  // is provided by MapLibre's own NavigationControl (top-right). Fit/Reset re-frame the whole fleet.
   /** Fit the viewport to the extent of all current sites (the same capped bounds used on load). */
   mapFit(): void {
     this.map?.fitBounds(this.siteExtent(), {
@@ -728,7 +932,14 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   select(siteId: string): void {
-    this.nav.toSiteGraph(siteId);
+    // Prefer the in-place dashboard swap: emit the siteId to the host (the dashboard renders the
+    // site graph in the same panel with a Close button). If nothing is bound to the output (used
+    // standalone), fall back to the legacy route navigation so the component still works alone.
+    if (this.siteSelected.observed) {
+      this.siteSelected.emit(siteId);
+    } else {
+      this.nav.toSiteGraph(siteId);
+    }
   }
 
   ngOnDestroy(): void {

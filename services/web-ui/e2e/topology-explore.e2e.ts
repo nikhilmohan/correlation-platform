@@ -21,9 +21,11 @@ import { shot } from './support/screenshots';
  * single-site and never asserts site-count>1.
  */
 test.describe('Explorable topology — expand, cross-site trail explode, site boxes, zoom', () => {
-  /** Root the explorer at a site (geo map → site view). Returns the .cy-canvas locator. */
+  /** Root the explorer at a site (dashboard geo map → IN-PLACE site graph). Topology now lives on
+   *  the DASHBOARD (no separate /topology page): clicking a site swaps the map panel for the site
+   *  graph in-place. Returns the .cy-canvas locator. */
   async function rootAtSite(page: import('@playwright/test').Page) {
-    await page.goto('/topology');
+    await page.goto('/dashboard');
     const markers = page.getByTestId('site-marker');
     await expect(markers.first()).toBeVisible();
     // REAL: drill into London Docklands by name; MOCK: the first marker (interceptor returns LON).
@@ -280,7 +282,7 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
       return;
     }
 
-    await page.goto('/topology');
+    await page.goto('/dashboard');
     const markers = page.getByTestId('site-marker');
     await expect(markers.first()).toBeVisible();
     // Madrid marker (3rd site) — distinct device set + the unknown type.
@@ -316,7 +318,7 @@ test.describe('Explorable topology — expand, cross-site trail explode, site bo
   }) => {
     if (MODE === 'real') test.skip();
     // London first.
-    await page.goto('/topology');
+    await page.goto('/dashboard');
     await expect(page.getByTestId('site-marker').first()).toBeVisible();
     await page.getByTestId('site-marker').filter({ hasText: /London/i }).first().click();
     await expect(page.locator('.cy-canvas')).toHaveAttribute('data-cy-layout-done', 'true', { timeout: 15_000 });
