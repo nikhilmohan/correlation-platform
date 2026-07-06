@@ -9,19 +9,27 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.acp.alarmmanager.domain.LifecycleState;
+import com.acp.alarmmanager.domain.PendingStatus;
 import com.acp.alarmmanager.repository.AlarmRepository;
+import com.acp.alarmmanager.repository.PendingStatusRepository;
 import com.acp.alarmmanager.repository.StateTransitionRepository;
 import java.time.Instant;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
-/** AC7 — wire-cleared / status-cleared transitions the alarm to cleared with a cleared audit. */
+/**
+ * AC7 — wire-cleared / status-cleared transitions the alarm to cleared with a cleared audit.
+ * Ordering-race fix — a status op for a not-yet-persisted alarm PARKS the change (does not drop
+ * it), and a parked change is re-applied on ingest.
+ */
 class LifecycleServiceTest {
 
     private AlarmRepository alarms;
     private StateTransitionRepository transitions;
+    private PendingStatusRepository pending;
     private AmMetrics metrics;
     private LifecycleService lifecycle;
 
@@ -29,8 +37,9 @@ class LifecycleServiceTest {
     void setUp() {
         alarms = Mockito.mock(AlarmRepository.class);
         transitions = Mockito.mock(StateTransitionRepository.class);
+        pending = Mockito.mock(PendingStatusRepository.class);
         metrics = Mockito.mock(AmMetrics.class);
-        lifecycle = new LifecycleService(alarms, transitions, metrics);
+        lifecycle = new LifecycleService(alarms, transitions, pending, metrics);
     }
 
     @Test
@@ -50,13 +59,81 @@ class LifecycleServiceTest {
     }
 
     @Test
-    void clearForUnknownAlarmIsNoOpWithMetric() {
+    void clearForUnknownAlarmParksInsteadOfDropping() {
         when(alarms.exists("UNKNOWN")).thenReturn(false);
 
         lifecycle.clear("UNKNOWN", "simulator", null, "evt-1", Instant.now());
 
+        // Not applied to a (missing) row, but parked for re-apply — not dropped.
         verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        ArgumentCaptor<PendingStatus> parked = ArgumentCaptor.forClass(PendingStatus.class);
+        verify(pending).upsert(parked.capture());
+        assertThat(parked.getValue().alarmId()).isEqualTo("UNKNOWN");
+        assertThat(parked.getValue().newStatus()).isEqualTo("cleared");
         verify(metrics).clearForUnknownAlarm();
+    }
+
+    /** THE bug's unit-level guard: a correlated status for a not-yet-persisted alarm is PARKED. */
+    @Test
+    void applyStateForUnknownAlarmParksInsteadOfDropping() {
+        when(alarms.exists("ALM-RACE")).thenReturn(false);
+        Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
+
+        lifecycle.applyState("ALM-RACE", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-corr", Instant.now());
+
+        // No update against a missing row, and NOT dropped — parked keyed by alarmId.
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        ArgumentCaptor<PendingStatus> parked = ArgumentCaptor.forClass(PendingStatus.class);
+        verify(pending).upsert(parked.capture());
+        assertThat(parked.getValue().alarmId()).isEqualTo("ALM-RACE");
+        assertThat(parked.getValue().newStatus()).isEqualTo("correlated");
+        assertThat(parked.getValue().changedAt()).isEqualTo(changedAt);
+        assertThat(parked.getValue().causedByEventId()).isEqualTo("evt-corr");
+        verify(metrics).statusForUnknownAlarm();
+    }
+
+    @Test
+    void applyStateForKnownAlarmAppliesImmediatelyAndDoesNotPark() {
+        when(alarms.exists("ALM-0001")).thenReturn(true);
+        Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
+
+        lifecycle.applyState("ALM-0001", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-corr", Instant.now());
+
+        verify(alarms).updateLifecycleState(eq("ALM-0001"), eq(LifecycleState.CORRELATED), isNull(),
+                any());
+        verify(pending, never()).upsert(any());
+    }
+
+    /** Re-apply on ingest: a parked correlated is applied to the freshly-persisted alarm, then
+     * the parked entry is deleted. This is the state-transition side of THE bug's fix. */
+    @Test
+    void reapplyPendingAppliesParkedCorrelatedThenDeletes() {
+        Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
+        when(pending.find("ALM-RACE")).thenReturn(Optional.of(new PendingStatus(
+                "ALM-RACE", "correlated", "correlation-engine", changedAt, "evt-corr",
+                Instant.parse("2026-06-13T09:05:01Z"))));
+        // Alarm has just been persisted, so the re-apply takes the apply branch.
+        when(alarms.exists("ALM-RACE")).thenReturn(true);
+
+        lifecycle.reapplyPending("ALM-RACE", Instant.now());
+
+        verify(alarms).updateLifecycleState(eq("ALM-RACE"), eq(LifecycleState.CORRELATED), isNull(),
+                any());
+        verify(transitions).append(eq("ALM-RACE"), eq("correlated"), any(),
+                eq("correlation-engine"), eq(changedAt), eq("evt-corr"), any());
+        verify(pending).delete("ALM-RACE");
+    }
+
+    @Test
+    void reapplyPendingIsNoOpWhenNothingParked() {
+        when(pending.find("ALM-NONE")).thenReturn(Optional.empty());
+
+        lifecycle.reapplyPending("ALM-NONE", Instant.now());
+
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        verify(pending, never()).delete(any());
     }
 
     @Test
