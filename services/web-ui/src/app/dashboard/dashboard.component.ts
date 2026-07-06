@@ -197,10 +197,22 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
         position: relative;
         height: min(64vh, 720px);
         min-height: 480px;
+        /* A flex column so the single child (map OR site-graph host) stretches to fill the fixed box
+           height regardless of the child's own display. This is the parent that guarantees the
+           embedded child has a resolved, non-zero height before Cytoscape / MapLibre mount + fit. */
+        display: flex;
+        flex-direction: column;
       }
+      /* Do NOT set the display property here: the embedded child's own :host(.embedded-host) rule
+         sets display:flex to make it a flex COLUMN (compact header + graph/map filling the rest). A
+         display:block on this parent-child selector would win on specificity (parent .class > child
+         :host) and collapse the child's flex chain -> the Cytoscape canvas gets zero height and the
+         graph renders empty (the regression). We only stretch the child to the panel height via flex
+         + min-height:0. */
       .topology-panel > app-geo-site-map,
       .topology-panel > app-site-graph {
-        display: block;
+        flex: 1 1 auto;
+        min-height: 0;
         height: 100%;
       }
     `,

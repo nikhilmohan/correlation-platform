@@ -2,7 +2,21 @@ import { TestBed, ComponentFixture } from '@angular/core/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { testProviders, flush } from '../../test-utils';
 import { SiteGraphComponent } from './site-graph.component';
+import { DashboardComponent } from '../dashboard/dashboard.component';
 import { TopologyStore } from './topology.store';
+
+/** Read a standalone component's compiled inline `styles[]` (all entries joined) for CSS-contract
+ *  assertions. The regression these guard is a DOM-layout one that jsdom cannot measure (it does no
+ *  layout, so every getBoundingClientRect() is 0); asserting the CSS rules that resolve the flex
+ *  chain is the deterministic proxy that fails the moment the collapse is reintroduced. */
+function componentStyles(cmp: unknown): string {
+  const meta = (cmp as { ɵcmp?: { styles?: readonly string[] } }).ɵcmp;
+  return (meta?.styles ?? []).join('\n');
+}
+/** Collapse all whitespace so brittle formatting differences don't affect the substring assertions. */
+function squish(css: string): string {
+  return css.replace(/\s+/g, ' ');
+}
 
 /**
  * Dashboard site-graph fit-in-bounds + shared-panel + Back-to-map behaviour (PR #401 fix):
@@ -127,5 +141,65 @@ describe('site-graph — auto-fit all nodes in-bounds', () => {
     const spy = vi.spyOn(store, 'collapseToRoot');
     fixture.componentInstance.reset();
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * REGRESSION GUARD — embedded site-graph collapsed to zero height (empty graph in the dashboard panel).
+ * The live cause was a specificity fight: the dashboard's `.topology-panel > app-site-graph` rule set
+ * `display: block`, which BEAT the component's `:host(.embedded-host){ display:flex }` and reverted the
+ * host to a block box, so the flex chain never resolved and the Cytoscape `.cy-canvas` got clientHeight
+ * 0 (nodes never drew). jsdom does no layout, so we assert the CSS CONTRACT that resolves the chain:
+ *   - the component's :host(.embedded-host) makes the host a flex column;
+ *   - the embedded .cy-wrap/.cy-canvas carry a NON-ZERO min-height fallback (never fully collapse);
+ *   - the DASHBOARD parent selector for the embedded child must NOT set `display` (which would win on
+ *     specificity and re-collapse the child) and must stretch the child (flex + height:100%).
+ * Any of these regressing re-introduces the empty-graph bug and fails here.
+ */
+describe('site-graph — embedded panel must NOT collapse to zero height (regression #401)', () => {
+  // Angular ViewEncapsulation.Emulated compiles `:host(.embedded-host)` to
+  // `.embedded-host[_nghost-%COMP%]` and appends `[_ngcontent-%COMP%]` to descendant selectors, so
+  // the assertions match those compiled forms (attribute suffixes tolerated).
+  it('the embedded host (:host(.embedded-host)) is a flex column that fills its parent', () => {
+    const css = squish(componentStyles(SiteGraphComponent));
+    const host = /\.embedded-host\[[^\]]*\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(host.length).toBeGreaterThan(0);
+    expect(host).toMatch(/display:\s*flex/);
+    expect(host).toMatch(/flex-direction:\s*column/);
+    expect(host).toMatch(/height:\s*100%/);
+  });
+
+  it('the embedded graph container carries a NON-ZERO min-height fallback (never fully collapses)', () => {
+    const css = squish(componentStyles(SiteGraphComponent));
+    // .cy-wrap and .cy-canvas in embedded mode must have a non-zero px min-height fallback so the
+    // Cytoscape mount + fit always get a real box even if the flex chain briefly fails to resolve.
+    const wrap = /\.embedded-host\[[^\]]*\]\s*\.cy-wrap\[[^\]]*\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    const canvas = /\.embedded-host\[[^\]]*\]\s*\.cy-canvas\[[^\]]*\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    const minPx = (block: string): number => {
+      const m = /min-height:\s*(\d+)px/.exec(block);
+      return m ? Number(m[1]) : 0;
+    };
+    expect(minPx(wrap)).toBeGreaterThan(0);
+    expect(minPx(canvas)).toBeGreaterThan(0);
+    // And the canvas fills the wrap's resolved height.
+    expect(canvas).toMatch(/height:\s*100%/);
+  });
+
+  it('DASHBOARD panel does NOT force display:block on the embedded child (specificity trap)', () => {
+    const css = squish(componentStyles(DashboardComponent));
+    // The parent > child rule that sizes the embedded map/graph host (attribute suffixes tolerated).
+    const rule =
+      /\.topology-panel\[[^\]]*\]\s*>\s*app-geo-site-map\[[^\]]*\]\s*,\s*\.topology-panel\[[^\]]*\]\s*>\s*app-site-graph\[[^\]]*\]\s*\{([^}]*)\}/.exec(
+        css,
+      )?.[1] ?? '';
+    expect(rule.length).toBeGreaterThan(0);
+    // The regression: a `display: block` here overrides the child's :host(.embedded-host){display:flex}.
+    expect(rule).not.toMatch(/display:\s*block/);
+    // It must instead STRETCH the child to the panel height so the child's flex chain has a real box.
+    expect(rule).toMatch(/flex:\s*1 1 auto/);
+    expect(rule).toMatch(/height:\s*100%/);
+    // And the panel itself is a flex column so the single child fills the fixed-height box.
+    const panel = /\.topology-panel\[[^\]]*\]\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(panel).toMatch(/display:\s*flex/);
   });
 });

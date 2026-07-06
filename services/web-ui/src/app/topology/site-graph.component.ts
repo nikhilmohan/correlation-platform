@@ -617,12 +617,15 @@ import type {
       }
       :host(.embedded-host) .cy-wrap {
         flex: 1 1 auto;
-        min-height: 0;
+        /* A small non-zero min-height FALLBACK so the graph area is never fully collapsed even if the
+           flex chain briefly fails to resolve (mirrors the geo-map's canvas fallback). The flex:1 fill
+           is the primary sizing; this only guarantees Cytoscape mounts + fits into a real box. */
+        min-height: 240px;
         margin-bottom: 0;
       }
       :host(.embedded-host) .cy-canvas {
         height: 100%;
-        min-height: 0;
+        min-height: 240px;
         margin-bottom: 0;
       }
       /* CHANGE 3: single-column layout — the graph fills the full width; the detail panel is an
