@@ -55,6 +55,19 @@ public class CorrelationEngine {
     private final Map<String, List<ObservedAlarm>> uncoveredByTrail = new LinkedHashMap<>();
     /** Ingest-side dedupe of alarms across the whole engine (AC16). */
     private final Set<String> processedAlarmIds = new LinkedHashSet<>();
+    /**
+     * alarmIds that have been CORRELATED into a fired incident (root-cause or child). Under
+     * pattern generalization one alarm fans out to many {@code (trailId, patternId)} instances;
+     * once it is correlated in a real incident by ANY instance it must never be reverted-open when
+     * a SIBLING instance later expires without a full match. This is the revert guard.
+     *
+     * <p>Same in-memory single-threaded/synchronized concurrency model as {@link #instances} and
+     * {@link #processedAlarmIds}, so a plain {@link HashSet}-style set is sufficient. It grows with
+     * the number of correlated alarms over the engine's lifetime (acceptable for the MVP in-memory
+     * registry model — bounded by distinct correlated alarmIds, same growth profile as the other
+     * ingest registries; a durable/pruned store is the deferred RocksDB-changelog target).
+     */
+    private final Set<String> correlatedAlarmIds = new LinkedHashSet<>();
 
     public CorrelationEngine(
             CompatibilityIndexService compatibilityIndex,
@@ -184,9 +197,11 @@ public class CorrelationEngine {
         resultEmitter.emit(incident);
         statusEmitter.fireCorrelated(incident.rootCauseAlarmId(), nowEpochMs);
         metrics.incrementStatusChanged("correlated");
+        correlatedAlarmIds.add(incident.rootCauseAlarmId());
         for (String child : incident.childAlarmIds()) {
             statusEmitter.fireCorrelated(child, nowEpochMs);
             metrics.incrementStatusChanged("correlated");
+            correlatedAlarmIds.add(child);
         }
         metrics.incrementIncidentsCreated();
         if (winner.matchType() == MatchCandidate.MatchType.PATTERN) {
@@ -222,6 +237,13 @@ public class CorrelationEngine {
             }
             metrics.incrementSessionExpiration();
             for (ObservedAlarm a : instance.matchedAlarms()) {
+                // Revert guard: never revert an alarm already CORRELATED into a fired incident by a
+                // sibling instance. Under generalization the same alarm rides many instances; this
+                // one expiring without a full match must not clobber a legitimate correlation
+                // (the live bug: correlated alarms bounced back to open on sibling-instance expiry).
+                if (correlatedAlarmIds.contains(a.alarmId())) {
+                    continue;
+                }
                 statusEmitter.fireRevertedOpen(a.alarmId(), nowEpochMs);
                 metrics.incrementStatusChanged("reverted-open");
             }
