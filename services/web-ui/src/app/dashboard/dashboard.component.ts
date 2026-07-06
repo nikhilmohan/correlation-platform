@@ -95,25 +95,22 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
             Network topology &amp; trails
           }
         </h2>
-        @if (selectedSiteId()) {
-          <button
-            type="button"
-            class="btn btn-secondary site-graph-close"
-            data-testid="site-graph-close"
-            (click)="closeSite()"
-          >
-            <span aria-hidden="true">←</span> Back to map
-          </button>
-        }
       </div>
 
-      @if (selectedSiteId(); as sid) {
-        <!-- IN-PLACE site graph: fills the same panel as the map. Close returns to the map. -->
-        <app-site-graph [siteId]="sid" (closed)="closeSite()" />
-      } @else {
-        <!-- Geo-site MAP. A site click emits its id → we swap to the site graph in-place. -->
-        <app-geo-site-map [showHeading]="false" (siteSelected)="openSite($event)" />
-      }
+      <!-- SHARED PANEL: the map and the in-place site graph render into the SAME fixed-size box, so
+           swapping between them causes ZERO layout shift — the site view directly overlaps where the
+           map was. Both children fill 100% of this panel (their own vh defaults only apply when the
+           components are used standalone). -->
+      <div class="topology-panel" [class.is-graph]="!!selectedSiteId()">
+        @if (selectedSiteId(); as sid) {
+          <!-- IN-PLACE site graph: fills the same panel as the map. Its own "← Back to map" button
+               (data-testid="site-graph-close") emits (closed) → back to the map. -->
+          <app-site-graph [siteId]="sid" [embedded]="true" (closed)="closeSite()" />
+        } @else {
+          <!-- Geo-site MAP. A site click emits its id → we swap to the site graph in-place. -->
+          <app-geo-site-map [showHeading]="false" [embedded]="true" (siteSelected)="openSite($event)" />
+        }
+      </div>
     </section>
   `,
   styles: [
@@ -194,11 +191,17 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
         margin: 0;
         font-size: 1.2rem;
       }
-      .site-graph-close {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        white-space: nowrap;
+      /* SHARED topology panel: ONE fixed box hosting either the map or the site graph, so switching
+         between them never shifts the page vertically. Both embedded children fill 100% of this box. */
+      .topology-panel {
+        position: relative;
+        height: min(64vh, 720px);
+        min-height: 480px;
+      }
+      .topology-panel > app-geo-site-map,
+      .topology-panel > app-site-graph {
+        display: block;
+        height: 100%;
       }
     `,
   ],

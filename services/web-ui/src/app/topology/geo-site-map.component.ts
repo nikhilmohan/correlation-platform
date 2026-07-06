@@ -5,6 +5,7 @@ import {
   ElementRef,
   EffectRef,
   EventEmitter,
+  HostBinding,
   Input,
   NgZone,
   Output,
@@ -89,7 +90,8 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       <div
         #mapEl
         class="geo-map"
-        [class.geo-map-tall]="!showHeading"
+        [class.geo-map-tall]="!showHeading && !embedded"
+        [class.geo-map-fill]="embedded"
         role="application"
         aria-label="Geographic map of network sites over a UK and Europe basemap. Each site is selectable below."
       ></div>
@@ -196,6 +198,34 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         height: min(58vh, 620px);
         min-height: 420px;
       }
+      /* Embedded in the dashboard's SHARED topology panel: the map FILLS the space the panel gives it
+         (the host is a flex column; the status bar sits on top, the accessible site list scrolls
+         below), so the panel height is controlled by the host — identical to the site-graph panel and
+         to itself before/after a drill-in, so swapping never shifts the page. */
+      :host {
+        display: block;
+      }
+      :host(.embedded-host) {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+      }
+      :host(.embedded-host) .map-wrap {
+        flex: 1 1 auto;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        margin-bottom: 0.6rem;
+      }
+      :host(.embedded-host) .site-markers {
+        flex: 0 0 auto;
+        max-height: 8.5rem;
+        overflow-y: auto;
+      }
+      .geo-map-fill {
+        flex: 1 1 auto;
+        min-height: 240px;
+      }
       .cluster-badges {
         position: absolute;
         inset: 0;
@@ -299,6 +329,19 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
    * canvas fills the taller container it becomes visible in.
    */
   @Input() showHeading = true;
+
+  /**
+   * True when embedded in the dashboard's SHARED topology panel. The host then becomes a flex column
+   * filling 100% of the panel (map grows, status bar on top, site list scrolls below) so the map
+   * panel has the EXACT SAME box as the in-place site graph — swapping between them causes zero
+   * vertical shift. Standalone (`/topology`) it is false and the component keeps its own vh height.
+   */
+  @Input() embedded = false;
+
+  /** Reflects `embedded` onto the host so the `:host(.embedded-host)` flex-fill rules apply. */
+  @HostBinding('class.embedded-host') get embeddedHost(): boolean {
+    return this.embedded;
+  }
 
   /**
    * Emits the siteId when the operator drills into a site (pin click or accessible site-list click).
