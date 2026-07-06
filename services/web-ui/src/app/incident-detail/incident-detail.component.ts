@@ -44,7 +44,7 @@ import { AlarmDetail } from '../api/models';
         <h2>Root-cause alarm</h2>
         @if (rootCause(); as rc) {
           <div class="member" data-testid="root-cause">
-            <a [routerLink]="['/streaming']" [queryParams]="{ alarmId: rc.alarmId }">{{ rc.alarmId }}</a>
+            <a [routerLink]="['/alarms']" [queryParams]="{ alarmId: rc.alarmId }">{{ rc.alarmId }}</a>
             — {{ rc.eventType }} · state {{ rc.lifecycleState }} · role {{ rc.role }}
           </div>
         } @else {
@@ -58,7 +58,7 @@ import { AlarmDetail } from '../api/models';
           <ul class="members">
             @for (c of children(); track c.alarmId) {
               <li data-testid="child-alarm">
-                <a [routerLink]="['/streaming']" [queryParams]="{ alarmId: c.alarmId }">{{ c.alarmId }}</a>
+                <a [routerLink]="['/alarms']" [queryParams]="{ alarmId: c.alarmId }">{{ c.alarmId }}</a>
                 — {{ c.eventType }} · state {{ c.lifecycleState }} · role {{ c.role }}
               </li>
             }

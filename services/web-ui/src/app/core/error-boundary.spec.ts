@@ -7,7 +7,7 @@ import { ApiConfigService, ServiceKey } from './api-config.service';
 import { ErrorBannerService } from './error-banner.service';
 import { mockBackendInterceptor } from './mock-backend.interceptor';
 import { PatternStore } from '../patterns/pattern.store';
-import { StatsStore } from '../stats/stats.store';
+import { AlarmsStore } from '../alarms/alarms.store';
 import { RcaAccuracyService } from './rca-accuracy.service';
 import { flush } from '../../test-utils';
 
@@ -28,7 +28,7 @@ describe('AC 53 — a 5xx in one integration point shows a structured service-na
     TestBed.configureTestingModule({
       providers: [
         PatternStore,
-        StatsStore,
+        AlarmsStore,
         RcaAccuracyService,
         ErrorBannerService,
         provideRouter([]),
@@ -64,18 +64,23 @@ describe('AC 53 — a 5xx in one integration point shows a structured service-na
     configure();
     const httpMock = TestBed.inject(HttpTestingController);
     const errors = TestBed.inject(ErrorBannerService);
-    const stats = TestBed.inject(StatsStore);
+    const alarms = TestBed.inject(AlarmsStore);
 
-    stats.loadStats();
-    const req = httpMock.expectOne((r) => r.url.includes('/correlationEngine/stats'));
-    req.flush('boom', { status: 503, statusText: 'Unavailable' });
+    // The unified Alarms store loads alarms + incidents + stats. Fail the CE /stats call and let the
+    // others resolve empty — the store must degrade gracefully with only a per-service error surfaced.
+    alarms.loadAll();
+    const statsReq = httpMock.expectOne((r) => r.url.includes('/correlationEngine/stats'));
+    statsReq.flush('boom', { status: 503, statusText: 'Unavailable' });
+    for (const r of httpMock.match(() => true)) {
+      r.flush({ items: [], total: 0, limit: 50, offset: 0 });
+    }
     await flush();
 
     expect(errors.forService('Correlation Engine')?.status).toBe(503);
     // a different module's surface is untouched
     expect(errors.forService('Pattern Manager')).toBeUndefined();
-    // the stats store degraded gracefully (no stats, no throw)
-    expect(stats.stats()).toBeNull();
+    // the alarms store degraded gracefully (no stats, no throw)
+    expect(alarms.stats()).toBeNull();
     httpMock.verify();
   });
 });

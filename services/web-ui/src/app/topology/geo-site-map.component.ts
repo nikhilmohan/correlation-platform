@@ -118,26 +118,32 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       </div>
     </div>
 
+    <!-- ACCESSIBLE, COMPACT site list (Parts 1-2). The old bottom CARD GRID was removed and its
+         vertical space given to a taller map, so the visible UI is dominated by the map; this is a
+         slim single-line chip row (not cards) that stays as the WCAG/keyboard drill-in path AND the
+         selection source of truth for tests/e2e — every site is a selectable chip carrying
+         data-testid=site-marker and its name/region (so keyboard users, screen readers, and hasText
+         selectors reach every site at any map zoom). Clicking a green map pin is the primary visible
+         drill-in; this compact row mirrors it. It is genuinely rendered (not 1px-hidden) so it is
+         keyboard-focusable and reliably click-targetable. -->
     @if (store.sitesLoading()) {
       <p aria-busy="true">Loading sites…</p>
     } @else if (store.sites().length) {
-      <ul class="site-markers" aria-label="Network sites">
+      <nav class="site-chips" aria-label="Network sites — select a site to open its device graph">
+        <span class="site-chips-lead" aria-hidden="true">Sites:</span>
         @for (site of store.sites(); track site.siteId) {
-          <li>
-            <button
-              type="button"
-              class="card site-marker"
-              data-testid="site-marker"
-              (click)="select(site.siteId)"
-              [attr.aria-label]="ariaFor(site)"
-            >
-              <span class="dot" [class]="'dot-' + siteStatusFor(site)" aria-hidden="true"></span>
-              <strong>{{ site.name }}</strong>
-              <span class="muted">{{ site.region }} · {{ site.latitude }}, {{ site.longitude }}</span>
-            </button>
-          </li>
+          <button
+            type="button"
+            class="site-chip"
+            data-testid="site-marker"
+            (click)="select(site.siteId)"
+            [attr.aria-label]="ariaFor(site)"
+          >
+            <span class="dot dot-monitored" aria-hidden="true"></span>
+            {{ site.name }} — {{ site.region }}
+          </button>
         }
-      </ul>
+      </nav>
     } @else {
       <p class="empty-state">No sites returned.</p>
     }
@@ -185,8 +191,11 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         position: relative;
         margin-bottom: 1rem;
       }
+      /* The bottom site-card grid was removed (Parts 1-2); the map reclaims that vertical space and is
+         now the sole visible surface, so give it a generous default height. */
       .geo-map {
-        height: 360px;
+        height: min(70vh, 720px);
+        min-height: 480px;
         border: 1px solid var(--border);
         border-radius: 10px;
         background: var(--canvas-bg);
@@ -195,8 +204,8 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       }
       /* Embedded on the dashboard (no heading) → give the map more vertical presence. */
       .geo-map-tall {
-        height: min(58vh, 620px);
-        min-height: 420px;
+        height: min(68vh, 720px);
+        min-height: 480px;
       }
       /* Embedded in the dashboard's SHARED topology panel: the map FILLS the space the panel gives it
          (the host is a flex column; the status bar sits on top, the accessible site list scrolls
@@ -216,11 +225,6 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         flex-direction: column;
         min-height: 0;
         margin-bottom: 0.6rem;
-      }
-      :host(.embedded-host) .site-markers {
-        flex: 0 0 auto;
-        max-height: 8.5rem;
-        overflow-y: auto;
       }
       .geo-map-fill {
         flex: 1 1 auto;
@@ -289,25 +293,49 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       .map-controls button:hover {
         border-color: var(--accent);
       }
-      .site-markers {
-        list-style: none;
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-        gap: 0.6rem;
-        padding: 0;
-        margin: 0;
-      }
-      .site-marker {
-        display: flex;
-        flex-direction: column;
-        gap: 0.2rem;
-        text-align: left;
-        color: var(--text);
-        cursor: pointer;
-      }
       .muted {
         color: var(--text-muted);
         font-size: 0.85rem;
+      }
+      /* Compact site chip row — replaces the removed bottom card grid. A single wrapping/scrolling
+         line of selectable chips so the MAP stays the dominant surface while every site remains
+         keyboard-reachable + click-targetable (a11y + tests). */
+      .site-chips {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.4rem;
+        margin-top: 0.5rem;
+      }
+      .site-chips-lead {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-right: 0.15rem;
+      }
+      .site-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        padding: 0.2rem 0.6rem;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--surface-2);
+        color: var(--text);
+        font-size: 0.82rem;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .site-chip:hover,
+      .site-chip:focus-visible {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      /* Embedded on the dashboard: bound the chip row height so it never crowds out the map/graph. */
+      :host(.embedded-host) .site-chips {
+        flex: 0 0 auto;
+        max-height: 4.5rem;
+        overflow-y: auto;
       }
     `,
   ],
@@ -358,6 +386,15 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly mapReady = signal(false);
   private siteEffect: EffectRef;
   private themeEffect: EffectRef;
+
+  /**
+   * Uniform site-pin GREEN (Part 1). Every independent site renders as this same green circle — the
+   * status→green/amber/red variation was removed; a site is just a green dot. Matches the `--ok`
+   * green family used elsewhere in the app.
+   */
+  private static readonly SITE_GREEN = '#22c55e';
+  /** Cluster bubble GREEN — same family as the pin, a shade darker so the aggregate still reads. */
+  private static readonly SITE_CLUSTER_GREEN = '#15803d';
 
   /** GeoJSON source id holding the site points (native MapLibre clustering source). */
   private static readonly SITES_SOURCE = 'sites';
@@ -442,9 +479,10 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     setPaint('coast', 'line-color', paint.coast);
     setPaint('cities', 'circle-color', paint.city);
     setPaint('cities', 'circle-stroke-color', paint.cityHalo);
-    setPaint('site-clusters', 'circle-stroke-color', paint.clusterStroke);
-    // Keep the site-pin ring a fixed dark colour in both themes so the pins stay high-contrast on
-    // the natural green LAND / blue SEA of the basemap (a canvas-coloured ring would vanish on land).
+    // Keep BOTH the cluster bubble and the site pins ringed with a fixed dark colour in both themes so
+    // the uniform-green sites (Part 1) stay high-contrast on the natural green LAND / blue SEA basemap
+    // (a canvas/accent-coloured ring would vanish on the green land).
+    setPaint('site-clusters', 'circle-stroke-color', '#0b1220');
     setPaint('site-unclustered', 'circle-stroke-color', '#0b1220');
   }
 
@@ -618,7 +656,6 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
     const src = GeoSiteMapComponent.SITES_SOURCE;
-    const paint = this.basemapPaint();
 
     map.addSource(src, {
       type: 'geojson',
@@ -635,26 +672,27 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       source: src,
       filter: ['has', 'point_count'],
       paint: {
-        // Cluster FILL identical in both themes (per decision); STROKE follows the theme accent.
-        'circle-color': '#1d4ed8',
-        'circle-opacity': 0.85,
-        'circle-stroke-color': paint.clusterStroke,
+        // Cluster FILL is the SAME GREEN family as the individual site pins (Part 1 — sites render
+        // uniformly green; the cluster is just a grouped green bubble, not blue). A darker green than
+        // the pin fill so the cluster still reads as an aggregate. Dark STROKE ring for contrast on
+        // the natural land/sea basemap.
+        'circle-color': GeoSiteMapComponent.SITE_CLUSTER_GREEN,
+        'circle-opacity': 0.9,
+        'circle-stroke-color': '#0b1220',
         'circle-stroke-width': 1.5,
         'circle-radius': ['step', ['get', 'point_count'], 16, 5, 20, 10, 26],
       },
     });
 
-    // Individual (unclustered) site pins — status-coloured dot.
+    // Individual (unclustered) site pins — UNIFORM GREEN dot (Part 1). Every independent site is the
+    // same green circle regardless of status; a dark ring keeps it high-contrast on the green land.
     map.addLayer({
       id: 'site-unclustered',
       type: 'circle',
       source: src,
       filter: ['!', ['has', 'point_count']],
       paint: {
-        // Status pin FILL identical in both themes (per decision). STROKE = a dark ring (not the
-        // canvas colour) so the pins — including the GREEN 'monitored' dot — stay high-contrast and
-        // never blend into the green LAND fill of the natural-colour basemap.
-        'circle-color': ['get', 'statusColor'],
+        'circle-color': GeoSiteMapComponent.SITE_GREEN,
         'circle-radius': 7,
         'circle-stroke-color': '#0b1220',
         'circle-stroke-width': 2.5,
@@ -826,16 +864,13 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     source?.setData(this.sitesGeoJson(sites));
   }
 
-  /** Status → pin fill colour (mirrors the accessible-list dot colours). */
-  private statusColorFor(site: SiteDto): string {
-    switch (this.siteStatusFor(site)) {
-      case 'fault':
-        return '#ef4444';
-      case 'warning':
-        return '#f59e0b';
-      default:
-        return '#22c55e';
-    }
+  /**
+   * Pin fill colour. Part 1: sites render UNIFORMLY GREEN — every independent site is the same green
+   * circle regardless of status, so this always returns the site green (kept as a method so the
+   * GeoJSON `statusColor` feature property stays populated for any downstream/theme use).
+   */
+  private statusColorFor(_site: SiteDto): string {
+    return GeoSiteMapComponent.SITE_GREEN;
   }
 
   /** Bounding box [W,S,E,N] of the current sites, or the UK/EU fallback when there are none. */

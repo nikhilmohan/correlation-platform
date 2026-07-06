@@ -46,15 +46,16 @@ test.describe('Cross-navigation [AC 25]', () => {
     await page.goto('/dashboard');
     await expect(page.getByRole('heading', { name: /Platform overview/i })).toBeVisible();
 
-    // The incident-count KPI links to the correlation-stats / incidents view (spec AC 4/25).
+    // The incident-count KPI links to the unified Alarms view (Streaming + Stats merged, Part 3).
     await page.getByTestId('kpi-incidents').click();
-    await expect(page).toHaveURL(/\/stats/);
-    await expect(page.getByRole('heading', { name: /Correlation stats/i })).toBeVisible();
+    await expect(page).toHaveURL(/\/alarms/);
+    await expect(page.getByRole('heading', { name: /^Alarms$/i })).toBeVisible();
 
-    // From the incidents list, drill into a single incident-detail page (deep-linked by id).
-    const firstIncident = page.getByTestId('stats-incident').first();
-    await expect(firstIncident).toBeVisible();
-    await firstIncident.getByRole('link').first().click();
+    // An incident is represented as its highlighted RCA alarm row; its incident icon deep-links to
+    // the incident-detail page (incidents are reached by clicking that icon on the RCA row).
+    const rcaRow = page.locator('[data-testid="alarm-row"][data-role="root-cause"]').first();
+    await expect(rcaRow).toBeVisible();
+    await rcaRow.getByTestId('alarm-incident-link').click();
 
     await expect(page).toHaveURL(/\/incidents\/.+/);
     await expect(page.getByRole('heading', { name: /^Incident /i })).toBeVisible();
