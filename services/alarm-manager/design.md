@@ -675,7 +675,8 @@ Decision logic per consumed message:
      emit.
    - If `state = cleared`: if the alarm exists and is not already `cleared`, set
      `lifecycle_state = cleared`, set `cleared_at`, append a `cleared` transition. If the
-     `alarmId` is unknown, record a `clear_for_unknown_alarm` metric and no-op.
+     `alarmId` is unknown, PARK the clear (durable `pending_status`, re-applied on ingest) and
+     record a `clear_parked_for_unknown_alarm` metric — parked for recovery, never dropped.
 2. **AlarmStatusChange message** *(new — STATE channel)*. Deserialize plus validate (codec;
    rejects unknown major `schemaVersion` and any `newStatus` outside the frozen enum). If invalid
    then `alarms.status.changed.dlq` and the store is untouched. Else insert
@@ -687,8 +688,9 @@ Decision logic per consumed message:
    - `reverted-open` to `lifecycle_state = open` with the revert reason; clear a **provisional**
      in-progress role association (`role = none` if not finalised by a `CorrelationResultEvent`).
    - `open` to `lifecycle_state = open`.
-   A status change for an unknown `alarmId` records a `status_for_unknown_alarm` metric and
-   no-ops (never an error, never silently dropped).
+   A status change for an unknown `alarmId` is PARKED (durable `pending_status`, re-applied on
+   ingest — and self-drained if the alarm is persisted during the park window) and records a
+   `status_parked_for_unknown_alarm` metric (never an error, never silently dropped).
 3. **Correlation-result message** *(ROLE channel)*. Deserialize plus validate. If invalid then
    `correlation.results.dlq`. Insert `processed_event(eventId)`; on conflict no-op. Otherwise, for
    `rootCauseAlarmId` set `role = root-cause`, `incident_id`; for each `childAlarmIds` set
@@ -751,7 +753,7 @@ consumed by web-ui.
 | Kafka redelivery of an already-persisted alarm | PK upsert plus `published` guard make persist, transition, and republish exactly-once (acceptance #3). |
 | Kafka redelivery of an already-applied `AlarmStatusChange` | `processed_event(eventId)` unique-insert guard makes the STATE update exactly-once, no duplicate transitions. |
 | Kafka redelivery of an already-applied correlation result | `processed_event(eventId)` unique-insert guard makes the role/incident update exactly-once, no duplicate transitions (acceptance #5). |
-| `AlarmStatusChange` / `cleared` / correlation for an unknown `alarmId` | No-op plus `status_for_unknown_alarm` / `clear_for_unknown_alarm` / `correlation_for_unknown_alarm` metric plus log (the raise may arrive later). Never an error, never silently lost from observability. |
+| `AlarmStatusChange` / `cleared` / correlation for an unknown `alarmId` | STATE (`AlarmStatusChange` / `cleared`) is PARKED durably and re-applied on ingest (self-drained if the alarm is persisted during the park window) — `status_parked_for_unknown_alarm` / `clear_parked_for_unknown_alarm` metric. ROLE (correlation) records the linkage where present and counts absent ones (`correlation_for_unknown_alarm`). Plus log (the raise may arrive later). Never an error, never silently lost from observability. |
 | Out-of-order STATE vs. ROLE arrival for the same alarm | Tolerated: the two channels write disjoint columns and are each idempotent; the record is consistent once both are applied (complementary model). |
 | `reverted-open` for an alarm with a finalised role/incident | STATE returns to `open`; provisional in-progress role is cleared but a finalised `CorrelationResultEvent` role/`incidentId` is preserved (acceptance #17 plus Design alternatives). |
 | Transient DB error during persist/update | Spring Kafka retry (bounded, exponential backoff from config); on exhaustion the message goes to the matching `<topic>.dlq`. Offsets are committed only after successful processing or DLQ routing. |
@@ -831,7 +833,7 @@ harnesses).
 | 5 | Clear path (both channels) | Produce an `AlarmEvent` `state=cleared`, and separately an `AlarmStatusChange(cleared)`, for persisted alarms | Each alarm transitions to `cleared`; `GET /alarms?state=cleared` returns them; `GET /alarms?state=open` no longer returns them |
 | 6 | At-least-once redelivery (partial/duplicate path) | Re-deliver the same `alarms.enriched.live`, `alarms.status.changed`, and `correlation.results` messages | Exactly one alarm row, one republish, one transition per logical change; `processed_event` dedupes the status and correlation events; no duplicates |
 | 7 | Poison message (failure path) | Produce a malformed `AlarmEvent` (missing `alarmId`), an envelope with `schemaVersion=2`, and an `AlarmStatusChange` with an unrecognised `newStatus` | Each lands on the matching `<topic>.dlq` (`alarms.enriched.live.dlq` / `alarms.status.changed.dlq`); no rows persisted/modified; service keeps processing subsequent valid messages |
-| 8 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent`, an `AlarmStatusChange`, and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `status_for_unknown_alarm` / `clear_for_unknown_alarm` metrics increment; a later raise for the same `alarmId` still persists `open` |
+| 8 | Out-of-order arrival (partial path) | Produce a `CorrelationResultEvent`, an `AlarmStatusChange`, and a `cleared` `AlarmEvent` for an `alarmId` not yet persisted | No error, no DLQ; `correlation_for_unknown_alarm` / `status_parked_for_unknown_alarm` / `clear_parked_for_unknown_alarm` metrics increment; the parked STATE change re-applies once the alarm is persisted (never stuck `open`, self-drained if persisted during the park window); a later raise for the same `alarmId` still persists `open` |
 | 10 | Schema bootstrap on a clean DB (DB readiness) | Start the service against a clean PostgreSQL (Testcontainers) and let Flyway run | The `live_alarm` schema and its `alarm` / `state_transition` / `processed_event` tables are created in `live_alarm` (none in `public`); V1→V2→V3 all record `success` in `live_alarm.flyway_schema_history`; the service then ingests an `AlarmEvent` and the row lands in `live_alarm.alarm` |
 | 9 | web-ui contract (uniform pagination envelope, P3-G3) | web-ui builds its client from `services/alarm-manager/openapi.json` and calls `GET /alarms?limit&offset` (incl. `state=in-progress`) plus `GET /alarms/{alarmId}` against the real service, alongside its `GET /incidents` poll | `GET /alarms` returns the **same** `{ items, total, limit, offset }` envelope as Correlation Engine `GET /incidents`, so the streaming view reads `.items`/`.total`/`.limit`/`.offset` uniformly across both polled endpoints; `AlarmSummary` and `AlarmDetail` both carry the canonical `alarmType` join token (distinct from `eventType`/`probableCause`) for the live/incident views and the alarm-to-incident join; detail with transitions incl. `source`/`changedAt`; no drift between running surface and checked-in `openapi.json` |
 
@@ -850,7 +852,7 @@ harnesses).
 - **`/metrics`** — Prometheus (Micrometer): `alarms_persisted_total`,
   `alarms_republished_total`, `status_changes_applied_total{newStatus}`,
   `correlation_results_applied_total`, `alarms_cleared_total`, `dlq_routed_total{topic}`,
-  `status_for_unknown_alarm_total`, `clear_for_unknown_alarm_total`,
+  `status_parked_for_unknown_alarm_total`, `clear_parked_for_unknown_alarm_total`,
   `correlation_for_unknown_alarm_total`, consumer lag, query latency.
 - **Logging** — structured JSON; the envelope `traceId` is extracted and propagated into every
   log line (MDC) for cross-service tracing.

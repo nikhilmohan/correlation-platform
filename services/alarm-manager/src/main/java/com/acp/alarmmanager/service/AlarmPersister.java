@@ -51,6 +51,10 @@ public class AlarmPersister {
             metrics.persisted();
             log.info("persisted alarmId={} lifecycle=open alarmType={}", record.alarmId(),
                     record.alarmType());
+            // Ordering-race fix: a status change (e.g. correlated) may have arrived BEFORE this
+            // alarm was persisted and been parked. Re-apply it now, in this same transaction, so
+            // the alarm never lingers 'open' when a correlated status already raced ahead of it.
+            lifecycle.reapplyPending(record.alarmId(), now);
         } else {
             log.debug("alarmId={} already persisted — skip persist (redelivery)", record.alarmId());
         }

@@ -64,6 +64,9 @@ class AlarmPersisterTest {
 
         // Exactly one ingest open audit entry (committed atomically with the insert).
         verify(lifecycle, times(1)).recordIngestOpen(eq("ALM-0001"), anyString(), any());
+        // Ordering-race fix: after persisting, re-apply any parked status (e.g. a correlated that
+        // raced ahead of this alarm) in the same transaction.
+        verify(lifecycle, times(1)).reapplyPending(eq("ALM-0001"), any());
     }
 
     @Test
@@ -75,8 +78,10 @@ class AlarmPersisterTest {
         persister.persistOpen(env);
         persister.persistOpen(env);
 
-        // Two insert attempts (both idempotent), but only ONE open audit entry.
+        // Two insert attempts (both idempotent), but only ONE open audit entry and ONE re-apply
+        // (only the first delivery actually inserts, so the parked-status re-apply runs once).
         verify(alarms, times(2)).insertIfAbsent(any());
         verify(lifecycle, times(1)).recordIngestOpen(eq("ALM-0001"), anyString(), any());
+        verify(lifecycle, times(1)).reapplyPending(eq("ALM-0001"), any());
     }
 }
