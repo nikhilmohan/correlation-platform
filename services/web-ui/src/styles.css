@@ -2,14 +2,21 @@
 
 :root {
   /* DARK (default) — WCAG AA contrast-checked palette (all text >= 4.5:1 on its background). */
-  --bg: #0f172a;
-  --surface: #1e293b;
-  --surface-2: #334155;
-  --border: #475569;
+  --bg: #0b1120;
+  --surface: #172033;
+  --surface-2: #263143;
+  --border: #33415580;
+  --border-strong: #475569;
   --text: #f1f5f9;
-  --text-muted: #cbd5e1;
+  --text-muted: #a9b6c9;
   --accent: #60a5fa;
   --accent-strong: #2563eb;
+
+  /* Elevation / shape tokens — consistent radius + shadow across cards, controls and the map. */
+  --radius: 10px;
+  --radius-sm: 6px;
+  --shadow-sm: 0 1px 2px rgba(2, 6, 23, 0.4);
+  --shadow-md: 0 6px 20px rgba(2, 6, 23, 0.45);
 
   /* Semantic status + logical-layer accents — IDENTICAL in both themes (per product decision). */
   --ok: #4ade80;
@@ -49,14 +56,18 @@
 
 /* LIGHT — WCAG AA contrast-checked light palette. Status + layer accents stay identical. */
 [data-theme='light'] {
-  --bg: #f8fafc;
+  --bg: #eef2f7;
   --surface: #ffffff;
   --surface-2: #f1f5f9;
-  --border: #cbd5e1;
+  --border: #d3dbe5;
+  --border-strong: #cbd5e1;
   --text: #0f172a;
-  --text-muted: #475569;
+  --text-muted: #4a5a70;
   --accent: #2563eb;
   --accent-strong: #2563eb;
+
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 6px 20px rgba(15, 23, 42, 0.12);
 
   --on-accent: #fff;
   --canvas-bg: #e2e8f0;
@@ -126,8 +137,17 @@ th {
   background: var(--accent-strong);
   color: var(--on-accent);
   border: 1px solid var(--accent-strong);
-  border-radius: 6px;
-  padding: 0.4rem 0.85rem;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.9rem;
+  font-weight: 600;
+  transition:
+    filter 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.btn:hover {
+  filter: brightness(1.06);
+  box-shadow: var(--shadow-sm);
 }
 
 .btn:disabled {
@@ -144,8 +164,9 @@ th {
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius);
   padding: 1rem;
+  box-shadow: var(--shadow-sm);
 }
 
 .error-banner {
@@ -266,4 +287,24 @@ th {
 .maplibre-site-marker:focus-visible {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* City-name labels on the geo basemap. These spans are created IMPERATIVELY by the geo-site map
+   (offline-safe DOM overlay — no glyph stack shipped), so they carry no Angular style-encapsulation
+   attribute; their appearance MUST live in this GLOBAL stylesheet (a component-scoped rule would not
+   match them). Positioning (left/top/position) is set inline on each span at project() time. */
+.geo-map-city-labels .city-label,
+.city-labels .city-label {
+  transform: translate(6px, -50%);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  text-shadow:
+    0 0 2px var(--canvas-bg),
+    0 0 2px var(--canvas-bg),
+    0 0 4px var(--canvas-bg);
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 0.92;
 }

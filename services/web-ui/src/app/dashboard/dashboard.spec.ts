@@ -56,6 +56,25 @@ describe('Landing dashboard', () => {
     expect(spy).toHaveBeenCalledWith(['/stats']);
   });
 
+  it('embeds the full topology & trails map below the KPIs (no recent-incidents / quick-links)', async () => {
+    configure();
+    const fixture = TestBed.createComponent(DashboardComponent);
+    fixture.detectChanges();
+    await flush();
+    fixture.detectChanges();
+    const el = fixture.nativeElement as HTMLElement;
+    // The embedded topology view is the GeoSiteMapComponent, wrapped in the dashboard section.
+    expect(el.querySelector('[data-testid="dashboard-topology"]')).toBeTruthy();
+    expect(el.querySelector('app-geo-site-map')).toBeTruthy();
+    // The removed sections must be gone.
+    expect(el.querySelector('[data-testid="recent-incident"]')).toBeNull();
+    expect(el.textContent).not.toMatch(/Quick links/i);
+    // KPI testids are preserved.
+    for (const id of ['kpi-incidents', 'kpi-patterns', 'kpi-reduction', 'kpi-processed', 'kpi-rca', 'kpi-autocorr']) {
+      expect(el.querySelector(`[data-testid="${id}"]`)).toBeTruthy();
+    }
+  });
+
   it('AC 57 — RCA accuracy: eval-mode value, else client-side join, else N/A', () => {
     const svc = new RcaAccuracyService();
     const incidents: IncidentVM[] = [
