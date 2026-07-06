@@ -2530,3 +2530,465 @@ validation fail-fast for each new knob, v1→v2 config-snapshot load compatibili
 ## UI wireframes
 
 N/A — backend/CLI service (no web-ui surface).
+
+---
+
+## HTTP Trigger for On-Demand P3 Synth Ingestion (additive capability — Tasks 25-30, AC 66-77)
+
+This section is **purely additive** to the existing design above. It adds two HTTP endpoints
+(`POST /synth/run`, `GET /synth/status`) and a **persistent service mode** so the FastAPI process
+stays up and a P3 network-wide synth run can be triggered on demand (and polled) from the web-ui.
+It **reuses** the existing `p3_run.run_synth` pipeline unchanged (emits the frozen `AlarmEvent`
+on the existing `alarms.live` topic). **No new topic, payload, event-model field, or DB.** All
+resolved decisions from the spec's OQ-TRIGGER-1..6 are baked in below.
+
+> **Contract status:** NO event-model / Kafka contract change. The two endpoints are on the
+> Simulator's **own** OpenAPI surface (self-owned, per the per-service contract-change procedure).
+> Two **ops** changes are flagged (not contract changes): (a) the compose lifecycle shifts from
+> one-shot to a persistent service; (b) an `/api/simulator` nginx proxy entry is added for the
+> web-ui. Both are called out in "Config & observability (trigger additions)" and the PR body.
+
+### Task breakdown (trigger — from the spec)
+
+| Spec task | Realized by (modules / flow) |
+|---|---|
+| 25. Persistent service mode | New `serve` entrypoint (`simulator.serve` / `python -m simulator serve`) runs uvicorn against `create_app(state)` and **stays up**; the run executes in a background worker thread so `/health`+`/metrics` stay responsive (AC 76). CLI one-shot (`--phase …`) unchanged (AC 77). |
+| 26. `POST /synth/run` (async trigger) | New router in `api/synth_routes.py`: validate body (422) → `RunManager.start()` (409 if running) → submit `run_synth` to a background worker → return 202 `{runId,status:"running"}` (AC 66/67/68). |
+| 27. `GET /synth/status` | Same router: `RunManager.status()` → the frozen status shape (AC 69/70/71). |
+| 28. Error propagation to status | `RunManager` background wrapper catches any exception from `run_synth`, records `summary.status="failed"` + `failureReason`, releases the guard (AC 72). |
+| 29. Params from config/env + POST overrides | `SynthRunRequest` pydantic model (`target`/`totalAlarms`/`seed` optional); `RunManager` maps present fields onto a **derived `Settings`** (env defaults for absent), all other P3 knobs env-only (AC 73/74). |
+| 30. OpenAPI + drift guard | Both endpoints added to checked-in `services/simulator/openapi.json`; existing drift-guard test extended to assert their presence + status codes (AC 75). |
+
+Every trigger task is traceable above; nothing dropped or re-scoped.
+
+### Phase applicability (trigger, design view)
+
+The trigger capability is a **P3** operator convenience. The persistent server itself runs in all
+phases (it serves the existing read endpoints continuously), but the `/synth` endpoints only start
+a P3 synth run.
+
+| Phase | Active/Passive/Idle | Modules/handlers exercised | Inputs/Outputs |
+|---|---|---|---|
+| P1 — Topology onboarding | Passive (server up, read endpoints only) | `create_app` read routes, `/synth/status` returns `idle` | in: HTTP GET; out: — (POST /synth/run allowed but a run emits on alarms.live which is a P3 activity; operators trigger in P3) |
+| P2 — Pattern learning | Passive (server up, read endpoints only) | same as P1 | in: HTTP GET; out: — |
+| P3 — Real-time correlation | **Active** | `POST /synth/run` → `RunManager` → background `run_synth` → `alarms.live`; `GET /synth/status` polled by web-ui | in: HTTP POST/GET, PM/TB/Topology read APIs (or persisted snapshot); out: `alarms.live` (frozen AlarmEvent), status JSON |
+
+### Module breakdown (trigger additions)
+
+```mermaid
+flowchart TB
+  subgraph http["FastAPI app (create_app, stays up)"]
+    read["existing read routes<br/>/health /metrics /labels /scenarios"]
+    post["POST /synth/run<br/>(synth_routes)"]
+    get["GET /synth/status<br/>(synth_routes)"]
+  end
+  rm["RunManager<br/>(thread-safe single-run state)"]
+  worker["background worker thread<br/>(run_synth wrapper)"]
+  progress["ProgressSink<br/>(emitted / aligned / nonAligned counters)"]
+  p3["p3_run.run_synth<br/>(existing pipeline, unchanged core)"]
+  live[("alarms.live<br/>frozen AlarmEvent")]
+
+  post -->|validate 422, guard 409| rm
+  get --> rm
+  rm -->|start| worker
+  worker --> p3
+  p3 -->|per-emit increment| progress
+  progress --> rm
+  p3 -->|produce| live
+  worker -->|on complete/exception| rm
+```
+
+- **`api/synth_routes.py`** — the `POST /synth/run` and `GET /synth/status` handlers + the
+  `SynthRunRequest` / `SynthRunResponse` / `SynthStatusResponse` / `SynthConflictResponse`
+  pydantic models. Bound to the shared `RunManager` (mounted on the app in `create_app`).
+- **`synth/run_manager.py`** — `RunManager`: thread-safe single-run state machine
+  (idle↔running), the 409 guard, background submission, progress + summary bookkeeping.
+- **`synth/progress.py`** — `ProgressSink`: three atomic counters (`alarmsEmitted`,
+  `alignedEmitted`, `nonAlignedEmitted`) updated by the emit loop and read (lock-free) by
+  `GET /synth/status`. Plus `alarmsTotal` (planned, set once the plan is built).
+- **`serve.py`** — the persistent-service entrypoint: builds `RunState` + `RunManager`, mounts
+  the synth router, runs uvicorn. Invoked by `python -m simulator serve` (compose command).
+- **`api/app.py`** — extended (additively) so `create_app(state, run_manager=None)` mounts the
+  synth router when a `RunManager` is provided; existing routes untouched (AC 77).
+
+Only `synth_routes.py`, `run_manager.py`, `progress.py`, `serve.py` are new. `p3_run.run_synth`
+gains **one optional keyword arg** (`progress: ProgressSink | None = None`) that the emit loop
+increments — a backward-compatible, additive change (CLI path passes `None`, behaviour identical).
+
+### RunManager — state machine & concurrency
+
+```mermaid
+stateDiagram-v2
+    [*] --> idle_never: process start
+    idle_never --> running: POST /synth/run accepted (202)
+    running --> idle_completed: run_synth returns (summary.status completed)
+    running --> idle_failed: run_synth raises (summary.status failed, failureReason set)
+    idle_completed --> running: new POST accepted (202)
+    idle_failed --> running: new POST accepted (202, guard released)
+    running --> running: second POST rejected (409), state unchanged
+```
+
+`RunManager` holds, under a single `threading.Lock`:
+
+- `_active: bool` — the concurrency guard (True only while a run is in flight).
+- `_run_id: str | None` — active run's UUID while running; the **last** run's UUID while idle.
+- `_progress: ProgressSink` — live counters (zeroed on each new run).
+- `_summary: SynthStatusSummary | None` — `None` until the first run finishes; then the last
+  completed/failed run's summary.
+
+**`start(request) -> (202 body) | raises Conflict`** (called inside the POST handler, body already
+validated):
+1. Acquire lock. If `_active` → raise `RunConflict(active_run_id=_run_id)` (handler → 409). No run
+   started, in-flight run untouched (AC 68).
+2. Else: mint `run_id = uuid4()`, set `_active=True`, `_run_id=run_id`, reset `_progress` (zeros),
+   clear the *live* view of `_summary` for this run (the previous summary is retained until this
+   run finishes so status is never blank mid-transition — but top-level `runId` now points at the
+   new run). Set `alarmsTotal` unknown (0) until the plan is built.
+3. Release lock. **Submit** the background worker (a `threading.Thread`, daemon, or a shared
+   single-worker `ThreadPoolExecutor(max_workers=1)`) running `_run_wrapper(run_id, request)`.
+4. Return `{runId, status:"running"}` (handler → **202**), BEFORE emission (AC 66).
+
+**`_run_wrapper(run_id, request)`** (background thread):
+1. Build a **derived `Settings`** = env/config settings with the request overrides applied
+   (`target→P3_AUTO_CORRELATION_TARGET`, `totalAlarms→P3_TOTAL_ALARMS`, `seed→P3_RNG_SEED`);
+   absent fields keep env defaults (AC 73). All other P3 knobs env-only (OQ-TRIGGER-5).
+2. Build the producer (`KafkaProducer(bootstrap)`), the PM/TB/Topology clients (mock/real per
+   env), a fresh `ProgressSink` shared with `RunManager`.
+3. Call `p3_run.run_synth(settings, producer, run_id=run_id, progress=sink, …)`.
+4. On success: build `SynthStatusSummary(status="completed", …)` from the `SynthOutcome.summary`
+   (reuse the existing `P3RunSummary` fields). Record `startedAt`/`completedAt`.
+5. On **any** exception: build `SynthStatusSummary(status="failed", failureReason=str(exc), …)`
+   with whatever counts were reached; log `synth.run_failed`.
+6. **`finally`**: acquire lock, set `_active=False`, `_summary=<the summary just built>`, keep
+   `_run_id` = this run's id. This releases the 409 guard on **both** completion and failure
+   (AC 72). Also push `state.p3_labels` = the run's label store so `/labels` reflects the latest
+   run (mirrors the CLI path's `run_synth_phase` behaviour).
+
+**`status() -> SynthStatusResponse`** (called by the GET handler; takes the lock briefly to read a
+consistent snapshot, but the progress counters are read lock-free from atomics for the sub-2s
+guarantee):
+- `status` = `"running"` if `_active` else `"idle"` (top-level is **only** idle/running per the
+  resolved decision; a failed run is top-level `idle` with `summary.status="failed"`).
+- `runId` = `_run_id` (active run while running; last run while idle; `null` if no run ever).
+- `progress` = the four counters (`alarmsEmitted`, `alarmsTotal`, `alignedEmitted`,
+  `nonAlignedEmitted`) — always present, zero-filled when idle-never (resolved decision).
+- `summary` = `_summary` (the last completed/failed run's summary) or `null` if no run ever.
+
+### ProgressSink & wiring progress into the emit loop
+
+`GET /synth/status` must report `alarmsEmitted` while a run is active (AC 69). The existing emit
+loop is `replay.LiveReplay.replay_synth` (increments a local `n` per produce). We surface that:
+
+- `ProgressSink` exposes `inc_emitted(aligned: bool)` and `set_total(n)`; counters are plain
+  `int`s guarded by the sink's own tiny lock (writes are cheap and reads by the status handler
+  copy three ints — no contention with the ~ms-paced emit loop).
+- `p3_run.run_synth` gains `progress: ProgressSink | None`. After building the plan it calls
+  `progress.set_total(settings.p3_total_alarms)` so `alarmsTotal` reflects the **effective** total
+  (post-override, AC 73's `alarmsTotal=200`). It passes the sink into the replay strategy.
+- `LiveReplay.replay_synth` (and the `p3_schedule` emission stream it consumes) already knows, per
+  alarm, whether it is an aligned-cascade member or non-aligned/noise (via `scenario_id` /
+  `is_noise` on `SynthAlarm`). On each successful `producer.produce`, it calls
+  `progress.inc_emitted(aligned=<is a pattern-aligned cascade member>)`. This increments
+  `alarmsEmitted` always, and `alignedEmitted` / `nonAlignedEmitted` accordingly.
+- When `progress is None` (CLI one-shot path) the calls are no-ops — CLI behaviour byte-for-byte
+  unchanged.
+
+Because the run executes on a **worker thread** and the sink is updated as alarms are produced,
+the status handler (on the uvicorn event loop / threadpool) reads fresh counters without blocking
+the run, and the run never blocks the HTTP server (AC 76).
+
+### Persistent service mode — entrypoint, Dockerfile, compose
+
+**Entrypoint.** Add `serve.py` and a `serve` subcommand so both launch modes coexist:
+
+- One-shot (unchanged): `python -m simulator.main --phase {p1,p2,p3}` (exits after the run).
+- **Service (new):** `python -m simulator serve` → `serve.main()`:
+  1. `configure_logging(settings.log_level)`; load `Settings` (fail-fast on bad config, exit 3).
+  2. Build `RunState(started=True)`, `RunManager(settings_provider, producer_factory)`.
+  3. `app = create_app(state, run_manager=rm)` (mounts the synth router).
+  4. `uvicorn.run(app, host="0.0.0.0", port=settings.http_port, log_config=None)` — **blocks**,
+     the process stays up. `/health` returns 200 while idle (server up); it does **not** depend on
+     an active run (AC 71/76/77).
+
+`simulator/__main__.py` (or `main.py`'s arg dispatch) routes `argv[0] == "serve"` to `serve.main()`
+and everything else to the existing `main()`; `--help`/`-h` list both modes.
+
+**Dockerfile.** The `ENTRYPOINT ["python", "-m", "simulator.main"]` stays (one-shot default is
+preserved). Compose **overrides `command`** to select service mode — no image change required.
+(If preferred, `CMD ["serve"]` may be added so the default image run is the service; the compose
+command below is explicit either way.)
+
+**Compose** (`docker-compose.yml`, `simulator:` service):
+
+```yaml
+  simulator:
+    # ... build/image unchanged ...
+    environment:
+      PHASE: p3
+      SIM_MODE: synth
+      P3_NETWORK_WIDE: "true"
+      P3_AUTO_CORRELATION_TARGET: "0.6"
+      P3_TOTAL_ALARMS: "500"
+      PATTERN_MANAGER_API_MODE: real
+      PATTERN_MANAGER_API_BASE_URL: http://pattern-manager:8080
+      TRAIL_BUILDER_API_MODE: real
+      TRAIL_BUILDER_API_BASE_URL: http://trail-builder:8080
+      TOPOLOGY_API_MODE: real
+      TOPOLOGY_API_BASE_URL: http://topology:8080
+      HTTP_PORT: "8080"
+    command: ["serve"]              # <-- persistent service mode (was ["--phase","p2"])
+    restart: unless-stopped         # <-- was one-shot; OQ-TRIGGER-3
+    healthcheck:                    # stays green while idle between runs (AC 76)
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    ports:
+      - "8085:8080"
+```
+
+**nginx proxy (web-ui, OQ-TRIGGER-6).** Add an `/api/simulator/` location mirroring the other
+`/api/<svc>/` entries so the web-ui reaches the trigger/status endpoints without CORS:
+
+```nginx
+location /api/simulator/ {
+    proxy_pass http://simulator:8080/;   # strips /api/simulator/ prefix; POST /synth/run + GET /synth/status forwarded
+}
+```
+
+Both the compose lifecycle shift and the nginx entry are **ops** changes (flagged in the PR body),
+not Kafka/event-model contract changes.
+
+### API contracts / API schema (trigger additions)
+
+**`POST /synth/run`**
+
+Request body (all fields optional; `application/json`; empty body `{}` allowed):
+
+| Field | Type | Constraint | Maps to |
+|---|---|---|---|
+| `target` | float | `0.0 <= target <= 1.0` | `P3_AUTO_CORRELATION_TARGET` |
+| `totalAlarms` | int | `totalAlarms >= 1` | `P3_TOTAL_ALARMS` |
+| `seed` | int | `seed >= 0` | `P3_RNG_SEED` |
+
+Responses:
+
+- **202 Accepted** — `{ "runId": "<uuid>", "status": "running" }` (AC 66).
+- **409 Conflict** — `{ "detail": "a synth run is already in progress", "runId": "<active uuid>" }`
+  (AC 68). No run started.
+- **422 Unprocessable Entity** — pydantic validation error identifying the bad field
+  (`target` out of range, `totalAlarms <= 0`, wrong type). No run started (AC 67).
+
+Validation is **synchronous** on the request body only (OQ-TRIGGER-4). Runtime failures (no
+approved patterns, PM/TB/Topology unreachable, all patterns excluded, `P3_NETWORK_WIDE=false`
+producing an empty plan) surface via `GET /synth/status` as `summary.status="failed"` — the POST
+still returns 202 (AC 72).
+
+**`GET /synth/status`** — **200 OK**, frozen shape (resolved decision):
+
+```json
+{
+  "status": "idle | running",
+  "runId": "<uuid or null>",
+  "progress": {
+    "alarmsEmitted": 0,
+    "alarmsTotal": 0,
+    "alignedEmitted": 0,
+    "nonAlignedEmitted": 0
+  },
+  "summary": {
+    "runId": "<uuid>",
+    "status": "completed | failed",
+    "alarmsEmitted": 0,
+    "alignedFraction": 0.0,
+    "enrichmentSafeCount": 0,
+    "shortfallCascades": 0,
+    "enrichmentConflictPatterns": [],
+    "failureReason": null,
+    "startedAt": "<iso8601>",
+    "completedAt": "<iso8601>"
+  }
+}
+```
+
+- `status` is **only** `idle` or `running`. A FAILED run is top-level `idle` with
+  `summary.status="failed"` + non-empty `summary.failureReason`.
+- `progress` is **always present** (zeros when idle-never).
+- `summary` is `null` until the first run completes/fails; then it is the **last** run's summary.
+- `summary.enrichmentConflictPatterns` reuses the existing `P3RunSummary` field; `alignedFraction`
+  is `alignedAlarms/totalAlarms` in `[0.0,1.0]`; `startedAt`/`completedAt` are ISO-8601 UTC.
+
+**OpenAPI (Task 30 / AC 75).** FastAPI auto-generates `/openapi.json` from the pydantic models;
+the checked-in `services/simulator/openapi.json` is regenerated to include the two paths (POST
+`/synth/run` with 202/409/422 responses; GET `/synth/status` with 200). The existing drift-guard
+test (compares checked-in `openapi.json` vs the app's live `/openapi.json`) is extended to assert
+both paths + their status codes are present; deleting `/synth/status` from the checked-in file
+makes it exit non-zero (AC 75).
+
+### Integration points (trigger — mock vs. real)
+
+Unchanged resolution model — the trigger reuses the existing P3 collaborators. Each has a
+`*_API_MODE` (mock/real) + `*_API_BASE_URL` env key; no hard-coded URLs.
+
+| Collaborator | Operation | Config keys | mock (unit) / real (integration) |
+|---|---|---|---|
+| Pattern Manager | approved patterns fetch | `PATTERN_MANAGER_API_MODE`, `PATTERN_MANAGER_API_BASE_URL` | mock stub from PM OpenAPI in unit tests; real in integration |
+| Trail Builder | compatible-trail enumeration | `TRAIL_BUILDER_API_MODE`, `TRAIL_BUILDER_API_BASE_URL` | mock / real |
+| Topology | snapshot read | `TOPOLOGY_API_MODE`, `TOPOLOGY_API_BASE_URL` | mock / real |
+| Kafka | produce `alarms.live` | `KAFKA_BOOTSTRAP_SERVERS` | fake producer (test double) / real broker |
+
+In unit tests the `RunManager` is constructed with an **injected producer factory + client
+factory** so the background run uses a fake producer + stub clients (fast, deterministic, no
+broker). A "failing" PM stub (returns empty approved-pattern list) drives the AC 72 failure path.
+
+### Key flows (trigger — sequence diagrams)
+
+**Trigger → run → poll → complete (success path):**
+
+```mermaid
+sequenceDiagram
+    participant UI as web-ui
+    participant NX as nginx /api/simulator
+    participant API as FastAPI (uvicorn)
+    participant RM as RunManager
+    participant W as worker thread
+    participant P3 as run_synth
+    participant K as alarms.live
+
+    UI->>NX: POST /synth/run {target,totalAlarms}
+    NX->>API: POST /synth/run
+    API->>API: validate body (422 on bad param)
+    API->>RM: start(request)
+    RM->>RM: guard idle, mint runId, active=true
+    RM-->>W: submit _run_wrapper(runId)
+    API-->>UI: 202 {runId, status running}
+    W->>P3: run_synth(settings, producer, progress)
+    loop per alarm
+        P3->>K: produce AlarmEvent
+        P3->>RM: progress.inc_emitted(aligned)
+    end
+    UI->>NX: GET /synth/status (poll)
+    NX->>API: GET /synth/status
+    API->>RM: status()
+    RM-->>UI: 200 running, progress{alarmsEmitted..}
+    P3-->>W: SynthOutcome(summary)
+    W->>RM: summary completed, active=false
+    UI->>NX: GET /synth/status (poll)
+    API->>RM: status()
+    RM-->>UI: 200 idle, summary completed
+```
+
+**Failure path (runtime failure surfaces in status, guard released):**
+
+```mermaid
+sequenceDiagram
+    participant UI as web-ui
+    participant API as FastAPI
+    participant RM as RunManager
+    participant W as worker thread
+    participant P3 as run_synth
+
+    UI->>API: POST /synth/run
+    API->>RM: start()
+    RM-->>W: submit _run_wrapper(runId)
+    API-->>UI: 202 {runId, running}
+    W->>P3: run_synth(...)
+    P3-->>W: raises (no approved patterns)
+    W->>RM: summary failed, failureReason set, active=false
+    UI->>API: GET /synth/status
+    RM-->>UI: 200 idle, summary.status failed, failureReason
+    UI->>API: POST /synth/run (new run)
+    API->>RM: start()
+    RM-->>UI: 202 (guard released)
+```
+
+### Algorithm logical flow (trigger)
+
+N/A — the trigger adds no new synthesis algorithm. The P3 synthesis algorithm (compatible-trail
+discovery, target→cascade-count, enrichment-safe cascades) is unchanged and documented in the
+network-wide section above. The only new logic is the `RunManager` state machine (above) and the
+progress counters, both fully specified.
+
+### Error handling (trigger additions)
+
+| Failure mode | Handling | Surfaced as |
+|---|---|---|
+| Invalid POST body param (`target` out of range, `totalAlarms<=0`, wrong type) | pydantic validation before any run | **422**, field+reason; no run started (AC 67) |
+| Second POST while running | 409 guard in `RunManager.start` | **409** + active `runId`; in-flight run untouched (AC 68) |
+| No approved patterns / PM unreachable / TB or Topology unreachable / all patterns excluded / empty plan | background `_run_wrapper` catches exception | 202 already returned; `GET /synth/status` → `summary.status="failed"` + non-empty `failureReason`; **guard released** (AC 72) |
+| Kafka produce failure mid-run | exception propagates out of `run_synth` → same failed-summary path | `summary.status="failed"`, guard released; alarms already produced are on the topic (at-least-once, idempotent by `eventId`) |
+| Bad service config at startup (e.g. missing `KAFKA_BOOTSTRAP_SERVERS`) | `serve.main` fail-fast on `load_settings` | process exits 3 before serving (server never comes up unhealthy) |
+| `/health`/`/metrics` during a run | served on the event loop while the run is on a worker thread | 200 within 2s (AC 76) |
+
+Nothing is silently dropped: a runtime failure always lands in `summary.failureReason` and is
+logged (`synth.run_failed`); the guard is always released in a `finally`.
+
+### Design alternatives (trigger)
+
+| Consideration | Alternatives considered | Chosen + rationale |
+|---|---|---|
+| Background execution model | (a) `threading.Thread` / single-worker `ThreadPoolExecutor`; (b) `asyncio.create_task` on the uvicorn loop; (c) external task queue (Celery/RQ) | **(a) worker thread.** `run_synth` is **synchronous, blocking, CPU+IO** (paced `time.sleep`, blocking Kafka produce). Running it as an asyncio task would block the event loop and break AC 76 (health <2s). A worker thread keeps the loop free with zero new infra. Celery is over-engineered for a single-run MVP. |
+| Concurrency policy | 409-reject vs. queue vs. cancel-and-replace | **409-reject** (OQ-TRIGGER-1, resolved). One run at a time, no queue; the web-ui disables its button while running. Simplest, matches the single-run status shape. |
+| `failed` as a top-level status | distinct top-level `"failed"` vs. `idle` + `summary.status="failed"` | **`idle` + `summary.status="failed"`** (resolved decision). Top-level `status` stays a clean `idle/running` for the UI spinner; failure detail lives in the summary. |
+| Progress surfacing | (a) counters incremented by the emit loop via a shared sink; (b) parse metrics; (c) estimate from wall-clock | **(a) shared `ProgressSink`.** Exact, cheap, decoupled; no metric scraping or estimation. The emit loop already counts per-produce. |
+| Launch-mode selection | new `serve` subcommand vs. an env flag (`RUN_MODE=serve`) vs. separate image | **`serve` subcommand** (compose `command: ["serve"]`). Keeps one image + one entrypoint, CLI one-shot untouched, explicit in compose. |
+| Overridable knobs | env-only vs. `target/totalAlarms/seed` vs. all P3 knobs | **`target/totalAlarms/seed` only** (OQ-TRIGGER-5, resolved). Smallest useful override surface; smallest openapi/validation surface. |
+| Settings override mechanism | mutate global env in the worker vs. build a derived `Settings` per run | **derived `Settings` per run** — thread-safe, no global mutation, no cross-run leakage of overrides. |
+
+### Config & observability (trigger additions)
+
+- **New env (all with defaults; no new required key):** none beyond existing P3 knobs. Service
+  mode reuses `HTTP_PORT`, `P3_*`, `*_API_MODE`/`*_API_BASE_URL`, `KAFKA_BOOTSTRAP_SERVERS`.
+- **Launch:** `python -m simulator serve` (compose `command: ["serve"]`).
+- **/health:** 200 while the server is up (idle or running) — reflects the **server**, not a run
+  (AC 71/76). **/metrics:** unchanged Prometheus surface; new gauges
+  `sim_synth_run_active` (0/1), `sim_synth_run_alarms_emitted`, plus reuse of existing P3 gauges.
+- **Logging:** structured JSON — `synth.run_accepted` (runId, overrides), `synth.run_complete`
+  (existing), `synth.run_failed` (runId, failureReason), `synth.run_rejected_conflict` (activeRunId).
+- **Ops changes flagged (not contract changes):** compose lifecycle → `restart: unless-stopped`
+  + healthcheck + `command: ["serve"]`; nginx `/api/simulator/` proxy entry.
+
+### Build & run (trigger)
+
+- Build/lint/test: unchanged — `ruff` + `black` + `pytest --cov` (Python cohort gate).
+- Local one-shot (unchanged): `python -m simulator.main --phase p3 --synth`.
+- Local service: `HTTP_PORT=8080 KAFKA_BOOTSTRAP_SERVERS=… python -m simulator serve`, then
+  `curl -XPOST localhost:8080/synth/run -d '{}'` and `curl localhost:8080/synth/status`.
+- Container: `docker compose up -d --build simulator` (now persistent); healthcheck goes green
+  while idle.
+
+### Test plan — trigger (AC 66-77 → pytest test)
+
+All tests use **pytest + FastAPI `TestClient`** against `create_app(state, run_manager=rm)` with an
+**injected fake producer + stub PM/TB/Topology clients** (no broker, no live services). For
+running-state tests, the background run is made deterministic by injecting a producer/pacing that
+either blocks on a controllable gate or completes quickly, so the test can observe `running` then
+`idle` transitions. File: `tests/test_synth_trigger.py` (+ `tests/test_openapi_drift.py` extension).
+
+| # | Acceptance criterion | Test | Asserts |
+|---|---|---|---|
+| 66 | POST returns 202 + UUID runId + running | `test_post_run_returns_202_running` | status 202; body `runId` is a valid non-empty UUID; `status=="running"`; response returned before emission completes (run gated open). |
+| 67 | POST invalid param → 422, no run | `test_post_invalid_target_422`, `test_post_totalalarms_zero_422`, `test_post_totalalarms_negative_422` | each returns 422; body identifies bad field; `RunManager` still idle (no background run started). |
+| 68 | POST while running → 409 + active runId | `test_post_while_running_returns_409` | first POST 202 (run gated open); second POST 409; body `runId` == first runId; only one run active. |
+| 69 | GET status running + progress counters | `test_status_running_progress` | while a gated run is active: 200, `status=="running"`, `runId` matches POST, `progress.alarmsEmitted` int `>=0` and `<= alarmsTotal`, `alignedEmitted`/`nonAlignedEmitted` present ints; `summary` null. |
+| 70 | GET status idle + completed summary | `test_status_idle_completed_summary` | after a run completes: 200, `status=="idle"`, `runId` == completed run, `summary.status=="completed"`, `alarmsEmitted>0`, `alignedFraction` in [0,1], `completedAt > startedAt` (ISO-8601), required fields present. |
+| 71 | GET status idle, no runId/summary, fresh | `test_status_idle_never_run` | on a fresh `RunManager`: 200, `status=="idle"`, `runId` null, `summary` null, `progress` all zero; no error. |
+| 72 | Failed run → summary.failureReason + guard released | `test_failed_run_surfaces_failure_and_releases_guard` | with a PM stub returning empty approved patterns: POST 202; poll → `status=="idle"`, `summary.status=="failed"`, non-empty `failureReason`; a subsequent POST returns 202 (guard released). |
+| 73 | Body overrides + env defaults | `test_body_overrides_and_env_defaults` | env `target=0.6,total=500`; POST `{target:0.75,totalAlarms:200}` → run uses 0.75/200, status `alarmsTotal==200`; empty-body run → uses 0.6/500 (assert derived Settings / alarmsTotal==500). |
+| 74 | Seed override reproducible | `test_seed_override_reproducible` | two runs with `{seed:42}` + same persisted config snapshot → label store cascade records identical in `alarmType`/`managedObjectId`/ordering; the two `runId`s differ. |
+| 75 | openapi.json declares both + drift guard catches missing | `test_openapi_declares_synth_endpoints`, `test_drift_guard_fails_on_missing_status` | checked-in `openapi.json` has `/synth/run` (POST 202/409/422) + `/synth/status` (GET 200 with status/runId/summary); drift guard against an openapi.json missing `/synth/status` exits non-zero. |
+| 76 | FastAPI responsive during a run | `test_health_metrics_responsive_during_run` | with a gated long-running background run active: `GET /health`→200 and `GET /metrics`→200, each within 2s (measured); the run thread does not block the server. |
+| 77 | Existing read endpoints unaffected | `test_read_endpoints_unaffected` | with service up + no run: `GET /labels`, `/scenarios`, `/health`, `/metrics` each 200 with the existing shapes; mounting the synth router changes none of them. |
+
+### E2E scenarios — trigger (from the Simulator's point of view)
+
+| # | Scenario | Trigger → path | Expected outcome |
+|---|---|---|---|
+| 1 | On-demand run, success | Persistent service in P3 against real PM/TB/Topology + broker; `POST /api/simulator/synth/run {}` → background `run_synth` emits network-wide to `alarms.live`; poll `GET /synth/status` | 202 + runId; status transitions running→idle; final `summary.status=="completed"`, `alarmsEmitted>0`, `alignedFraction` sane; alarms observable on `alarms.live`. |
+| 2 | Concurrency guard | POST while run #1 active | second POST → 409 with run #1's runId; run #1 unaffected; after it finishes a new POST → 202. |
+| 3 | Runtime failure (partial path) | PM returns no approved patterns during the background fetch | POST → 202; status eventually `idle` + `summary.status=="failed"` + `failureReason`; guard released; a re-trigger accepted. |
+| 4 | Overrides honored | `POST {target:0.75,totalAlarms:200}` | status while running reports `alarmsTotal==200`; run sized to 200; empty-body re-run uses env defaults. |
+| 5 | Server stays responsive (partial/perf path) | during a long run, hammer `/health` + `/metrics` | both 200 within 2s throughout; server never blocked by the run. |
+| 6 | Read surface intact | during idle, hit `/labels` + `/scenarios` | 200 with existing shapes; last run's labels visible via `/labels` (P3 cascade records). |
+| 7 | web-ui through nginx | web-ui dashboard button → `/api/simulator/synth/run`; spinner polls `/api/simulator/synth/status` | proxy forwards both; UI shows running spinner then completed summary — no CORS. |
