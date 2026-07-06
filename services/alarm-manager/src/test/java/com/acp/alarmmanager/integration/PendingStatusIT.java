@@ -152,6 +152,69 @@ class PendingStatusIT extends PostgresIntegrationBase {
         assertThat(correlatedAudits).isEqualTo(1);
     }
 
+    /**
+     * THE residual park-vs-persist window, closed. Reproduces the exact interleaving the reviewer
+     * flagged: the status transaction reads {@code exists()=false} and takes the park branch, but
+     * the alarm's persist transaction commits DURING the park window (its own reapply ran before our
+     * parked row was visible, so it drained nothing). Without the self-heal the parked row is
+     * orphaned and the alarm stays {@code open} forever.
+     *
+     * <p>The park path re-checks {@code exists()} after upserting and, seeing the alarm now present,
+     * drains the parked row itself. We drive that interleaving with a real {@link LifecycleService}
+     * over a real DB, using an {@link AlarmRepository} that returns {@code exists()=false} on the
+     * first probe (park branch) then persists the alarm and returns {@code true} on the re-check —
+     * exactly the window. Asserts: alarm ends {@code correlated}, NO orphan pending row remains, and
+     * EXACTLY ONE correlated audit row (no double-count).
+     */
+    @Test
+    void parkPathSelfHealsWhenAlarmPersistsDuringTheParkWindow() {
+        Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
+        RaceAlarmRepository racing = new RaceAlarmRepository(jdbc, "ALM-WINDOW");
+        LifecycleService raced = new LifecycleService(racing, transitions, pending,
+                new AmMetrics(new SimpleMeterRegistry()));
+
+        // Status arrives: first exists() probe (park branch) is false; RaceAlarmRepository persists
+        // the alarm and the re-check exists() then sees it -> the park path drains it itself.
+        raced.applyState("ALM-WINDOW", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-corr", Instant.now());
+
+        // The alarm is correlated (never stuck open) and the parked row is drained (no orphan).
+        assertThat(alarms.findById("ALM-WINDOW").orElseThrow().lifecycleState())
+                .isEqualTo(LifecycleState.CORRELATED);
+        assertThat(pending.find("ALM-WINDOW")).isEmpty();
+        // Exactly one correlated audit — the atomic claim guarantees a single drainer applies.
+        long correlatedAudits = transitions.findByAlarmOrdered("ALM-WINDOW").stream()
+                .filter(t -> "correlated".equals(t.toState())).count();
+        assertThat(correlatedAudits).isEqualTo(1);
+    }
+
+    /**
+     * Drain-race idempotency at the DB level: a parked status, then TWO drain attempts (as the
+     * park-path re-check AND the persist-path reapply can both fire). The atomic
+     * {@code DELETE ... RETURNING} claim means only the first drainer removes-and-applies the row;
+     * the second claims nothing and no-ops — so the alarm ends {@code correlated} with EXACTLY ONE
+     * correlated audit (no double-count), and no orphan pending row survives.
+     */
+    @Test
+    void twoDrainAttemptsClaimOnceSoAuditIsNotDoubleCounted() {
+        // Persist the alarm first so both drain attempts take the apply branch.
+        persister.persistOpen(alarmEnvelope("ALM-2DRAIN"));
+        // Park a correlated status directly (simulate the orphaned window row).
+        pending.upsert(new com.acp.alarmmanager.domain.PendingStatus("ALM-2DRAIN", "correlated",
+                "correlation-engine", Instant.parse("2026-06-13T09:05:00Z"), "evt-corr",
+                Instant.now()));
+
+        lifecycle.reapplyPending("ALM-2DRAIN", Instant.now());   // winner: claims + applies
+        lifecycle.reapplyPending("ALM-2DRAIN", Instant.now());   // loser: claim empty, no-op
+
+        assertThat(alarms.findById("ALM-2DRAIN").orElseThrow().lifecycleState())
+                .isEqualTo(LifecycleState.CORRELATED);
+        assertThat(pending.find("ALM-2DRAIN")).isEmpty();
+        long correlatedAudits = transitions.findByAlarmOrdered("ALM-2DRAIN").stream()
+                .filter(t -> "correlated".equals(t.toState())).count();
+        assertThat(correlatedAudits).isEqualTo(1);
+    }
+
     /** A known alarm: a correlated status applies immediately and nothing is parked (unchanged). */
     @Test
     void knownAlarmAppliesImmediatelyWithoutParking() {
@@ -171,5 +234,51 @@ class PendingStatusIT extends PostgresIntegrationBase {
         return Fixtures.CODEC.deserialize(Fixtures.alarmEventJson(
                 "evt-ing-" + alarmId, alarmId, "PortDown", "raised", List.of("trail-77"),
                 "2026-06-13T09:00:00Z"));
+    }
+
+    /**
+     * An {@link AlarmRepository} that reproduces the park-vs-persist window for a single target
+     * alarm: the FIRST {@link #exists} probe returns {@code false} (so {@code applyState} takes the
+     * park branch), then — simulating the persist transaction committing during the park window —
+     * it actually persists the alarm row against the real DB, so every SUBSEQUENT {@code exists}
+     * (the park-path re-check) returns {@code true}. All other operations delegate to the real
+     * repository against the real DB, so the drain writes real rows.
+     */
+    private static final class RaceAlarmRepository extends AlarmRepository {
+        private final JdbcTemplate jdbc;
+        private final String target;
+        private boolean probed;
+
+        RaceAlarmRepository(JdbcTemplate jdbc, String target) {
+            super(jdbc);
+            this.jdbc = jdbc;
+            this.target = target;
+        }
+
+        @Override
+        public boolean exists(String alarmId) {
+            if (target.equals(alarmId) && !probed) {
+                probed = true;   // first probe: alarm not yet visible -> park branch
+                return false;
+            }
+            if (target.equals(alarmId) && !super.exists(alarmId)) {
+                // The persist tx commits during the park window: insert the alarm row now, so the
+                // park-path re-check sees it and drains the parked status.
+                insertTargetAlarm();
+            }
+            return super.exists(alarmId);
+        }
+
+        private void insertTargetAlarm() {
+            jdbc.update("""
+                    INSERT INTO live_alarm.alarm (
+                      alarm_id, managed_object_id, event_type, probable_cause, alarm_type,
+                      perceived_severity, wire_state, raised_at, trail_ids, vendor_raw,
+                      lifecycle_state, role, published, raw_envelope, created_at, updated_at)
+                    VALUES (?, 'MO-1', 'PortDown', 'pc', 'PortDown', 'major', 'raised', now(),
+                      '[]'::jsonb, '{}'::jsonb, 'open', 'none', false, '{}', now(), now())
+                    ON CONFLICT (alarm_id) DO NOTHING
+                    """, target);
+        }
     }
 }

@@ -68,6 +68,22 @@ public class PendingStatusRepository {
         return rows.stream().findFirst();
     }
 
+    /**
+     * Atomically CLAIM the parked entry: delete the row keyed on {@code alarm_id} and return it in
+     * one {@code DELETE ... RETURNING} statement. This is the drain-race guard — when two actors can
+     * both try to re-apply the same parked status (the persist-path {@code reapplyPending} AND the
+     * park-path re-check that races the persist commit), the row-lock on the single row serialises
+     * the two {@code DELETE}s and only ONE removes-and-returns the row; the loser gets
+     * {@link Optional#empty()} and applies nothing. So exactly one actor appends the correlated audit
+     * — no double-count. Empty when nothing is parked.
+     */
+    public Optional<PendingStatus> claim(String alarmId) {
+        List<PendingStatus> rows = jdbc.query(
+                "DELETE FROM live_alarm.pending_status WHERE alarm_id = ? RETURNING *", MAPPER,
+                alarmId);
+        return rows.stream().findFirst();
+    }
+
     /** Delete the parked entry after it has been re-applied. Idempotent. */
     public void delete(String alarmId) {
         jdbc.update("DELETE FROM live_alarm.pending_status WHERE alarm_id = ?", alarmId);

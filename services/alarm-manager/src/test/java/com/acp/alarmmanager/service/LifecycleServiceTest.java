@@ -70,7 +70,7 @@ class LifecycleServiceTest {
         verify(pending).upsert(parked.capture());
         assertThat(parked.getValue().alarmId()).isEqualTo("UNKNOWN");
         assertThat(parked.getValue().newStatus()).isEqualTo("cleared");
-        verify(metrics).clearForUnknownAlarm();
+        verify(metrics).clearParkedForUnknownAlarm();
     }
 
     /** THE bug's unit-level guard: a correlated status for a not-yet-persisted alarm is PARKED. */
@@ -90,7 +90,7 @@ class LifecycleServiceTest {
         assertThat(parked.getValue().newStatus()).isEqualTo("correlated");
         assertThat(parked.getValue().changedAt()).isEqualTo(changedAt);
         assertThat(parked.getValue().causedByEventId()).isEqualTo("evt-corr");
-        verify(metrics).statusForUnknownAlarm();
+        verify(metrics).statusParkedForUnknownAlarm();
     }
 
     @Test
@@ -106,12 +106,13 @@ class LifecycleServiceTest {
         verify(pending, never()).upsert(any());
     }
 
-    /** Re-apply on ingest: a parked correlated is applied to the freshly-persisted alarm, then
-     * the parked entry is deleted. This is the state-transition side of THE bug's fix. */
+    /** Re-apply on ingest: a parked correlated is CLAIMED (atomic delete-returning) and applied to
+     * the freshly-persisted alarm. The claim removes the row, so no separate delete is issued. This
+     * is the state-transition side of THE bug's fix. */
     @Test
-    void reapplyPendingAppliesParkedCorrelatedThenDeletes() {
+    void reapplyPendingClaimsAndAppliesParkedCorrelated() {
         Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
-        when(pending.find("ALM-RACE")).thenReturn(Optional.of(new PendingStatus(
+        when(pending.claim("ALM-RACE")).thenReturn(Optional.of(new PendingStatus(
                 "ALM-RACE", "correlated", "correlation-engine", changedAt, "evt-corr",
                 Instant.parse("2026-06-13T09:05:01Z"))));
         // Alarm has just been persisted, so the re-apply takes the apply branch.
@@ -123,17 +124,78 @@ class LifecycleServiceTest {
                 any());
         verify(transitions).append(eq("ALM-RACE"), eq("correlated"), any(),
                 eq("correlation-engine"), eq(changedAt), eq("evt-corr"), any());
-        verify(pending).delete("ALM-RACE");
+        // The atomic claim IS the delete — the row is gone; no second delete needed.
+        verify(pending).claim("ALM-RACE");
+    }
+
+    /**
+     * Drain-race guard: when a concurrent drainer already CLAIMED the parked row, this caller's
+     * {@code claim} returns empty and it applies nothing — so exactly one correlated audit is
+     * appended, never two.
+     */
+    @Test
+    void reapplyPendingIsNoOpWhenAnotherDrainerAlreadyClaimed() {
+        when(pending.claim("ALM-RACE")).thenReturn(Optional.empty());
+
+        lifecycle.reapplyPending("ALM-RACE", Instant.now());
+
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        verify(transitions, never()).append(any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
     void reapplyPendingIsNoOpWhenNothingParked() {
-        when(pending.find("ALM-NONE")).thenReturn(Optional.empty());
+        when(pending.claim("ALM-NONE")).thenReturn(Optional.empty());
 
         lifecycle.reapplyPending("ALM-NONE", Instant.now());
 
         verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
-        verify(pending, never()).delete(any());
+    }
+
+    /**
+     * THE residual-window fix (park-then-drain-if-raced): the status parks (alarm not yet visible),
+     * but the alarm is persisted DURING the park window. The re-check after upsert sees the alarm
+     * now exists and drains the parked row itself via the atomic claim — so the alarm never lingers
+     * orphaned open.
+     */
+    @Test
+    void parkPathDrainsItselfWhenAlarmPersistedDuringParkWindow() {
+        Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
+        // First exists()=false (park branch), then true (persisted during the park window).
+        when(alarms.exists("ALM-RACE")).thenReturn(false, true);
+        // The row this call parked is what the self-drain claims back.
+        when(pending.claim("ALM-RACE")).thenReturn(Optional.of(new PendingStatus(
+                "ALM-RACE", "correlated", "correlation-engine", changedAt, "evt-corr",
+                Instant.parse("2026-06-13T09:05:01Z"))));
+
+        lifecycle.applyState("ALM-RACE", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-corr", Instant.now());
+
+        // It parked ...
+        verify(pending).upsert(any());
+        // ... then self-drained: claimed and applied the correlated state to the now-existing alarm.
+        verify(pending).claim("ALM-RACE");
+        verify(alarms).updateLifecycleState(eq("ALM-RACE"), eq(LifecycleState.CORRELATED), isNull(),
+                any());
+        verify(transitions).append(eq("ALM-RACE"), eq("correlated"), any(),
+                eq("correlation-engine"), eq(changedAt), eq("evt-corr"), any());
+    }
+
+    /**
+     * Park path, no race: the alarm still does not exist after the upsert, so nothing is drained
+     * (the persist path will drain it later). No claim, no apply.
+     */
+    @Test
+    void parkPathLeavesRowParkedWhenAlarmStillAbsentAfterUpsert() {
+        Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
+        when(alarms.exists("ALM-RACE")).thenReturn(false, false);
+
+        lifecycle.applyState("ALM-RACE", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-corr", Instant.now());
+
+        verify(pending).upsert(any());
+        verify(pending, never()).claim(any());
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
     }
 
     @Test

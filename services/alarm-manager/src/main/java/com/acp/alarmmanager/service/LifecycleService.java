@@ -76,7 +76,7 @@ public class LifecycleService {
             // Ordering race: the status change beat the alarm's own ingest/persist. Do NOT drop it
             // (that was the stuck-open bug) — PARK it durably keyed by alarmId; the ingest path
             // re-applies it once the alarm is persisted. Last-write-wins by changedAt.
-            park(alarmId, state.wire(), source, changedAt, causedByEventId, now);
+            parkThenDrainIfRaced(alarmId, state.wire(), source, changedAt, causedByEventId, now);
             return;
         }
         alarms.updateLifecycleState(alarmId, state, null, now);
@@ -94,8 +94,8 @@ public class LifecycleService {
         if (!alarms.exists(alarmId)) {
             // A status-channel clear (AlarmStatusChange(cleared)) can also race ahead of the
             // alarm's persist — park it for re-apply rather than dropping it.
-            park(alarmId, WIRE_CLEARED, source, clearedAt, causedByEventId, now);
-            metrics.clearForUnknownAlarm();
+            metrics.clearParkedForUnknownAlarm();
+            parkThenDrainIfRaced(alarmId, WIRE_CLEARED, source, clearedAt, causedByEventId, now);
             return;
         }
         Instant effectiveClearedAt = clearedAt != null ? clearedAt : now;
@@ -114,7 +114,8 @@ public class LifecycleService {
             String causedByEventId, Instant now) {
         if (!alarms.exists(alarmId)) {
             // A reverted-open can also race ahead of the alarm's persist — park for re-apply.
-            park(alarmId, WIRE_REVERTED_OPEN, source, changedAt, causedByEventId, now);
+            parkThenDrainIfRaced(alarmId, WIRE_REVERTED_OPEN, source, changedAt, causedByEventId,
+                    now);
             return;
         }
         alarms.revertToOpenClearingProvisionalRole(alarmId, now);
@@ -123,39 +124,62 @@ public class LifecycleService {
     }
 
     /**
-     * Park a status change whose alarm has not yet been persisted (ordering race). Upsert into the
-     * durable pending-status store keyed by {@code alarmId}, last-write-wins by {@code changedAt}
-     * (the state machine is monotonic toward {@code correlated}, so keeping the latest is correct).
-     * Re-applied on the ingest path by {@link #reapplyPending}.
+     * Park a status change whose alarm has not yet been persisted (ordering race), THEN self-heal
+     * the millisecond race between this park and the alarm's persist commit.
+     *
+     * <p>Upsert into the durable pending-status store keyed by {@code alarmId}, last-write-wins by
+     * {@code changedAt} (the state machine is monotonic toward {@code correlated}, so keeping the
+     * latest is correct). Then RE-CHECK {@link AlarmRepository#exists}: the window the reviewer
+     * flagged is that our {@code exists()=false} read can be immediately followed by the persist
+     * transaction fully committing (insert + its own {@link #reapplyPending} finding nothing parked)
+     * BEFORE our park upsert commits — which would orphan the parked row and leave the alarm stuck
+     * {@code open}. If the alarm now exists, we drain the parked row ourselves via
+     * {@link #reapplyPending}. Draining is race-safe against a concurrent persist-path drain: both
+     * go through {@link PendingStatusRepository#claim} (atomic {@code DELETE ... RETURNING}), so
+     * only ONE actor removes-and-applies the row (exactly-one correlated audit); the other is a
+     * no-op. After both transactions commit in any order the alarm ends in the parked state, never
+     * orphaned open.
      */
-    private void park(String alarmId, String wireStatus, String source, Instant changedAt,
-            String causedByEventId, Instant now) {
+    private void parkThenDrainIfRaced(String alarmId, String wireStatus, String source,
+            Instant changedAt, String causedByEventId, Instant now) {
         log.info("status '{}' for not-yet-persisted alarmId={} — parking for re-apply on ingest",
                 wireStatus, alarmId);
         pending.upsert(new PendingStatus(alarmId, wireStatus, source, changedAt, causedByEventId,
                 now));
-        metrics.statusForUnknownAlarm();
+        metrics.statusParkedForUnknownAlarm();
+        if (alarms.exists(alarmId)) {
+            // The alarm was persisted during the park window. The persist-path reapply may have run
+            // before our row was visible and found nothing — so drain it ourselves now. claim() is
+            // atomic, so if the persist path is also draining concurrently only one of us wins.
+            log.info("alarmId={} persisted during park window — draining parked '{}' now", alarmId,
+                    wireStatus);
+            reapplyPending(alarmId, now);
+        }
     }
 
     /**
-     * Re-apply a parked status change for an alarm that has just been persisted on the ingest path,
-     * then delete the parked entry. Called from the ingest transaction (see
-     * {@link AlarmPersister#persistOpen}) so a freshly-persisted alarm never lingers {@code open}
-     * when a {@code correlated} status already arrived ahead of it.
+     * Re-apply a parked status change for an alarm that has just been persisted, then delete the
+     * parked entry. Called from the ingest transaction (see {@link AlarmPersister#persistOpen}) so a
+     * freshly-persisted alarm never lingers {@code open} when a {@code correlated} status already
+     * arrived ahead of it, and also from {@link #parkThenDrainIfRaced} to self-heal the park-vs-
+     * persist race window.
      *
-     * <p>Replays through the very same state-machine methods the live status change would have used
-     * ({@link #applyState}/{@link #clear}/{@link #revertToOpen}) — so all state-machine and audit
-     * rules are reused. The alarm now exists, so those methods take the apply branch (never
-     * re-park). Applying is idempotent: e.g. {@code correlated} on an already-{@code correlated}
-     * alarm is a harmless no-op write. A no-op when nothing is parked.
+     * <p>Claims the parked row with an atomic {@link PendingStatusRepository#claim} ({@code DELETE
+     * ... RETURNING}) so that when both drain paths race the same row, exactly ONE removes-and-
+     * returns it and therefore exactly one appends the audit entry (no double-count); the loser gets
+     * empty and no-ops. Replays through the very same state-machine methods the live status change
+     * would have used ({@link #applyState}/{@link #clear}/{@link #revertToOpen}) — so all
+     * state-machine and audit rules are reused. The alarm now exists, so those methods take the
+     * apply branch (never re-park). Applying is idempotent: e.g. {@code correlated} on an
+     * already-{@code correlated} alarm is a harmless no-op write. A no-op when nothing is parked.
      */
     @Transactional
     public void reapplyPending(String alarmId, Instant now) {
-        Optional<PendingStatus> parked = pending.find(alarmId);
-        if (parked.isEmpty()) {
+        Optional<PendingStatus> claimed = pending.claim(alarmId);
+        if (claimed.isEmpty()) {
             return;
         }
-        PendingStatus p = parked.get();
+        PendingStatus p = claimed.get();
         log.info("re-applying parked status '{}' to freshly-persisted alarmId={}", p.newStatus(),
                 alarmId);
         switch (p.newStatus()) {
@@ -171,6 +195,5 @@ public class LifecycleService {
             default -> log.warn("parked status '{}' for alarmId={} is unrecognised — discarding",
                     p.newStatus(), alarmId);
         }
-        pending.delete(alarmId);
     }
 }
