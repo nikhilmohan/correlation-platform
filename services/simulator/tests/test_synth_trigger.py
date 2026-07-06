@@ -27,7 +27,6 @@ from simulator.synth.run_manager import (
     derive_settings,
 )
 
-
 # --------------------------------------------------------------------------- test doubles
 
 
@@ -72,9 +71,7 @@ def _instant_run(emitted: int = 42):
             progress.set_total(settings.p3_total_alarms)
             for i in range(emitted):
                 progress.inc_emitted(aligned=i % 2 == 0)
-        return _StubOutcome(
-            emitted=emitted, summary=_StubSummary(), labels="labels-sentinel"
-        )
+        return _StubOutcome(emitted=emitted, summary=_StubSummary(), labels="labels-sentinel")
 
     return run_synth
 

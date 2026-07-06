@@ -20,6 +20,12 @@ from simulator.obs.logging import configure_logging, get_logger, log_event
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - process orchestration
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "serve":
+        # Persistent service mode (spec Task 25). Routed here too so the Docker ENTRYPOINT
+        # ``python -m simulator.main`` + compose ``command: ["serve"]`` selects the service.
+        from simulator import serve
+
+        return serve.main(argv[1:])
     if cli.wants_help(argv):
         print(cli.USAGE)
         return 0

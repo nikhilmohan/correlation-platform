@@ -1,4 +1,4 @@
-"""HTTP synth trigger router — ``POST /synth/run`` + ``GET /synth/status`` (spec Task 26/27, AC 66-77).
+"""HTTP synth trigger router — ``POST /synth/run`` + ``GET /synth/status`` (Task 26/27, AC 66-77).
 
 ``POST /synth/run`` validates the optional body (pydantic -> 422 on a bad param), then asks the
 shared :class:`RunManager` to start a background P3 synth run (409 if one is already active), and

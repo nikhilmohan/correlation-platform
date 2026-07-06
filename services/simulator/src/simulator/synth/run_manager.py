@@ -169,17 +169,13 @@ class RunManager:
             summary=summary,
         )
 
-    def _run_wrapper(
-        self, run_id: str, overrides: RunOverrides, progress: ProgressSink
-    ) -> None:
+    def _run_wrapper(self, run_id: str, overrides: RunOverrides, progress: ProgressSink) -> None:
         started_at = self._started_at or datetime.now(tz=UTC).isoformat()
         summary: SynthStatusSummary
         try:
             settings = derive_settings(self._settings_provider(), overrides)
             producer = self._producer_factory(settings)
-            outcome = self._run_synth(
-                settings, producer, run_id=run_id, progress=progress
-            )
+            outcome = self._run_synth(settings, producer, run_id=run_id, progress=progress)
             summary = self._summary_from_outcome(run_id, outcome, started_at)
             if self._on_labels is not None:
                 self._on_labels(getattr(outcome, "labels", None))
@@ -220,9 +216,7 @@ class RunManager:
                 self._summary = summary
 
     @staticmethod
-    def _summary_from_outcome(
-        run_id: str, outcome: object, started_at: str
-    ) -> SynthStatusSummary:
+    def _summary_from_outcome(run_id: str, outcome: object, started_at: str) -> SynthStatusSummary:
         run_summary = getattr(outcome, "summary", None)
         emitted = int(getattr(outcome, "emitted", 0))
         return SynthStatusSummary(
