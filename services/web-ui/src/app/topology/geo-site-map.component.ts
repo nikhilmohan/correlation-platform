@@ -4,8 +4,10 @@ import {
   Component,
   ElementRef,
   EffectRef,
+  EventEmitter,
   Input,
   NgZone,
+  Output,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -102,12 +104,11 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
            aria-hidden — decorative basemap context; the accessible site list carries site names. -->
       <div class="city-labels" aria-hidden="true"></div>
 
-      <!-- Explicit zoom / fit / reset controls (operator-driven, keyboard-reachable). MapLibre's
-           NavigationControl provides zoom-in/out too; these mirror the device-graph controls and add
-           fit-to-sites + reset-to-default so both canvases offer the same affordances (AC 74/75). -->
-      <div class="map-controls" role="group" aria-label="Map zoom controls">
-        <button type="button" data-testid="map-zoom-in" aria-label="Zoom in" (click)="mapZoomIn()">+</button>
-        <button type="button" data-testid="map-zoom-out" aria-label="Zoom out" (click)="mapZoomOut()">−</button>
+      <!-- FIT / RESET controls only (bottom-right, clear of MapLibre's top-right NavigationControl).
+           The redundant custom LEFT zoom-in/out buttons were removed — zoom lives on MapLibre's own
+           NavigationControl (top-right). Fit-to-sites + reset-to-default are NOT pure zoom (they
+           re-frame the whole fleet), so they are kept as a small right-aligned group. -->
+      <div class="map-controls" role="group" aria-label="Map view controls">
         <button type="button" data-testid="map-zoom-fit" aria-label="Fit to all sites" (click)="mapFit()">Fit</button>
         <button type="button" data-testid="map-zoom-reset" aria-label="Reset map to default view" (click)="mapReset()">
           Reset
@@ -233,31 +234,27 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
         white-space: nowrap;
         opacity: 0.9;
       }
+      /* FIT / RESET group — pinned bottom-right so it clears MapLibre's top-right NavigationControl
+         (zoom) and no longer clutters the LEFT of the map (the redundant left zoom was removed). */
       .map-controls {
         position: absolute;
-        top: 8px;
-        left: 8px;
+        bottom: 8px;
+        right: 8px;
         display: flex;
-        flex-direction: column;
+        flex-direction: row;
         gap: 4px;
         z-index: 2;
       }
       .map-controls button {
-        width: 2rem;
-        height: 2rem;
         border: 1px solid var(--border);
         background: var(--surface);
         color: var(--text);
         border-radius: 6px;
         cursor: pointer;
-        font-size: 0.9rem;
         line-height: 1;
-      }
-      .map-controls button[data-testid='map-zoom-fit'],
-      .map-controls button[data-testid='map-zoom-reset'] {
-        width: auto;
-        padding: 0 0.4rem;
-        font-size: 0.7rem;
+        padding: 0 0.5rem;
+        height: 1.9rem;
+        font-size: 0.72rem;
       }
       .map-controls button:hover {
         border-color: var(--accent);
@@ -302,6 +299,14 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
    * canvas fills the taller container it becomes visible in.
    */
   @Input() showHeading = true;
+
+  /**
+   * Emits the siteId when the operator drills into a site (pin click or accessible site-list click).
+   * The dashboard listens and swaps the map panel for the in-place site graph (no separate
+   * `/topology/:siteId` page). When NO listener is bound (`observed === false`) the component falls
+   * back to legacy router navigation so it stays usable standalone.
+   */
+  @Output() siteSelected = new EventEmitter<string>();
 
   /** Proves the guarded real-render path ran (asserted by the unit test even when WebGL is absent). */
   mapInitAttempted = false;
@@ -395,7 +400,9 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     setPaint('cities', 'circle-color', paint.city);
     setPaint('cities', 'circle-stroke-color', paint.cityHalo);
     setPaint('site-clusters', 'circle-stroke-color', paint.clusterStroke);
-    setPaint('site-unclustered', 'circle-stroke-color', paint.canvasBg);
+    // Keep the site-pin ring a fixed dark colour in both themes so the pins stay high-contrast on
+    // the natural green LAND / blue SEA of the basemap (a canvas-coloured ring would vanish on land).
+    setPaint('site-unclustered', 'circle-stroke-color', '#0b1220');
   }
 
   /** Theme-dependent basemap + stroke colours read from the CSS palette (with dark fallbacks). */
@@ -411,24 +418,29 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     canvasBg: string;
   } {
     const canvasBg = this.cssVar('--canvas-bg') || '#0b1220';
-    const surface = this.cssVar('--surface') || '#1e293b';
-    const border = this.cssVar('--border') || '#475569';
     const accent = this.cssVar('--accent') || '#60a5fa';
-    const textMuted = this.cssVar('--text-muted') || '#cbd5e1';
+    // NATURAL-COLOUR MAP TOKENS (dedicated --map-* palette, theme-aware). These give the offline
+    // basemap real geographic colours (blue sea / green land / darker borders) instead of the pale
+    // app surface/canvas tokens, so it reads as a genuine map in both light and dark themes. Solid
+    // hex/rgb literals only — MapLibre paint rejects color-mix() and aborts the style load.
+    const water = this.cssVar('--map-water') || '#a9d3ec';
+    const land = this.cssVar('--map-land') || '#cfe3b0';
+    const mapBorder = this.cssVar('--map-border') || '#6b8f4e';
+    const coast = this.cssVar('--map-coast') || '#4a7fa5';
+    const city = this.cssVar('--map-city') || '#334155';
+    const graticule = this.cssVar('--map-graticule') || '#7fa8c4';
     return {
-      graticule: border,
-      // City marker fill = the muted text tone so the dot reads on both land and sea; halo = the
-      // sea/canvas backdrop so it stays legible wherever it lands.
-      city: textMuted,
-      cityHalo: canvasBg,
-      // MapLibre paint properties require LITERAL colour strings (hex/rgb/rgba/hsl) — it does NOT
-      // accept CSS color-mix(); passing one aborts the entire style load and the map renders blank.
-      // The land sits over the opaque sea backdrop, so the 90% "lift" is applied via a separate
-      // `fill-opacity` paint property (see `land` layer) rather than baked into the colour.
-      sea: canvasBg,
-      land: surface,
-      border,
-      coast: accent,
+      graticule,
+      // City marker fill from the dedicated token; halo = the sea backdrop so the dot stays legible.
+      city,
+      cityHalo: water,
+      // Land sits over the opaque sea backdrop; the land `fill-opacity` (see `land` layer) keeps the
+      // graticule faintly visible through it.
+      sea: water,
+      land,
+      border: mapBorder,
+      coast,
+      // Cluster/pin STROKE follows the theme accent (kept separate from the natural land/sea fills).
       clusterStroke: accent,
       canvasBg,
     };
@@ -596,11 +608,13 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       source: src,
       filter: ['!', ['has', 'point_count']],
       paint: {
-        // Status pin FILL identical in both themes (per decision); STROKE = canvas backdrop colour.
+        // Status pin FILL identical in both themes (per decision). STROKE = a dark ring (not the
+        // canvas colour) so the pins — including the GREEN 'monitored' dot — stay high-contrast and
+        // never blend into the green LAND fill of the natural-colour basemap.
         'circle-color': ['get', 'statusColor'],
         'circle-radius': 7,
-        'circle-stroke-color': paint.canvasBg,
-        'circle-stroke-width': 2,
+        'circle-stroke-color': '#0b1220',
+        'circle-stroke-width': 2.5,
       },
     });
 
@@ -829,15 +843,9 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  // ── Map zoom / fit / reset controls ───────────────────────────────────────────────────────────
-  /** Zoom the map in one step (no-op until the real map exists, e.g. in jsdom unit tests). */
-  mapZoomIn(): void {
-    this.map?.zoomIn();
-  }
-  /** Zoom the map out one step. */
-  mapZoomOut(): void {
-    this.map?.zoomOut();
-  }
+  // ── Map fit / reset controls ──────────────────────────────────────────────────────────────────
+  // NOTE: the custom zoom-in/out handlers were removed with the redundant left zoom buttons — zoom
+  // is provided by MapLibre's own NavigationControl (top-right). Fit/Reset re-frame the whole fleet.
   /** Fit the viewport to the extent of all current sites (the same capped bounds used on load). */
   mapFit(): void {
     this.map?.fitBounds(this.siteExtent(), {
@@ -881,7 +889,14 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   select(siteId: string): void {
-    this.nav.toSiteGraph(siteId);
+    // Prefer the in-place dashboard swap: emit the siteId to the host (the dashboard renders the
+    // site graph in the same panel with a Close button). If nothing is bound to the output (used
+    // standalone), fall back to the legacy route navigation so the component still works alone.
+    if (this.siteSelected.observed) {
+      this.siteSelected.emit(siteId);
+    } else {
+      this.nav.toSiteGraph(siteId);
+    }
   }
 
   ngOnDestroy(): void {

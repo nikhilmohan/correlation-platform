@@ -148,7 +148,7 @@ export class AppComponent {
   readonly links: NavLink[] = [
     { path: '/dashboard', label: 'Dashboard' },
     { path: '/streaming', label: 'Streaming' },
-    { path: '/topology', label: 'Topology' },
+    // Topology & trails now lives on the Dashboard (no separate page) — nav item removed.
     { path: '/patterns', label: 'Patterns' },
     { path: '/chatter', label: 'Chatter' },
     { path: '/config', label: 'Config' },

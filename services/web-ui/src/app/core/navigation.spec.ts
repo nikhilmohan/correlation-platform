@@ -12,7 +12,7 @@ class StubComponent {}
 
 const ROUTES: Routes = [
   { path: 'incidents/:incidentId', component: StubComponent },
-  { path: 'topology', component: StubComponent },
+  { path: 'dashboard', component: StubComponent },
 ];
 
 describe('Cross-navigation & deep-linking', () => {
@@ -27,18 +27,18 @@ describe('Cross-navigation & deep-linking', () => {
     expect(router.url).toBe('/incidents/INC-12');
   });
 
-  it('AC 21 — pattern → topology trail deep link is built as /topology?trailId=<id>', async () => {
+  it('AC 21 — pattern → topology trail deep link is built as /dashboard?trailId=<id> (topology is on the dashboard now)', async () => {
     TestBed.configureTestingModule({ providers: [...testProviders(ROUTES)] });
     const router = TestBed.inject(Router);
     const nav = TestBed.inject(NavigationService);
     const spy = vi.spyOn(router, 'navigate');
     const ok = await nav.toTrail('TR-7');
-    expect(spy).toHaveBeenCalledWith(['/topology'], { queryParams: { trailId: 'TR-7' } });
+    expect(spy).toHaveBeenCalledWith(['/dashboard'], { queryParams: { trailId: 'TR-7' } });
     expect(ok).toBe(true);
-    expect(router.url).toBe('/topology?trailId=TR-7');
+    expect(router.url).toBe('/dashboard?trailId=TR-7');
   });
 
-  it('AC 24 — direct navigation to /topology?trailId=<id> activates that trail (query param read on init)', async () => {
+  it('AC 24 — direct navigation to ?trailId=<id> activates that trail (query param read on init)', async () => {
     TestBed.configureTestingModule({
       providers: [
         ...testProviders(),

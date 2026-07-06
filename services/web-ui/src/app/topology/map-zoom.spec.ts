@@ -5,20 +5,18 @@ import { testProviders, flush } from '../../test-utils';
 import { GeoSiteMapComponent } from './geo-site-map.component';
 
 /**
- * AC 74 — geo-map zoom controls drive the MapLibre API. In jsdom there is no WebGL, so the real
- * map is never constructed; a stubbed MapLibre map (vi.fn() spies) is injected via the component's
- * narrow test hook and each control handler exercised:
- *   - zoom-in  → map.zoomIn(),
- *   - zoom-out → map.zoomOut(),
- *   - Fit      → map.fitBounds(siteExtent) — bounds containing all site markers,
- *   - Reset    → map.fitBounds(siteExtent) (zoom + centre back to the initial default view).
- * Each assertion would FAIL if the corresponding handler stopped calling the MapLibre method.
+ * AC 74 — geo-map FIT / RESET controls drive the MapLibre API. In jsdom there is no WebGL, so the
+ * real map is never constructed; a stubbed MapLibre map (vi.fn() spies) is injected via the
+ * component's narrow test hook and each control handler exercised:
+ *   - Fit   → map.fitBounds(siteExtent) — bounds containing all site markers,
+ *   - Reset → map.fitBounds(siteExtent) (zoom + centre back to the initial default view).
+ * The redundant custom LEFT zoom-in/out buttons were REMOVED — zoom is provided by MapLibre's own
+ * NavigationControl (top-right). Each assertion would FAIL if the corresponding handler stopped
+ * calling the MapLibre method.
  */
 
 function makeMapStub() {
   return {
-    zoomIn: vi.fn(),
-    zoomOut: vi.fn(),
     fitBounds: vi.fn(),
     // ngOnDestroy calls map.remove() — provide it so test cleanup doesn't throw.
     remove: vi.fn(),
@@ -42,17 +40,12 @@ async function mount(): Promise<{ fixture: ComponentFixture<GeoSiteMapComponent>
   return { fixture, map };
 }
 
-describe('AC 74 — geo-map zoom controls (MapLibre spy)', () => {
-  it('zoom-in calls map.zoomIn()', async () => {
-    const { fixture, map } = await mount();
-    fixture.componentInstance.mapZoomIn();
-    expect(map.zoomIn).toHaveBeenCalledTimes(1);
-  });
-
-  it('zoom-out calls map.zoomOut()', async () => {
-    const { fixture, map } = await mount();
-    fixture.componentInstance.mapZoomOut();
-    expect(map.zoomOut).toHaveBeenCalledTimes(1);
+describe('AC 74 — geo-map fit/reset controls (MapLibre spy)', () => {
+  it('the redundant custom left zoom-in/out buttons are removed (zoom lives on NavigationControl)', async () => {
+    const { fixture } = await mount();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('[data-testid="map-zoom-in"]')).toBeNull();
+    expect(el.querySelector('[data-testid="map-zoom-out"]')).toBeNull();
   });
 
   it('Fit calls map.fitBounds with the extent that contains all site markers', async () => {
@@ -73,15 +66,11 @@ describe('AC 74 — geo-map zoom controls (MapLibre spy)', () => {
     expect(map.fitBounds).toHaveBeenCalledTimes(1);
   });
 
-  it('all four controls are wired from the rendered buttons (in/out/fit/reset)', async () => {
+  it('the fit + reset controls are wired from the rendered buttons', async () => {
     const { fixture, map } = await mount();
     const el: HTMLElement = fixture.nativeElement;
-    (el.querySelector('[data-testid="map-zoom-in"]') as HTMLButtonElement).click();
-    (el.querySelector('[data-testid="map-zoom-out"]') as HTMLButtonElement).click();
     (el.querySelector('[data-testid="map-zoom-fit"]') as HTMLButtonElement).click();
     (el.querySelector('[data-testid="map-zoom-reset"]') as HTMLButtonElement).click();
-    expect(map.zoomIn).toHaveBeenCalledTimes(1);
-    expect(map.zoomOut).toHaveBeenCalledTimes(1);
     expect(map.fitBounds).toHaveBeenCalledTimes(2); // fit + reset
   });
 });

@@ -4,8 +4,10 @@ import {
   Component,
   ElementRef,
   EffectRef,
+  EventEmitter,
   HostListener,
   NgZone,
+  Output,
   OnDestroy,
   OnInit,
   ViewChild,
@@ -1139,8 +1141,16 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly theme = inject(ThemeService);
   private readonly zone = inject(NgZone);
 
-  /** Route param binding (withComponentInputBinding). */
+  /** Site to render. Bound by the dashboard as `[siteId]="selectedSiteId()"` for the in-place
+   *  (embedded) site graph; also satisfied by route input-binding when used standalone. */
   readonly siteId = input<string>('');
+
+  /**
+   * Emitted when the operator dismisses the site graph via the breadcrumb / back affordance. The
+   * dashboard listens and returns to the map (clears its selectedSiteId). When NO listener is bound
+   * (standalone use) the breadcrumb falls back to navigating to the dashboard.
+   */
+  @Output() closed = new EventEmitter<void>();
 
   @ViewChild('cyEl') private cyEl?: ElementRef<HTMLDivElement>;
 
@@ -1571,9 +1581,14 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  /** Breadcrumb: back to the geo-site map (topology entry view). */
+  /** Breadcrumb: back to the map. When embedded on the dashboard (a listener is bound to `closed`)
+   *  this emits so the dashboard swaps back to the map in-place; standalone it navigates home. */
   toTopology(): void {
-    this.nav.toTopology();
+    if (this.closed.observed) {
+      this.closed.emit();
+    } else {
+      this.nav.toTopology();
+    }
   }
 
   /** Site of a device for the accessible row tag (friendly name), or null if unknown. */

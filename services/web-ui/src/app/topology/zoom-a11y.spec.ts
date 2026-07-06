@@ -85,9 +85,10 @@ describe('AC 75 — zoom controls are keyboard-accessible (focus + Enter/Space a
     expect(results.violations).toEqual([]);
   });
 
-  it('the map zoom controls are also keyboard-accessible buttons with aria-labels (canvas symmetry)', async () => {
+  it('the map fit/reset controls are keyboard-accessible buttons with aria-labels (canvas symmetry)', async () => {
     const fixture = await mountMap();
-    for (const testid of ['map-zoom-in', 'map-zoom-out', 'map-zoom-fit', 'map-zoom-reset']) {
+    // Zoom-in/out were removed (MapLibre NavigationControl provides zoom); fit/reset remain.
+    for (const testid of ['map-zoom-fit', 'map-zoom-reset']) {
       const btn = fixture.nativeElement.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement;
       expect(btn, testid).not.toBeNull();
       expect(btn.tagName).toBe('BUTTON');

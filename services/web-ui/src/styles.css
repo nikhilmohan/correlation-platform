@@ -28,6 +28,16 @@
   /* De-hardcoded theme-dependent literals (dark values here; light overridden below). */
   --on-accent: #fff; /* text on a filled accent button / active nav — white in both themes */
   --canvas-bg: #0b1220; /* MAP canvas backdrop; also read by the imperative geo-map re-theme */
+  /* NATURAL-COLOUR OFFLINE BASEMAP palette (DARK). Dedicated map tokens so the geo-site-map paints
+     like a real geographic map (blue sea, green land, darker country borders) instead of the pale
+     app surface/canvas tokens. Read by geo-site-map.basemapPaint() via cssVar; DARK values are
+     deep-sea / darker-land variants of the light palette so it still reads as a map at night. */
+  --map-water: #16324f; /* deep-sea blue */
+  --map-land: #33503a; /* darker olive-green land */
+  --map-border: #cfe0b4; /* country borders — light line, distinct on the dark land */
+  --map-coast: #7fb0d8; /* subtle coastline accent */
+  --map-city: #e2e8f0; /* city marker dot — light, reads on land + sea */
+  --map-graticule: #3f5a6e; /* faint lat/long grid over the water */
   /* Site-GRAPH canvas backdrop: points at the app surface so the graph blends with the page
      (operator feedback — the old grey --canvas-bg read as a grey block). Read by buildCyStyle
      via cssVar so a theme flip re-themes the canvas; node chips/labels stay legible against it. */
@@ -71,6 +81,14 @@
 
   --on-accent: #fff;
   --canvas-bg: #e2e8f0;
+  /* NATURAL-COLOUR OFFLINE BASEMAP palette (LIGHT) — vivid real-map tones: ocean blue sea, green
+     land, a distinct darker country border, subtle coast, clear city dot and a faint graticule. */
+  --map-water: #a9d3ec; /* ocean blue */
+  --map-land: #cfe3b0; /* green/olive land */
+  --map-border: #6b8f4e; /* distinct darker green country border line */
+  --map-coast: #4a7fa5; /* subtle coastline accent */
+  --map-city: #334155; /* city marker dot — dark-slate, reads on the light land/sea */
+  --map-graticule: #7fa8c4; /* faint lat/long grid */
   /* Light: the graph canvas blends with the white page surface (no grey block). */
   --graph-bg: #ffffff;
   /* LIGHT theme glyph colour = dark-slate, reads on the white --graph-bg inside the grey box. */

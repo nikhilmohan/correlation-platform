@@ -1,23 +1,30 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
 import { DecimalPipe, PercentPipe } from '@angular/common';
 import { DashboardStore } from './dashboard.store';
 import { NavigationService } from '../core/navigation.service';
 import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
+import { SiteGraphComponent } from '../topology/site-graph.component';
 
 /**
  * Landing dashboard (default route). Shows the fleet KPI widgets across the top, then embeds the
- * FULL topology & trails view (the same `GeoSiteMapComponent` used by the `/topology` route) below
- * them — real basemap, site pins + native clustering, layer/trail features and site drill-in, all
- * on the dashboard. The heading is suppressed on the embed (`[showHeading]="false"`); the dashboard
- * supplies its own section header, and the map is given more height. The former "Recent incidents"
- * and "Quick links" cards were removed in favour of the embedded map.
+ * FULL topology & trails view below them — real basemap, site pins + native clustering, layer/trail
+ * features and IN-PLACE site drill-in, all on the dashboard (there is no separate `/topology` page).
+ *
+ * The topology panel swaps between two states driven by `selectedSiteId`:
+ *   - null  → the geo-site MAP (`<app-geo-site-map>`). Clicking a site emits its id via the map's
+ *             `(siteSelected)` output, which the dashboard captures into selectedSiteId.
+ *   - set   → the in-place SITE GRAPH (`<app-site-graph [siteId]=…>`) filling the same panel, with a
+ *             Close button (data-testid="site-graph-close") that clears selectedSiteId → back to map.
+ *
+ * The map heading is suppressed on the embed (`[showHeading]="false"`); the dashboard supplies its
+ * own section header. The former "Recent incidents" and "Quick links" cards were removed.
  */
 @Component({
   selector: 'app-dashboard',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [DashboardStore],
-  imports: [DecimalPipe, PercentPipe, GeoSiteMapComponent],
+  imports: [DecimalPipe, PercentPipe, GeoSiteMapComponent, SiteGraphComponent],
   template: `
     <div class="page-head">
       <h1>Platform overview</h1>
@@ -77,8 +84,36 @@ import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
     </section>
 
     <section class="topology-embed" aria-labelledby="dash-topo-h" data-testid="dashboard-topology">
-      <h2 id="dash-topo-h">Network topology &amp; trails</h2>
-      <app-geo-site-map [showHeading]="false" />
+      <div class="topo-head">
+        <!-- When a site is selected the embedded SiteGraphComponent renders its own "Site graph — …"
+             heading; keep THIS section heading distinct ("Site: …") so there is a single
+             "Site graph" heading on the page (avoids a duplicate-heading strict-mode collision). -->
+        <h2 id="dash-topo-h">
+          @if (selectedSiteId(); as sid) {
+            Site: {{ sid }}
+          } @else {
+            Network topology &amp; trails
+          }
+        </h2>
+        @if (selectedSiteId()) {
+          <button
+            type="button"
+            class="btn btn-secondary site-graph-close"
+            data-testid="site-graph-close"
+            (click)="closeSite()"
+          >
+            <span aria-hidden="true">←</span> Back to map
+          </button>
+        }
+      </div>
+
+      @if (selectedSiteId(); as sid) {
+        <!-- IN-PLACE site graph: fills the same panel as the map. Close returns to the map. -->
+        <app-site-graph [siteId]="sid" (closed)="closeSite()" />
+      } @else {
+        <!-- Geo-site MAP. A site click emits its id → we swap to the site graph in-place. -->
+        <app-geo-site-map [showHeading]="false" (siteSelected)="openSite($event)" />
+      }
     </section>
   `,
   styles: [
@@ -148,9 +183,22 @@ import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
       .topology-embed {
         margin-top: 1.6rem;
       }
-      .topology-embed > h2 {
+      .topo-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
         margin: 0 0 0.75rem;
+      }
+      .topo-head h2 {
+        margin: 0;
         font-size: 1.2rem;
+      }
+      .site-graph-close {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        white-space: nowrap;
       }
     `,
   ],
@@ -158,6 +206,19 @@ import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
 export class DashboardComponent implements OnInit {
   readonly store = inject(DashboardStore);
   readonly nav = inject(NavigationService);
+
+  /** null → show the geo-site map; a siteId → show the in-place site graph for that site. */
+  readonly selectedSiteId = signal<string | null>(null);
+
+  /** Drill into a site IN-PLACE (map → site graph) — wired from the map's (siteSelected) output. */
+  openSite(siteId: string): void {
+    this.selectedSiteId.set(siteId);
+  }
+
+  /** Close the in-place site graph and return to the map (Close button / site-graph `closed`). */
+  closeSite(): void {
+    this.selectedSiteId.set(null);
+  }
 
   ngOnInit(): void {
     this.store.load();
