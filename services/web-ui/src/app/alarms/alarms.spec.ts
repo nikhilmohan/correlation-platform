@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { describe, expect, it } from 'vitest';
 import { AlarmsStore } from './alarms.store';
 import { AlarmsComponent } from './alarms.component';
+import { LivePollingService } from '../streaming/live-polling.service';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { testProviders, flush } from '../../test-utils';
 import { AlarmSummary, StatsVM } from '../api/models';
@@ -104,7 +105,10 @@ describe('Alarms component (Part 3)', () => {
 
   it('table columns are Timestamp-first in the required order', async () => {
     const cmp = await mount();
-    const heads = [...cmp.nativeElement.querySelectorAll('thead th')].map((h: Element) => h.textContent?.trim());
+    // The State header carries an info affordance (ⓘ) for the lifecycle-state legend; normalise it.
+    const heads = [...cmp.nativeElement.querySelectorAll('thead th')].map((h: Element) =>
+      h.textContent?.replace(/\s*ⓘ\s*/g, '').trim(),
+    );
     expect(heads).toEqual(['Timestamp', 'Severity', 'Alarm type', 'Managed object', 'State', 'Correlation']);
   });
 
@@ -168,6 +172,164 @@ describe('Alarms component (Part 3)', () => {
     );
     expect(states.length).toBeGreaterThanOrEqual(1);
     expect(states.every((s) => s === 'correlated')).toBe(true);
+  });
+});
+
+describe('Alarms — collapsible incident GROUPS (Feature 1)', () => {
+  it('each incident renders as one collapsible group header (data-group="true"), collapsed by default', async () => {
+    const cmp = await mount();
+    // Group headers keep the alarm-row testid AND carry data-group + a distinct alarm-group marker.
+    const groups = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"][data-group="true"]')];
+    // The mock has one correlated incident (INC-12) → exactly one group header.
+    expect(groups.length).toBe(1);
+    const group = groups[0] as HTMLElement;
+    expect(group.getAttribute('data-incident-id')).toBe('INC-12');
+    expect(group.querySelector('[data-testid="alarm-group"]')).toBeTruthy();
+    // Collapsed by default: no child rows rendered yet.
+    const children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+      (r: Element) => r.getAttribute('data-role') === 'child',
+    );
+    expect(children.length).toBe(0);
+    // The expand toggle is present and reports collapsed.
+    const toggle = group.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it("the group HEADER status pill reads 'correlated' for the whole group (not per-child state)", async () => {
+    const cmp = await mount();
+    const group = cmp.nativeElement.querySelector('[data-testid="alarm-row"][data-group="true"]') as HTMLElement;
+    const statePill = group.querySelector('[data-testid="lifecycle-state"]') as HTMLElement;
+    expect(statePill.textContent?.trim()).toBe('correlated');
+    expect(statePill.classList.contains('state-correlated')).toBe(true);
+  });
+
+  it('the group header shows a "root cause + N correlated alarms" child count', async () => {
+    const cmp = await mount();
+    const count = cmp.nativeElement.querySelector('[data-testid="alarm-group"]') as HTMLElement;
+    expect(count.textContent?.replace(/\s+/g, ' ').trim()).toBe('root cause + 2 correlated alarms');
+  });
+
+  it('expanding the group reveals its child alarm rows (each with its OWN lifecycle state)', async () => {
+    const cmp = await mount();
+    const toggle = cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
+    toggle.click();
+    cmp.detectChanges();
+    const children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+      (r: Element) => r.getAttribute('data-role') === 'child',
+    );
+    expect(children.length).toBe(2);
+    // A child row shows its own state (correlated in the mock), independent of the group pill.
+    const childState = children[0].querySelector('[data-testid="lifecycle-state"]') as HTMLElement;
+    expect(childState.textContent?.trim()).toBe('correlated');
+  });
+
+  it('uncorrelated alarms are PLAIN ungrouped rows (no group wrapper)', async () => {
+    const cmp = await mount();
+    const plain = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+      (r: Element) => r.getAttribute('data-role') === 'none',
+    );
+    // a-1, a-2, a-9 are uncorrelated → 3 plain rows, none inside a group.
+    expect(plain.length).toBe(3);
+    plain.forEach((r: Element) => expect(r.getAttribute('data-testid')).toBe('alarm-row'));
+  });
+
+  it('the expand-all / collapse-all toggle opens then closes every group', async () => {
+    const cmp = await mount();
+    const expandAll = cmp.nativeElement.querySelector('[data-testid="alarm-expand-all"]') as HTMLButtonElement;
+    expect(expandAll.textContent?.trim()).toBe('Expand all');
+    expandAll.click();
+    cmp.detectChanges();
+    let children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+      (r: Element) => r.getAttribute('data-role') === 'child',
+    );
+    expect(children.length).toBe(2);
+    expect(expandAll.textContent?.trim()).toBe('Collapse all');
+    expandAll.click();
+    cmp.detectChanges();
+    children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+      (r: Element) => r.getAttribute('data-role') === 'child',
+    );
+    expect(children.length).toBe(0);
+  });
+
+  it('a lifecycle-state legend is present as an info affordance', async () => {
+    const cmp = await mount();
+    const legend = cmp.nativeElement.querySelector('[data-testid="lifecycle-legend"]') as HTMLElement;
+    expect(legend).toBeTruthy();
+    expect(legend.textContent).toContain('placed in a fired incident');
+  });
+});
+
+describe('Alarms — REAL-TIME live updates (Feature 2)', () => {
+  it('mounting starts the LivePollingService poll loop and shows a live indicator', async () => {
+    const cmp = await mount();
+    const live = cmp.debugElement.injector.get(LivePollingService);
+    // The poll loop fired at least one immediate tick (lastUpdated set) and autoRefresh is on.
+    expect(live.lastUpdated()).not.toBeNull();
+    expect(live.autoRefresh()).toBe(true);
+    expect(cmp.nativeElement.querySelector('[data-testid="live-indicator"]')).toBeTruthy();
+    expect(cmp.nativeElement.querySelector('[data-testid="live-indicator"]')?.textContent?.trim()).toBe('live');
+  });
+
+  it('pause/resume toggles autoRefresh via the live-toggle control', async () => {
+    const cmp = await mount();
+    const live = cmp.debugElement.injector.get(LivePollingService);
+    const toggle = cmp.nativeElement.querySelector('[data-testid="live-toggle"]') as HTMLButtonElement;
+    toggle.click();
+    cmp.detectChanges();
+    expect(live.autoRefresh()).toBe(false);
+    expect(cmp.nativeElement.querySelector('[data-testid="live-indicator"]')?.textContent?.trim()).toBe('paused');
+    toggle.click();
+    cmp.detectChanges();
+    expect(live.autoRefresh()).toBe(true);
+  });
+
+  it('a poll tick refreshes the store rows (new incident group appears live)', async () => {
+    const cmp = await mount();
+    const live = cmp.debugElement.injector.get(LivePollingService);
+    const store = cmp.debugElement.injector.get(AlarmsStore);
+    const before = store.rows().length;
+    // Simulate a poll tick delivering a NEW correlated incident + its RCA alarm.
+    const newAlarms: AlarmSummary[] = [
+      ...store.alarms(),
+      { alarmId: 'live-rc', managedObjectId: 'mo-x', eventType: 'LOS', alarmType: 'LOS', perceivedSeverity: 'critical', raisedAt: '2026-06-01T13:00:00Z', lifecycleState: 'correlated', role: 'root-cause', incidentId: 'INC-99', trailIds: [] },
+    ];
+    live.alarmsSnapshot.set(newAlarms);
+    live.lastUpdated.set(Date.now());
+    await flush();
+    cmp.detectChanges();
+    expect(store.rows().length).toBe(before + 1);
+    const groups = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"][data-group="true"]')].map(
+      (g: Element) => g.getAttribute('data-incident-id'),
+    );
+    expect(groups).toContain('INC-99');
+  });
+
+  it('expand state is PRESERVED across a poll tick (an opened group stays open)', async () => {
+    const cmp = await mount();
+    const live = cmp.debugElement.injector.get(LivePollingService);
+    const store = cmp.debugElement.injector.get(AlarmsStore);
+    // Expand INC-12.
+    (cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement).click();
+    cmp.detectChanges();
+    expect(
+      [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+        (r: Element) => r.getAttribute('data-role') === 'child',
+      ).length,
+    ).toBe(2);
+    // A poll tick re-delivers the same data (a new object identity).
+    live.alarmsSnapshot.set([...store.alarms()]);
+    live.lastUpdated.set(Date.now());
+    await flush();
+    cmp.detectChanges();
+    // The group is STILL expanded after the tick.
+    const toggle = cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+        (r: Element) => r.getAttribute('data-role') === 'child',
+      ).length,
+    ).toBe(2);
   });
 });
 

@@ -134,4 +134,32 @@ export class AlarmsStore {
   setStateFilter(state: LifecycleState | 'all'): void {
     this.stateFilter.set(state);
   }
+
+  /**
+   * Apply a live poll snapshot (from `LivePollingService`) to the store's alarm + incident signals so
+   * `rows()`, the KPI numbers and the incident grouping all update in real time without a second
+   * fetch. Stats are refreshed separately (the poll loop does not carry the stats envelope), so a
+   * null incidents snapshot on an errored tick leaves the previous data intact — the caller keeps
+   * the last-good view and shows a stale indicator instead of blanking the table.
+   */
+  applyLiveSnapshot(alarms: AlarmSummary[] | null, incidents: IncidentVM[] | null): void {
+    if (alarms) {
+      this.alarms.set(alarms);
+    }
+    if (incidents) {
+      this.incidents.set(incidents);
+    }
+  }
+
+  /** Refresh the Correlation Engine stats (the KPI header) — the poll loop does not carry them. */
+  refreshStats(): void {
+    this.ce
+      .getStats()
+      .pipe(catchError(() => of(null)))
+      .subscribe((s) => {
+        if (s) {
+          this.stats.set(s);
+        }
+      });
+  }
 }

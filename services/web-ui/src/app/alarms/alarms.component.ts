@@ -1,7 +1,17 @@
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
+import {
+  ChangeDetectionStrategy,
+  Component,
+  OnInit,
+  computed,
+  effect,
+  inject,
+  signal,
+} from '@angular/core';
 import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { AlarmsStore } from './alarms.store';
+import { LivePollingService } from '../streaming/live-polling.service';
+import { DeltaDiffService } from '../streaming/delta-diff';
 import { AlarmSummary, LifecycleState } from '../api/models';
 import { alarmTypeLabel } from '../patterns/alarm-type-labels';
 import { relativeTime } from '../core/relative-time';
@@ -25,7 +35,7 @@ import { relativeTime } from '../core/relative-time';
   selector: 'app-alarms',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  providers: [AlarmsStore],
+  providers: [AlarmsStore, LivePollingService, DeltaDiffService],
   imports: [DatePipe, DecimalPipe, PercentPipe, RouterLink],
   template: `
     <h1>Alarms</h1>
@@ -73,16 +83,63 @@ import { relativeTime } from '../core/relative-time';
     </section>
 
     <div class="toolbar">
-      <label>
-        Lifecycle state
-        <select data-testid="alarm-filter" (change)="onFilter($event)">
-          <option value="all">all</option>
-          <option value="open">open</option>
-          <option value="in-progress">in-progress</option>
-          <option value="correlated">correlated</option>
-          <option value="cleared">cleared</option>
-        </select>
-      </label>
+      <div class="toolbar-left">
+        <label>
+          Lifecycle state
+          <select data-testid="alarm-filter" (change)="onFilter($event)">
+            <option value="all">all</option>
+            <option value="open">open</option>
+            <option value="in-progress">in-progress</option>
+            <option value="correlated">correlated</option>
+            <option value="cleared">cleared</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          class="expand-all"
+          data-testid="alarm-expand-all"
+          [attr.aria-pressed]="allExpanded()"
+          (click)="toggleExpandAll()"
+        >
+          {{ allExpanded() ? 'Collapse all' : 'Expand all' }}
+        </button>
+      </div>
+
+      <div class="toolbar-right">
+        <!-- LIVE indicator + pause/resume. Reuses LivePollingService.autoRefresh. -->
+        <span
+          class="live"
+          data-testid="live-indicator"
+          [class.paused]="!live.autoRefresh()"
+          [class.stale]="live.pollError()"
+          role="status"
+          [attr.aria-label]="liveLabel()"
+          [title]="liveLabel()"
+        >
+          <span class="dot" aria-hidden="true"></span>
+          @if (live.pollError()) {
+            stale
+          } @else if (live.autoRefresh()) {
+            live
+          } @else {
+            paused
+          }
+        </span>
+        <button
+          type="button"
+          class="live-toggle"
+          data-testid="live-toggle"
+          [attr.aria-pressed]="live.autoRefresh()"
+          [attr.aria-label]="live.autoRefresh() ? 'Pause live updates' : 'Resume live updates'"
+          (click)="toggleLive()"
+        >
+          <span aria-hidden="true">{{ live.autoRefresh() ? '⏸' : '▶' }}</span>
+          {{ live.autoRefresh() ? 'Pause' : 'Resume' }}
+        </button>
+      </div>
+    </div>
+
+    <div class="legends">
       <span class="legend" aria-hidden="true">
         <span class="sev-pill sev-critical">critical</span>
         <span class="sev-pill sev-major">major</span>
@@ -90,6 +147,20 @@ import { relativeTime } from '../core/relative-time';
         <span class="sev-pill sev-warning">warning</span>
         <span class="sev-pill sev-cleared">cleared</span>
       </span>
+      <!-- Lifecycle-state legend (Feature 1 info affordance). -->
+      <details class="state-legend" data-testid="lifecycle-legend">
+        <summary>Lifecycle states</summary>
+        <dl>
+          <dt>open</dt>
+          <dd>raised, not yet correlating</dd>
+          <dt>in-progress</dt>
+          <dd>being processed in an active correlation instance</dd>
+          <dt>correlated</dt>
+          <dd>placed in a fired incident</dd>
+          <dt>cleared</dt>
+          <dd>terminal / reset (reverted to open)</dd>
+        </dl>
+      </details>
     </div>
 
     <section class="card table-card" aria-labelledby="alarms-h">
@@ -105,17 +176,31 @@ import { relativeTime } from '../core/relative-time';
             <th scope="col">Severity</th>
             <th scope="col">Alarm type</th>
             <th scope="col">Managed object</th>
-            <th scope="col">State</th>
+            <th scope="col" class="state-th">
+              State
+              <span
+                class="info"
+                tabindex="0"
+                aria-label="Lifecycle states: open = raised, not yet correlating; in-progress = being processed in an active correlation instance; correlated = placed in a fired incident; cleared = terminal/reset."
+                [title]="STATE_HELP"
+                >&#9432;</span
+              >
+            </th>
             <th scope="col">Correlation</th>
           </tr>
         </thead>
         <tbody>
           @for (row of store.rows(); track row.alarm.alarmId) {
-            <!-- RCA / plain alarm row -->
+            <!-- INCIDENT GROUP header (rca) OR plain uncorrelated alarm row. The header keeps the
+                 alarm-row testid (existing selectors) AND carries data-group + a distinct
+                 alarm-group testid on the group-count marker below (Feature 1). -->
             <tr
               data-testid="alarm-row"
               [attr.data-role]="row.kind === 'rca' ? 'root-cause' : 'none'"
+              [attr.data-group]="row.kind === 'rca' ? 'true' : null"
+              [attr.data-incident-id]="row.incidentId"
               [class.rca-row]="row.kind === 'rca'"
+              [class.group-header]="row.kind === 'rca'"
               [class]="'sev-border-' + sevKey(row.alarm)"
             >
               <td class="ts" data-testid="alarm-raised-at" [title]="rel(row.alarm.raisedAt)">
@@ -128,30 +213,48 @@ import { relativeTime } from '../core/relative-time';
               </td>
               <td class="type-cell">
                 @if (row.kind === 'rca') {
-                  @if (row.children.length) {
-                    <button
-                      type="button"
-                      class="expander"
-                      data-testid="alarm-expand"
-                      [attr.aria-expanded]="isExpanded(row.incidentId!)"
-                      [attr.aria-label]="
-                        (isExpanded(row.incidentId!) ? 'Collapse' : 'Expand') +
-                        ' ' + row.children.length + ' correlated child alarms'
-                      "
-                      (click)="toggle(row.incidentId!)"
-                    >
-                      <span aria-hidden="true">{{ isExpanded(row.incidentId!) ? '▾' : '▸' }}</span>
-                    </button>
-                  }
+                  <button
+                    type="button"
+                    class="expander"
+                    data-testid="alarm-expand"
+                    [attr.aria-expanded]="isExpanded(row.incidentId!)"
+                    [disabled]="!row.children.length"
+                    [attr.aria-label]="
+                      (isExpanded(row.incidentId!) ? 'Collapse' : 'Expand') +
+                      ' incident ' + row.incidentId +
+                      ' — ' + row.children.length + ' correlated alarms'
+                    "
+                    (click)="toggle(row.incidentId!)"
+                  >
+                    <span aria-hidden="true">{{ isExpanded(row.incidentId!) ? '▾' : '▸' }}</span>
+                  </button>
                   <span class="rca-badge" aria-label="Root cause alarm" data-testid="rca-badge">&#9733; RCA</span>
                 }
                 <span class="alarm-type">{{ label(row.alarm) }}</span>
+                @if (row.kind === 'rca') {
+                  <span class="group-count" data-testid="alarm-group" data-group-count>
+                    root cause + {{ row.children.length }} correlated
+                    {{ row.children.length === 1 ? 'alarm' : 'alarms' }}
+                  </span>
+                }
               </td>
               <td class="mo" [title]="row.alarm.managedObjectId">{{ row.alarm.managedObjectId }}</td>
               <td>
-                <span class="badge state" [class]="stateClass(row.alarm.lifecycleState)" data-testid="lifecycle-state">
-                  {{ row.alarm.lifecycleState }}
-                </span>
+                @if (row.kind === 'rca') {
+                  <!-- GROUP-LEVEL status: the whole incident reads as 'correlated' (one pill for the
+                       group, not per-child). Individual child states show only when expanded. -->
+                  <span
+                    class="badge state state-correlated"
+                    data-testid="lifecycle-state"
+                    title="This incident has fired — the group is correlated regardless of individual child states."
+                  >
+                    correlated
+                  </span>
+                } @else {
+                  <span class="badge state" [class]="stateClass(row.alarm.lifecycleState)" data-testid="lifecycle-state">
+                    {{ row.alarm.lifecycleState }}
+                  </span>
+                }
               </td>
               <td>
                 @if (row.incidentId) {
@@ -245,10 +348,126 @@ import { relativeTime } from '../core/relative-time';
         gap: 1rem;
         margin-bottom: 0.6rem;
       }
+      .toolbar-left,
+      .toolbar-right {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
       .toolbar label {
         display: inline-flex;
         gap: 0.4rem;
         align-items: center;
+      }
+      .expand-all,
+      .live-toggle {
+        background: var(--surface-2);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.25rem 0.6rem;
+        cursor: pointer;
+        font-size: 0.82rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+      .expand-all:hover,
+      .live-toggle:hover {
+        border-color: var(--accent);
+      }
+      /* LIVE indicator: pulsing green dot; amber when stale; grey when paused. */
+      .live {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--ok, #16a34a);
+      }
+      .live .dot {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 999px;
+        background: var(--ok, #16a34a);
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok, #16a34a) 60%, transparent);
+        animation: live-pulse 1.6s ease-out infinite;
+      }
+      .live.paused {
+        color: var(--text-muted);
+      }
+      .live.paused .dot {
+        background: var(--text-muted);
+        animation: none;
+      }
+      .live.stale {
+        color: var(--warn, #d97706);
+      }
+      .live.stale .dot {
+        background: var(--warn, #d97706);
+        animation: none;
+      }
+      @keyframes live-pulse {
+        0% {
+          box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok, #16a34a) 55%, transparent);
+        }
+        70% {
+          box-shadow: 0 0 0 0.45rem color-mix(in srgb, var(--ok, #16a34a) 0%, transparent);
+        }
+        100% {
+          box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok, #16a34a) 0%, transparent);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .live .dot {
+          animation: none;
+        }
+      }
+      .legends {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 1rem;
+        margin-bottom: 0.6rem;
+      }
+      .state-legend {
+        font-size: 0.8rem;
+      }
+      .state-legend summary {
+        cursor: pointer;
+        color: var(--accent);
+      }
+      .state-legend dl {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.15rem 0.6rem;
+        margin: 0.4rem 0 0;
+      }
+      .state-legend dt {
+        font-weight: 700;
+      }
+      .state-legend dd {
+        margin: 0;
+        color: var(--text-muted);
+      }
+      .state-th .info,
+      th .info {
+        cursor: help;
+        color: var(--text-muted);
+        margin-left: 0.25rem;
+      }
+      .group-count {
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        white-space: nowrap;
+      }
+      .expander[disabled] {
+        opacity: 0.35;
+        cursor: default;
       }
       select {
         background: var(--surface-2);
@@ -454,8 +673,18 @@ import { relativeTime } from '../core/relative-time';
 })
 export class AlarmsComponent implements OnInit {
   readonly store = inject(AlarmsStore);
+  /**
+   * The self-rescheduling poll loop (reused from the old Streaming view). Provided at the component
+   * level so its `DestroyRef.onDestroy` teardown fires when the operator leaves the Alarms view — the
+   * timer never runs app-wide (Feature 2).
+   */
+  readonly live = inject(LivePollingService);
 
-  /** Incidents whose child alarms are expanded (default collapsed). Keyed by incidentId. */
+  /**
+   * Incidents whose child alarms are expanded (default collapsed). Keyed by incidentId, so the set
+   * SURVIVES every poll tick — a refresh that rewrites the alarm list never collapses a group the
+   * operator opened (Feature 2: preserve expand state across refreshes).
+   */
   private readonly expanded = signal<ReadonlySet<string>>(new Set());
 
   /**
@@ -465,13 +694,50 @@ export class AlarmsComponent implements OnInit {
    */
   readonly TS_FMT = 'dd MMM yy HH:mm:ss.SSS';
 
+  /** Screen-reader / tooltip copy for the lifecycle-state column info affordance. */
+  readonly STATE_HELP =
+    'open = raised, not yet correlating · in-progress = being processed in an active correlation ' +
+    'instance · correlated = placed in a fired incident · cleared = terminal/reset (reverted to open)';
+
   /** X.733 perceived-severity → colour-key (drives the left-border + pill class). */
   private static readonly SEV_KEYS = new Set(['critical', 'major', 'minor', 'warning', 'cleared']);
 
   readonly rowCount = computed(() => this.store.rows().length);
 
+  /** The incidentIds that currently render as groups (rca rows). */
+  private readonly groupIds = computed<string[]>(() =>
+    this.store
+      .rows()
+      .filter((r) => r.kind === 'rca' && r.incidentId)
+      .map((r) => r.incidentId!),
+  );
+
+  /** True when every current group is expanded (drives the expand-all/collapse-all label). */
+  readonly allExpanded = computed<boolean>(() => {
+    const ids = this.groupIds();
+    return ids.length > 0 && ids.every((id) => this.expanded().has(id));
+  });
+
+  constructor() {
+    // Feed every poll snapshot into the store so rows()/KPIs/grouping update live. Refreshing inside
+    // an effect keeps the render reactive; the store leaves prior data intact on an errored (null)
+    // tick so the last-good view survives while the stale indicator shows.
+    effect(() => {
+      // Only apply once a real poll tick has landed (lastUpdated set) — never let the initial empty
+      // snapshot blank the store before the first fetch resolves.
+      if (this.live.lastUpdated() === null) {
+        return;
+      }
+      this.store.applyLiveSnapshot(this.live.alarmsSnapshot(), this.live.incidentsSnapshot());
+      this.store.refreshStats();
+    });
+  }
+
   ngOnInit(): void {
+    // Initial one-shot load, then start the live poll loop. The first poll tick fires immediately and
+    // re-populates the same signals; the effect keeps the view in sync thereafter.
     this.store.loadAll();
+    this.live.start();
   }
 
   onFilter(event: Event): void {
@@ -491,6 +757,28 @@ export class AlarmsComponent implements OnInit {
       next.add(incidentId);
     }
     this.expanded.set(next);
+  }
+
+  /** Expand every group when any is collapsed, otherwise collapse all. */
+  toggleExpandAll(): void {
+    this.expanded.set(this.allExpanded() ? new Set() : new Set(this.groupIds()));
+  }
+
+  /** Pause/resume the live poll loop (reuses LivePollingService.autoRefresh). */
+  toggleLive(): void {
+    if (this.live.autoRefresh()) {
+      this.live.pause();
+    } else {
+      this.live.resume();
+    }
+  }
+
+  /** Accessible label for the live indicator. */
+  liveLabel(): string {
+    if (this.live.pollError()) {
+      return 'Live updates paused on error — showing last known data';
+    }
+    return this.live.autoRefresh() ? 'Live updates on' : 'Live updates paused';
   }
 
   /** Readable alarm-type label, preferring `alarmType` then falling back to `eventType`. */
