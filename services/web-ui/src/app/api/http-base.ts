@@ -23,6 +23,14 @@ export abstract class HttpBaseClient {
   protected abstract readonly serviceName: string;
   protected abstract readonly serviceKey: ServiceKey;
 
+  /**
+   * HTTP statuses the CALLER handles as a legitimate outcome (not a global error banner). 404 is
+   * always silent (a "not found" the caller renders as empty state); a client may add more (e.g.
+   * the Simulator treats 409 "run already active" as a normal branch, not an error). The raw
+   * HttpErrorResponse still propagates so the caller can branch on it.
+   */
+  protected readonly silentStatuses: ReadonlySet<number> = new Set([404]);
+
   protected url(path: string): string {
     const base = this.config.baseUrl(this.serviceKey).replace(/\/+$/, '');
     const suffix = path.startsWith('/') ? path : `/${path}`;
@@ -80,8 +88,9 @@ export abstract class HttpBaseClient {
       status === 'network'
         ? `${this.serviceName} is unreachable`
         : `${this.serviceName} returned HTTP ${status}`;
-    // 404 is a legitimate "not found" the caller renders as empty/not-found state — not a banner.
-    if (status !== 404) {
+    // Statuses the caller owns (404 always; a client may add more, e.g. Simulator 409) are not
+    // surfaced as a global error banner — the caller branches on the propagated error instead.
+    if (status === 'network' || !this.silentStatuses.has(status)) {
       this.errors.report({ service: this.serviceName, status, message });
       this.logger.error('api_error', { service: this.serviceName, method, path, status });
     }

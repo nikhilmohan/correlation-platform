@@ -17,6 +17,8 @@ import {
   SiteListDto,
   SiteObjectsDto,
   StatsVM,
+  SynthRunResponse,
+  SynthStatusResponse,
   TraversalDto,
   TrailDetail,
   TrailsForObjectResponse,
@@ -610,6 +612,14 @@ const LABELS: GroundTruthLabel[] = [
   { scenarioId: 'sc-2', scenarioType: 'card-fail', rootCause: 'Router:lon-r1', rootCauseManagedObjectId: 'Router:lon-r1', rootCauseAlarmType: 'CardFail', children: ['PortFlap'] },
 ];
 
+const SYNTH_RUN_ACCEPTED: SynthRunResponse = { runId: 'mock-run-1', status: 'running' };
+const SYNTH_STATUS_IDLE: SynthStatusResponse = {
+  status: 'idle',
+  runId: null,
+  progress: { alarmsEmitted: 0, alarmsTotal: 0, alignedEmitted: 0, nonAlignedEmitted: 0 },
+  summary: null,
+};
+
 export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => has(r.url, '/topology/sites/') && has(r.url, '/objects'), respond: (r) => objectsForSite(siteIdFromObjectsUrl(r)) },
   { matches: (r) => has(r.url, '/topology/sites'), respond: () => SITES },
@@ -634,6 +644,10 @@ export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => has(r.url, '/observed-chatter'), respond: () => OBSERVED_CHATTER },
   { matches: (r) => has(r.url, '/chatter'), respond: (r) => enrichmentChatter(r) },
   { matches: (r) => has(r.url, '/labels'), respond: () => LABELS },
+  // Simulator synth-run trigger. Default mock: an idle run (nothing in progress). POST /synth/run
+  // returns a started run; the button's poll then reads /synth/status (idle here) → returns to idle.
+  { matches: (r) => has(r.url, '/synth/run') && r.method === 'POST', respond: () => SYNTH_RUN_ACCEPTED },
+  { matches: (r) => has(r.url, '/synth/status'), respond: () => SYNTH_STATUS_IDLE },
 ];
 
 function paramOf(req: HttpRequest<unknown>, key: string): string | null {

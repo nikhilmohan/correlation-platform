@@ -4,6 +4,7 @@ import { DashboardStore } from './dashboard.store';
 import { NavigationService } from '../core/navigation.service';
 import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
 import { SiteGraphComponent } from '../topology/site-graph.component';
+import { IngestionButtonComponent } from './ingestion-button.component';
 
 /**
  * Landing dashboard (default route). Shows the fleet KPI widgets across the top, then embeds the
@@ -24,11 +25,20 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [DashboardStore],
-  imports: [DecimalPipe, PercentPipe, GeoSiteMapComponent, SiteGraphComponent],
+  imports: [
+    DecimalPipe,
+    PercentPipe,
+    GeoSiteMapComponent,
+    SiteGraphComponent,
+    IngestionButtonComponent,
+  ],
   template: `
     <div class="page-head">
       <h1>Platform overview</h1>
-      <button class="btn btn-secondary" type="button" (click)="store.load()">Refresh</button>
+      <div class="page-actions">
+        <app-ingestion-button />
+        <button class="btn btn-secondary" type="button" (click)="store.load()">Refresh</button>
+      </div>
     </div>
 
     <section class="kpis" aria-label="Key performance indicators">
@@ -124,6 +134,12 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
       }
       .page-head h1 {
         margin: 0;
+      }
+      .page-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
       }
       .kpis {
         display: grid;

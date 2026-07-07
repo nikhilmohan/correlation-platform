@@ -428,6 +428,7 @@ services:
       TRAIL_BUILDER_API_BASE_URL: "/api/trail-builder"  # → nginx → trail-builder:8000
       CODEBOOK_API_BASE_URL: "/api/codebook"            # → nginx → codebook-api:8000
       KNOWLEDGE_API_BASE_URL: "/api/knowledge"          # → nginx → knowledge:8080
+      SIMULATOR_API_BASE_URL: "/api/simulator"          # → nginx → simulator:8080 (synth-run trigger)
       # P2/P3 services not yet in this compose — left UNSET on purpose (graceful degrade). The
       # nginx /api/<svc> proxy routes for them already exist (resolved at request time), so the
       # moment those services land we just set the same-origin base URL below — no proxy change:
