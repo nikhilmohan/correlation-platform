@@ -13,19 +13,24 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 /**
- * Regression for the auto-correlation KPI &gt; 100% bug (live {@code /stats} showed 154.1%).
+ * Regression for the {@code /stats} scope-mismatch bugs. Two sibling ratios must each stay within
+ * their natural bound, and both broke the same way — a since-restart in-memory count paired with an
+ * all-time DB count:
+ * <ul>
+ *   <li>auto-correlation = {@code correlatedAlarmCount / totalAlarmsProcessed} — must be {@code <= 1}
+ *       (live showed 154.1%: 279 all-time DB correlated / 181 since-restart processed);
+ *   <li>alarm-reduction = {@code totalAlarmsProcessed / totalIncidentsCreated} — must be {@code >= 1}
+ *       (an all-time DB incident denominator over a since-restart processed numerator can dip below
+ *       1.0, the same impossible-number class).
+ * </ul>
  *
- * <p>Root cause: the numerator {@code correlatedAlarmCount} was sourced from the persistent Incident
- * Store (all-time DB history) while the denominator {@code totalAlarmsProcessed} was the engine's
- * in-memory since-restart ingest counter. Mixing an all-time numerator with a since-restart
- * denominator let the numerator exceed the denominator, so the rate could exceed 1.0 — mathematically
- * impossible for a fraction of alarms.
- *
- * <p>The fix makes BOTH counts come from the SAME scope: the engine's own in-memory session state
- * ({@code processedAlarmIds} for the denominator, {@code correlatedAlarmIds} for the numerator, which
- * share one lifetime and reset together on restart). Because a correlated alarm is necessarily an
- * ingested alarm, {@code correlatedAlarmCount <= totalAlarmsProcessed} always holds, so the
- * auto-correlation rate stays in {@code [0, 1]} across restarts.
+ * <p>The fix makes EVERY count that participates in a ratio come from the SAME scope: the engine's own
+ * in-memory session state ({@code processedAlarmIds}, {@code correlatedAlarmIds}, {@code firedIncidentIds}),
+ * which share one lifetime and reset together on restart. Because a correlated alarm is necessarily an
+ * ingested alarm, and every fired incident consumes at least its root-cause alarm,
+ * {@code correlatedAlarmCount <= totalAlarmsProcessed} and {@code totalIncidentsCreated <= totalAlarmsProcessed}
+ * both hold — so auto-correlation stays in {@code [0, 1]} and alarm-reduction stays {@code >= 1} across
+ * restarts.
  */
 class StatsScopeConsistencyTest {
 
@@ -127,6 +132,73 @@ class StatsScopeConsistencyTest {
     }
 
     /**
+     * SIBLING invariant (alarm-reduction ratio): after processing N alarms forming I incidents this
+     * session, {@code totalAlarmsProcessed (N) >= totalIncidentsCreated (I)} and the alarm-reduction
+     * ratio {@code N/I >= 1} — because {@code totalIncidentsCreated} is now the engine's session
+     * incident count (same scope as {@code totalAlarmsProcessed}), not the all-time DB count. Each
+     * incident consumes at least its root-cause alarm, so processed always dominates incidents.
+     */
+    @Test
+    void nAlarmsIIncidents_alarmReductionAtLeastOne() {
+        EngineHarness h = new EngineHarness();
+        h.addPattern(gapPattern("P", "T", List.of("LOS", "LinkDown"), "LOS", 60_000));
+
+        // N = 5 processed forming I = 2 incidents (each incident = 2 alarms), plus 1 noise alarm.
+        h.feed(alarm("a1", "LOS"), "T", T0);
+        h.feed(alarm("a2", "LinkDown"), "T", T0 + 1); // incident 1
+        h.feed(alarm("a3", "LOS"), "T", T0 + 2);
+        h.feed(alarm("a4", "LinkDown"), "T", T0 + 3); // incident 2
+        h.feed(alarm("noise", "CardFault"), "T", T0 + 4); // uncorrelated
+
+        StatsAggregator agg = new StatsAggregator(h.incidents, h.engine, RcaAccuracyOracle.DISABLED);
+        StatsView stats = agg.snapshot();
+
+        assertThat(stats.totalAlarmsProcessed()).isEqualTo(5);
+        assertThat(stats.totalIncidentsCreated()).isEqualTo(2);
+        assertThat(stats.totalAlarmsProcessed())
+                .isGreaterThanOrEqualTo(stats.totalIncidentsCreated());
+        double alarmReduction =
+                (double) stats.totalAlarmsProcessed() / stats.totalIncidentsCreated();
+        assertThat(alarmReduction).isEqualTo(5.0 / 2.0).isGreaterThanOrEqualTo(1.0);
+        // pattern + codebook match counts are also session-scoped: sum == session incident count.
+        assertThat(stats.patternMatchCount() + stats.codebookMatchCount())
+                .isEqualTo(stats.totalIncidentsCreated());
+    }
+
+    /**
+     * SIBLING invariant across a simulated restart: with the Incident Store carrying many prior-run
+     * incidents (all-time history &gt; this session's processed alarms), the alarm-reduction ratio must
+     * still be {@code >= 1} — proving {@code totalIncidentsCreated} is the session count, not the stale
+     * all-time DB count. This is the exact class the reviewer flagged: an all-time incident denominator
+     * paired with a since-restart processed numerator can drive the ratio below 1.0.
+     */
+    @Test
+    void acrossSimulatedRestart_alarmReductionStaysAtLeastOne() {
+        EngineHarness run2 = new EngineHarness();
+        run2.addPattern(gapPattern("P", "T", List.of("LOS", "LinkDown"), "LOS", 60_000));
+
+        // DB carries 80 prior-run incidents (all-time). If totalIncidentsCreated were DB-sourced, the
+        // ratio would be (this-session processed) / 80 << 1.0 — the impossible-number bug.
+        seedPriorIncidents(run2.incidents, 80);
+
+        // This session (post-restart): process 4 alarms forming 2 incidents.
+        run2.feed(alarm("r2a", "LOS"), "T", T0 + 100);
+        run2.feed(alarm("r2b", "LinkDown"), "T", T0 + 101); // incident 1
+        run2.feed(alarm("r2c", "LOS"), "T", T0 + 102);
+        run2.feed(alarm("r2d", "LinkDown"), "T", T0 + 103); // incident 2
+
+        StatsView stats =
+                new StatsAggregator(run2.incidents, run2.engine, RcaAccuracyOracle.DISABLED).snapshot();
+
+        assertThat(stats.totalAlarmsProcessed()).isEqualTo(4);
+        // NOT the 80+2 all-time DB incidents — the engine's 2 session incidents.
+        assertThat(stats.totalIncidentsCreated()).isEqualTo(2);
+        double alarmReduction =
+                (double) stats.totalAlarmsProcessed() / stats.totalIncidentsCreated();
+        assertThat(alarmReduction).isGreaterThanOrEqualTo(1.0);
+    }
+
+    /**
      * Seeds {@code correlatedAlarmCount} distinct correlated alarms into the repository as prior-run
      * incident history — the "all-time DB" shape that, if (wrongly) used as the {@code /stats}
      * numerator, would blow the rate past 100%.
@@ -137,6 +209,18 @@ class StatsScopeConsistencyTest {
             String child = "hist-child-" + i;
             repository.save(com.acp.correlationengine.support.Fixtures.incident(
                     "HIST-" + i, "T", root, "LOS", List.of(child)));
+        }
+    }
+
+    /**
+     * Seeds {@code count} prior-run incidents into the repository (the all-time DB shape). Used to
+     * prove the alarm-reduction denominator ({@code totalIncidentsCreated}) is the engine's session
+     * count, not this stale all-time DB total.
+     */
+    private static void seedPriorIncidents(IncidentRepository repository, int count) {
+        for (int i = 0; i < count; i++) {
+            repository.save(com.acp.correlationengine.support.Fixtures.incident(
+                    "PRIOR-" + i, "T", "prior-root-" + i, "LOS", List.of("prior-child-" + i)));
         }
     }
 }
