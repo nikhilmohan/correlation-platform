@@ -266,6 +266,28 @@ class LifecycleServiceTest {
         verify(metrics).downgradeIgnored("correlated", "open");
     }
 
+    /**
+     * A `correlated -> correlated` re-apply (a redelivered / duplicate correlated status-sync event)
+     * is a SILENT no-op: the state is not rewritten (still `<=` STATE-WRITE suppression), but because
+     * it is NOT a genuine downgrade (same rank) it must NOT be audited as REASON_DOWNGRADE_IGNORED
+     * nor increment status_downgrade_ignored_total{from=correlated,to=correlated}.
+     */
+    @Test
+    void correlatedToCorrelatedRedeliveryIsSilentNoOpNotDowngradeIgnored() {
+        when(alarms.currentLifecycleState("ALM-DUP"))
+                .thenReturn(Optional.of(LifecycleState.CORRELATED));
+        Instant changedAt = Instant.parse("2026-06-13T13:07:00Z");
+
+        lifecycle.applyState("ALM-DUP", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-redelivered", Instant.now());
+
+        // State is not rewritten (suppression still holds) ...
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        // ... and it is a SILENT no-op: no downgrade-ignored audit and no downgrade-ignored metric.
+        verify(transitions, never()).append(any(), any(), any(), any(), any(), any(), any());
+        verify(metrics, never()).downgradeIgnored(any(), any());
+    }
+
     /** Forward transitions still apply: open -> in-progress -> correlated each writes. */
     @Test
     void forwardTransitionsStillApply() {

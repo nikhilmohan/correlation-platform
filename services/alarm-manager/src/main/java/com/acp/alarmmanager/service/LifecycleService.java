@@ -101,13 +101,20 @@ public class LifecycleService {
         // expiry `revertToOpen` are their own methods and are intentionally NOT guarded here.
         if (current.get() == LifecycleState.CORRELATED
                 && state.statusRank() <= LifecycleState.CORRELATED.statusRank()) {
-            log.info("ignoring out-of-order status-sync downgrade for alarmId={}: {} -> {} "
-                    + "(correlated is terminal-for-downgrade on the status channel)",
-                    alarmId, current.get().wire(), state.wire());
-            // Keep an audit trail so the suppressed transition is debuggable; state is unchanged.
-            transitions.append(alarmId, LifecycleState.CORRELATED.wire(), REASON_DOWNGRADE_IGNORED,
-                    source, changedAt, causedByEventId, now);
-            metrics.downgradeIgnored(current.get().wire(), state.wire());
+            // STATE-WRITE suppression uses `<=`: a `correlated` alarm's state is never rewritten by
+            // any {open,in-progress,correlated} status-sync event (a same-rank correlated->correlated
+            // redelivery is likewise a no-op write). But only a GENUINE downgrade (`<`) is audited +
+            // metered as a suppressed downgrade — a same-rank correlated->correlated re-apply is a
+            // silent no-op, not a misleading "downgrade ignored" audit/metric.
+            if (state.statusRank() < LifecycleState.CORRELATED.statusRank()) {
+                log.info("ignoring out-of-order status-sync downgrade for alarmId={}: {} -> {} "
+                        + "(correlated is terminal-for-downgrade on the status channel)",
+                        alarmId, current.get().wire(), state.wire());
+                // Keep an audit trail so the suppressed downgrade is debuggable; state is unchanged.
+                transitions.append(alarmId, LifecycleState.CORRELATED.wire(),
+                        REASON_DOWNGRADE_IGNORED, source, changedAt, causedByEventId, now);
+                metrics.downgradeIgnored(current.get().wire(), state.wire());
+            }
             return;
         }
         alarms.updateLifecycleState(alarmId, state, null, now);
