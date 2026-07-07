@@ -2,8 +2,10 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { catchError, forkJoin, of } from 'rxjs';
 import { TopologyClient } from '../api/topology.client';
 import { TrailBuilderClient } from '../api/trail-builder.client';
+import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { ApiConfigService } from '../core/api-config.service';
 import {
+  AlarmSummary,
   EdgeDto,
   LogicalLayer,
   NeighborsDto,
@@ -13,6 +15,7 @@ import {
   TrailSummary,
 } from '../api/models';
 import { ALL_LAYERS, layerForEdge, layerForObjectType } from './layer-mapper';
+import { SeverityBucket, nodeTokensOf, tokensForMoids, worstBucketForTokens } from './alarm-severity';
 
 export interface DerivedNode extends NodeDto {
   derivedLayer: LogicalLayer;
@@ -43,6 +46,7 @@ export const NODE_CAP = 250;
 export class TopologyStore {
   private readonly topo = inject(TopologyClient);
   private readonly trailBuilder = inject(TrailBuilderClient);
+  private readonly alarmManager = inject(AlarmManagerClient);
   private readonly apiConfig = inject(ApiConfigService);
 
   /** Effective node cap (env-config `TOPOLOGY_NODE_CAP`, default {@link NODE_CAP}). */
@@ -54,6 +58,28 @@ export class TopologyStore {
   readonly sitesLoading = signal<boolean>(false);
   readonly selectedSiteId = signal<string | null>(null);
   readonly graphLoading = signal<boolean>(false);
+
+  // ── ALARM-SEVERITY OVERLAY (shared by the geo site map + the site device graph) ────────────────
+  /**
+   * The current alarm snapshot used to colour sites (map pins) and device nodes (site graph) by
+   * their WORST ACTIVE severity. Fetched once from `GET /alarms` (a generous page) and re-pulled by
+   * the Refresh buttons; BOTH views derive their red/amber/green buckets from this same snapshot, so
+   * one fetch colours both levels. Public + writable so component tests can seed a deterministic set.
+   */
+  readonly alarms = signal<readonly AlarmSummary[]>([]);
+  /** True while an alarm re-pull is in flight — drives the Refresh buttons' busy/spinner state. */
+  readonly alarmsLoading = signal<boolean>(false);
+  /** Generous page size for the alarm pull — broad coverage, not just the freshest 50 (per spec). */
+  private static readonly ALARM_PULL_LIMIT = 500;
+
+  /**
+   * Per-site device managedObjectId lists, keyed by siteId. Populated by {@link loadAllSiteObjects}
+   * (one objects-at-site fan-out) so the geo map can attribute alarms to a site WITHOUT selecting it.
+   * The site device graph uses the accumulating `nodeMap` directly (it is the selected site).
+   */
+  private readonly siteObjectMoids = signal<ReadonlyMap<string, readonly string[]>>(new Map());
+  /** True while the per-site objects fan-out (for the map's site-level colouring) is in flight. */
+  readonly siteObjectsLoading = signal<boolean>(false);
 
   /** Accumulating explorer graph, keyed by id so merges dedupe. Single writes per merge keep the
    *  structureKey (and thus the cytoscape relayout) firing exactly once per logical change. */
@@ -267,6 +293,77 @@ export class TopologyStore {
         this.sites.set(res.sites);
         this.sitesLoading.set(false);
       });
+  }
+
+  // ── ALARM-SEVERITY OVERLAY methods ─────────────────────────────────────────────────────────────
+  /**
+   * (Re-)pull the alarm snapshot from `GET /alarms` (a generous {@link ALARM_PULL_LIMIT}-item page)
+   * and publish it to the `alarms` signal, from which BOTH the geo map (site pins) and the site graph
+   * (device nodes) derive their red/amber/green buckets. Called on view init and by the Refresh
+   * buttons. Resilient: an error leaves the previous snapshot untouched (the overlay never breaks the
+   * base render) and clears the busy flag. No contract change — client-side derivation only.
+   */
+  refreshAlarms(): void {
+    this.alarmsLoading.set(true);
+    this.alarmManager
+      .listAlarms({ limit: TopologyStore.ALARM_PULL_LIMIT })
+      .pipe(catchError(() => of(null)))
+      .subscribe((page) => {
+        if (page) {
+          this.alarms.set(page.items);
+        }
+        this.alarmsLoading.set(false);
+      });
+  }
+
+  /**
+   * Fetch objects-at-site for EVERY site and cache each site's device managedObjectId list, so the
+   * geo map can attribute alarms to a site (site pin colour) without drilling into it. One
+   * objects-at-site fan-out (once at map init; the Refresh button re-pulls alarms only, reusing this
+   * cache unless forced). Resilient per site (a failed site contributes an empty list). No-op with no
+   * sites yet.
+   */
+  loadAllSiteObjects(): void {
+    const sites = this.sites();
+    if (sites.length === 0) {
+      return;
+    }
+    this.siteObjectsLoading.set(true);
+    forkJoin(
+      sites.map((s) =>
+        this.topo.objectsAtSite(s.siteId).pipe(catchError(() => of(null))),
+      ),
+    ).subscribe((results) => {
+      const map = new Map<string, readonly string[]>();
+      results.forEach((res, i) => {
+        map.set(sites[i].siteId, res ? res.nodes.map((n) => n.managedObjectId) : []);
+      });
+      this.siteObjectMoids.set(map);
+      this.siteObjectsLoading.set(false);
+    });
+  }
+
+  /**
+   * The worst ACTIVE-alarm severity bucket for a SITE (map pin colour): the worst bucket across all
+   * alarms whose node token belongs to any of the site's cached devices. Green when the site's
+   * objects are not yet cached or it has no active fault. Reads the shared `alarms` snapshot + the
+   * per-site object cache; pure attribution otherwise.
+   */
+  siteSeverityBucket(siteId: string): SeverityBucket {
+    const moids = this.siteObjectMoids().get(siteId) ?? [];
+    if (moids.length === 0) {
+      return 'green';
+    }
+    return worstBucketForTokens(this.alarms(), tokensForMoids(moids));
+  }
+
+  /**
+   * The worst ACTIVE-alarm severity bucket for a single device NODE (site-graph node colour): the
+   * worst bucket among alarms whose node token(s) intersect this node's token(s). Reads the shared
+   * `alarms` snapshot; pure attribution otherwise.
+   */
+  nodeSeverityBucket(managedObjectId: string): SeverityBucket {
+    return worstBucketForTokens(this.alarms(), nodeTokensOf(managedObjectId));
   }
 
   /**
