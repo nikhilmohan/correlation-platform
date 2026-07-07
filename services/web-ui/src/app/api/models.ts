@@ -409,7 +409,8 @@ export interface SynthSummaryModel {
   alignedFraction: number;
   enrichmentSafeCount: number;
   shortfallCascades: number;
-  enrichmentConflictPatterns: number;
+  /** Pattern IDs with enrichment-safety conflicts (simulator OpenAPI: array of string). */
+  enrichmentConflictPatterns: string[];
   failureReason: string | null;
   startedAt: string | null;
   completedAt: string | null;

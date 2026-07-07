@@ -34,7 +34,7 @@ function summary(over: Partial<SynthSummaryModel> = {}): SynthSummaryModel {
     alignedFraction: 0.5,
     enrichmentSafeCount: 0,
     shortfallCascades: 0,
-    enrichmentConflictPatterns: 0,
+    enrichmentConflictPatterns: [],
     failureReason: null,
     startedAt: '2026-01-01T00:00:00Z',
     completedAt: '2026-01-01T00:01:00Z',
