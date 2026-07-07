@@ -44,6 +44,32 @@ export interface TimeHeatmap {
   maxCell: number;
 }
 
+/**
+ * One proportional stacked bar for Heatmap A (Change 2): per time bucket, the dropped-vs-kept
+ * split sized to the REAL noise:kept ratio, plus a total-volume weight so busy buckets stand out.
+ */
+export interface TimeSplitBar {
+  bucket: number;
+  label: string;
+  dropped: number;
+  kept: number;
+  total: number;
+  /** Dropped fraction of the bucket [0..1]; null when the bucket is empty (guards div-by-zero). */
+  droppedFraction: number | null;
+  /** Kept fraction of the bucket [0..1]; null when the bucket is empty. */
+  keptFraction: number | null;
+  /** total normalised to the busiest bucket [0..1] — drives overall bar prominence (opacity). */
+  volume: number;
+}
+
+/** Heatmap A (proportional) — one stacked bar per time bucket, split by noise:kept ratio. */
+export interface TimeSplitHeatmap {
+  buckets: TimeBucket[];
+  bars: TimeSplitBar[];
+  /** Busiest bucket's total (dropped+kept) — the volume-scale max; 0 when no data. */
+  maxTotal: number;
+}
+
 /** A single heatmap cell for Heatmap B (trail × time), coloured by noise ratio [0..1]. */
 export interface TrailHeatCell {
   bucket: number;
@@ -213,6 +239,37 @@ export class NoiseStore {
       keptRow: kept.map((count, bucket) => ({ bucket, count, intensity: norm(count) })),
       maxCell,
     };
+  });
+
+  /**
+   * Heatmap A (proportional, Change 2) — one stacked bar per time bucket whose dropped/kept split
+   * is sized to the bucket's REAL noise:kept ratio (dropped ∝ dropped/(dropped+kept)). The overall
+   * bar prominence (volume) encodes the bucket's total so busy buckets stand out. Div-by-zero is
+   * guarded: an empty bucket yields null fractions (rendered as a neutral zero-height marker), never
+   * NaN. Reuses the same bucketing as the count heatmap so counts are conserved.
+   */
+  readonly timeSplitHeatmap = computed<TimeSplitHeatmap>(() => {
+    const hm = this.timeHeatmap();
+    const bars: TimeSplitBar[] = hm.buckets.map((b) => {
+      const dropped = hm.droppedRow[b.index]?.count ?? 0;
+      const kept = hm.keptRow[b.index]?.count ?? 0;
+      const total = dropped + kept;
+      return {
+        bucket: b.index,
+        label: b.label,
+        dropped,
+        kept,
+        total,
+        droppedFraction: total > 0 ? dropped / total : null,
+        keptFraction: total > 0 ? kept / total : null,
+        volume: 0, // filled below once maxTotal is known
+      };
+    });
+    const maxTotal = Math.max(0, ...bars.map((x) => x.total));
+    for (const bar of bars) {
+      bar.volume = maxTotal > 0 ? bar.total / maxTotal : 0;
+    }
+    return { buckets: hm.buckets, bars, maxTotal };
   });
 
   /**

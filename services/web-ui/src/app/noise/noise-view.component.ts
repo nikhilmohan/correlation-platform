@@ -1,6 +1,5 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject } from '@angular/core';
 import { DecimalPipe, PercentPipe } from '@angular/common';
-import { RouterLink } from '@angular/router';
 import { NoiseStore } from './noise.store';
 
 /**
@@ -20,13 +19,13 @@ import { NoiseStore } from './noise.store';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [NoiseStore],
-  imports: [DecimalPipe, PercentPipe, RouterLink],
+  imports: [DecimalPipe, PercentPipe],
   template: `
     <h1>Noise filter</h1>
     <p class="hint">
       How effectively the noise filter collapses alarm storms into clusters and drops chatter — the
       heatmaps below show <strong>when</strong> noise bursts and <strong>where</strong> it concentrates.
-      <a routerLink="/chatter">Review &amp; promote observed chatter →</a>
+      Review &amp; promote observed chatter in the section below.
     </p>
 
     <label class="trail-filter">
@@ -118,55 +117,54 @@ import { NoiseStore } from './noise.store';
         </div>
 
         @if (store.heatmapMode() === 'time') {
-          <!-- HEATMAP A: two heat-rows over time buckets, colour = normalised count. -->
+          <!-- HEATMAP A (proportional, Change 2): one stacked bar per time bucket. Each bucket's
+               dropped/kept split is sized to its REAL noise:kept ratio; overall bar prominence
+               (opacity) encodes the bucket's total volume so busy buckets stand out. -->
           <div
             class="heatmap heatmap-time"
             data-testid="noise-heatmap-time"
-            [style.--cols]="store.timeHeatmap().buckets.length"
+            [style.--cols]="store.timeSplitHeatmap().bars.length"
           >
             <div class="hm-legend">
-              <span class="hm-legend-label">Alarms per bucket</span>
-              <span class="hm-scale" aria-hidden="true">
-                <span class="hm-swatch i0"></span><span class="hm-swatch i1"></span>
-                <span class="hm-swatch i2"></span><span class="hm-swatch i3"></span>
-                <span class="hm-swatch i4"></span>
+              <span class="hm-legend-label">Per bucket: noise vs kept split (bar opacity = volume)</span>
+              <span class="hm-scale-key" aria-hidden="true">
+                <span class="key-swatch dropped"></span><span class="key-text">noise (dropped)</span>
+                <span class="key-swatch kept"></span><span class="key-text">kept (signal)</span>
               </span>
-              <span class="hm-legend-anchors">0 – {{ store.timeHeatmap().maxCell }}</span>
+              <span class="hm-legend-anchors">busiest bucket: {{ store.timeSplitHeatmap().maxTotal }} alarms</span>
             </div>
 
-            <div class="hm-row-label">Dropped as noise</div>
-            <div class="hm-cells">
-              @for (c of store.timeHeatmap().droppedRow; track c.bucket) {
-                <span
-                  class="hm-cell dropped"
-                  data-testid="heat-cell-dropped"
-                  [style.--i]="c.intensity"
-                  [attr.title]="cellTitle('dropped', c.bucket, c.count)"
-                  [attr.aria-label]="cellTitle('dropped', c.bucket, c.count)"
+            <div class="split-bars" role="list">
+              @for (bar of store.timeSplitHeatmap().bars; track bar.bucket) {
+                <div
+                  class="split-bar"
+                  role="listitem"
+                  data-testid="heat-bucket-bar"
+                  [style.--vol]="bar.volume"
+                  [attr.aria-label]="splitBarLabel(bar)"
                 >
-                  <span class="hm-cell-text">{{ c.count || '' }}</span>
-                </span>
-              }
-            </div>
-
-            <div class="hm-row-label">Kept as signal</div>
-            <div class="hm-cells">
-              @for (c of store.timeHeatmap().keptRow; track c.bucket) {
-                <span
-                  class="hm-cell kept"
-                  data-testid="heat-cell-kept"
-                  [style.--i]="c.intensity"
-                  [attr.title]="cellTitle('kept', c.bucket, c.count)"
-                  [attr.aria-label]="cellTitle('kept', c.bucket, c.count)"
-                >
-                  <span class="hm-cell-text">{{ c.count || '' }}</span>
-                </span>
-              }
-            </div>
-
-            <div class="hm-axis">
-              @for (b of store.timeHeatmap().buckets; track b.index) {
-                <span class="hm-axis-tick">{{ b.label }}</span>
+                  <div class="split-stack" [attr.title]="splitBarLabel(bar)">
+                    @if (bar.total > 0) {
+                      <span
+                        class="split-seg dropped"
+                        data-testid="heat-seg-dropped"
+                        [style.height.%]="bar.droppedFraction! * 100"
+                      >
+                        <span class="split-seg-text">{{ bar.dropped }}</span>
+                      </span>
+                      <span
+                        class="split-seg kept"
+                        data-testid="heat-seg-kept"
+                        [style.height.%]="bar.keptFraction! * 100"
+                      >
+                        <span class="split-seg-text">{{ bar.kept }}</span>
+                      </span>
+                    } @else {
+                      <span class="split-empty" data-testid="heat-seg-empty" aria-hidden="true">·</span>
+                    }
+                  </div>
+                  <span class="split-axis-tick">{{ bar.label }}</span>
+                </div>
               }
             </div>
           </div>
@@ -396,18 +394,92 @@ import { NoiseStore } from './noise.store';
         font-variant-numeric: tabular-nums;
       }
 
-      /* Heatmap A layout: label column + a cells grid row per heat-row. */
+      /* Heatmap A (proportional) layout: legend on top, a row of stacked bars below. */
       .heatmap-time {
-        display: grid;
-        grid-template-columns: 9rem 1fr;
+        display: block;
+      }
+      .hm-scale-key {
+        display: inline-flex;
         align-items: center;
-        gap: 0.35rem 0.6rem;
+        gap: 0.35rem;
+        flex-wrap: wrap;
       }
-      .heatmap-time .hm-legend {
-        grid-column: 1 / -1;
+      .key-swatch {
+        width: 0.9rem;
+        height: 0.9rem;
+        border-radius: 3px;
+        border: 1px solid var(--border);
       }
-      .heatmap-time .hm-axis {
-        grid-column: 2;
+      .key-swatch.dropped {
+        background: var(--warn);
+      }
+      .key-swatch.kept {
+        background: var(--ok);
+      }
+      .key-text {
+        font-size: 0.74rem;
+        color: var(--text-muted);
+        margin-right: 0.5rem;
+      }
+      .split-bars {
+        display: grid;
+        grid-template-columns: repeat(var(--cols, 1), 1fr);
+        gap: 3px;
+        align-items: end;
+      }
+      .split-bar {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.25rem;
+        min-width: 0;
+      }
+      /* Bar prominence encodes total volume: busier buckets are more opaque. */
+      .split-stack {
+        display: flex;
+        flex-direction: column;
+        height: 8.5rem;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        overflow: hidden;
+        background: var(--surface-2);
+        opacity: calc(0.4 + 0.6 * var(--vol, 0));
+      }
+      .split-seg {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .split-seg.dropped {
+        background: var(--warn);
+        color: #3a2a00;
+      }
+      .split-seg.kept {
+        background: var(--ok);
+        color: #06280f;
+      }
+      .split-seg-text {
+        font-size: 0.66rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        pointer-events: none;
+      }
+      .split-empty {
+        display: flex;
+        flex: 1;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-muted);
+      }
+      .split-axis-tick {
+        font-size: 0.6rem;
+        color: var(--text-muted);
+        text-align: center;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .hm-row-label {
@@ -506,11 +578,22 @@ export class NoiseViewComponent implements OnInit {
     return fraction === null ? '—' : `${Math.round(fraction * 100)}%`;
   }
 
-  /** Screen-reader label for a Heatmap-A cell, e.g. "12:04, dropped 8 alarms". */
-  cellTitle(kind: 'dropped' | 'kept', bucket: number, count: number): string {
-    const label = this.store.timeHeatmap().buckets[bucket]?.label ?? `#${bucket + 1}`;
-    const noun = kind === 'dropped' ? 'dropped' : 'kept';
-    return `${label}, ${noun} ${count} alarm${count === 1 ? '' : 's'}`;
+  /**
+   * Screen-reader label for a Heatmap-A proportional bar, e.g.
+   * "12:04 — 40 noise / 60 kept (40% noise)". Empty buckets read as "no alarms".
+   */
+  splitBarLabel(bar: {
+    label: string;
+    dropped: number;
+    kept: number;
+    total: number;
+    droppedFraction: number | null;
+  }): string {
+    if (bar.total <= 0 || bar.droppedFraction === null) {
+      return `${bar.label} — no alarms`;
+    }
+    const pct = Math.round(bar.droppedFraction * 100);
+    return `${bar.label} — ${bar.dropped} noise / ${bar.kept} kept (${pct}% noise)`;
   }
 
   /** Screen-reader label for a Heatmap-B cell, e.g. "TR-7 at 12:04, 62% noise (8 of 13)". */
