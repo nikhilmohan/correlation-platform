@@ -70,6 +70,99 @@ describe('Noise store (Part 4)', () => {
   });
 });
 
+describe('Noise store (Part 4) — heatmap derivations', () => {
+  /** Runs spanning a real time range across two trails, for bucketing/heatmap assertions. */
+  function seedRuns(): RunStatsRow[] {
+    const base = (iso: string, trailId: string, alarmsIn: number, kept: number, dropped: number): RunStatsRow =>
+      ({
+        runId: `R-${iso}-${trailId}`,
+        runTimestamp: iso,
+        trailId,
+        snapshotId: 'current',
+        windowStart: iso,
+        windowEnd: iso,
+        eps: 0.5,
+        minSamples: 3,
+        windowSize: 60,
+        algorithm: 'dbscan',
+        alarmsIn,
+        clustersFormed: 2,
+        alarmsKept: kept,
+        alarmsDropped: dropped,
+        noiseRatio: alarmsIn ? dropped / alarmsIn : 0,
+      }) as RunStatsRow;
+    return [
+      base('2026-05-10T00:00:00Z', 'TR-7', 10, 4, 6),
+      base('2026-05-10T00:30:00Z', 'TR-7', 20, 8, 12),
+      base('2026-05-10T01:00:00Z', 'TR-8', 5, 4, 1),
+      base('2026-05-10T02:00:00Z', 'TR-8', 8, 6, 2),
+    ];
+  }
+
+  it('Heatmap A — buckets the runs across the window and sums dropped/kept per bucket', () => {
+    const s = store();
+    s.runStats.set(seedRuns());
+    const hm = s.timeHeatmap();
+    expect(hm.buckets.length).toBeGreaterThanOrEqual(2);
+    // Totals across all buckets equal the raw sums (bucketing conserves counts).
+    const totalDropped = hm.droppedRow.reduce((a, c) => a + c.count, 0);
+    const totalKept = hm.keptRow.reduce((a, c) => a + c.count, 0);
+    expect(totalDropped).toBe(6 + 12 + 1 + 2);
+    expect(totalKept).toBe(4 + 8 + 4 + 6);
+    // The earliest bucket holds the first run's dropped=6; hottest cell = max over both rows (12).
+    expect(hm.droppedRow[0].count).toBe(6);
+    expect(hm.maxCell).toBe(12);
+    // Intensity normalised to the hottest cell.
+    const hottest = hm.droppedRow.find((c) => c.count === 12)!;
+    expect(hottest.intensity).toBeCloseTo(1);
+  });
+
+  it('Heatmap A — degenerate time span falls back to one column per run (chronological)', () => {
+    const s = store();
+    const same = seedRuns().map((r) => ({ ...r, windowStart: '2026-05-10T00:00:00Z', runTimestamp: '2026-05-10T00:00:00Z' }));
+    s.runStats.set(same);
+    const hm = s.timeHeatmap();
+    expect(hm.buckets.length).toBe(same.length);
+  });
+
+  it('Heatmap B — one row per trail (noisiest first), cell = noise ratio dropped/in', () => {
+    const s = store();
+    s.runStats.set(seedRuns());
+    const hm = s.trailHeatmap();
+    expect(hm.rows.map((r) => r.trailId)).toEqual(['TR-7', 'TR-8']); // TR-7 dropped 18 > TR-8 dropped 3
+    const tr7 = hm.rows.find((r) => r.trailId === 'TR-7')!;
+    // The bucket holding TR-7's second run (in 20, dropped 12) → ratio 0.6.
+    const ratios = tr7.cells.map((c) => c.noiseRatio).filter((v) => v !== null);
+    expect(ratios).toContainEqual(0.6);
+  });
+
+  it('Heatmap B — caps to top-N noisiest trails and reports the omitted count', () => {
+    const s = store();
+    // 15 trails, each a single run → 12 shown, 3 omitted.
+    const many: RunStatsRow[] = Array.from({ length: 15 }, (_, i) => ({
+      runId: `R${i}`,
+      runTimestamp: '2026-05-10T00:00:00Z',
+      trailId: `TR-${i}`,
+      snapshotId: 'current',
+      windowStart: `2026-05-10T0${i % 3}:00:00Z`,
+      windowEnd: '2026-05-10T03:00:00Z',
+      eps: 0.5,
+      minSamples: 3,
+      windowSize: 60,
+      algorithm: 'dbscan',
+      alarmsIn: 10 + i,
+      clustersFormed: 2,
+      alarmsKept: 2,
+      alarmsDropped: 8 + i,
+      noiseRatio: 0.5,
+    })) as RunStatsRow[];
+    s.runStats.set(many);
+    const hm = s.trailHeatmap();
+    expect(hm.rows.length).toBe(12);
+    expect(hm.omitted).toBe(3);
+  });
+});
+
 describe('Noise view component (Part 4) — graphical', () => {
   it('renders a prominent aggregate headline (in → kept → dropped → reduction)', async () => {
     const cmp = await mount();
@@ -81,26 +174,43 @@ describe('Noise view component (Part 4) — graphical', () => {
     expect(el.querySelector('[data-testid="agg-reduction"]')?.textContent).toContain(': 1');
   });
 
-  it('renders the kept-vs-dropped proportion bar + noise/storm gauges (CSS/SVG, no chart lib)', async () => {
+  it('renders the kept-vs-dropped proportion bar (CSS/SVG, no chart lib)', async () => {
     const cmp = await mount();
     const el: HTMLElement = cmp.nativeElement;
     const bar = el.querySelector('[data-testid="agg-prop-bar"]') as HTMLElement;
     expect(bar).toBeTruthy();
-    // Two segments summing to the full width; kept + dropped both present.
     expect(bar.querySelector('.seg-kept')).toBeTruthy();
     expect(bar.querySelector('.seg-dropped')).toBeTruthy();
-    // aria-label carries the values (not colour-only).
     expect(bar.getAttribute('aria-label')).toMatch(/kept/i);
-    expect(el.querySelector('[data-testid="gauge-noise"]')).toBeTruthy();
-    expect(el.querySelector('[data-testid="gauge-storm"]')).toBeTruthy();
   });
 
-  it('renders a per-run breakdown bar per run row (with non-zero alarmsIn)', async () => {
+  it('renders Heatmap A by default (time × noise/signal) with dropped/kept cells carrying aria-labels', async () => {
     const cmp = await mount();
-    const rows = cmp.nativeElement.querySelectorAll('[data-testid="run-row"]');
-    expect(rows.length).toBeGreaterThanOrEqual(2);
-    const alarmsIn = (cmp.nativeElement.querySelector('[data-testid="run-alarmsIn"]') as HTMLElement).textContent ?? '';
-    expect(Number(alarmsIn.replace(/\D/g, ''))).toBeGreaterThan(0);
-    expect(cmp.nativeElement.querySelector('[data-testid="run-storm"]')?.textContent).toContain(': 1');
+    const el: HTMLElement = cmp.nativeElement;
+    expect(el.querySelector('[data-testid="noise-heatmap-time"]')).toBeTruthy();
+    const droppedCells = el.querySelectorAll('[data-testid="heat-cell-dropped"]');
+    const keptCells = el.querySelectorAll('[data-testid="heat-cell-kept"]');
+    expect(droppedCells.length).toBeGreaterThan(0);
+    expect(keptCells.length).toBeGreaterThan(0);
+    // Non-colour-only: each cell has an aria-label naming the real count.
+    expect((droppedCells[0] as HTMLElement).getAttribute('aria-label')).toMatch(/dropped \d+ alarm/);
+    // Legend anchors present.
+    expect(el.querySelector('.hm-legend-anchors')?.textContent).toContain('–');
+  });
+
+  it('the toggle switches to Heatmap B (trail × time)', async () => {
+    const cmp = await mount();
+    const el: HTMLElement = cmp.nativeElement;
+    expect(el.querySelector('[data-testid="noise-heatmap-trail"]')).toBeFalsy();
+    const toggle = el.querySelector('[data-testid="noise-heatmap-toggle"]') as HTMLElement;
+    const trailBtn = Array.from(toggle.querySelectorAll('button')).find((b) => /Trail/i.test(b.textContent ?? ''))!;
+    trailBtn.click();
+    cmp.detectChanges();
+    expect(el.querySelector('[data-testid="noise-heatmap-trail"]')).toBeTruthy();
+    expect(el.querySelector('[data-testid="noise-heatmap-time"]')).toBeFalsy();
+    const trailCell = el.querySelector('[data-testid="heat-cell-trail"]') as HTMLElement | null;
+    if (trailCell) {
+      expect(trailCell.getAttribute('aria-label')).toMatch(/noise|no alarms/);
+    }
   });
 });

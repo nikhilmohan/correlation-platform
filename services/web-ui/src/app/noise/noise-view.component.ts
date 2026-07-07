@@ -4,13 +4,16 @@ import { RouterLink } from '@angular/router';
 import { NoiseStore } from './noise.store';
 
 /**
- * Graphical Noise-filter view (Part 4). Its OWN first-level tab/route (`/noise`) — replaces the dense
- * Stats "Noise run-stats" table with an intuitive, dependency-light visualisation:
- *   - a prominent AGGREGATE headline (total alarms in → kept, overall reduction) with a kept-vs-
- *     dropped proportion bar + a Noise-ratio and a Storm-reduction gauge, then
- *   - PER-RUN kept/dropped proportion bars.
- * Pure CSS/SVG (no chart lib) — theme-aware via the app CSS custom properties. Non-colour-only:
- * every gauge/bar carries a text value + an aria-label so it is screen-reader legible.
+ * Graphical Noise-filter view (Part 4). Its OWN first-level tab/route (`/noise`). Keeps the
+ * prominent AGGREGATE headline (Alarms in → Kept → Dropped, storm-reduction) and REPLACES the
+ * wall of per-run proportion bars with TWO heatmaps + a toggle:
+ *   - Heatmap A (default) — Time × noise-vs-signal: two heat-rows (dropped-as-noise, kept-as-
+ *     signal) over time buckets; cell colour = normalised count. Shows WHEN noise bursts.
+ *   - Heatmap B (toggle) — Trail × time: one row per (noisiest) trail, cell colour = noise ratio.
+ *     Shows WHERE + WHEN noise concentrates.
+ * Pure CSS/SVG (CSS grid of intensity-shaded cells) — theme-aware via the app CSS custom
+ * properties. Non-colour-only: a legend with numeric anchors + every cell carries a text value
+ * and an aria-label with the REAL count/ratio so it is screen-reader legible.
  */
 @Component({
   selector: 'app-noise-view',
@@ -21,7 +24,8 @@ import { NoiseStore } from './noise.store';
   template: `
     <h1>Noise filter</h1>
     <p class="hint">
-      How effectively the noise filter collapses alarm storms into clusters and drops chatter.
+      How effectively the noise filter collapses alarm storms into clusters and drops chatter — the
+      heatmaps below show <strong>when</strong> noise bursts and <strong>where</strong> it concentrates.
       <a routerLink="/chatter">Review &amp; promote observed chatter →</a>
     </p>
 
@@ -79,78 +83,151 @@ import { NoiseStore } from './noise.store';
             </span>
           </div>
         }
-
-        <!-- Noise-ratio + Storm-reduction gauges. -->
-        <div class="gauges">
-          <div class="gauge" data-testid="gauge-noise">
-            <span class="gauge-label">Noise ratio</span>
-            <div class="gauge-track" role="img" [attr.aria-label]="'Noise ratio ' + pct(store.aggregate().noiseRatio)">
-              <span class="gauge-fill noise" [style.width.%]="(store.aggregate().noiseRatio ?? 0) * 100"></span>
-            </div>
-            <span class="gauge-value">{{ (store.aggregate().noiseRatio ?? 0) | percent: '1.0-1' }}</span>
-          </div>
-          <div class="gauge" data-testid="gauge-storm">
-            <span class="gauge-label">Storm reduction</span>
-            <div
-              class="gauge-track"
-              role="img"
-              [attr.aria-label]="
-                'Storm reduction ' +
-                (store.aggregate().stormReduction !== null
-                  ? (store.aggregate().stormReduction! | number: '1.1-1') + ' to 1'
-                  : 'not available')
-              "
-            >
-              <span class="gauge-fill storm" [style.width.%]="stormPct(store.aggregate().stormReduction)"></span>
-            </div>
-            <span class="gauge-value">
-              @if (store.aggregate().stormReduction !== null) {
-                {{ store.aggregate().stormReduction! | number: '1.1-1' }} : 1
-              } @else {
-                N/A
-              }
-            </span>
-          </div>
-        </div>
       </section>
 
-      <!-- PER-RUN proportion bars -->
-      <section class="card" aria-labelledby="runs-h">
-        <h2 id="runs-h">Per-run breakdown</h2>
-        <ul class="run-list">
-          @for (r of store.runStats(); track r.runId) {
-            <li class="run" data-testid="run-row">
-              <div class="run-head">
-                <span class="run-id">{{ r.runId }}</span>
-                <span class="run-trail">{{ r.trailId }}</span>
-                <span class="run-in" data-testid="run-alarmsIn">{{ r.alarmsIn }} in</span>
-                <span class="run-storm" data-testid="run-storm">
-                  @if (store.stormReduction(r) !== null) {
-                    {{ store.stormReduction(r)! | number: '1.1-1' }} : 1
-                  } @else {
-                    N/A
-                  }
-                </span>
-              </div>
-              @if (store.keptRatio(r) !== null) {
-                <div
-                  class="prop-bar sm"
-                  role="img"
-                  [attr.aria-label]="
-                    r.runId + ': ' + r.alarmsKept + ' kept, ' + r.alarmsDropped + ' dropped of ' + r.alarmsIn
-                  "
+      <!-- HEATMAPS + toggle -->
+      <section class="card" aria-labelledby="heat-h">
+        <div class="heat-head">
+          <h2 id="heat-h">
+            @if (store.heatmapMode() === 'time') {
+              Noise over time
+            } @else {
+              Noise by trail over time
+            }
+          </h2>
+          <div class="toggle" role="group" aria-label="Choose heatmap" data-testid="noise-heatmap-toggle">
+            <button
+              type="button"
+              class="toggle-btn"
+              [class.active]="store.heatmapMode() === 'time'"
+              [attr.aria-pressed]="store.heatmapMode() === 'time'"
+              (click)="store.setHeatmapMode('time')"
+            >
+              Time × noise/signal
+            </button>
+            <button
+              type="button"
+              class="toggle-btn"
+              [class.active]="store.heatmapMode() === 'trail'"
+              [attr.aria-pressed]="store.heatmapMode() === 'trail'"
+              (click)="store.setHeatmapMode('trail')"
+            >
+              Trail × time
+            </button>
+          </div>
+        </div>
+
+        @if (store.heatmapMode() === 'time') {
+          <!-- HEATMAP A: two heat-rows over time buckets, colour = normalised count. -->
+          <div
+            class="heatmap heatmap-time"
+            data-testid="noise-heatmap-time"
+            [style.--cols]="store.timeHeatmap().buckets.length"
+          >
+            <div class="hm-legend">
+              <span class="hm-legend-label">Alarms per bucket</span>
+              <span class="hm-scale" aria-hidden="true">
+                <span class="hm-swatch i0"></span><span class="hm-swatch i1"></span>
+                <span class="hm-swatch i2"></span><span class="hm-swatch i3"></span>
+                <span class="hm-swatch i4"></span>
+              </span>
+              <span class="hm-legend-anchors">0 – {{ store.timeHeatmap().maxCell }}</span>
+            </div>
+
+            <div class="hm-row-label">Dropped as noise</div>
+            <div class="hm-cells">
+              @for (c of store.timeHeatmap().droppedRow; track c.bucket) {
+                <span
+                  class="hm-cell dropped"
+                  data-testid="heat-cell-dropped"
+                  [style.--i]="c.intensity"
+                  [attr.title]="cellTitle('dropped', c.bucket, c.count)"
+                  [attr.aria-label]="cellTitle('dropped', c.bucket, c.count)"
                 >
-                  <span class="seg seg-kept" [style.width.%]="store.keptRatio(r)! * 100">
-                    <span class="seg-text">{{ r.alarmsKept }}</span>
-                  </span>
-                  <span class="seg seg-dropped" [style.width.%]="store.droppedRatio(r)! * 100">
-                    <span class="seg-text">{{ r.alarmsDropped }}</span>
-                  </span>
+                  <span class="hm-cell-text">{{ c.count || '' }}</span>
+                </span>
+              }
+            </div>
+
+            <div class="hm-row-label">Kept as signal</div>
+            <div class="hm-cells">
+              @for (c of store.timeHeatmap().keptRow; track c.bucket) {
+                <span
+                  class="hm-cell kept"
+                  data-testid="heat-cell-kept"
+                  [style.--i]="c.intensity"
+                  [attr.title]="cellTitle('kept', c.bucket, c.count)"
+                  [attr.aria-label]="cellTitle('kept', c.bucket, c.count)"
+                >
+                  <span class="hm-cell-text">{{ c.count || '' }}</span>
+                </span>
+              }
+            </div>
+
+            <div class="hm-axis">
+              @for (b of store.timeHeatmap().buckets; track b.index) {
+                <span class="hm-axis-tick">{{ b.label }}</span>
+              }
+            </div>
+          </div>
+        } @else {
+          <!-- HEATMAP B: trail (row) × time (col), colour = noise ratio dropped/in. -->
+          <div
+            class="heatmap heatmap-trail"
+            data-testid="noise-heatmap-trail"
+            [style.--cols]="store.trailHeatmap().buckets.length"
+          >
+            <div class="hm-legend">
+              <span class="hm-legend-label">Noise ratio (dropped / in)</span>
+              <span class="hm-scale" aria-hidden="true">
+                <span class="hm-swatch i0"></span><span class="hm-swatch i1"></span>
+                <span class="hm-swatch i2"></span><span class="hm-swatch i3"></span>
+                <span class="hm-swatch i4"></span>
+              </span>
+              <span class="hm-legend-anchors">0% – 100%</span>
+            </div>
+
+            @if (store.trailHeatmap().rows.length) {
+              @for (row of store.trailHeatmap().rows; track row.trailId) {
+                <div class="hm-trail-row" data-testid="heat-trail-row">
+                  <div class="hm-row-label trail" [attr.title]="row.trailId">{{ row.trailId }}</div>
+                  <div class="hm-cells">
+                    @for (c of row.cells; track c.bucket) {
+                      <span
+                        class="hm-cell noise"
+                        data-testid="heat-cell-trail"
+                        [style.--i]="c.noiseRatio ?? 0"
+                        [class.empty]="c.noiseRatio === null"
+                        [attr.title]="trailCellTitle(row.trailId, c.bucket, c)"
+                        [attr.aria-label]="trailCellTitle(row.trailId, c.bucket, c)"
+                      >
+                        <span class="hm-cell-text">
+                          @if (c.noiseRatio !== null) {
+                            {{ c.noiseRatio | percent: '1.0-0' }}
+                          } @else {
+                            —
+                          }
+                        </span>
+                      </span>
+                    }
+                  </div>
                 </div>
               }
-            </li>
-          }
-        </ul>
+              <div class="hm-axis trail">
+                @for (b of store.trailHeatmap().buckets; track b.index) {
+                  <span class="hm-axis-tick">{{ b.label }}</span>
+                }
+              </div>
+              @if (store.trailHeatmap().omitted > 0) {
+                <p class="hm-omitted" data-testid="heat-trail-omitted">
+                  +{{ store.trailHeatmap().omitted }} more trails (showing the noisiest)
+                </p>
+              }
+            } @else {
+              <p class="empty-state">No trail data.</p>
+            }
+          </div>
+        }
       </section>
     } @else {
       <p class="empty-state">No run-stats yet.</p>
@@ -207,7 +284,6 @@ import { NoiseStore } from './noise.store';
       .agg-value.dropped {
         color: var(--warn);
       }
-      /* Kept-vs-dropped proportion bar (flex segments summing to 100%). */
       .prop-bar {
         display: flex;
         width: 100%;
@@ -216,10 +292,6 @@ import { NoiseStore } from './noise.store';
         overflow: hidden;
         border: 1px solid var(--border);
         background: var(--surface-2);
-      }
-      .prop-bar.sm {
-        height: 1.4rem;
-        margin-top: 0.3rem;
       }
       .seg {
         display: flex;
@@ -244,83 +316,181 @@ import { NoiseStore } from './noise.store';
         overflow: hidden;
         text-overflow: ellipsis;
       }
-      .gauges {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-        gap: 1.25rem;
-        margin-top: 1.1rem;
-      }
-      .gauge {
-        display: grid;
-        grid-template-columns: 9rem 1fr auto;
+
+      /* ---- Heatmaps ---- */
+      .heat-head {
+        display: flex;
         align-items: center;
-        gap: 0.6rem;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.8rem;
       }
-      .gauge-label {
-        color: var(--text-muted);
-        font-size: 0.82rem;
-        font-weight: 600;
-      }
-      .gauge-track {
-        height: 0.7rem;
-        border-radius: 999px;
-        background: var(--surface-2);
+      .toggle {
+        display: inline-flex;
         border: 1px solid var(--border);
+        border-radius: 8px;
         overflow: hidden;
       }
-      .gauge-fill {
-        display: block;
-        height: 100%;
+      .toggle-btn {
+        background: var(--surface-2);
+        color: var(--text-muted);
+        border: 0;
+        padding: 0.4rem 0.8rem;
+        font-size: 0.82rem;
+        font-weight: 600;
+        cursor: pointer;
       }
-      .gauge-fill.noise {
-        background: var(--warn);
+      .toggle-btn + .toggle-btn {
+        border-left: 1px solid var(--border);
       }
-      .gauge-fill.storm {
+      .toggle-btn.active {
         background: var(--accent);
+        color: #04121f;
       }
-      .gauge-value {
-        font-weight: 700;
-        font-size: 0.85rem;
-        white-space: nowrap;
+      .toggle-btn:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
       }
-      .run-list {
-        list-style: none;
-        padding: 0;
-        margin: 0;
+
+      .hm-legend {
         display: flex;
-        flex-direction: column;
-        gap: 0.9rem;
-      }
-      .run-head {
-        display: flex;
-        align-items: baseline;
-        gap: 0.75rem;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.8rem;
         flex-wrap: wrap;
       }
-      .run-id {
-        font-weight: 700;
-      }
-      .run-trail {
+      .hm-legend-label {
+        font-size: 0.78rem;
         color: var(--text-muted);
-        font-size: 0.85rem;
-      }
-      .run-in {
-        color: var(--text-muted);
-        font-size: 0.85rem;
-      }
-      .run-storm {
-        margin-left: auto;
         font-weight: 600;
-        font-size: 0.85rem;
+      }
+      .hm-scale {
+        display: inline-flex;
+        gap: 2px;
+      }
+      .hm-swatch {
+        width: 1.4rem;
+        height: 0.8rem;
+        border-radius: 2px;
+        border: 1px solid var(--border);
+      }
+      .hm-swatch.i0 {
+        background: var(--surface-2);
+      }
+      .hm-swatch.i1 {
+        background: color-mix(in srgb, var(--accent) 25%, var(--surface-2));
+      }
+      .hm-swatch.i2 {
+        background: color-mix(in srgb, var(--accent) 50%, var(--surface-2));
+      }
+      .hm-swatch.i3 {
+        background: color-mix(in srgb, var(--accent) 75%, var(--surface-2));
+      }
+      .hm-swatch.i4 {
+        background: var(--accent);
+      }
+      .hm-legend-anchors {
+        font-size: 0.78rem;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Heatmap A layout: label column + a cells grid row per heat-row. */
+      .heatmap-time {
+        display: grid;
+        grid-template-columns: 9rem 1fr;
+        align-items: center;
+        gap: 0.35rem 0.6rem;
+      }
+      .heatmap-time .hm-legend {
+        grid-column: 1 / -1;
+      }
+      .heatmap-time .hm-axis {
+        grid-column: 2;
+      }
+
+      .hm-row-label {
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      .hm-cells {
+        display: grid;
+        grid-template-columns: repeat(var(--cols, 1), 1fr);
+        gap: 2px;
+      }
+      .hm-cell {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 1.9rem;
+        border-radius: 3px;
+        border: 1px solid var(--border);
+        /* intensity --i in [0..1] drives the accent mix (colour) — text value is always present. */
+        background: color-mix(in srgb, var(--accent) calc(var(--i, 0) * 100%), var(--surface-2));
+      }
+      .hm-cell.kept {
+        background: color-mix(in srgb, var(--ok) calc(var(--i, 0) * 100%), var(--surface-2));
+      }
+      .hm-cell.dropped {
+        background: color-mix(in srgb, var(--warn) calc(var(--i, 0) * 100%), var(--surface-2));
+      }
+      .hm-cell.noise {
+        background: color-mix(in srgb, var(--warn) calc(var(--i, 0) * 100%), var(--surface-2));
+      }
+      .hm-cell.empty {
+        opacity: 0.55;
+      }
+      .hm-cell-text {
+        font-size: 0.68rem;
+        font-weight: 700;
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+        pointer-events: none;
+      }
+      .hm-axis {
+        display: grid;
+        grid-template-columns: repeat(var(--cols, 1), 1fr);
+        gap: 2px;
+      }
+      .hm-axis-tick {
+        font-size: 0.62rem;
+        color: var(--text-muted);
+        text-align: center;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      /* Heatmap B layout: a labelled row per trail. */
+      .heatmap-trail .hm-trail-row {
+        display: grid;
+        grid-template-columns: 9rem 1fr;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 2px;
+      }
+      .hm-row-label.trail {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text);
+      }
+      .hm-axis.trail {
+        margin-left: calc(9rem + 0.6rem);
+      }
+      .hm-omitted {
+        color: var(--text-muted);
+        font-size: 0.8rem;
+        margin: 0.6rem 0 0;
       }
     `,
   ],
 })
 export class NoiseViewComponent implements OnInit {
   readonly store = inject(NoiseStore);
-
-  /** Cap the storm-reduction gauge fill at a sensible max (30:1) so a huge ratio doesn't overflow. */
-  private static readonly STORM_GAUGE_MAX = 30;
 
   ngOnInit(): void {
     this.store.loadRunStats();
@@ -331,16 +501,28 @@ export class NoiseViewComponent implements OnInit {
     this.store.loadRunStats(value || undefined);
   }
 
-  /** Storm-reduction ratio → a 0-100 gauge width, clamped to the gauge max. */
-  stormPct(ratio: number | null): number {
-    if (ratio === null) {
-      return 0;
-    }
-    return Math.min(100, (ratio / NoiseViewComponent.STORM_GAUGE_MAX) * 100);
-  }
-
   /** Format a [0..1] fraction as a whole-percent string for aria-labels ('—' when null). */
   pct(fraction: number | null): string {
     return fraction === null ? '—' : `${Math.round(fraction * 100)}%`;
+  }
+
+  /** Screen-reader label for a Heatmap-A cell, e.g. "12:04, dropped 8 alarms". */
+  cellTitle(kind: 'dropped' | 'kept', bucket: number, count: number): string {
+    const label = this.store.timeHeatmap().buckets[bucket]?.label ?? `#${bucket + 1}`;
+    const noun = kind === 'dropped' ? 'dropped' : 'kept';
+    return `${label}, ${noun} ${count} alarm${count === 1 ? '' : 's'}`;
+  }
+
+  /** Screen-reader label for a Heatmap-B cell, e.g. "TR-7 at 12:04, 62% noise (8 of 13)". */
+  trailCellTitle(
+    trailId: string,
+    bucket: number,
+    cell: { alarmsIn: number; alarmsDropped: number; noiseRatio: number | null },
+  ): string {
+    const label = this.store.trailHeatmap().buckets[bucket]?.label ?? `#${bucket + 1}`;
+    if (cell.noiseRatio === null) {
+      return `${trailId} at ${label}, no alarms`;
+    }
+    return `${trailId} at ${label}, ${Math.round(cell.noiseRatio * 100)}% noise (${cell.alarmsDropped} of ${cell.alarmsIn})`;
   }
 }
