@@ -145,6 +145,19 @@ public class AlarmRepository {
         return c != null && c > 0;
     }
 
+    /**
+     * Read the alarm's CURRENT {@code lifecycle_state} (STATE channel) without loading the whole
+     * row. Used by the state-precedence guard so a stronger state (e.g. {@code correlated}) is never
+     * downgraded by a later out-of-order status-sync event. {@link Optional#empty()} when the alarm
+     * does not exist.
+     */
+    public Optional<LifecycleState> currentLifecycleState(String alarmId) {
+        return jdbc.query("SELECT lifecycle_state FROM live_alarm.alarm WHERE alarm_id = ?",
+                rs -> rs.next() ? Optional.of(LifecycleState.fromWire(rs.getString(1)))
+                        : Optional.empty(),
+                alarmId);
+    }
+
     /** Filtered, paged list of alarm summaries. */
     public List<AlarmRecord> query(AlarmQueryFilter f) {
         StringBuilder sql = new StringBuilder("SELECT * FROM live_alarm.alarm WHERE 1 = 1");
