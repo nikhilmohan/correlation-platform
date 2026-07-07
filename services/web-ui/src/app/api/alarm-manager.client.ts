@@ -1,8 +1,8 @@
 import { Injectable } from '@angular/core';
-import { Observable } from 'rxjs';
+import { Observable, catchError, forkJoin, map, of } from 'rxjs';
 import { HttpBaseClient } from './http-base';
 import { ServiceKey } from '../core/api-config.service';
-import { AlarmDetail, AlarmPage, LifecycleState } from './models';
+import { AlarmDetail, AlarmPage, AlarmSummary, LifecycleState } from './models';
 
 /**
  * Alarm Manager alarm-lifecycle query API (frozen AM OpenAPI, P3 + streaming + incident-detail).
@@ -27,5 +27,25 @@ export class AlarmManagerClient extends HttpBaseClient {
 
   getAlarm(alarmId: string): Observable<AlarmDetail> {
     return this.get<AlarmDetail>(`/alarms/${encodeURIComponent(alarmId)}`);
+  }
+
+  /**
+   * Resolve many alarms by id concurrently (fan-out of `GET /alarms/{id}`). Used by the
+   * incident-first Alarms view to hydrate each incident's root-cause + child alarms (the
+   * correlated rows never appear in the flat `/alarms` window). Resilient: an id that 404s (or any
+   * per-id error) is skipped rather than failing the whole batch, so a group still renders minus a
+   * missing member. De-duplicates the id list, preserves the resolved order by input id, and
+   * resolves to `[]` for an empty id list (no HTTP).
+   */
+  getAlarms(ids: readonly string[]): Observable<AlarmSummary[]> {
+    const unique = [...new Set(ids)].filter((id) => id.length > 0);
+    if (unique.length === 0) {
+      return of([]);
+    }
+    return forkJoin(
+      unique.map((id) =>
+        this.getAlarm(id).pipe(catchError(() => of(null))),
+      ),
+    ).pipe(map((results) => results.filter((a): a is AlarmDetail => a !== null)));
   }
 }

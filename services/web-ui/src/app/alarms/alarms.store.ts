@@ -1,9 +1,14 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
-import { catchError, of } from 'rxjs';
+import { catchError, forkJoin, of } from 'rxjs';
 import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { CorrelationEngineClient } from '../api/correlation-engine.client';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { AlarmSummary, IncidentVM, LifecycleState, StatsVM } from '../api/models';
+
+/** How many incidents to pull so ALL live incidents are covered (they are older than the flat tail). */
+const INCIDENT_PAGE_LIMIT = 200;
+/** How many recent (raw, uncorrelated) alarms to pull for the plain "open" tail. */
+const OPEN_TAIL_LIMIT = 50;
 
 /**
  * One row in the unified Alarms stream (Part 3). The stream is a FLAT, timestamp-descending list of
@@ -116,19 +121,35 @@ export class AlarmsStore {
     return rows.sort((a, b) => ms(b.alarm) - ms(a.alarm) || a.alarm.alarmId.localeCompare(b.alarm.alarmId));
   });
 
+  /**
+   * INCIDENT-FIRST load (the fix). The flat `/alarms` window only ever returns the freshest,
+   * still-UNCORRELATED tail — correlated alarms are older and never appear there — so grouping off a
+   * flat page yields zero groups. Instead we drive the view from the Correlation Engine's incidents:
+   *
+   *   1. `GET /incidents?limit=200`   — every live incident (RCA id + child ids + trail + confidence).
+   *   2. `GET /stats`                 — the KPI header numbers.
+   *   3. `GET /alarms?limit=50`       — the recent raw/open tail (the legitimate uncorrelated rows).
+   *   4. For every incident, resolve its RCA + child alarms by id via `AlarmManagerClient.getAlarms`
+   *      (a concurrent `GET /alarms/{id}` fan-out; a 404 on one id skips just that alarm). All
+   *      incidents' id sets are resolved together in one `forkJoin`.
+   *
+   * The resolved correlated alarms + the de-duped open tail are merged into `alarms()`; `rows()` then
+   * groups them exactly as before (RCA row + nested children, interleaved with plain rows by
+   * timestamp-desc). Nothing here changes any service contract.
+   */
   loadAll(): void {
-    this.am
-      .listAlarms()
-      .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
-      .subscribe((p) => this.alarms.set(p.items));
-    this.ce
-      .listIncidents()
-      .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
-      .subscribe((p) => this.incidents.set(p.items));
-    this.ce
-      .getStats()
-      .pipe(catchError(() => of(null)))
-      .subscribe((s) => this.stats.set(s));
+    forkJoin({
+      incidents: this.ce.listIncidents({ limit: INCIDENT_PAGE_LIMIT }).pipe(catchError(() => of(null))),
+      stats: this.ce.getStats().pipe(catchError(() => of(null))),
+      openTail: this.am.listAlarms({ limit: OPEN_TAIL_LIMIT }).pipe(catchError(() => of(null))),
+    }).subscribe(({ incidents, stats, openTail }) => {
+      if (stats) {
+        this.stats.set(stats);
+      }
+      const incidentList = incidents?.items ?? [];
+      this.incidents.set(incidentList);
+      this.resolveAndAssemble(incidentList, openTail?.items ?? []);
+    });
   }
 
   setStateFilter(state: LifecycleState | 'all'): void {
@@ -136,18 +157,68 @@ export class AlarmsStore {
   }
 
   /**
-   * Apply a live poll snapshot (from `LivePollingService`) to the store's alarm + incident signals so
-   * `rows()`, the KPI numbers and the incident grouping all update in real time without a second
-   * fetch. Stats are refreshed separately (the poll loop does not carry the stats envelope), so a
-   * null incidents snapshot on an errored tick leaves the previous data intact — the caller keeps
-   * the last-good view and shows a stale indicator instead of blanking the table.
+   * Resolve every incident's alarms by id (RCA + children), then merge the correlated result with the
+   * recent open tail into `alarms()`. An incident referencing an id that 404s still renders (the
+   * missing member is skipped by `getAlarms`). When there are no incidents we still show the open
+   * tail. Resilient to the by-id fan-out failing wholesale (falls back to the open tail alone).
+   */
+  private resolveAndAssemble(incidents: readonly IncidentVM[], openTail: readonly AlarmSummary[]): void {
+    const ids = new Set<string>();
+    for (const inc of incidents) {
+      if (inc.rootCauseAlarmId) {
+        ids.add(inc.rootCauseAlarmId);
+      }
+      for (const cid of inc.childAlarmIds ?? []) {
+        ids.add(cid);
+      }
+    }
+    if (ids.size === 0) {
+      this.alarms.set(this.mergeOpenTail([], openTail));
+      return;
+    }
+    this.am
+      .getAlarms([...ids])
+      .pipe(catchError(() => of<AlarmSummary[]>([])))
+      .subscribe((correlated) => {
+        this.alarms.set(this.mergeOpenTail(correlated, openTail));
+      });
+  }
+
+  /**
+   * Merge the incident-resolved correlated alarms with the recent open tail, DE-DUPING: any tail
+   * alarm whose id already appears inside a resolved group is dropped (it must render only once, in
+   * its group). Correlated alarms win on id collision.
+   */
+  private mergeOpenTail(correlated: readonly AlarmSummary[], openTail: readonly AlarmSummary[]): AlarmSummary[] {
+    const byId = new Map<string, AlarmSummary>();
+    for (const a of correlated) {
+      byId.set(a.alarmId, a);
+    }
+    for (const a of openTail) {
+      if (!byId.has(a.alarmId)) {
+        byId.set(a.alarmId, a);
+      }
+    }
+    return [...byId.values()];
+  }
+
+  /**
+   * Apply a live poll snapshot (from `LivePollingService`) to the store's incident + alarm signals so
+   * `rows()`, the KPI numbers and the incident grouping all update in real time. The snapshot carries
+   * the fresh incident list + the raw open tail; we re-resolve the incidents' alarms by id (moving a
+   * newly-correlated alarm out of the plain tail and into its incident group live). A null snapshot on
+   * an errored tick leaves the previous data intact — the caller keeps the last-good view and shows a
+   * stale indicator instead of blanking the table.
    */
   applyLiveSnapshot(alarms: AlarmSummary[] | null, incidents: IncidentVM[] | null): void {
-    if (alarms) {
-      this.alarms.set(alarms);
-    }
     if (incidents) {
       this.incidents.set(incidents);
+    }
+    // Re-resolve against the freshest incident list we have, using the freshest open tail we have.
+    const inc = incidents ?? this.incidents();
+    const tail = alarms ?? [];
+    if (incidents || alarms) {
+      this.resolveAndAssemble(inc, tail);
     }
   }
 
