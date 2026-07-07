@@ -5,13 +5,27 @@ import com.acp.correlationengine.correlate.CorrelationEngine;
 import com.acp.correlationengine.incident.IncidentRepository;
 
 /**
- * Assembles {@link StatsView} for {@code GET /stats}. {@code totalAlarmsProcessed} is the engine's
- * distinct-ingest count; the incident-derived counts ({@code totalIncidentsCreated},
- * {@code patternMatchCount}, {@code codebookMatchCount}, {@code correlatedAlarmCount},
- * {@code confidenceDistribution}) come from the owned Incident Store — so both numerator and
- * denominator of the auto-correlation rate ({@code correlatedAlarmCount / totalAlarmsProcessed})
- * are self-contained and reproducible (D1). {@code rcaAccuracy} is {@code null} unless eval-mode is
- * on and a labels oracle is wired (D2).
+ * Assembles {@link StatsView} for {@code GET /stats}.
+ *
+ * <p><b>Scope consistency (auto-correlation rate).</b> Both the numerator and the denominator of the
+ * auto-correlation rate ({@code correlatedAlarmCount / totalAlarmsProcessed}) MUST come from the same
+ * scope, else the ratio is meaningless. They are both sourced from the engine's own session-scoped
+ * in-memory state: {@code totalAlarmsProcessed} = {@link CorrelationEngine#totalAlarmsProcessed()}
+ * (distinct alarmIds ingested this session) and {@code correlatedAlarmCount} =
+ * {@link CorrelationEngine#correlatedAlarmCount()} (distinct alarmIds correlated into an incident this
+ * session). These two counters share one lifetime and reset together on restart, and every correlated
+ * alarm was necessarily ingested first — so {@code correlatedAlarmCount <= totalAlarmsProcessed}
+ * always holds and the rate stays in {@code [0, 1]}.
+ *
+ * <p>The numerator deliberately does NOT read {@code repository.distinctCorrelatedAlarmCount()}: that
+ * is an ALL-TIME count over the persistent Incident Store, which — paired with the since-restart
+ * in-memory denominator — produced the impossible &gt;100% auto-correlation rate observed live
+ * (279 all-time correlated / 181 since-restart processed = 154%).
+ *
+ * <p>The remaining counts ({@code totalIncidentsCreated}, {@code patternMatchCount},
+ * {@code codebookMatchCount}, {@code confidenceDistribution}) stay incident-derived — they are
+ * standalone all-time counts used for the alarm-reduction view, not for the auto-correlation rate.
+ * {@code rcaAccuracy} is {@code null} unless eval-mode is on and a labels oracle is wired (D2).
  */
 public class StatsAggregator {
 
@@ -29,7 +43,7 @@ public class StatsAggregator {
     public StatsView snapshot() {
         return new StatsView(
                 engine.totalAlarmsProcessed(),
-                repository.distinctCorrelatedAlarmCount(),
+                engine.correlatedAlarmCount(),
                 repository.totalIncidents(),
                 repository.countByMatchType("pattern"),
                 repository.countByMatchType("codebook"),

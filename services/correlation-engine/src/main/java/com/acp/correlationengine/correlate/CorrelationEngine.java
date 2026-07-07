@@ -293,6 +293,21 @@ public class CorrelationEngine {
         return processedAlarmIds.size();
     }
 
+    /**
+     * @return the count of distinct {@code alarmId}s the engine has CORRELATED into a committed
+     *     incident (root-cause or child) — the {@code correlatedAlarmCount} numerator of the
+     *     auto-correlation rate (D1). Sourced from the engine's own {@link #correlatedAlarmIds} set,
+     *     which shares its lifetime with {@link #processedAlarmIds} (both are session-scoped in-memory
+     *     state that reset together on restart). Every correlated alarm was necessarily ingested
+     *     first, so {@code correlatedAlarmCount() <= totalAlarmsProcessed()} always holds and the
+     *     auto-correlation rate stays in {@code [0, 1]}. This deliberately does NOT read the persistent
+     *     Incident Store: mixing an all-time DB numerator with a since-restart in-memory denominator is
+     *     what produced the impossible &gt;100% rate live.
+     */
+    public synchronized long correlatedAlarmCount() {
+        return correlatedAlarmIds.size();
+    }
+
     /** @return true if a live instance exists for {@code (trailId, patternId)} (test introspection). */
     public synchronized boolean hasInstance(String trailId, String patternId) {
         return instances.containsKey(key(trailId, patternId));

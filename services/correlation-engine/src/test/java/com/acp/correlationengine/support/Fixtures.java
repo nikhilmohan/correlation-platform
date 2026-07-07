@@ -1,9 +1,12 @@
 package com.acp.correlationengine.support;
 
+import com.acp.correlationengine.model.Incident;
+import com.acp.correlationengine.model.MatchCandidate;
 import com.acp.correlationengine.model.ObservedAlarm;
 import com.acp.correlationengine.model.PatternRef;
 import com.acp.correlationengine.model.TrailScenarioSignature;
 import com.acp.correlationengine.model.WindowType;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,6 +59,18 @@ public final class Fixtures {
             String rootCauseAlarmType, long windowMs) {
         return pattern(patternId, trailId, sequence, rootCauseAlarmType, 0.9, windowMs,
                 WindowType.FIXED);
+    }
+
+    /**
+     * A committed pattern-match incident for repository-seeding tests (e.g. simulating prior-run
+     * all-time history in the Incident Store). Each incident's fingerprint is derived from its id so
+     * distinct ids persist as distinct rows.
+     */
+    public static Incident incident(String incidentId, String trailId, String rootCauseAlarmId,
+            String rootCauseAlarmType, List<String> childAlarmIds) {
+        return new Incident(incidentId, trailId, rootCauseAlarmId, rootCauseAlarmType, childAlarmIds,
+                "P", null, 0.9, MatchCandidate.MatchType.PATTERN, "fp-" + incidentId,
+                Instant.parse("2026-06-11T12:00:00Z"));
     }
 
     public static TrailScenarioSignature scenario(String codebookId, String trailId,
