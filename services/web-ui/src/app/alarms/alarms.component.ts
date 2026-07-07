@@ -681,11 +681,13 @@ export class AlarmsComponent implements OnInit {
   readonly live = inject(LivePollingService);
 
   /**
-   * Incidents whose child alarms are expanded (default collapsed). Keyed by incidentId, so the set
-   * SURVIVES every poll tick — a refresh that rewrites the alarm list never collapses a group the
-   * operator opened (Feature 2: preserve expand state across refreshes).
+   * Incidents the operator has EXPLICITLY COLLAPSED. The default is expanded: a group is shown open
+   * unless its incidentId is in this set. We track collapses (not expands) so groups arriving on a
+   * live poll tick — whose ids are NOT in the set — render expanded automatically, and so a refresh
+   * that rewrites the alarm list never re-collapses a group the operator opened (Feature 2: preserve
+   * expand state across refreshes).
    */
-  private readonly expanded = signal<ReadonlySet<string>>(new Set());
+  private readonly collapsed = signal<ReadonlySet<string>>(new Set());
 
   /**
    * Compact, unambiguous absolute-timestamp format: `dd MMM yy HH:mm:ss.SSS` (day, short month,
@@ -712,10 +714,14 @@ export class AlarmsComponent implements OnInit {
       .map((r) => r.incidentId!),
   );
 
-  /** True when every current group is expanded (drives the expand-all/collapse-all label). */
+  /**
+   * True when every current group is expanded (drives the expand-all/collapse-all label). With the
+   * collapsed-set model this means: NONE of the current group ids is in `collapsed`.
+   */
   readonly allExpanded = computed<boolean>(() => {
     const ids = this.groupIds();
-    return ids.length > 0 && ids.every((id) => this.expanded().has(id));
+    const collapsed = this.collapsed();
+    return ids.length > 0 && ids.every((id) => !collapsed.has(id));
   });
 
   constructor() {
@@ -745,23 +751,24 @@ export class AlarmsComponent implements OnInit {
     this.store.setStateFilter(value);
   }
 
+  /** Groups are expanded by DEFAULT — only hidden once the operator collapses them. */
   isExpanded(incidentId: string): boolean {
-    return this.expanded().has(incidentId);
+    return !this.collapsed().has(incidentId);
   }
 
   toggle(incidentId: string): void {
-    const next = new Set(this.expanded());
+    const next = new Set(this.collapsed());
     if (next.has(incidentId)) {
       next.delete(incidentId);
     } else {
       next.add(incidentId);
     }
-    this.expanded.set(next);
+    this.collapsed.set(next);
   }
 
-  /** Expand every group when any is collapsed, otherwise collapse all. */
+  /** Collapse every group when all are expanded, otherwise expand all (clear the collapsed set). */
   toggleExpandAll(): void {
-    this.expanded.set(this.allExpanded() ? new Set() : new Set(this.groupIds()));
+    this.collapsed.set(this.allExpanded() ? new Set(this.groupIds()) : new Set());
   }
 
   /** Pause/resume the live poll loop (reuses LivePollingService.autoRefresh). */
