@@ -627,13 +627,15 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   /**
-   * Refresh the alarm overlay (the `data-testid="map-refresh"` button): re-pull the alarm snapshot
-   * and re-pull the per-site objects; the pin-colour effect + status-bar counts re-paint reactively
-   * from the new snapshot. Does NOT rebuild the map/basemap — only the overlay recolours.
+   * Refresh the alarm overlay (the `data-testid="map-refresh"` button): re-pull the alarm snapshot;
+   * the pin-colour effect + status-bar counts re-paint reactively from the new snapshot. Does NOT
+   * rebuild the map/basemap — only the overlay recolours. The per-site object cache is only fanned
+   * out if it hasn't been loaded yet (site objects don't change between refreshes — only alarms do),
+   * so a Refresh normally re-pulls alarms ONLY (ensureSiteObjectsLoaded no-ops once cached).
    */
   refreshAlarms(): void {
     this.store.refreshAlarms();
-    this.store.loadAllSiteObjects();
+    this.store.ensureSiteObjectsLoaded();
   }
 
   async ngAfterViewInit(): Promise<void> {

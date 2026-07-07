@@ -41,6 +41,28 @@ describe('alarm-severity — node-token extraction', () => {
     expect(nodeTokensOf(null).size).toBe(0);
     expect(nodeTokensOf(undefined).size).toBe(0);
   });
+
+  it('tokens are EXACT — N3 does NOT match N30 (no accidental prefix/substring attribution)', () => {
+    // The greedy /N\d+/g extracts the WHOLE run of digits, so `Node:N30` yields the token `N30`,
+    // never `N3`. Set.has then requires an exact token match, so an alarm on N30 can never colour a
+    // device whose token is N3 (and vice-versa). This locks the token-exactness the fix relies on.
+    expect([...nodeTokensOf('Node:N3')]).toEqual(['N3']);
+    expect([...nodeTokensOf('Node:N30')]).toEqual(['N30']);
+    expect(nodeTokensOf('Node:N30').has('N3')).toBe(false);
+    expect(nodeTokensOf('Node:N3').has('N30')).toBe(false);
+
+    // End-to-end: an active critical on N30 must NOT colour a device whose sole token is N3.
+    const alarms = [alarm({ managedObjectId: 'Node:N30', perceivedSeverity: 'critical', lifecycleState: 'open' })];
+    expect(worstBucketForTokens(alarms, nodeTokensOf('Node:N3'))).toBe('green');
+    expect(worstBucketForTokens(alarms, nodeTokensOf('Node:N30'))).toBe('red');
+    // And the reverse: an alarm on N3 does not light up N30.
+    const alarmsN3 = [alarm({ managedObjectId: 'Node:N3', perceivedSeverity: 'critical', lifecycleState: 'open' })];
+    expect(worstBucketForTokens(alarmsN3, nodeTokensOf('Node:N30'))).toBe('green');
+
+    // The link-moid case that the reviewer flagged as the reason NOT to use \bN\d+\b (underscore is a
+    // word-boundary char, which would break this): `IPLink:N30_N31` must still yield BOTH N30 and N31.
+    expect([...nodeTokensOf('IPLink:N30_N31')].sort()).toEqual(['N30', 'N31']);
+  });
 });
 
 describe('alarm-severity — severity → bucket mapping', () => {
