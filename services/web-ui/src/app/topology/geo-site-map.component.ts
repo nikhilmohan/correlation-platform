@@ -614,10 +614,12 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnInit(): void {
     this.store.loadSites();
-    // Pull the alarm snapshot + each site's objects so the pins can be coloured by the site's worst
-    // active alarm severity. loadAllSiteObjects re-runs once sites arrive (guarded no-op before then).
+    // Pull the alarm snapshot so the pins can be coloured by the site's worst active alarm severity.
+    // The per-site objects fan-out is NOT kicked off here: loadSites() is async, so at this point
+    // sites() is still empty and a one-shot loadAllSiteObjects() would no-op and never retry (the
+    // live bug). Instead the store's reactive effect loads the per-site objects the moment sites()
+    // becomes non-empty. The Refresh button still force-re-pulls both (see refreshAlarms()).
     this.store.refreshAlarms();
-    this.store.loadAllSiteObjects();
     const trailId = this.route.snapshot.queryParamMap.get('trailId');
     if (trailId) {
       this.store.activateTrail(trailId);

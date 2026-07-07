@@ -1,4 +1,4 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
+import { Injectable, computed, effect, inject, signal } from '@angular/core';
 import { catchError, forkJoin, of } from 'rxjs';
 import { TopologyClient } from '../api/topology.client';
 import { TrailBuilderClient } from '../api/trail-builder.client';
@@ -80,6 +80,38 @@ export class TopologyStore {
   private readonly siteObjectMoids = signal<ReadonlyMap<string, readonly string[]>>(new Map());
   /** True while the per-site objects fan-out (for the map's site-level colouring) is in flight. */
   readonly siteObjectsLoading = signal<boolean>(false);
+
+  /**
+   * The site-set signature the per-site object cache was last loaded (or is being loaded) for — a
+   * stable join of the current sites' ids. Drives the reactive {@link loadAllSiteObjects} effect so
+   * the fan-out runs EXACTLY ONCE per distinct site set: it fires when `sites()` first becomes
+   * non-empty (fixing the init race where `loadAllSiteObjects()` was called before the async
+   * `loadSites()` had populated `sites()`), and again only if the site set genuinely changes. The
+   * Refresh button still forces a re-pull by resetting this to `null` before re-calling.
+   */
+  private loadedObjectsKey: string | null = null;
+
+  constructor() {
+    // REACTIVE site-object load — the fix for the init race. `loadSites()` is async, so at the
+    // moment ngOnInit fires its one-shot `loadAllSiteObjects()` the `sites()` signal is still EMPTY
+    // and that call no-ops (never retried) — leaving `siteObjectMoids` empty so every site fell back
+    // to green. This effect instead tracks `sites()` and drives the per-site objects fan-out the
+    // moment the site list becomes non-empty (and again when the site SET changes), so the pins get
+    // real per-site severity. Guarded by `loadedObjectsKey` so it runs once per distinct site set —
+    // no infinite loop, no redundant re-fetch on unrelated change detection. The Refresh path
+    // (loadAllSiteObjects) resets the key to force a genuine re-pull.
+    effect(() => {
+      const sites = this.sites();
+      if (sites.length === 0) {
+        return;
+      }
+      const key = sites.map((s) => s.siteId).join('|');
+      if (key === this.loadedObjectsKey) {
+        return; // already loaded (or loading) for this exact site set — no redundant fan-out.
+      }
+      this.loadAllSiteObjects();
+    });
+  }
 
   /** Accumulating explorer graph, keyed by id so merges dedupe. Single writes per merge keep the
    *  structureKey (and thus the cytoscape relayout) firing exactly once per logical change. */
@@ -328,6 +360,9 @@ export class TopologyStore {
     if (sites.length === 0) {
       return;
     }
+    // Record the site set this fan-out covers so the reactive effect won't redundantly re-fire for
+    // the same set (set BEFORE the async fetch resolves so an in-flight load is not re-triggered).
+    this.loadedObjectsKey = sites.map((s) => s.siteId).join('|');
     this.siteObjectsLoading.set(true);
     forkJoin(
       sites.map((s) =>
