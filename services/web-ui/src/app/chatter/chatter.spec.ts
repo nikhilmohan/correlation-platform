@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { ActivatedRoute, convertToParamMap } from '@angular/router';
 import { describe, expect, it, vi } from 'vitest';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { ChatterStore } from './chatter.store';
 import { ChatterManagementComponent } from './chatter-management.component';
 import { EnrichmentChatterClient } from '../api/enrichment-chatter.client';
@@ -116,6 +116,67 @@ describe('Chatter management (FIX F-UI1) — promoted-vs-candidate join (AC 55, 
     const bars = fixture.nativeElement.querySelectorAll('[data-testid="chatter-bar"]');
     expect(bars.length).toBeGreaterThanOrEqual(1);
     expect(fixture.nativeElement.querySelector('[data-testid="chatter-chart-alarmtype"]')).toBeTruthy();
+  });
+});
+
+describe('Chatter store — Enrichment API absent/unexpected shape (live BUG-1 regression)', () => {
+  it('listChatter ERRORS → observed bar charts still derive (non-empty), enrichmentChatter() is [] (no throw), flagged unavailable', async () => {
+    const s = store();
+    const ecc = TestBed.inject(EnrichmentChatterClient);
+    vi.spyOn(ecc, 'listChatter').mockImplementation(() => throwError(() => new Error('network / not published')));
+    s.load();
+    await flush();
+    // The whole page must not crash: enrichmentChatter is a safe empty array (never undefined).
+    expect(s.enrichmentChatter()).toEqual([]);
+    expect(Array.isArray(s.enrichmentChatter())).toBe(true);
+    // Observed chatter (from Noise Filter, which IS available) still drives non-empty class bars.
+    expect(s.classBars().length).toBeGreaterThanOrEqual(1);
+    // The derived join/classBars computeds do not throw when enrichment is empty.
+    expect(() => s.classBars()).not.toThrow();
+    expect(s.enrichmentAvailable()).toBe(false);
+  });
+
+  it('listChatter returns an UNEXPECTED shape (no chatterList/items) → enrichmentChatter() is [] and flagged unavailable', async () => {
+    const s = store();
+    const ecc = TestBed.inject(EnrichmentChatterClient);
+    // 200 with a shape lacking chatterList AND items (list.chatterList === undefined → old crash).
+    vi.spyOn(ecc, 'listChatter').mockReturnValue(of({ unexpected: true } as never));
+    s.load();
+    await flush();
+    expect(s.enrichmentChatter()).toEqual([]);
+    expect(s.classBars().length).toBeGreaterThanOrEqual(1);
+    expect(s.enrichmentAvailable()).toBe(false);
+  });
+
+  it('listChatter returns an { items: [...] } shape → accepted as the chatter list', async () => {
+    const s = store();
+    const ecc = TestBed.inject(EnrichmentChatterClient);
+    vi.spyOn(ecc, 'listChatter').mockReturnValue(
+      of({ items: [{ managedObjectId: 'Port:x', eventType: 'portFlap' }] } as never),
+    );
+    s.load();
+    await flush();
+    expect(s.enrichmentChatter()).toEqual([{ managedObjectId: 'Port:x', eventType: 'portFlap' }]);
+    expect(s.enrichmentAvailable()).toBe(true);
+  });
+});
+
+describe('Chatter management — Enrichment-unavailable UI (live BUG-1 regression)', () => {
+  it('renders the observed bar charts + an inline notice and DISABLES suppress when Enrichment is absent', async () => {
+    const fixture = await mount();
+    const s = fixture.componentInstance.store;
+    s.observed.set(seedObserved());
+    s.enrichmentAvailable.set(false);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    // Charts still render (page did not crash / hide).
+    expect(el.querySelectorAll('[data-testid="chatter-bar"]').length).toBeGreaterThanOrEqual(1);
+    // Non-blocking notice present.
+    expect(el.querySelector('[data-testid="enrichment-unavailable-notice"]')).toBeTruthy();
+    // Suppress action disabled with a tooltip.
+    const suppress = el.querySelector('[data-testid="suppress-class-btn"]') as HTMLButtonElement;
+    expect(suppress.disabled).toBe(true);
+    expect(suppress.getAttribute('title')).toBeTruthy();
   });
 });
 

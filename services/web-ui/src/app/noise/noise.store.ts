@@ -55,8 +55,11 @@ export interface TrailHeatCell {
 
 export interface TrailHeatRow {
   trailId: string;
-  /** Total dropped across the row — used to rank the noisiest trails. */
+  /** Total dropped across the row (noise volume). */
   totalDropped: number;
+  /** Total alarmsIn across the row — the primary ranking key (activity), so busy but
+   *  zero-noise trails are NOT dropped from the view (a zero-noise cell is meaningful). */
+  totalIn: number;
   cells: TrailHeatCell[];
 }
 
@@ -212,26 +215,43 @@ export class NoiseStore {
     };
   });
 
-  /** Heatmap B — top-N noisiest trails × time, colour = noise ratio (dropped/in) per cell. */
+  /**
+   * Heatmap B — top-N most-active trails × time, colour = noise ratio (dropped/in) per cell.
+   *
+   * Ranking is by total alarmsIn (activity), NOT by dropped/noise, so trails that simply have
+   * low/zero dropped are STILL shown — a zero-noise cell is meaningful. With real sparse data
+   * (dropped 0-2, many trails at 0 dropped) ranking by noise would incorrectly render nothing;
+   * ranking by activity keeps every trail that carried alarms. Ties break on dropped then trailId
+   * for a stable order. Capped to the top-N with a "+N more" note.
+   */
   readonly trailHeatmap = computed<TrailHeatmap>(() => {
     const rows = this.runStats();
-    const buckets = this.timeBuckets();
-    // Group runs by trailId → per-bucket in/dropped accumulators.
+    // Never let an empty bucket set (a bucketing edge on odd timestamps) silently drop ALL trail
+    // rows: when there is run-stats data but no time buckets, fall back to a single synthetic
+    // "all-time" column so every trail still renders. This is the safety net for the live 0-rows.
+    const buckets: TimeBucket[] = this.timeBuckets().length
+      ? this.timeBuckets()
+      : rows.length
+        ? [{ index: 0, start: 0, end: 0, label: 'all' }]
+        : [];
+    // Group runs by trailId → per-bucket in/dropped accumulators. Rows without a trailId still
+    // group (under an em-dash key) so they render rather than vanish.
     const byTrail = new Map<string, { in: number[]; dropped: number[] }>();
     for (const r of rows) {
-      const key = r.trailId ?? '—';
+      const key = r.trailId && r.trailId.trim() ? r.trailId : '—';
       let acc = byTrail.get(key);
       if (!acc) {
         acc = { in: buckets.map(() => 0), dropped: buckets.map(() => 0) };
         byTrail.set(key, acc);
       }
       const i = this.bucketIndexFor(r, buckets);
-      acc.in[i] += r.alarmsIn;
-      acc.dropped[i] += r.alarmsDropped;
+      acc.in[i] += r.alarmsIn ?? 0;
+      acc.dropped[i] += r.alarmsDropped ?? 0;
     }
     const allRows: TrailHeatRow[] = [...byTrail.entries()].map(([trailId, acc]) => ({
       trailId,
       totalDropped: acc.dropped.reduce((s, v) => s + v, 0),
+      totalIn: acc.in.reduce((s, v) => s + v, 0),
       cells: buckets.map((b, i) => ({
         bucket: b.index,
         alarmsIn: acc.in[i],
@@ -239,8 +259,10 @@ export class NoiseStore {
         noiseRatio: acc.in[i] > 0 ? acc.dropped[i] / acc.in[i] : null,
       })),
     }));
-    // Rank by noisiest (most dropped) and cap the row count.
-    allRows.sort((a, b) => b.totalDropped - a.totalDropped);
+    // Rank by activity (alarmsIn) so zero-noise trails are kept; tie-break dropped, then trailId.
+    allRows.sort(
+      (a, b) => b.totalIn - a.totalIn || b.totalDropped - a.totalDropped || a.trailId.localeCompare(b.trailId),
+    );
     const shown = allRows.slice(0, MAX_TRAIL_ROWS);
     return { buckets, rows: shown, omitted: Math.max(0, allRows.length - shown.length) };
   });

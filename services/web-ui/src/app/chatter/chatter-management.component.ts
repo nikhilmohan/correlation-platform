@@ -67,6 +67,13 @@ import { ErrorBannerService } from '../core/error-banner.service';
     @if (errors.forService('Enrichment'); as err) {
       <div class="error-banner" role="alert">{{ err.message }}</div>
     }
+    @if (!store.enrichmentAvailable()) {
+      <div class="notice" role="status" data-testid="enrichment-unavailable-notice">
+        Enrichment suppression list unavailable (API not yet published). The observed-chatter charts
+        below are live; Suppress and Remove are disabled until the Enrichment chatter API is
+        available.
+      </div>
+    }
 
     <div class="grid">
       <section class="card" aria-labelledby="obs-h">
@@ -101,7 +108,8 @@ import { ErrorBannerService } from '../core/error-banner.service';
                       type="button"
                       class="btn"
                       data-testid="suppress-class-btn"
-                      [disabled]="store.isClassPending(bar.key)"
+                      [disabled]="store.isClassPending(bar.key) || !store.enrichmentAvailable()"
+                      [attr.title]="store.enrichmentAvailable() ? null : enrichmentDisabledHint"
                       (click)="store.suppressClass(bar)"
                     >
                       {{ store.isClassPending(bar.key) ? 'Suppressing…' : 'Suppress class — ' + suppressableRemaining(bar) + ' objects' }}
@@ -143,7 +151,8 @@ import { ErrorBannerService } from '../core/error-banner.service';
                                 class="btn btn-secondary"
                                 type="button"
                                 data-testid="promote-btn"
-                                [disabled]="store.isPending(row.observed.managedObjectId, row.observed.eventType)"
+                                [disabled]="store.isPending(row.observed.managedObjectId, row.observed.eventType) || !store.enrichmentAvailable()"
+                                [attr.title]="store.enrichmentAvailable() ? null : enrichmentDisabledHint"
                                 (click)="store.promote(row.observed)"
                               >
                                 Promote
@@ -183,7 +192,8 @@ import { ErrorBannerService } from '../core/error-banner.service';
                       class="btn btn-secondary"
                       type="button"
                       data-testid="remove-btn"
-                      [disabled]="store.isPending(entry.managedObjectId, entry.eventType)"
+                      [disabled]="store.isPending(entry.managedObjectId, entry.eventType) || !store.enrichmentAvailable()"
+                      [attr.title]="store.enrichmentAvailable() ? null : enrichmentDisabledHint"
                       (click)="store.remove(entry)"
                     >
                       Remove
@@ -204,6 +214,17 @@ import { ErrorBannerService } from '../core/error-banner.service';
       .muted {
         color: var(--text-muted);
         max-width: 70ch;
+      }
+      .notice {
+        margin: 0.6rem 0 0.4rem;
+        padding: 0.55rem 0.8rem;
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 6px;
+        background: var(--surface-2);
+        color: var(--text-muted);
+        font-size: 0.85rem;
+        max-width: 80ch;
       }
       .controls {
         display: flex;
@@ -339,6 +360,9 @@ export class ChatterManagementComponent implements OnInit {
   readonly store = inject(ChatterStore);
   readonly errors = inject(ErrorBannerService);
   private readonly route = inject(ActivatedRoute);
+
+  /** Tooltip shown on Suppress/Promote/Remove while the Enrichment API is unreachable. */
+  readonly enrichmentDisabledHint = 'Enrichment suppression API unavailable — action disabled.';
 
   ngOnInit(): void {
     const source = this.route.snapshot.queryParamMap.get('source');

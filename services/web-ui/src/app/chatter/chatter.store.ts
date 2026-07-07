@@ -35,6 +35,22 @@ function keyOf(managedObjectId: string | null, eventType: string): string {
   return `${managedObjectId ?? '__null__'}::${eventType}`;
 }
 
+/**
+ * Coerce whatever the Enrichment chatter endpoint returned into a safe entry array. The endpoint
+ * is not reliably published in every environment, so the shape is unknown at runtime: accept a
+ * `chatterList` array, an `items` array, or fall back to `[]`. Never returns undefined/null.
+ */
+function coerceChatterEntries(list: unknown): EnrichmentChatterEntry[] {
+  const obj = list as { chatterList?: unknown; items?: unknown } | null | undefined;
+  if (Array.isArray(obj?.chatterList)) {
+    return obj.chatterList as EnrichmentChatterEntry[];
+  }
+  if (Array.isArray(obj?.items)) {
+    return obj.items as EnrichmentChatterEntry[];
+  }
+  return [];
+}
+
 /** Device-type = the token before the first ':' in a managedObjectId (Port, IPLink, LSP…). */
 function deviceTypeOf(managedObjectId: string | null): string {
   if (!managedObjectId) {
@@ -59,6 +75,12 @@ export class ChatterStore {
 
   readonly observed = signal<ObservedChatterSignature[]>([]);
   readonly enrichmentChatter = signal<EnrichmentChatterEntry[]>([]);
+  /**
+   * False when the Enrichment suppression API is unreachable or returns an unexpected shape.
+   * The page keeps rendering the observed-chatter charts (from Noise Filter) and shows an inline
+   * non-blocking notice; the Suppress/Remove actions (which need Enrichment) are disabled.
+   */
+  readonly enrichmentAvailable = signal<boolean>(true);
   readonly selectedSource = signal<string>('nms-alpha');
   readonly groupBy = signal<GroupBy>('alarmType');
   /** Class keys the operator has expanded to reveal per-object drill-down. */
@@ -69,8 +91,8 @@ export class ChatterStore {
   readonly loading = signal<boolean>(false);
 
   readonly joinView = computed<ChatterJoinRow[]>(() => {
-    const promoted = new Set(this.enrichmentChatter().map((e) => keyOf(e.managedObjectId, e.eventType)));
-    return this.observed().map((o) => {
+    const promoted = new Set((this.enrichmentChatter() ?? []).map((e) => keyOf(e.managedObjectId, e.eventType)));
+    return (this.observed() ?? []).map((o) => {
       const alreadyPromoted = promoted.has(keyOf(o.managedObjectId, o.eventType));
       return { observed: o, alreadyPromoted, status: alreadyPromoted ? 'promoted' : 'candidate' } as ChatterJoinRow;
     });
@@ -82,7 +104,7 @@ export class ChatterStore {
    */
   readonly classBars = computed<ChatterClassBar[]>(() => {
     const grouping = this.groupBy();
-    const rows = this.joinView();
+    const rows = this.joinView() ?? [];
     const byKey = new Map<string, ChatterJoinRow[]>();
     for (const row of rows) {
       const key = grouping === 'alarmType' ? row.observed.alarmType : deviceTypeOf(row.observed.managedObjectId);
@@ -112,6 +134,7 @@ export class ChatterStore {
 
   load(): void {
     this.loading.set(true);
+    this.enrichmentAvailable.set(true);
     this.nf
       .listObservedChatter()
       .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
@@ -125,8 +148,24 @@ export class ChatterStore {
   loadEnrichment(): void {
     this.ecc
       .listChatter(this.selectedSource())
-      .pipe(catchError(() => of({ source: this.selectedSource(), chatterList: [] })))
-      .subscribe((list) => this.enrichmentChatter.set(list.chatterList));
+      .pipe(
+        // Missing/unreachable endpoint → flag unavailable, keep the page alive with an empty list.
+        catchError(() => {
+          this.enrichmentAvailable.set(false);
+          return of(null);
+        }),
+      )
+      .subscribe((list) => {
+        // The served shape is not guaranteed to carry `chatterList`; coerce defensively to an
+        // array (accept `chatterList`, `items`, or neither → []). NEVER set undefined, and never
+        // let an unexpected shape crash the derived signals / render.
+        const entries = coerceChatterEntries(list);
+        if (list !== null && !Array.isArray((list as { chatterList?: unknown }).chatterList) && !Array.isArray((list as { items?: unknown }).items)) {
+          // A 200 with an unrecognised shape is treated as "suppression list unavailable".
+          this.enrichmentAvailable.set(false);
+        }
+        this.enrichmentChatter.set(entries);
+      });
   }
 
   selectSource(source: string): void {
@@ -164,7 +203,7 @@ export class ChatterStore {
       .subscribe((list) => {
         this.pendingPromotion.set(null);
         if (list) {
-          this.enrichmentChatter.set(list.chatterList);
+          this.enrichmentChatter.set(coerceChatterEntries(list));
         }
         this.loadEnrichment();
       });
@@ -196,7 +235,7 @@ export class ChatterStore {
       // Prefer the last non-null list echoed back; the re-read is authoritative regardless.
       const last = [...results].reverse().find((r): r is EnrichmentChatterList => r !== null);
       if (last) {
-        this.enrichmentChatter.set(last.chatterList);
+        this.enrichmentChatter.set(coerceChatterEntries(last));
       }
       this.loadEnrichment();
     });
@@ -214,7 +253,7 @@ export class ChatterStore {
       .subscribe((list) => {
         this.pendingPromotion.set(null);
         if (list) {
-          this.enrichmentChatter.set(list.chatterList);
+          this.enrichmentChatter.set(coerceChatterEntries(list));
         }
         this.loadEnrichment();
       });

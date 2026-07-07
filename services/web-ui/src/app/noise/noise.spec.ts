@@ -136,6 +136,50 @@ describe('Noise store (Part 4) — heatmap derivations', () => {
     expect(ratios).toContainEqual(0.6);
   });
 
+  it('Heatmap B — renders rows for trails with LOW/ZERO dropped (rank by activity, do not drop zero-noise trails)', () => {
+    const s = store();
+    // Real-data-like: small per-run counts, several trails, MANY with dropped = 0. Ranking by
+    // noise/dropped would drop these and render nothing; ranking by activity keeps them.
+    const base = (iso: string, trailId: string, alarmsIn: number, dropped: number): RunStatsRow =>
+      ({
+        runId: `R-${iso}-${trailId}`,
+        runTimestamp: iso,
+        trailId,
+        snapshotId: 'current',
+        windowStart: iso,
+        windowEnd: iso,
+        eps: 0.5,
+        minSamples: 3,
+        windowSize: 60,
+        algorithm: 'dbscan',
+        alarmsIn,
+        clustersFormed: 1,
+        alarmsKept: alarmsIn - dropped,
+        alarmsDropped: dropped,
+        noiseRatio: alarmsIn ? dropped / alarmsIn : 0,
+      }) as RunStatsRow;
+    const sparse: RunStatsRow[] = [
+      base('2026-07-03T17:37:00Z', 'TR-A', 13, 0), // busy, zero noise
+      base('2026-07-03T17:39:00Z', 'TR-B', 8, 0), // zero noise
+      base('2026-07-03T17:41:00Z', 'TR-C', 5, 2), // some noise
+      base('2026-07-03T17:43:00Z', 'TR-D', 3, 0), // zero noise
+      base('2026-07-03T17:45:00Z', 'TR-E', 0, 0), // idle
+    ];
+    s.runStats.set(sparse);
+    const hm = s.trailHeatmap();
+    // Every trail that carried alarms renders a row (none dropped for being zero-noise).
+    expect(hm.rows.length).toBeGreaterThanOrEqual(4);
+    const ids = hm.rows.map((r) => r.trailId);
+    expect(ids).toContain('TR-A');
+    expect(ids).toContain('TR-B');
+    expect(ids).toContain('TR-D');
+    // Busiest trail (TR-A, 13 in) ranks first even though it has zero dropped.
+    expect(hm.rows[0].trailId).toBe('TR-A');
+    // A zero-noise busy trail still has a meaningful (0%) cell, not a dropped row.
+    const trA = hm.rows.find((r) => r.trailId === 'TR-A')!;
+    expect(trA.cells.some((c) => c.noiseRatio === 0)).toBe(true);
+  });
+
   it('Heatmap B — caps to top-N noisiest trails and reports the omitted count', () => {
     const s = store();
     // 15 trails, each a single run → 12 shown, 3 omitted.
@@ -212,5 +256,23 @@ describe('Noise view component (Part 4) — graphical', () => {
     if (trailCell) {
       expect(trailCell.getAttribute('aria-label')).toMatch(/noise|no alarms/);
     }
+  });
+
+  it('Heatmap B renders trail rows against sparse low/zero-dropped data (the live 0-rows regression)', async () => {
+    const cmp = await mount();
+    const el: HTMLElement = cmp.nativeElement;
+    const s = cmp.componentInstance.store;
+    // Real-data-like rows: small counts, most trails zero-dropped.
+    s.runStats.set([
+      { runId: 'r1', runTimestamp: '2026-07-03T17:37:00Z', trailId: 'TR-A', snapshotId: 'c', windowStart: '2026-07-03T17:37:00Z', windowEnd: '2026-07-03T17:37:00Z', eps: 0.5, minSamples: 3, windowSize: 60, algorithm: 'dbscan', alarmsIn: 13, clustersFormed: 1, alarmsKept: 13, alarmsDropped: 0, noiseRatio: 0 },
+      { runId: 'r2', runTimestamp: '2026-07-03T17:39:00Z', trailId: 'TR-B', snapshotId: 'c', windowStart: '2026-07-03T17:39:00Z', windowEnd: '2026-07-03T17:39:00Z', eps: 0.5, minSamples: 3, windowSize: 60, algorithm: 'dbscan', alarmsIn: 8, clustersFormed: 1, alarmsKept: 6, alarmsDropped: 2, noiseRatio: 0.25 },
+      { runId: 'r3', runTimestamp: '2026-07-03T17:41:00Z', trailId: 'TR-C', snapshotId: 'c', windowStart: '2026-07-03T17:41:00Z', windowEnd: '2026-07-03T17:41:00Z', eps: 0.5, minSamples: 3, windowSize: 60, algorithm: 'dbscan', alarmsIn: 3, clustersFormed: 1, alarmsKept: 3, alarmsDropped: 0, noiseRatio: 0 },
+    ] as RunStatsRow[]);
+    const toggle = el.querySelector('[data-testid="noise-heatmap-toggle"]') as HTMLElement;
+    const trailBtn = Array.from(toggle.querySelectorAll('button')).find((b) => /Trail/i.test(b.textContent ?? ''))!;
+    trailBtn.click();
+    cmp.detectChanges();
+    const rows = el.querySelectorAll('[data-testid="heat-trail-row"]');
+    expect(rows.length).toBe(3); // all three trails render — zero-dropped ones are NOT filtered out
   });
 });
