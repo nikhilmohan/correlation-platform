@@ -117,6 +117,54 @@ describe('Noise store (Part 4) — heatmap derivations', () => {
     expect(hottest.intensity).toBeCloseTo(1);
   });
 
+  it('Heatmap A (proportional) — per bucket the dropped/kept split equals the real noise:kept ratio', () => {
+    const s = store();
+    s.runStats.set(seedRuns());
+    const split = s.timeSplitHeatmap();
+    expect(split.bars.length).toBe(split.buckets.length);
+    // Every non-empty bar's fractions sum to 1 and match dropped/(dropped+kept).
+    for (const bar of split.bars) {
+      if (bar.total > 0) {
+        expect(bar.droppedFraction! + bar.keptFraction!).toBeCloseTo(1);
+        expect(bar.droppedFraction).toBeCloseTo(bar.dropped / bar.total);
+      } else {
+        expect(bar.droppedFraction).toBeNull();
+        expect(bar.keptFraction).toBeNull();
+      }
+    }
+    // Conservation: bar totals equal the raw dropped+kept sums.
+    const total = split.bars.reduce((a, b) => a + b.total, 0);
+    expect(total).toBe(6 + 12 + 1 + 2 + 4 + 8 + 4 + 6);
+  });
+
+  it('Heatmap A (proportional) — a 40:60 bucket → droppedFraction 0.4 / keptFraction 0.6; zero bucket → null (no NaN)', () => {
+    const s = store();
+    s.runStats.set([
+      {
+        runId: 'r1', runTimestamp: '2026-07-03T17:37:00Z', trailId: 'TR-A', snapshotId: 'c',
+        windowStart: '2026-07-03T17:37:00Z', windowEnd: '2026-07-03T17:37:00Z', eps: 0.5, minSamples: 3,
+        windowSize: 60, algorithm: 'dbscan', alarmsIn: 100, clustersFormed: 2, alarmsKept: 60,
+        alarmsDropped: 40, noiseRatio: 0.4,
+      },
+    ] as RunStatsRow[]);
+    const bar = s.timeSplitHeatmap().bars[0];
+    expect(bar.droppedFraction).toBeCloseTo(0.4);
+    expect(bar.keptFraction).toBeCloseTo(0.6);
+    expect(bar.volume).toBeCloseTo(1);
+
+    s.runStats.set([
+      {
+        runId: 'r0', runTimestamp: '2026-07-03T17:37:00Z', trailId: 'TR-A', snapshotId: 'c',
+        windowStart: '2026-07-03T17:37:00Z', windowEnd: '2026-07-03T17:37:00Z', eps: 0.5, minSamples: 3,
+        windowSize: 60, algorithm: 'dbscan', alarmsIn: 0, clustersFormed: 0, alarmsKept: 0,
+        alarmsDropped: 0, noiseRatio: 0,
+      },
+    ] as RunStatsRow[]);
+    const empty = s.timeSplitHeatmap().bars[0];
+    expect(empty.droppedFraction).toBeNull();
+    expect(Number.isNaN(empty.volume)).toBe(false);
+  });
+
   it('Heatmap A — degenerate time span falls back to one column per run (chronological)', () => {
     const s = store();
     const same = seedRuns().map((r) => ({ ...r, windowStart: '2026-05-10T00:00:00Z', runTimestamp: '2026-05-10T00:00:00Z' }));
@@ -228,18 +276,64 @@ describe('Noise view component (Part 4) — graphical', () => {
     expect(bar.getAttribute('aria-label')).toMatch(/kept/i);
   });
 
-  it('renders Heatmap A by default (time × noise/signal) with dropped/kept cells carrying aria-labels', async () => {
+  it('renders Heatmap A by default (proportional stacked bars per time bucket) with aria-labels', async () => {
     const cmp = await mount();
     const el: HTMLElement = cmp.nativeElement;
     expect(el.querySelector('[data-testid="noise-heatmap-time"]')).toBeTruthy();
-    const droppedCells = el.querySelectorAll('[data-testid="heat-cell-dropped"]');
-    const keptCells = el.querySelectorAll('[data-testid="heat-cell-kept"]');
-    expect(droppedCells.length).toBeGreaterThan(0);
-    expect(keptCells.length).toBeGreaterThan(0);
-    // Non-colour-only: each cell has an aria-label naming the real count.
-    expect((droppedCells[0] as HTMLElement).getAttribute('aria-label')).toMatch(/dropped \d+ alarm/);
-    // Legend anchors present.
-    expect(el.querySelector('.hm-legend-anchors')?.textContent).toContain('–');
+    const bars = el.querySelectorAll('[data-testid="heat-bucket-bar"]');
+    expect(bars.length).toBeGreaterThan(0);
+    // Non-colour-only: each bucket bar carries an aria-label naming the real split.
+    expect((bars[0] as HTMLElement).getAttribute('aria-label')).toMatch(/noise|no alarms/);
+    // Legend present.
+    expect(el.querySelector('.hm-legend-label')?.textContent).toMatch(/noise vs kept/i);
+  });
+
+  it('Heatmap A — a bucket with dropped=40, kept=60 renders segments sized 40:60 (proportional split)', async () => {
+    const cmp = await mount();
+    const el: HTMLElement = cmp.nativeElement;
+    const s = cmp.componentInstance.store;
+    // Single bucket (degenerate span → one column): dropped 40, kept 60 → 40% / 60% split.
+    s.runStats.set([
+      {
+        runId: 'r1', runTimestamp: '2026-07-03T17:37:00Z', trailId: 'TR-A', snapshotId: 'c',
+        windowStart: '2026-07-03T17:37:00Z', windowEnd: '2026-07-03T17:37:00Z', eps: 0.5, minSamples: 3,
+        windowSize: 60, algorithm: 'dbscan', alarmsIn: 100, clustersFormed: 2, alarmsKept: 60,
+        alarmsDropped: 40, noiseRatio: 0.4,
+      },
+    ] as RunStatsRow[]);
+    cmp.detectChanges();
+    const bar = cmp.componentInstance.store.timeSplitHeatmap().bars[0];
+    expect(bar.droppedFraction).toBeCloseTo(0.4);
+    expect(bar.keptFraction).toBeCloseTo(0.6);
+    // The rendered segments carry the proportional height.
+    const dropSeg = el.querySelector('[data-testid="heat-seg-dropped"]') as HTMLElement;
+    const keptSeg = el.querySelector('[data-testid="heat-seg-kept"]') as HTMLElement;
+    expect(dropSeg.style.height).toBe('40%');
+    expect(keptSeg.style.height).toBe('60%');
+    expect((el.querySelector('[data-testid="heat-bucket-bar"]') as HTMLElement).getAttribute('aria-label')).toMatch(
+      /40 noise \/ 60 kept \(40% noise\)/,
+    );
+  });
+
+  it('Heatmap A — a zero-total bucket produces null fractions (no NaN width) and a neutral marker', async () => {
+    const cmp = await mount();
+    const el: HTMLElement = cmp.nativeElement;
+    const s = cmp.componentInstance.store;
+    s.runStats.set([
+      {
+        runId: 'r0', runTimestamp: '2026-07-03T17:37:00Z', trailId: 'TR-A', snapshotId: 'c',
+        windowStart: '2026-07-03T17:37:00Z', windowEnd: '2026-07-03T17:37:00Z', eps: 0.5, minSamples: 3,
+        windowSize: 60, algorithm: 'dbscan', alarmsIn: 0, clustersFormed: 0, alarmsKept: 0,
+        alarmsDropped: 0, noiseRatio: 0,
+      },
+    ] as RunStatsRow[]);
+    cmp.detectChanges();
+    const bar = cmp.componentInstance.store.timeSplitHeatmap().bars[0];
+    expect(bar.droppedFraction).toBeNull();
+    expect(bar.keptFraction).toBeNull();
+    expect(Number.isNaN(bar.volume)).toBe(false);
+    expect(el.querySelector('[data-testid="heat-seg-empty"]')).toBeTruthy();
+    expect(el.querySelector('[data-testid="heat-seg-dropped"]')).toBeFalsy();
   });
 
   it('the toggle switches to Heatmap B (trail × time)', async () => {

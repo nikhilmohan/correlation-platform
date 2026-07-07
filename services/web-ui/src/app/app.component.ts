@@ -151,9 +151,8 @@ export class AppComponent {
     // KPI header, correlation/RCA rows. Noise (Part 4) is its own graphical top-level tab.
     { path: '/alarms', label: 'Alarms' },
     // Topology & trails now lives on the Dashboard (no separate page) — nav item removed.
-    { path: '/patterns', label: 'Patterns' },
-    { path: '/noise', label: 'Noise' },
-    { path: '/chatter', label: 'Chatter' },
-    { path: '/config', label: 'Config' },
+    // Patterns, Noise, Chatter and Config are consolidated under one "ML" page (three sub-tabs:
+    // Pattern mining / Noise filtering / Config). The item is active on any /ml/... route.
+    { path: '/ml', label: 'ML' },
   ];
 }
