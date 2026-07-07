@@ -143,21 +143,27 @@ describe('Alarms component (Part 3)', () => {
     expect(link.getAttribute('href')).toContain('/incidents/INC-12');
   });
 
-  it('child alarms are collapsed by default and expand via the RCA-row toggle', async () => {
+  it('child alarms are EXPANDED by default and collapse via the RCA-row toggle', async () => {
     const cmp = await mount();
-    // Default collapsed: only top-level rows (RCA + 3 uncorrelated = 4).
+    // Default EXPANDED: children visible without any user interaction.
     let rows = cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]');
-    expect([...rows].filter((r: Element) => r.getAttribute('data-role') === 'child').length).toBe(0);
+    expect([...rows].filter((r: Element) => r.getAttribute('data-role') === 'child').length).toBe(2);
 
     const toggle = cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
     expect(toggle).toBeTruthy();
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    // Clicking collapses the group (hides its children).
     toggle.click();
     cmp.detectChanges();
 
     rows = cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]');
-    const children = [...rows].filter((r: Element) => r.getAttribute('data-role') === 'child');
-    expect(children.length).toBe(2);
+    expect([...rows].filter((r: Element) => r.getAttribute('data-role') === 'child').length).toBe(0);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    // Clicking again re-expands.
+    toggle.click();
+    cmp.detectChanges();
+    rows = cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]');
+    expect([...rows].filter((r: Element) => r.getAttribute('data-role') === 'child').length).toBe(2);
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
   });
 
@@ -176,7 +182,7 @@ describe('Alarms component (Part 3)', () => {
 });
 
 describe('Alarms — collapsible incident GROUPS (Feature 1)', () => {
-  it('each incident renders as one collapsible group header (data-group="true"), collapsed by default', async () => {
+  it('each incident renders as one collapsible group header (data-group="true"), EXPANDED by default', async () => {
     const cmp = await mount();
     // Group headers keep the alarm-row testid AND carry data-group + a distinct alarm-group marker.
     const groups = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"][data-group="true"]')];
@@ -185,14 +191,14 @@ describe('Alarms — collapsible incident GROUPS (Feature 1)', () => {
     const group = groups[0] as HTMLElement;
     expect(group.getAttribute('data-incident-id')).toBe('INC-12');
     expect(group.querySelector('[data-testid="alarm-group"]')).toBeTruthy();
-    // Collapsed by default: no child rows rendered yet.
+    // EXPANDED by default: child rows are visible on load (no user interaction).
     const children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
       (r: Element) => r.getAttribute('data-role') === 'child',
     );
-    expect(children.length).toBe(0);
-    // The expand toggle is present and reports collapsed.
+    expect(children.length).toBe(2);
+    // The per-row collapse/expand toggle is present and reports expanded.
     const toggle = group.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
   });
 
   it("the group HEADER status pill reads 'correlated' for the whole group (not per-child state)", async () => {
@@ -209,11 +215,9 @@ describe('Alarms — collapsible incident GROUPS (Feature 1)', () => {
     expect(count.textContent?.replace(/\s+/g, ' ').trim()).toBe('root cause + 2 correlated alarms');
   });
 
-  it('expanding the group reveals its child alarm rows (each with its OWN lifecycle state)', async () => {
+  it('a group shows its child alarm rows by default (each with its OWN lifecycle state)', async () => {
     const cmp = await mount();
-    const toggle = cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
-    toggle.click();
-    cmp.detectChanges();
+    // Children are visible on load (expanded by default) — no toggle click needed.
     const children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
       (r: Element) => r.getAttribute('data-role') === 'child',
     );
@@ -233,23 +237,31 @@ describe('Alarms — collapsible incident GROUPS (Feature 1)', () => {
     plain.forEach((r: Element) => expect(r.getAttribute('data-testid')).toBe('alarm-row'));
   });
 
-  it('the expand-all / collapse-all toggle opens then closes every group', async () => {
+  it('the collapse-all / expand-all bulk toggle closes then re-opens every group (starts expanded)', async () => {
     const cmp = await mount();
     const expandAll = cmp.nativeElement.querySelector('[data-testid="alarm-expand-all"]') as HTMLButtonElement;
-    expect(expandAll.textContent?.trim()).toBe('Expand all');
-    expandAll.click();
-    cmp.detectChanges();
+    // Groups start EXPANDED, so the bulk control reads "Collapse all" and children are visible.
+    expect(expandAll.textContent?.trim()).toBe('Collapse all');
     let children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
       (r: Element) => r.getAttribute('data-role') === 'child',
     );
     expect(children.length).toBe(2);
-    expect(expandAll.textContent?.trim()).toBe('Collapse all');
+    // Collapse all → children hidden, label flips to "Expand all".
     expandAll.click();
     cmp.detectChanges();
     children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
       (r: Element) => r.getAttribute('data-role') === 'child',
     );
     expect(children.length).toBe(0);
+    expect(expandAll.textContent?.trim()).toBe('Expand all');
+    // Expand all → children back, label flips to "Collapse all".
+    expandAll.click();
+    cmp.detectChanges();
+    children = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
+      (r: Element) => r.getAttribute('data-role') === 'child',
+    );
+    expect(children.length).toBe(2);
+    expect(expandAll.textContent?.trim()).toBe('Collapse all');
   });
 
   it('a lifecycle-state legend is present as an info affordance', async () => {
@@ -303,33 +315,39 @@ describe('Alarms — REAL-TIME live updates (Feature 2)', () => {
       (g: Element) => g.getAttribute('data-incident-id'),
     );
     expect(groups).toContain('INC-99');
+    // A newly-arriving group is EXPANDED by default (its id was never collapsed).
+    const newGroup = [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"][data-group="true"]')].find(
+      (g: Element) => g.getAttribute('data-incident-id') === 'INC-99',
+    ) as HTMLElement;
+    const newToggle = newGroup.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
+    expect(newToggle.getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('expand state is PRESERVED across a poll tick (an opened group stays open)', async () => {
+  it('collapse state is PRESERVED across a poll tick (a collapsed group stays collapsed)', async () => {
     const cmp = await mount();
     const live = cmp.debugElement.injector.get(LivePollingService);
     const store = cmp.debugElement.injector.get(AlarmsStore);
-    // Expand INC-12.
+    // Groups start expanded; collapse INC-12.
     (cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement).click();
     cmp.detectChanges();
     expect(
       [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
         (r: Element) => r.getAttribute('data-role') === 'child',
       ).length,
-    ).toBe(2);
+    ).toBe(0);
     // A poll tick re-delivers the same data (a new object identity).
     live.alarmsSnapshot.set([...store.alarms()]);
     live.lastUpdated.set(Date.now());
     await flush();
     cmp.detectChanges();
-    // The group is STILL expanded after the tick.
+    // The group is STILL collapsed after the tick (the collapsed set survives the refresh).
     const toggle = cmp.nativeElement.querySelector('[data-testid="alarm-expand"]') as HTMLButtonElement;
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(
       [...cmp.nativeElement.querySelectorAll('[data-testid="alarm-row"]')].filter(
         (r: Element) => r.getAttribute('data-role') === 'child',
       ).length,
-    ).toBe(2);
+    ).toBe(0);
   });
 });
 
