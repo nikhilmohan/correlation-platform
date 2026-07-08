@@ -359,14 +359,24 @@ export interface EnrichmentChatterList {
   chatterList: EnrichmentChatterEntry[];
 }
 
-// ---- Simulator labels (frozen, demo/eval RCA oracle) ----
+// ---- Simulator labels (P3 RCA oracle) ----
+/**
+ * The ground-truth label shape ACTUALLY returned by the simulator's `GET /labels` in P3 — i.e. the
+ * simulator OpenAPI `P3CascadeLabelModel`. NOTE: an earlier frozen model here mirrored the OTHER
+ * schema in that spec (`GroundTruthLabelModel`, keyed on `rootCauseManagedObjectId`), but that is
+ * NOT what `/labels` serves; the live endpoint returns `rootCauseAlarmId` and has NO
+ * `rootCauseManagedObjectId`. The RCA-accuracy join therefore keys on `rootCauseAlarmId`, which both
+ * the label and the incident carry directly (an exact alarm-id match — no device resolution needed).
+ */
 export interface GroundTruthLabel {
-  scenarioId: string;
-  scenarioType: string;
-  rootCause: string;
-  rootCauseManagedObjectId: string;
+  patternId: string;
+  trailId: string;
+  rootCauseAlarmId: string;
   rootCauseAlarmType: string;
-  children: string[];
+  childAlarmIds: string[];
+  scenarioType: string;
+  instanceIndex: number;
+  igpArea: string;
 }
 
 // ---- Simulator synth-run trigger (frozen Simulator OpenAPI: /synth/run, /synth/status) ----

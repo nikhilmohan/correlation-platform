@@ -2,8 +2,9 @@ import { Injectable, computed, inject, signal } from '@angular/core';
 import { catchError, forkJoin, of } from 'rxjs';
 import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { CorrelationEngineClient } from '../api/correlation-engine.client';
+import { SimulatorLabelsClient } from '../api/simulator-labels.client';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
-import { AlarmSummary, IncidentVM, LifecycleState, StatsVM } from '../api/models';
+import { AlarmSummary, GroundTruthLabel, IncidentVM, LifecycleState, StatsVM } from '../api/models';
 
 /** How many incidents to pull so ALL live incidents are covered (they are older than the flat tail). */
 const INCIDENT_PAGE_LIMIT = 200;
@@ -40,6 +41,7 @@ export interface AlarmRow {
 export class AlarmsStore {
   private readonly am = inject(AlarmManagerClient);
   private readonly ce = inject(CorrelationEngineClient);
+  private readonly labelsSvc = inject(SimulatorLabelsClient);
   private readonly rcaSvc = inject(RcaAccuracyService);
 
   readonly alarms = signal<AlarmSummary[]>([]);
@@ -47,12 +49,14 @@ export class AlarmsStore {
   readonly stats = signal<StatsVM | null>(null);
   readonly stateFilter = signal<LifecycleState | 'all'>('all');
 
-  // ── KPI header numbers (mirror the dashboard/stats formulas) ────────────────────────────────
-  readonly alarmReductionRatio = computed<number | null>(() => {
-    const s = this.stats();
-    return s && s.totalIncidentsCreated > 0 ? s.totalAlarmsProcessed / s.totalIncidentsCreated : null;
-  });
+  /**
+   * RCA ground-truth labels (the simulator eval oracle). Fetched once in `loadAll()`; empty/failed →
+   * `rcaAccuracy` gracefully resolves to N/A (no fabrication). Labels are static per snapshot, so a
+   * single fetch suffices — the live poll does not need to re-pull them.
+   */
+  readonly labels = signal<GroundTruthLabel[] | null>(null);
 
+  // ── KPI header numbers (mirror the dashboard/stats formulas) ────────────────────────────────
   readonly autoCorrelationPct = computed<number | null>(() => {
     const s = this.stats();
     if (!s || !s.totalAlarmsProcessed || s.correlatedAlarmCount === undefined) {
@@ -61,7 +65,14 @@ export class AlarmsStore {
     return s.correlatedAlarmCount / s.totalAlarmsProcessed;
   });
 
-  readonly rcaAccuracy = computed(() => this.rcaSvc.resolve(this.stats(), this.incidents(), null));
+  /**
+   * RCA accuracy: eval-mode value, else the direct `rootCauseAlarmId` exact join against the
+   * simulator ground-truth labels, else N/A. The join keys straight off each incident's
+   * `rootCauseAlarmId` (both sides carry it), so no alarm-by-id device resolution is needed.
+   */
+  readonly rcaAccuracy = computed(() =>
+    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()),
+  );
 
   readonly liveIncidentCount = computed<number>(() => this.incidents().length);
   readonly alarmsProcessed = computed<number>(() => this.stats()?.totalAlarmsProcessed ?? 0);
@@ -142,10 +153,13 @@ export class AlarmsStore {
       incidents: this.ce.listIncidents({ limit: INCIDENT_PAGE_LIMIT }).pipe(catchError(() => of(null))),
       stats: this.ce.getStats().pipe(catchError(() => of(null))),
       openTail: this.am.listAlarms({ limit: OPEN_TAIL_LIMIT }).pipe(catchError(() => of(null))),
-    }).subscribe(({ incidents, stats, openTail }) => {
+      // RCA ground-truth oracle. Failed/empty → labels []; `rcaAccuracy` then resolves to N/A.
+      labels: this.labelsSvc.listLabels().pipe(catchError(() => of<GroundTruthLabel[]>([]))),
+    }).subscribe(({ incidents, stats, openTail, labels }) => {
       if (stats) {
         this.stats.set(stats);
       }
+      this.labels.set(labels ?? []);
       const incidentList = incidents?.items ?? [];
       this.incidents.set(incidentList);
       this.resolveAndAssemble(incidentList, openTail?.items ?? []);
@@ -222,7 +236,10 @@ export class AlarmsStore {
     }
   }
 
-  /** Refresh the Correlation Engine stats (the KPI header) — the poll loop does not carry them. */
+  /**
+   * Refresh the KPI-header numbers the poll loop does not carry: the Correlation Engine stats. Labels
+   * are static per snapshot and are NOT re-pulled here. Each read degrades independently.
+   */
   refreshStats(): void {
     this.ce
       .getStats()
