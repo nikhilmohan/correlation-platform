@@ -32,4 +32,13 @@ public class ProcessedEventRepository {
                 """, eventId, Timestamp.from(now));
         return inserted == 1;
     }
+
+    /**
+     * Demo/ops reset: delete every row from the {@code live_alarm.processed_event} dedup ledger and
+     * return the number of rows deleted. Clearing the ledger lets a fresh demo run re-ingest the
+     * same {@code eventId}s cleanly. No FK dependency.
+     */
+    public int deleteAll() {
+        return jdbc.update("DELETE FROM live_alarm.processed_event");
+    }
 }

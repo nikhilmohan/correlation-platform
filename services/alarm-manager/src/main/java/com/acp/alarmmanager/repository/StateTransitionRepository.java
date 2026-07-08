@@ -51,6 +51,15 @@ public class StateTransitionRepository {
         }
     }
 
+    /**
+     * Demo/ops reset: delete every audit row from {@code live_alarm.state_transition} and return
+     * the number of rows deleted. This is the CHILD side of the {@code state_transition -> alarm}
+     * FK, so the transactional purge deletes it BEFORE {@code live_alarm.alarm}.
+     */
+    public int deleteAll() {
+        return jdbc.update("DELETE FROM live_alarm.state_transition");
+    }
+
     public List<StateTransitionRecord> findByAlarmOrdered(String alarmId) {
         return jdbc.query("""
                 SELECT * FROM live_alarm.state_transition WHERE alarm_id = ?
