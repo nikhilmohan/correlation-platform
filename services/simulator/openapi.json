@@ -175,6 +175,72 @@
           }
         }
       }
+    },
+    "/synth/run": {
+      "post": {
+        "summary": "Synth Run",
+        "operationId": "synth_run_synth_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/SynthRunRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthRunResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthConflictResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid override parameter"
+          }
+        }
+      }
+    },
+    "/synth/status": {
+      "get": {
+        "summary": "Synth Status",
+        "operationId": "synth_status_synth_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SynthStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -381,6 +447,225 @@
         ],
         "title": "P3RunSummaryModel",
         "description": "/labels/p3-summary response \u2014 the run summary; the 60-70% KPI is directly computable.\n\nNetwork-wide adds the spread + enrichment fields (all additive, defaulted): distinct trails/\nareas used (AC 53), shortfall cascades (AC 55), enrichmentSafeCount + enrichmentConflictPatterns\n(AC 51/65), and the over-provisioned emitted fraction (AC 51)."
+      },
+      "ProgressModel": {
+        "properties": {
+          "alarmsEmitted": {
+            "type": "integer",
+            "title": "Alarmsemitted",
+            "default": 0
+          },
+          "alarmsTotal": {
+            "type": "integer",
+            "title": "Alarmstotal",
+            "default": 0
+          },
+          "alignedEmitted": {
+            "type": "integer",
+            "title": "Alignedemitted",
+            "default": 0
+          },
+          "nonAlignedEmitted": {
+            "type": "integer",
+            "title": "Nonalignedemitted",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ProgressModel"
+      },
+      "SynthConflictResponse": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": "a synth run is already in progress"
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runid"
+          }
+        },
+        "type": "object",
+        "title": "SynthConflictResponse",
+        "description": "409 body: the already-active run's id."
+      },
+      "SynthRunRequest": {
+        "properties": {
+          "target": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          },
+          "totalAlarms": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Totalalarms"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SynthRunRequest",
+        "description": "Optional P3 knob overrides for a triggered run; absent fields use env/config defaults."
+      },
+      "SynthRunResponse": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "running"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId"
+        ],
+        "title": "SynthRunResponse",
+        "description": "202 body: the accepted run's id + running status."
+      },
+      "SynthStatusResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runid"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/ProgressModel"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SynthSummaryModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "progress"
+        ],
+        "title": "SynthStatusResponse",
+        "description": "Frozen ``GET /synth/status`` shape (top-level status is only idle/running)."
+      },
+      "SynthSummaryModel": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "alarmsEmitted": {
+            "type": "integer",
+            "title": "Alarmsemitted"
+          },
+          "alignedFraction": {
+            "type": "number",
+            "title": "Alignedfraction"
+          },
+          "enrichmentSafeCount": {
+            "type": "integer",
+            "title": "Enrichmentsafecount"
+          },
+          "shortfallCascades": {
+            "type": "integer",
+            "title": "Shortfallcascades"
+          },
+          "enrichmentConflictPatterns": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Enrichmentconflictpatterns",
+            "default": []
+          },
+          "failureReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failurereason"
+          },
+          "startedAt": {
+            "type": "string",
+            "title": "Startedat"
+          },
+          "completedAt": {
+            "type": "string",
+            "title": "Completedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId",
+          "status",
+          "alarmsEmitted",
+          "alignedFraction",
+          "enrichmentSafeCount",
+          "shortfallCascades",
+          "startedAt",
+          "completedAt"
+        ],
+        "title": "SynthSummaryModel"
       },
       "ValidationError": {
         "properties": {

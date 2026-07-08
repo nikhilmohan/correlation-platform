@@ -77,9 +77,22 @@ KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
   python -m simulator.main --synth \
     --p3-config-snapshot-path /data/sim/p3-config-snapshot.json --p3-rng-seed 42
+
+# PERSISTENT SERVICE MODE: stay up and serve the HTTP synth trigger (web-ui polls this)
+#   POST /synth/run   -> 202 {runId, status:"running"}  (409 if a run is active, 422 on bad body)
+#   GET  /synth/status-> {status:"idle"|"running", runId, progress{...}, summary{...}}
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 P3_NETWORK_WIDE=true P3_TOTAL_ALARMS=500 \
+  python -m simulator serve            # == python -m simulator.main serve (compose: command:["serve"])
+
+# trigger + poll a P3 synth run against the running service
+curl -sX POST localhost:8085/synth/run -H 'content-type: application/json' \
+  -d '{"target":0.6,"totalAlarms":500,"seed":42}'
+curl -s localhost:8085/synth/status
 ```
 
 `--help` prints the full option surface; `--dry-run` validates config + inputs without emitting.
+`serve` runs the FastAPI app under uvicorn indefinitely (all read endpoints stay available); a
+triggered run executes on a background worker thread so `/health` + `/metrics` stay responsive.
 
 ## Configuration (env only — no hard-coded values)
 

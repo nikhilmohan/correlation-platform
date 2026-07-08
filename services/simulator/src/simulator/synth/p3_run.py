@@ -37,6 +37,7 @@ from simulator.synth.aligned_synth import AlignedCascade
 from simulator.synth.models import P3RunSummary
 from simulator.synth.p3_config_snapshot import P3ConfigSnapshot
 from simulator.synth.p3_labels import P3LabelStore
+from simulator.synth.progress import ProgressSink
 
 _log = get_logger("simulator.synth.p3_run")
 
@@ -265,8 +266,15 @@ def run_synth(
     pattern_client=None,
     trail_client=None,
     snapshot_client=None,
+    progress: ProgressSink | None = None,
 ) -> SynthOutcome:
-    """Execute a full P3 synthesis run and emit onto ``alarms.live``."""
+    """Execute a full P3 synthesis run and emit onto ``alarms.live``.
+
+    ``progress`` (optional) is the HTTP-trigger's :class:`ProgressSink`: the effective post-override
+    plan total is published via ``set_total`` and the emit loop increments it per produced alarm so
+    ``GET /synth/status`` can report live counters. The CLI one-shot path passes ``None`` and the
+    calls are no-ops — behaviour is byte-for-byte unchanged.
+    """
     pack = pack or CoreIPPack()
     metrics.MODE.labels(mode="synth").set(1)
 
@@ -286,6 +294,10 @@ def run_synth(
     # identities — only the absolute base (now()) naturally differs (AC 41, relative form). CE
     # windows on wall-clock ARRIVAL, so the absolute base is irrelevant to auto-correlation.
     base_time = datetime.now(tz=UTC)
+
+    if progress is not None:
+        # Effective (post-override) planned total so GET /synth/status reports alarmsTotal (AC 73).
+        progress.set_total(settings.p3_total_alarms)
 
     labels = P3LabelStore()
     if settings.p3_network_wide_active:
@@ -323,7 +335,9 @@ def run_synth(
     # timeline so opener+followers never arrived within windowMs at the CE -> ~0 auto-correlation.
     stream = p3_schedule.build_emission_stream(cascades, non_aligned.alarms, rng)
 
-    strategy = replay.LiveReplay(producer, pacing_multiplier=settings.pacing_multiplier)
+    strategy = replay.LiveReplay(
+        producer, pacing_multiplier=settings.pacing_multiplier, progress=progress
+    )
     emitted = strategy.replay_synth(stream)
 
     summary = labels.compute_summary()
