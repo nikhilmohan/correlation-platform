@@ -799,8 +799,20 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       badge.dataset['testid'] = 'cluster-count';
       badge.setAttribute('aria-hidden', 'true');
       badge.textContent = String(count);
+      // Positioning + centering are set INLINE (not via the component's scoped .cluster-count rule):
+      // this span is created imperatively, so it lacks the component's style-encapsulation attribute
+      // and the scoped `position:absolute`/`transform` would NOT apply — the badge would collapse to
+      // `position:static` and ignore its left/top, stacking at the host's top-left corner. Mirrors the
+      // city-label pattern below. Cosmetic props are inlined too so the imperative span stays legible.
+      badge.style.position = 'absolute';
+      badge.style.transform = 'translate(-50%, -50%)';
       badge.style.left = `${p.x}px`;
       badge.style.top = `${p.y}px`;
+      badge.style.fontSize = '0.72rem';
+      badge.style.fontWeight = '700';
+      badge.style.color = '#f8fafc';
+      badge.style.textShadow = '0 0 3px #0b1220, 0 0 3px #0b1220';
+      badge.style.pointerEvents = 'none';
       host.appendChild(badge);
     }
   }

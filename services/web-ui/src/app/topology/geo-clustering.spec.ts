@@ -210,6 +210,14 @@ describe('geo-map cluster-count badge positioning (corner-stack fix)', () => {
     // The whole point of the fix: the badge is NOT stacked at the top-left corner.
     expect(badges[0].style.left).not.toBe('0px');
     expect(badges[0].style.top).not.toBe('0px');
+    // Root-cause lock: the badge is created imperatively, so it lacks the component's
+    // style-encapsulation attribute and the scoped `.cluster-count { position:absolute }` rule does
+    // NOT apply — the span would collapse to `position:static` and IGNORE its left/top, stacking at
+    // the host corner. Positioning + centering MUST be set INLINE (as the city labels are) so the
+    // badge honours its left/top and centres over the cluster. A badge with left/top but
+    // position:static is the "222" corner-stack bug.
+    expect(badges[0].style.position).toBe('absolute');
+    expect(badges[0].style.transform).toBe('translate(-50%, -50%)');
   });
 
   it('SKIPS a badge whose projection is off-canvas/negative instead of corner-stacking it', async () => {
