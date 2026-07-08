@@ -359,6 +359,11 @@ describe('AlarmsStore — RCA accuracy wired to the ground-truth oracle (Change 
   function incident(rootCauseAlarmType: string, id: string): IncidentVM {
     return { incidentId: id, rootCauseAlarmId: `${id}-rc`, rootCauseAlarmType, childAlarmIds: [], confidence: 0.9, trailId: 'TR-1' };
   }
+  // The RCA alarm resolved (by id) into the store's alarms() — carries the exact failed DEVICE the
+  // per-incident join keys on. managedObjectId == the label's rootCauseManagedObjectId when they match.
+  function rcaAlarm(id: string, managedObjectId: string, type: string): AlarmSummary {
+    return { alarmId: `${id}-rc`, managedObjectId, eventType: type, alarmType: type, lifecycleState: 'correlated', role: 'root-cause', incidentId: id };
+  }
 
   it('loadAll() FETCHES the simulator labels into the labels signal', async () => {
     const s = store();
@@ -369,16 +374,31 @@ describe('AlarmsStore — RCA accuracy wired to the ground-truth oracle (Change 
     expect(s.labels()!.length).toBeGreaterThan(0);
   });
 
-  it('computes the REAL fraction via the client-side join when stats.rcaAccuracy is null', () => {
+  it('computes the REAL fraction via the PER-INCIDENT EXACT device+type join when stats.rcaAccuracy is null', () => {
     const s = store();
-    // No eval-mode value → the client-side label join drives the metric.
+    // No eval-mode value → the exact-device label join drives the metric.
     s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 3, rcaAccuracy: null } as StatsVM);
     s.labels.set([
-      { scenarioId: 'sc-1', scenarioType: 'fiber-cut', rootCause: 'x', rootCauseManagedObjectId: 'x', rootCauseAlarmType: 'LOS', children: [] },
-      { scenarioId: 'sc-2', scenarioType: 'card-fail', rootCause: 'y', rootCauseManagedObjectId: 'y', rootCauseAlarmType: 'CardFail', children: [] },
+      { scenarioId: 'sc-1', scenarioType: 'fiber-cut', rootCause: 'FiberSpan:1', rootCauseManagedObjectId: 'FiberSpan:1', rootCauseAlarmType: 'LOS', children: [] },
+      { scenarioId: 'sc-2', scenarioType: 'card-fail', rootCause: 'Card:2', rootCauseManagedObjectId: 'Card:2', rootCauseAlarmType: 'CardFail', children: [] },
     ]);
-    // Both incidents' RCA types are in the label set → 2/2 = 1.0 → "100%".
     s.incidents.set([incident('LOS', 'INC-1'), incident('CardFail', 'INC-2')]);
+    // Both incidents' RCA alarms resolve to a device+type that EXACTLY matches a label → 2/2 = 1.0.
+    s.alarms.set([rcaAlarm('INC-1', 'FiberSpan:1', 'LOS'), rcaAlarm('INC-2', 'Card:2', 'CardFail')]);
+    expect(s.rcaAccuracy().value).toBe(1);
+    expect(s.rcaAccuracy().source).toBe('client-side-join');
+  });
+
+  it('a matching device counts; a non-matching-device incident is excluded from the denominator (exact join)', () => {
+    const s = store();
+    s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 3, rcaAccuracy: null } as StatsVM);
+    s.labels.set([
+      { scenarioId: 'sc-1', scenarioType: 'fiber-cut', rootCause: 'FiberSpan:1', rootCauseManagedObjectId: 'FiberSpan:1', rootCauseAlarmType: 'LOS', children: [] },
+    ]);
+    // INC-1's RCA device matches the label → counts. INC-2's device is NOT labelled → excluded from
+    // BOTH numerator and denominator (denominator = incidents a label covers = 1). → 1/1 = 1.0.
+    s.incidents.set([incident('LOS', 'INC-1'), incident('LOS', 'INC-2')]);
+    s.alarms.set([rcaAlarm('INC-1', 'FiberSpan:1', 'LOS'), rcaAlarm('INC-2', 'FiberSpan:999', 'LOS')]);
     expect(s.rcaAccuracy().value).toBe(1);
     expect(s.rcaAccuracy().source).toBe('client-side-join');
   });
@@ -388,6 +408,7 @@ describe('AlarmsStore — RCA accuracy wired to the ground-truth oracle (Change 
     s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 3, rcaAccuracy: null } as StatsVM);
     s.labels.set([]);
     s.incidents.set([incident('LOS', 'INC-1')]);
+    s.alarms.set([rcaAlarm('INC-1', 'FiberSpan:1', 'LOS')]);
     expect(s.rcaAccuracy().value).toBeNull();
     expect(s.rcaAccuracy().source).toBe('na');
   });
@@ -398,8 +419,8 @@ describe('AlarmsStore — RCA accuracy wired to the ground-truth oracle (Change 
     // The mock stats carry rcaAccuracy=0.86 (eval path) → the card shows a percent, never N/A.
     expect(card.querySelector('.kpi-value')?.textContent?.trim()).not.toBe('N/A');
     expect(card.querySelector('.kpi-value')?.textContent?.trim()).toMatch(/%$/);
-    // The aria/tooltip explains the ground-truth-oracle validation.
-    expect(card.getAttribute('aria-label')).toContain('ground-truth oracle');
+    // The aria/tooltip honestly describes the metric: an exact match to the simulator ground-truth label.
+    expect(card.getAttribute('aria-label')).toContain('ground-truth label');
   });
 });
 
@@ -441,6 +462,18 @@ describe('AlarmsStore — Dedup-reduction card (Change 2)', () => {
     const d = s.dedupReduction();
     expect(d.fraction).toBeNull();
     expect(d.deduped).toBeNull();
+  });
+
+  it('guards kept > emitted → NO negative % / deduped (kept spans prior runs; not a single-run basis)', () => {
+    const s = store();
+    // Latest run emitted 50, but the Alarm Manager total (300) includes PRIOR runs → kept > emitted.
+    s.synthSummary.set(summary(50));
+    s.alarmManagerTotal.set(300);
+    const d = s.dedupReduction();
+    expect(d.fraction).toBeNull(); // no false/negative %
+    expect(d.deduped).toBeNull();
+    expect(d.kept).toBe(300); // kept still surfaced so the card shows "300 kept", not a bogus ratio
+    expect(d.emitted).toBe(50);
   });
 
   it('the kpi-dedup card renders "200 → 187" + the % deduped', async () => {

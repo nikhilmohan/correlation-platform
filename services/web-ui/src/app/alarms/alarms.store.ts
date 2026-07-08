@@ -5,19 +5,10 @@ import { CorrelationEngineClient } from '../api/correlation-engine.client';
 import { SimulatorLabelsClient } from '../api/simulator-labels.client';
 import { SimulatorClient } from '../api/simulator.client';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
+import { DedupReduction, computeDedupReduction } from '../core/dedup-reduction';
 import { AlarmSummary, GroundTruthLabel, IncidentVM, LifecycleState, StatsVM, SynthSummaryModel } from '../api/models';
 
-/** Emitted-by-ingestion vs kept-after-enrichment de-duplication, for the "Dedup reduction" KPI. */
-export interface DedupReduction {
-  /** Alarms EMITTED by the simulator run (`summary.alarmsEmitted`); null when no run this session. */
-  emitted: number | null;
-  /** Alarms KEPT after enrichment de-dup — the Alarm Manager total (`/alarms` page `total`). */
-  kept: number | null;
-  /** Absolute alarms removed by enrichment de-dup (emitted - kept); null when not resolvable. */
-  deduped: number | null;
-  /** Fraction of emitted alarms removed by de-dup [0..1]; null when not resolvable / divide-by-zero. */
-  fraction: number | null;
-}
+export type { DedupReduction } from '../core/dedup-reduction';
 
 /** How many incidents to pull so ALL live incidents are covered (they are older than the flat tail). */
 const INCIDENT_PAGE_LIMIT = 200;
@@ -80,17 +71,13 @@ export class AlarmsStore {
   /**
    * ENRICHMENT DE-DUP reduction for the repurposed KPI card: alarms EMITTED by ingestion
    * (`synthSummary.alarmsEmitted`) vs. alarms KEPT after enrichment's de-dup (the Alarm Manager total).
-   * Graceful: no run summary this session → `emitted` null (card shows "—" / kept-only); a zero/absent
-   * emitted count guards the divide so the fraction is null rather than NaN/Infinity.
+   * Delegates to the shared `computeDedupReduction` helper (the SAME logic backs the dashboard card):
+   * graceful "—"/kept-only when there is no run summary, divide-by-zero guard, AND the kept > emitted
+   * guard (kept spans prior runs → not a single-run basis → suppress the % rather than show a negative).
    */
-  readonly dedupReduction = computed<DedupReduction>(() => {
-    const emitted = this.synthSummary()?.alarmsEmitted ?? null;
-    const kept = this.alarmManagerTotal();
-    const canRatio = emitted !== null && emitted > 0 && kept !== null;
-    const deduped = canRatio ? emitted - kept : null;
-    const fraction = canRatio && deduped !== null ? deduped / emitted : null;
-    return { emitted, kept, deduped, fraction };
-  });
+  readonly dedupReduction = computed<DedupReduction>(() =>
+    computeDedupReduction(this.synthSummary()?.alarmsEmitted ?? null, this.alarmManagerTotal()),
+  );
 
   readonly autoCorrelationPct = computed<number | null>(() => {
     const s = this.stats();
@@ -100,7 +87,22 @@ export class AlarmsStore {
     return s.correlatedAlarmCount / s.totalAlarmsProcessed;
   });
 
-  readonly rcaAccuracy = computed(() => this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()));
+  /**
+   * Index of resolved alarms by id, so the RCA-accuracy join can look up each incident's root-cause
+   * alarm (its exact device `managedObjectId` + type) — `alarms()` already holds the incident-resolved
+   * root-cause + child alarms fetched by id in `resolveAndAssemble`.
+   */
+  private readonly alarmsById = computed<ReadonlyMap<string, AlarmSummary>>(() => {
+    const m = new Map<string, AlarmSummary>();
+    for (const a of this.alarms()) {
+      m.set(a.alarmId, a);
+    }
+    return m;
+  });
+
+  readonly rcaAccuracy = computed(() =>
+    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels(), this.alarmsById()),
+  );
 
   readonly liveIncidentCount = computed<number>(() => this.incidents().length);
   readonly alarmsProcessed = computed<number>(() => this.stats()?.totalAlarmsProcessed ?? 0);

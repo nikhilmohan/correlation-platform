@@ -80,7 +80,7 @@ import { relativeTime } from '../core/relative-time';
       <span
         class="kpi"
         data-testid="kpi-rca"
-        aria-label="RCA accuracy — fraction of incidents whose tagged root cause matches the simulator ground-truth oracle; N/A when no ground truth is available"
+        aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm matches the simulator ground-truth label (exact root-cause device + alarm type), over the incidents a label covers; N/A when no ground truth is available"
         [title]="RCA_HELP"
       >
         <span class="kpi-label">RCA accuracy</span>
@@ -730,8 +730,9 @@ export class AlarmsComponent implements OnInit {
 
   /** Tooltip copy for the RCA-accuracy KPI card (validated against the simulator ground-truth oracle). */
   readonly RCA_HELP =
-    'Root-cause accuracy: of the incidents the correlation engine created, how often the tagged root ' +
-    'cause matches the simulator ground-truth labels (the eval oracle). N/A when no ground truth is available.';
+    'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches its ' +
+    'simulator ground-truth label — the same failed device (managed object) AND alarm type — measured ' +
+    'over only the incidents a label covers. N/A when no ground truth is available.';
 
   /** Screen-reader / tooltip copy for the lifecycle-state column info affordance. */
   readonly STATE_HELP =

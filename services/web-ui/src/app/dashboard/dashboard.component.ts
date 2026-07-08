@@ -1,5 +1,5 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
-import { DecimalPipe, PercentPipe } from '@angular/common';
+import { PercentPipe } from '@angular/common';
 import { DashboardStore } from './dashboard.store';
 import { NavigationService } from '../core/navigation.service';
 import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
@@ -26,7 +26,6 @@ import { IngestionButtonComponent } from './ingestion-button.component';
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [DashboardStore],
   imports: [
-    DecimalPipe,
     PercentPipe,
     GeoSiteMapComponent,
     SiteGraphComponent,
@@ -52,14 +51,31 @@ import { IngestionButtonComponent } from './ingestion-button.component';
         <span class="kpi-label">Active patterns</span>
         <span class="kpi-value">{{ store.activePatternCount() }}</span>
       </button>
-      <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-reduction">
+      <button
+        class="card kpi"
+        type="button"
+        (click)="nav.toStats()"
+        data-testid="kpi-dedup"
+        [attr.aria-label]="dedupAriaLabel()"
+        [title]="DEDUP_HELP"
+      >
         <span class="kpi-icon" aria-hidden="true">▼</span>
-        <span class="kpi-label">Alarm reduction</span>
+        <span class="kpi-label">Dedup reduction</span>
         <span class="kpi-value">
-          @if (store.alarmReductionRatio() !== null) {
-            {{ store.alarmReductionRatio() | number: '1.1-1' }} : 1
+          @if (store.dedupReduction().emitted !== null && store.dedupReduction().kept !== null) {
+            <span data-testid="kpi-dedup-flow">
+              {{ store.dedupReduction().emitted }} &rarr; {{ store.dedupReduction().kept }}
+            </span>
+            @if (store.dedupReduction().fraction !== null) {
+              <small data-testid="kpi-dedup-pct">
+                {{ store.dedupReduction().fraction! | percent: '1.0-1' }} deduped
+              </small>
+            }
+          } @else if (store.dedupReduction().kept !== null) {
+            <!-- No ingestion run this session (or kept > emitted): show the kept count alone (no bogus ratio). -->
+            <span data-testid="kpi-dedup-flow">{{ store.dedupReduction().kept }} kept</span>
           } @else {
-            N/A
+            &mdash;
           }
         </span>
       </button>
@@ -68,7 +84,14 @@ import { IngestionButtonComponent } from './ingestion-button.component';
         <span class="kpi-label">Alarms processed</span>
         <span class="kpi-value">{{ store.stats()?.totalAlarmsProcessed ?? 0 }}</span>
       </div>
-      <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-rca">
+      <button
+        class="card kpi"
+        type="button"
+        (click)="nav.toStats()"
+        data-testid="kpi-rca"
+        aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm matches the simulator ground-truth label (exact root-cause device + alarm type), over the incidents a label covers; N/A when no ground truth is available"
+        [title]="RCA_HELP"
+      >
         <span class="kpi-icon" aria-hidden="true">◎</span>
         <span class="kpi-label">RCA accuracy</span>
         <span class="kpi-value">
@@ -237,6 +260,30 @@ import { IngestionButtonComponent } from './ingestion-button.component';
 export class DashboardComponent implements OnInit {
   readonly store = inject(DashboardStore);
   readonly nav = inject(NavigationService);
+
+  /** Tooltip copy for the Dedup-reduction KPI card (identical wording to the Alarms header card). */
+  readonly DEDUP_HELP =
+    'Alarms emitted by ingestion vs. kept after enrichment de-duplication. The gap is the number of ' +
+    'duplicate/redundant alarms enrichment removed before correlation.';
+
+  /** Tooltip copy for the RCA-accuracy KPI card (identical wording to the Alarms header card). */
+  readonly RCA_HELP =
+    'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches its ' +
+    'simulator ground-truth label — the same failed device (managed object) AND alarm type — measured ' +
+    'over only the incidents a label covers. N/A when no ground truth is available.';
+
+  /** Accessible, spoken-out description of the dedup-reduction KPI's current value (matches Alarms). */
+  dedupAriaLabel(): string {
+    const d = this.store.dedupReduction();
+    if (d.emitted !== null && d.kept !== null && d.fraction !== null) {
+      const pct = Math.round(d.fraction * 100);
+      return `Dedup reduction: ${d.emitted} alarms emitted by ingestion, ${d.kept} kept after enrichment de-duplication (${pct}% removed).`;
+    }
+    if (d.kept !== null) {
+      return `${d.kept} alarms kept after enrichment de-duplication. No consistent single-run ingestion basis, so the emitted count / percentage is unavailable.`;
+    }
+    return 'Dedup reduction: alarms emitted by ingestion vs. kept after enrichment de-duplication. No data yet.';
+  }
 
   /** null → show the geo-site map; a siteId → show the in-place site graph for that site. */
   readonly selectedSiteId = signal<string | null>(null);

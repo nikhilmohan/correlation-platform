@@ -29,13 +29,15 @@ test.describe('Landing dashboard [AC 5]', () => {
     const incidentValue = Number(incidentText.replace(/\D+/g, ''));
     expect(incidentValue).toBeGreaterThan(0);
 
-    // Alarm-reduction ratio = totalAlarmsProcessed / totalIncidentsCreated (CE /stats), shown as
-    // "<n> : 1"; must be a non-zero numeric (not "N/A").
-    const reductionKpi = page.getByTestId('kpi-reduction');
-    await expect(reductionKpi).toBeVisible();
-    const reductionText = (await reductionKpi.innerText()).trim();
-    expect(reductionText).not.toMatch(/N\/A/i);
-    expect(reductionText).toMatch(/[0-9]+(\.[0-9]+)?\s*:\s*1/);
+    // Dedup-reduction card (repurposed from the old alarm-reduction card, same testid convention as
+    // the Alarms header): emitted vs. kept after enrichment de-dup. It renders either an
+    // "<emitted> → <kept>" flow (with a "% deduped") when there is a consistent single-run basis, or
+    // the kept count alone / "—" otherwise. Assert the card + its label are present and that it shows
+    // a numeric flow value (kept is always known once alarms exist).
+    const dedupKpi = page.getByTestId('kpi-dedup');
+    await expect(dedupKpi).toBeVisible();
+    await expect(dedupKpi).toContainText(/Dedup reduction/i);
+    await expect(dedupKpi.getByTestId('kpi-dedup-flow')).toContainText(/[0-9]/);
   });
 });
 
