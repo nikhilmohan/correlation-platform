@@ -25,6 +25,7 @@ public class MicrometerCorrelationMetrics implements CorrelationMetrics {
     private final Counter codebookFetchFailure;
     private final Counter trailBuilderFetchErrors;
     private final Counter requiredTypesUnresolved;
+    private final Counter correlationReset;
     private final MeterRegistry registry;
     private final AtomicInteger activeInstances = new AtomicInteger(0);
     private final Map<String, AtomicInteger> compatibleTrailsGauges = new ConcurrentHashMap<>();
@@ -50,6 +51,9 @@ public class MicrometerCorrelationMetrics implements CorrelationMetrics {
                 .register(registry);
         this.requiredTypesUnresolved = Counter.builder("pattern_required_types_unresolved_total")
                 .description("Patterns excluded because required object types could not be resolved")
+                .register(registry);
+        this.correlationReset = Counter.builder("correlation_reset_total")
+                .description("P3 demo/ops correlation resets (incident purge + in-memory session reset)")
                 .register(registry);
         registry.gauge("active_instances", activeInstances);
     }
@@ -112,6 +116,11 @@ public class MicrometerCorrelationMetrics implements CorrelationMetrics {
     @Override
     public void incrementRequiredTypesUnresolved() {
         requiredTypesUnresolved.increment();
+    }
+
+    @Override
+    public void incrementCorrelationReset() {
+        correlationReset.increment();
     }
 
     @Override

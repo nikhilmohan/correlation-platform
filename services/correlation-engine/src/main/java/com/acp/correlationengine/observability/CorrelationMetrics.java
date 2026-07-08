@@ -39,6 +39,9 @@ public interface CorrelationMetrics {
     /** Per-pattern compatible-trail-set size ({@code compatible_trails_per_pattern} gauge). */
     void setCompatibleTrailsForPattern(String patternId, int compatibleTrailCount);
 
+    /** A P3 demo/ops correlation reset was performed ({@code correlation_reset_total}). */
+    void incrementCorrelationReset();
+
     /** A no-op implementation for tests that do not assert on metrics. */
     CorrelationMetrics NOOP = new CorrelationMetrics() {
         @Override public void incrementAlarmsProcessed() { }
@@ -54,5 +57,6 @@ public interface CorrelationMetrics {
         @Override public void incrementIndexRefresh(String trigger) { }
         @Override public void incrementRequiredTypesUnresolved() { }
         @Override public void setCompatibleTrailsForPattern(String patternId, int count) { }
+        @Override public void incrementCorrelationReset() { }
     };
 }

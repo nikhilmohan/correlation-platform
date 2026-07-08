@@ -169,6 +169,21 @@ public class JdbcIncidentRepository implements IncidentRepository {
     }
 
     @Override
+    @Transactional
+    public PurgeCounts deleteAll() {
+        // Transactional all-or-nothing purge of the CE-owned P3 incident state. Delete the child
+        // membership rows first (ON DELETE CASCADE would also handle them, but deleting explicitly
+        // yields the exact removed count for the response), then the incident rows. NOTE: we do NOT
+        // touch incident.processed_event — that ledger holds patterns.approved / codebook.generated /
+        // trails.built eventIds (the loaded P2 model) which must survive the reset.
+        long purgedAlarms = jdbc.getJdbcTemplate()
+                .update("DELETE FROM incident.incident_alarm");
+        long purgedIncidents = jdbc.getJdbcTemplate()
+                .update("DELETE FROM incident.incident");
+        return new PurgeCounts(purgedIncidents, purgedAlarms);
+    }
+
+    @Override
     public Map<String, Long> confidenceDistribution() {
         Map<String, Long> buckets = new LinkedHashMap<>();
         for (String b : List.of("0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0")) {
