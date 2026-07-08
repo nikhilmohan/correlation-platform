@@ -264,6 +264,18 @@ export interface StatsVM {
   rcaAccuracy?: number | null;
 }
 
+/**
+ * Result of `POST /admin/reset-correlation` (Correlation Engine P3 reset). Clears persisted
+ * incidents + their incident-alarm links and resets the in-memory correlation session so the KPIs
+ * (auto-correlation, alarm-reduction, RCA accuracy, live incidents) return to 0 / N/A. Idempotent:
+ * a second call returns all-zeros with a 200.
+ */
+export interface ResetResult {
+  purgedIncidents: number;
+  purgedIncidentAlarms: number;
+  resetInMemory: boolean;
+}
+
 // ---- Alarm Manager (frozen P3-G3) ----
 export type LifecycleState = 'open' | 'in-progress' | 'correlated' | 'cleared';
 export type AlarmRole = 'root-cause' | 'child' | 'none';
@@ -286,6 +298,20 @@ export interface AlarmSummary {
   trailIds?: string[];
 }
 export type AlarmPage = Page<AlarmSummary>;
+
+/**
+ * Result of `POST /admin/purge-live-alarms` (Alarm Manager P3 reset). Purges the LIVE alarm state
+ * that colours the topology (active alarms + their pending status-transitions + processed-event
+ * dedupe rows), leaving P1 topology + P2 (noise / patterns / codebook) untouched. Idempotent: a
+ * second call returns all-zeros with a 200.
+ */
+export interface PurgeSummary {
+  purgedAlarms: number;
+  purgedTransitions: number;
+  purgedPendingStatus: number;
+  purgedProcessedEvents: number;
+}
+
 /**
  * One correlation (incident) group for the Alarm-Lifecycle view: the root-cause alarm (may be
  * null if the incident's RCA alarm role is not yet resolved in the Alarm Manager) plus its child

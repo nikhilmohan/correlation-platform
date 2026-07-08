@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import { HttpBaseClient } from './http-base';
 import { ServiceKey } from '../core/api-config.service';
-import { IncidentPage, IncidentVM, StatsVM } from './models';
+import { IncidentPage, IncidentVM, ResetResult, StatsVM } from './models';
 
 /**
  * Correlation Engine incident/stats API (frozen CE OpenAPI, P3 + dashboard + streaming +
@@ -27,5 +27,15 @@ export class CorrelationEngineClient extends HttpBaseClient {
 
   getStats(): Observable<StatsVM> {
     return this.get<StatsVM>('/stats');
+  }
+
+  /**
+   * ADMIN reset: clear persisted incidents + incident-alarm links and reset the in-memory
+   * correlation session so the dashboard KPIs (auto-correlation, alarm-reduction, RCA accuracy, live
+   * incidents) return to 0 / N/A. Idempotent server-side (a second call returns all-zeros, 200).
+   * Empty POST body.
+   */
+  resetCorrelation(): Observable<ResetResult> {
+    return this.post<ResetResult>('/admin/reset-correlation', {});
   }
 }
