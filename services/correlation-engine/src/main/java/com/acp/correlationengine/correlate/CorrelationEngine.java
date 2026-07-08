@@ -68,6 +68,22 @@ public class CorrelationEngine {
      * ingest registries; a durable/pruned store is the deferred RocksDB-changelog target).
      */
     private final Set<String> correlatedAlarmIds = new LinkedHashSet<>();
+    /**
+     * incidentIds of incidents this engine has FIRED (committed via {@link #fireIncident}) this
+     * session — the {@code totalIncidentsCreated} count used for the alarm-reduction ratio. This is
+     * deliberately session-scoped (in-memory, resets on restart) to share one scope with
+     * {@link #processedAlarmIds} / {@link #correlatedAlarmIds}: the alarm-reduction ratio
+     * ({@code totalAlarmsProcessed / totalIncidentsCreated}) must be same-scope with its numerator,
+     * else — as the reviewer found — an all-time DB incident count paired with a since-restart
+     * processed count can drive the ratio below 1.0 (fewer alarms than incidents), the same
+     * "impossible number" class as the &gt;100% auto-correlation bug. Only successfully-inserted
+     * (non-duplicate) incidents are added, so this equals the distinct incidents fired this session.
+     */
+    private final Set<String> firedIncidentIds = new LinkedHashSet<>();
+    /** Count of PATTERN-matched incidents fired this session (session-scoped, matches the others). */
+    private long sessionPatternMatchCount = 0;
+    /** Count of CODEBOOK-matched incidents fired this session (session-scoped, matches the others). */
+    private long sessionCodebookMatchCount = 0;
 
     public CorrelationEngine(
             CompatibilityIndexService compatibilityIndex,
@@ -204,10 +220,13 @@ public class CorrelationEngine {
             correlatedAlarmIds.add(child);
         }
         metrics.incrementIncidentsCreated();
+        firedIncidentIds.add(incident.incidentId());
         if (winner.matchType() == MatchCandidate.MatchType.PATTERN) {
             metrics.incrementPatternMatch();
+            sessionPatternMatchCount++;
         } else {
             metrics.incrementCodebookMatch();
+            sessionCodebookMatchCount++;
         }
     }
 
@@ -291,6 +310,50 @@ public class CorrelationEngine {
      */
     public synchronized long totalAlarmsProcessed() {
         return processedAlarmIds.size();
+    }
+
+    /**
+     * @return the count of distinct {@code alarmId}s the engine has CORRELATED into a committed
+     *     incident (root-cause or child) — the {@code correlatedAlarmCount} numerator of the
+     *     auto-correlation rate (D1). Sourced from the engine's own {@link #correlatedAlarmIds} set,
+     *     which shares its lifetime with {@link #processedAlarmIds} (both are session-scoped in-memory
+     *     state that reset together on restart). Every correlated alarm was necessarily ingested
+     *     first, so {@code correlatedAlarmCount() <= totalAlarmsProcessed()} always holds and the
+     *     auto-correlation rate stays in {@code [0, 1]}. This deliberately does NOT read the persistent
+     *     Incident Store: mixing an all-time DB numerator with a since-restart in-memory denominator is
+     *     what produced the impossible &gt;100% rate live.
+     */
+    public synchronized long correlatedAlarmCount() {
+        return correlatedAlarmIds.size();
+    }
+
+    /**
+     * @return the count of distinct incidents this engine has FIRED this session — the
+     *     {@code totalIncidentsCreated} denominator of the alarm-reduction ratio
+     *     ({@code totalAlarmsProcessed / totalIncidentsCreated}). Session-scoped (from
+     *     {@link #firedIncidentIds}), sharing its lifetime with {@link #processedAlarmIds}, so it is
+     *     same-scope with that ratio's numerator. Because every fired incident consumes at least one
+     *     ingested alarm (root-cause), {@code totalIncidentsCreated() <= totalAlarmsProcessed()}
+     *     always holds and the alarm-reduction ratio stays {@code >= 1}. This deliberately does NOT
+     *     read {@code repository.totalIncidents()}: that all-time DB count paired with the
+     *     since-restart processed count is what could drive the ratio below 1.0 across a restart.
+     */
+    public synchronized long totalIncidentsCreated() {
+        return firedIncidentIds.size();
+    }
+
+    /**
+     * @return count of PATTERN-matched incidents fired this session. Session-scoped so it is
+     *     consistent with {@link #totalIncidentsCreated()} (their sum with
+     *     {@link #codebookMatchCount()} equals the session incident count).
+     */
+    public synchronized long patternMatchCount() {
+        return sessionPatternMatchCount;
+    }
+
+    /** @return count of CODEBOOK-matched incidents fired this session (session-scoped; see above). */
+    public synchronized long codebookMatchCount() {
+        return sessionCodebookMatchCount;
     }
 
     /** @return true if a live instance exists for {@code (trailId, patternId)} (test introspection). */
