@@ -66,6 +66,25 @@ All config is supplied from the environment — no hard-coded URLs, credentials,
 | `SESSION_WINDOW_GAP_FLOOR_FACTOR` | `2.0` | Session-window derivation: gap-floor multiplier. |
 | `SESSION_WINDOW_CV_FIXED_THRESHOLD` | `0.5` | Session-window derivation: CV threshold for fixed vs gap-based. |
 | `SAMPLE_ALARMS_CAP_K` | `10` | Per-pattern cap `K` on the bounded member-alarm sample served on `PatternView.sampleAlarms[]` (operator XAI). |
+| `PATTERN_SEED_ON_STARTUP` | `true` | Load the pre-approved seed pattern pack on startup so a fresh deploy can run P3 correlation without first mining. Idempotent (skips patterns already present). |
+| `PATTERN_SEED_PACK` | `seed/core-ip-patterns.json` | Classpath resource of the seed pack to load. |
+| `PATTERN_SEED_EMIT_APPROVED_EVENTS` | `true` | Emit a `PatternApprovedEvent` per newly seeded pattern (a running Correlation Engine picks them up via `patterns.approved`; a cold-start CE reads the approved set from the read API regardless). |
+
+### Pre-approved seed patterns (`seed/core-ip-patterns.json`)
+
+A fresh deploy needs APPROVED patterns for P3 correlation to match against, but those otherwise only
+exist AFTER the resource-heavy pattern-miner runs. On startup, `PatternSeedLoader` (mirroring the
+Knowledge Service's `SeedLoader`) idempotently loads a shipped pack of known-good, TRUE-cause-rooted
+Core IP cascade patterns directly into the Pattern Store in the `approved` lifecycle — so P3 works
+out of the box. Running the miner later refreshes/augments the store as normal.
+
+**Why the seed survives a fresh topology snapshot.** The Correlation Engine matches an approved
+pattern to trails **by structure** — the objectType hostability-subset rule (`CompatibilityEvaluator`),
+derived from `PatternView.sampleAlarms[].managedObjectId` prefixes (`<objectType>:<id>`) — **not** by
+the pattern's `trailId` (provenance-only under pattern generalization). Each seed therefore ships a
+sample-alarm objectType witness for every sequence alarmType and its root type, so it generalizes to
+every structurally-compatible trail in whatever snapshot a fresh P1 topology ingest produces. Adds no
+new topic, payload, or field: seeds reuse the existing `patterns.approved` event and `PatternView`.
 
 ### Sample alarms (`PatternView.sampleAlarms[]`)
 

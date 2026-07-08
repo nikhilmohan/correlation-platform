@@ -161,6 +161,81 @@ public class PatternStoreService {
     }
 
     /**
+     * [SEED] Whether a pattern row already exists for {@code patternId} — the seed loader's
+     * idempotency gate (skip a seed already present so a restart never duplicates it).
+     */
+    @Transactional(readOnly = true)
+    public boolean patternExists(UUID patternId) {
+        return patternRepository.existsById(patternId);
+    }
+
+    /**
+     * [SEED] Persist a pre-approved seed pattern directly in the {@code approved} lifecycle through
+     * the sole-writer path — so a fresh deploy has approved patterns to correlate against WITHOUT
+     * first running the miner. Idempotent: a no-op returning {@code false} if the row already exists
+     * (safe to re-run on every restart). The row carries the SAME create-time fields a mined pattern
+     * has (sequence, sample alarms, session window, support/confidence/lift, structural validation),
+     * plus two audit rows ({@code - -> draft}, {@code draft -> approved}) so the lifecycle history is
+     * complete and the pattern is served by {@code GET /patterns?lifecycle=approved} exactly like a
+     * human-approved one.
+     *
+     * @param patternId the deterministic seed pattern id
+     * @param enriched the authored pattern content (sequence, root cause, metrics, session window,
+     *     sample alarms — the sample-alarm objectType witnesses drive Correlation Engine
+     *     compatibility)
+     * @param reviewer the audit reviewer to attribute the seed approval to (e.g. {@code "seed"})
+     * @param now the create/approve timestamp
+     * @return the persisted approved {@link PatternEntity}
+     */
+    @Transactional
+    public PatternEntity persistApprovedSeed(UUID patternId, EnrichedPattern enriched,
+            String reviewer, OffsetDateTime now) {
+        PatternEntity entity = new PatternEntity();
+        entity.setPatternId(patternId);
+        entity.setTrailId(enriched.trailId());
+        entity.setRootCauseAlarmType(enriched.rootCauseAlarmType());
+        entity.setPatternName(
+                PatternNaming.patternName(enriched.rootCauseAlarmType(), patternId.toString()));
+        entity.setSupport(enriched.support());
+        entity.setConfidence(enriched.confidence());
+        entity.setLift(enriched.lift());
+        entity.setTimingJson(writeJson(enriched.timing()));
+        entity.setCodebookMatchId(enriched.codebookMatchId());
+        entity.setReconcileStatus(enriched.reconcileStatus());
+        entity.setStructurallyValidated(enriched.structurallyValidated());
+        entity.setStructuralValidationReason(enriched.structuralValidationReason());
+        entity.setSessionWindowMs(enriched.sessionWindow().windowMs());
+        entity.setSessionWindowType(enriched.sessionWindow().type().wire());
+        entity.setInstanceCount(enriched.instanceCount());
+        entity.setOccurrenceCount(1);
+        entity.setTrailCount(1);
+        entity.setFirstSeen(now);
+        entity.setLastSeen(now);
+        entity.setDomain(enriched.domain());
+        entity.setAnchorScenarioId(enriched.anchorScenarioId());
+        entity.setSnapshotId(enriched.snapshotId());
+        entity.setCodebookVersion(enriched.codebookVersion());
+        entity.setRepresentativeWeight(null);
+        // Seeded patterns skip the draft-review stage: persisted directly as approved.
+        entity.setLifecycle("approved");
+        entity.setCreatedAt(now);
+        entity.setUpdatedAt(now);
+
+        replaceSequence(entity, enriched.sequence());
+        addSupportingInstances(entity, enriched.supportingInstances());
+        setSampleAlarms(entity, enriched.sampleAlarms());
+
+        patternRepository.save(entity);
+        // Complete audit trail: the implicit discovery, then the seed approval.
+        transitionRepository.save(new LifecycleTransitionEntity(
+                UUID.randomUUID(), patternId, "-", "draft", reviewer, "seed pattern loaded", now));
+        transitionRepository.save(new LifecycleTransitionEntity(
+                UUID.randomUUID(), patternId, "draft", "approved", reviewer,
+                "seed pattern pre-approved on bootstrap", now));
+        return entity;
+    }
+
+    /**
      * Replace the ordered sequence elements on {@code entity} with {@code seq}.
      *
      * <p>When the pattern is ALREADY persisted with sequence rows (the representative-sequence
