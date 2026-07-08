@@ -737,16 +737,20 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       });
     }
 
-    // Sync the DOM overlays (cluster-count badges + city labels — offline-safe substitutes for a
-    // glyph symbol layer) on every paint AND when the map comes to rest ('idle'/'moveend'), so the
-    // labels track the FINAL settled projection and never freeze at a mid-motion position.
+    // Sync the DOM cluster-count badges ONLY on SETTLED events ('idle'/'moveend', plus once now for
+    // the initial paint) — NEVER on the raw 'render' frame. A 'render'-time sync re-projects each
+    // cluster centre mid-animation/pan/zoom, where `map.project()` can transiently return near-(0,0)
+    // screen coordinates; because 'render' fires rapidly the badges would get positioned — and stuck
+    // — at the canvas TOP-LEFT corner (the "222"/"43" corner-stack bug). Waiting for the map to come
+    // to rest means every badge is placed at its FINAL settled projection, over its real cluster.
     const syncOverlays = (): void => {
       this.syncClusterCountBadges();
       this.syncCityLabels();
     };
-    map.on('render', () => this.syncClusterCountBadges());
     map.on('idle', syncOverlays);
     map.on('moveend', syncOverlays);
+    // Initial placement for the first (already-settled) paint.
+    this.syncClusterCountBadges();
   }
 
   /**
@@ -754,6 +758,12 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
    * Cluster features are queried from the rendered cluster layer and each is positioned by
    * projecting its lng/lat to the screen. At the default continental zoom the dense UK/EU set is a
    * single cluster, so this is one tidy badge, not a clutter of pins.
+   *
+   * Called only on SETTLED map events (idle/moveend/initial paint), never per 'render' frame, so
+   * `map.project()` returns the final resting screen position. As belt-and-braces defence against
+   * a bad/transient projection, a badge whose projected point falls OUTSIDE the visible canvas
+   * (negative or beyond width/height) is SKIPPED rather than clamped to the top-left corner — this
+   * is exactly the guard that prevents the count badges stacking at (0,0) on the sea.
    */
   private syncClusterCountBadges(): void {
     const map = this.map;
@@ -763,6 +773,9 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
     }
     const features = map.queryRenderedFeatures(undefined, { layers: ['site-clusters'] });
     host.replaceChildren();
+    const canvas = map.getCanvas();
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
     for (const f of features) {
       const count = (f.properties?.['point_count_abbreviated'] ?? f.properties?.['point_count']) as
         | string
@@ -773,6 +786,14 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
         continue;
       }
       const p = map.project(geom.coordinates as [number, number]);
+      // Skip a cluster whose projected centre is off-canvas (negative or past the edges). A valid
+      // canvas may report width/height 0 in some layout/test states — only apply the upper-bound
+      // check when the canvas has a real size so a real on-screen badge is never wrongly dropped.
+      const offCanvas =
+        p.x < 0 || p.y < 0 || (w > 0 && p.x > w) || (h > 0 && p.y > h) || !Number.isFinite(p.x) || !Number.isFinite(p.y);
+      if (offCanvas) {
+        continue;
+      }
       const badge = document.createElement('span');
       badge.className = 'cluster-count';
       badge.dataset['testid'] = 'cluster-count';
@@ -964,6 +985,19 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   /** TEST-ONLY: the GeoJSON FeatureCollection pushed into the clustering source (status props). */
   sitesGeoJsonForTest(): FeatureCollection<Point> {
     return this.sitesGeoJson(this.store.sites());
+  }
+
+  /**
+   * TEST-ONLY: drive the cluster-count badge sync against a stubbed map under jsdom and return the
+   * rendered `.cluster-count` badge spans. Lets the badge-positioning + off-canvas-guard behaviour
+   * be asserted (badges land at their projected cluster centre, and a badge whose projection is
+   * off-canvas/negative is skipped rather than stacked at the top-left corner).
+   */
+  syncClusterCountBadgesForTest(map: MlMap): readonly HTMLElement[] {
+    this.map = map;
+    this.syncClusterCountBadges();
+    const host = this.clusterBadgeHost();
+    return host ? Array.from(host.querySelectorAll<HTMLElement>('.cluster-count')) : [];
   }
 
   select(siteId: string): void {
