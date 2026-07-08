@@ -1,9 +1,11 @@
 import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
-import { DecimalPipe, PercentPipe } from '@angular/common';
+import { PercentPipe } from '@angular/common';
 import { DashboardStore } from './dashboard.store';
 import { NavigationService } from '../core/navigation.service';
 import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
 import { SiteGraphComponent } from '../topology/site-graph.component';
+import { IngestionButtonComponent } from './ingestion-button.component';
+import { ResetButtonComponent } from './reset-button.component';
 
 /**
  * Landing dashboard (default route). Shows the fleet KPI widgets across the top, then embeds the
@@ -24,11 +26,21 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [DashboardStore],
-  imports: [DecimalPipe, PercentPipe, GeoSiteMapComponent, SiteGraphComponent],
+  imports: [
+    PercentPipe,
+    GeoSiteMapComponent,
+    SiteGraphComponent,
+    IngestionButtonComponent,
+    ResetButtonComponent,
+  ],
   template: `
     <div class="page-head">
       <h1>Platform overview</h1>
-      <button class="btn btn-secondary" type="button" (click)="store.load()">Refresh</button>
+      <div class="page-actions">
+        <app-ingestion-button />
+        <app-reset-button />
+        <button class="btn btn-secondary" type="button" (click)="store.load()">Refresh</button>
+      </div>
     </div>
 
     <section class="kpis" aria-label="Key performance indicators">
@@ -42,23 +54,19 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
         <span class="kpi-label">Active patterns</span>
         <span class="kpi-value">{{ store.activePatternCount() }}</span>
       </button>
-      <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-reduction">
-        <span class="kpi-icon" aria-hidden="true">▼</span>
-        <span class="kpi-label">Alarm reduction</span>
-        <span class="kpi-value">
-          @if (store.alarmReductionRatio() !== null) {
-            {{ store.alarmReductionRatio() | number: '1.1-1' }} : 1
-          } @else {
-            N/A
-          }
-        </span>
-      </button>
       <div class="card kpi" data-testid="kpi-processed">
         <span class="kpi-icon" aria-hidden="true">∑</span>
         <span class="kpi-label">Alarms processed</span>
         <span class="kpi-value">{{ store.stats()?.totalAlarmsProcessed ?? 0 }}</span>
       </div>
-      <button class="card kpi" type="button" (click)="nav.toStats()" data-testid="kpi-rca">
+      <button
+        class="card kpi"
+        type="button"
+        (click)="nav.toStats()"
+        data-testid="kpi-rca"
+        aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm exactly matches a simulator ground-truth root-cause alarm; N/A when no ground truth is available"
+        [title]="RCA_HELP"
+      >
         <span class="kpi-icon" aria-hidden="true">◎</span>
         <span class="kpi-label">RCA accuracy</span>
         <span class="kpi-value">
@@ -124,6 +132,12 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
       }
       .page-head h1 {
         margin: 0;
+      }
+      .page-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
       }
       .kpis {
         display: grid;
@@ -221,6 +235,12 @@ import { SiteGraphComponent } from '../topology/site-graph.component';
 export class DashboardComponent implements OnInit {
   readonly store = inject(DashboardStore);
   readonly nav = inject(NavigationService);
+
+  /** Tooltip copy for the RCA-accuracy KPI card (identical wording to the Alarms header card). */
+  readonly RCA_HELP =
+    'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches a ' +
+    'simulator ground-truth root-cause alarm (a direct root-cause alarm-id match), measured over all ' +
+    'incidents. N/A when no ground truth is available.';
 
   /** null → show the geo-site map; a siteId → show the in-place site graph for that site. */
   readonly selectedSiteId = signal<string | null>(null);

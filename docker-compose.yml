@@ -440,6 +440,7 @@ services:
       TRAIL_BUILDER_API_BASE_URL: "/api/trail-builder"  # → nginx → trail-builder:8000
       CODEBOOK_API_BASE_URL: "/api/codebook"            # → nginx → codebook-api:8000
       KNOWLEDGE_API_BASE_URL: "/api/knowledge"          # → nginx → knowledge:8080
+      SIMULATOR_API_BASE_URL: "/api/simulator"          # → nginx → simulator:8080 (synth-run trigger)
       # P2 services (now in this compose) — same-origin prefixes proxied by nginx BY SERVICE NAME:
       PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"  # → nginx → pattern-manager:8080
       NOISE_FILTER_API_BASE_URL: "/api/noise-filter"        # → nginx → noise-filter:8080

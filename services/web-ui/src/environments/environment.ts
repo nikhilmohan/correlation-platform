@@ -17,6 +17,7 @@ interface RuntimeEnvOverlay {
   NOISE_FILTER_API_BASE_URL?: string;
   ENRICHMENT_CHATTER_API_BASE_URL?: string;
   SIMULATOR_LABELS_API_BASE_URL?: string;
+  SIMULATOR_API_BASE_URL?: string;
   CODEBOOK_API_BASE_URL?: string;
   STREAMING_REFRESH_INTERVAL_MS?: string;
   TOPOLOGY_NODE_CAP?: string;
@@ -49,6 +50,8 @@ export const environment: AppEnvironment = {
     enrichmentChatter: o.ENRICHMENT_CHATTER_API_BASE_URL ?? '/mock/enrichment',
     simulatorLabels: o.SIMULATOR_LABELS_API_BASE_URL ?? '/mock/simulator',
     codebook: o.CODEBOOK_API_BASE_URL ?? '/mock/codebook',
+    // Simulator synth-run trigger. In real mode nginx proxies /api/simulator/* → simulator:8080.
+    simulator: o.SIMULATOR_API_BASE_URL ?? '/api/simulator',
   },
   streamingRefreshIntervalMs: o.STREAMING_REFRESH_INTERVAL_MS
     ? Number(o.STREAMING_REFRESH_INTERVAL_MS)

@@ -37,7 +37,7 @@ describe('Incident-detail drill-down page', () => {
     expect(child?.role).toBe('child');
   });
 
-  it('AC 16 — clicking a member alarm link navigates to streaming with that alarm', async () => {
+  it('AC 16 — clicking a member alarm link navigates to the Alarms view with that alarm', async () => {
     TestBed.configureTestingModule({ providers: [...testProviders()] });
     const router = TestBed.inject(Router);
     const fixture = TestBed.createComponent(IncidentDetailComponent);
@@ -47,8 +47,8 @@ describe('Incident-detail drill-down page', () => {
     fixture.detectChanges();
     const link = fixture.nativeElement.querySelector('[data-testid="root-cause"] a') as HTMLAnchorElement;
     expect(link).toBeTruthy();
-    // RouterLink with queryParams renders the alarm deep link target.
-    expect(link.getAttribute('href')).toContain('/streaming');
+    // RouterLink with queryParams renders the alarm deep link target (Streaming merged into /alarms).
+    expect(link.getAttribute('href')).toContain('/alarms');
     expect(link.getAttribute('href')).toContain('alarmId=a-3');
     void router; // router presence asserts the deep-link route resolves
   });

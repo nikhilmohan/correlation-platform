@@ -131,24 +131,6 @@ interface NavLink {
         border-color: var(--accent);
         color: var(--accent);
       }
-      .theme-toggle {
-        margin-left: auto;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        width: 2.1rem;
-        height: 2.1rem;
-        border: 1px solid var(--border);
-        background: var(--surface-2);
-        color: var(--text);
-        border-radius: 6px;
-        font-size: 1rem;
-        line-height: 1;
-      }
-      .theme-toggle:hover {
-        border-color: var(--accent);
-        color: var(--accent);
-      }
       .shell-errors {
         padding: 0 1.25rem;
       }
@@ -165,11 +147,12 @@ export class AppComponent {
   readonly theme = inject(ThemeService);
   readonly links: NavLink[] = [
     { path: '/dashboard', label: 'Dashboard' },
-    { path: '/streaming', label: 'Streaming' },
+    // Unified Alarms view (Part 3) replaces the separate Streaming + Stats items: live alarm state,
+    // KPI header, correlation/RCA rows. Noise (Part 4) is its own graphical top-level tab.
+    { path: '/alarms', label: 'Alarms' },
     // Topology & trails now lives on the Dashboard (no separate page) — nav item removed.
-    { path: '/patterns', label: 'Patterns' },
-    { path: '/chatter', label: 'Chatter' },
-    { path: '/config', label: 'Config' },
-    { path: '/stats', label: 'Stats' },
+    // Patterns, Noise, Chatter and Config are consolidated under one "ML" page (three sub-tabs:
+    // Pattern mining / Noise filtering / Config). The item is active on any /ml/... route.
+    { path: '/ml', label: 'ML' },
   ];
 }

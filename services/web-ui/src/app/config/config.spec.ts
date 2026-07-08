@@ -26,6 +26,31 @@ describe('Config module (P2) — Knowledge model-params', () => {
     expect(fixture.nativeElement.querySelector('[data-testid="param-dbscan.epsilon"]')).toBeTruthy();
   });
 
+  it('Change 1 — params render grouped by ML feature (dbscan.* under Noise filtering (DBSCAN))', async () => {
+    const fixture = create();
+    await flush();
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    // The DBSCAN group exists and contains the dbscan.* params.
+    const noiseGroup = el.querySelector('[data-testid="param-group-noise"]') as HTMLElement;
+    expect(noiseGroup).toBeTruthy();
+    expect(noiseGroup.querySelector('legend')?.textContent).toMatch(/DBSCAN/i);
+    expect(noiseGroup.querySelector('[data-testid="param-dbscan.epsilon"]')).toBeTruthy();
+    expect(noiseGroup.querySelector('[data-testid="param-dbscan.minSamples"]')).toBeTruthy();
+    // The session-window param sits under Correlation / session window.
+    const corrGroup = el.querySelector('[data-testid="param-group-correlation"]') as HTMLElement;
+    expect(corrGroup).toBeTruthy();
+    expect(corrGroup.querySelector('[data-testid="param-window.sizeSeconds"]')).toBeTruthy();
+    // Every param renders exactly once across the groups (no dupes, none lost).
+    const cmp = fixture.componentInstance;
+    for (const p of cmp.params()) {
+      expect(el.querySelectorAll(`[data-testid="param-${p.key}"]`).length).toBe(1);
+    }
+    // The groups computed covers every param.
+    const grouped = cmp.groups().reduce((n, g) => n + g.members.length, 0);
+    expect(grouped).toBe(cmp.params().length);
+  });
+
   it('AC 41 — a valid edit submits to Knowledge and confirms the new version to the operator', async () => {
     const fixture = create();
     await flush();

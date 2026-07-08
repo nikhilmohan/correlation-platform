@@ -26,6 +26,13 @@ export class LivePollingService {
   readonly intervalMs = signal<number>(this.config.streamingRefreshIntervalMs);
   readonly alarmDeltas = signal<AlarmDelta[]>([]);
   readonly incidentDeltas = signal<IncidentDelta[]>([]);
+  /**
+   * Latest raw snapshots from each tick, exposed so a consumer (the unified Alarms view) can
+   * re-derive its own grouped rows on every poll WITHOUT a second HTTP fetch. The delta signals
+   * stay for the diff-based indicators; these carry the full current list.
+   */
+  readonly alarmsSnapshot = signal<AlarmSummary[]>([]);
+  readonly incidentsSnapshot = signal<IncidentVM[]>([]);
   readonly lastUpdated = signal<number | null>(null);
   readonly pollError = signal<boolean>(false);
 
@@ -112,6 +119,7 @@ export class LivePollingService {
           const deltas = this.diff.diffAlarms(this.prevAlarms, page.items);
           this.alarmDeltas.set(deltas);
           this.prevAlarms = page.items;
+          this.alarmsSnapshot.set(page.items);
           this.lastUpdated.set(Date.now());
           this.pollError.set(false);
         } else {
@@ -129,6 +137,7 @@ export class LivePollingService {
           const deltas = this.diff.diffIncidents(this.prevIncidents, page.items);
           this.incidentDeltas.set(deltas);
           this.prevIncidents = page.items;
+          this.incidentsSnapshot.set(page.items);
         } else {
           this.pollError.set(true);
         }

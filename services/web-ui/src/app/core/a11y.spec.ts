@@ -5,12 +5,12 @@ import axe from 'axe-core';
 import { describe, expect, it } from 'vitest';
 import { testProviders, flush } from '../../test-utils';
 import { DashboardComponent } from '../dashboard/dashboard.component';
-import { StreamingViewComponent } from '../streaming/streaming-view.component';
+import { AlarmsComponent } from '../alarms/alarms.component';
 import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
 import { SiteGraphComponent } from '../topology/site-graph.component';
 import { PatternListComponent } from '../patterns/pattern-list.component';
 import { ModelParamsFormComponent } from '../config/model-params-form.component';
-import { StatsComponent } from '../stats/stats.component';
+import { NoiseViewComponent } from '../noise/noise-view.component';
 import { IncidentDetailComponent } from '../incident-detail/incident-detail.component';
 import { ChatterManagementComponent } from '../chatter/chatter-management.component';
 
@@ -54,8 +54,8 @@ describe('AC 52 — WCAG/axe accessibility per main view', () => {
     await expectNoAxeViolations(await renderHost(DashboardComponent));
   });
 
-  it('Streaming view has no axe violations', async () => {
-    await expectNoAxeViolations(await renderHost(StreamingViewComponent));
+  it('Unified Alarms view has no axe violations', async () => {
+    await expectNoAxeViolations(await renderHost(AlarmsComponent));
   });
 
   it('Geo-site map: no axe violations + the map canvas carries an ARIA label', async () => {
@@ -85,8 +85,8 @@ describe('AC 52 — WCAG/axe accessibility per main view', () => {
     await expectNoAxeViolations(await renderHost(ModelParamsFormComponent));
   });
 
-  it('Stats dashboard / alarm-lifecycle view has no axe violations', async () => {
-    await expectNoAxeViolations(await renderHost(StatsComponent));
+  it('Graphical Noise view has no axe violations', async () => {
+    await expectNoAxeViolations(await renderHost(NoiseViewComponent));
   });
 
   it('Incident-detail page has no axe violations', async () => {

@@ -119,6 +119,7 @@ image serves any backend wiring. Any unset variable falls back to the app's mock
 | `CORRELATION_ENGINE_API_BASE_URL` | Correlation Engine incidents / stats API |
 | `ALARM_MANAGER_API_BASE_URL` | Alarm Manager alarm-lifecycle query API |
 | `NOISE_FILTER_API_BASE_URL` | Noise Filter run-stats read API |
+| `SIMULATOR_API_BASE_URL` | Simulator synth-run trigger API (`/synth/run`, `/synth/status`) |
 | `CODEBOOK_API_BASE_URL` | Codebook read API |
 | `STREAMING_REFRESH_INTERVAL_MS` | streaming-view poll interval (default 3000) |
 | `DOMAIN`, `SNAPSHOT_ID`, `LOG_LEVEL` | session context + client log level |

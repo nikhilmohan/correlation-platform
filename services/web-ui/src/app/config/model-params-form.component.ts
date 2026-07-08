@@ -1,4 +1,4 @@
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import {
   FormArray,
   FormControl,
@@ -16,6 +16,42 @@ interface ParamForm {
   key: FormControl<string>;
   value: FormControl<number>;
 }
+
+/** A labelled group of params (one ML feature) with the form-array index of each member. */
+interface ParamGroup {
+  id: string;
+  heading: string;
+  hint: string;
+  /** Members carry their ORIGINAL params()/form-array index so the reactive form stays intact. */
+  members: { param: ModelParam; index: number }[];
+}
+
+/**
+ * Group definitions (Change 1, sub-tab 3): organise the flat model-params by ML feature. Each
+ * entry matches params whose dotted key starts with one of its prefixes; the first matching group
+ * (in order) wins, and anything unmatched falls through to "Other". Purely presentational — the
+ * underlying reactive form and its per-key testids are unchanged.
+ */
+const PARAM_GROUP_DEFS: { id: string; heading: string; hint: string; prefixes: string[] }[] = [
+  {
+    id: 'noise',
+    heading: 'Noise filtering (DBSCAN)',
+    hint: 'Clustering parameters that decide which alarms are dropped as noise.',
+    prefixes: ['dbscan.'],
+  },
+  {
+    id: 'pattern',
+    heading: 'Pattern mining',
+    hint: 'Thresholds governing which frequent sequences become candidate patterns.',
+    prefixes: ['pattern.', 'mining.', 'support', 'confidence', 'lift', 'minSupport', 'minConfidence'],
+  },
+  {
+    id: 'correlation',
+    heading: 'Correlation / session window',
+    hint: 'Session-window and correlation grouping parameters.',
+    prefixes: ['window.', 'session.', 'correlation.', 'gap'],
+  },
+];
 
 /**
  * Config module (spec task 13, AC 40-42). Reads the versioned Knowledge model-params record and
@@ -42,33 +78,39 @@ interface ParamForm {
 
       <form class="card" [formGroup]="form" (ngSubmit)="submit()">
         <div formArrayName="params">
-          @for (param of params(); track param.key; let i = $index) {
-            <div class="param-row" [formGroupName]="i">
-              <label [attr.for]="'param-' + i">{{ param.key }}</label>
-              <input
-                type="number"
-                step="any"
-                [id]="'param-' + i"
-                [attr.data-testid]="'param-' + param.key"
-                formControlName="value"
-              />
-              <span class="bounds">
-                @if (param.min !== undefined) {
-                  min {{ param.min }}
-                }
-                @if (param.max !== undefined) {
-                  max {{ param.max }}
-                }
-                @if (param.unit) {
-                  {{ param.unit }}
-                }
-              </span>
-              @if (paramInvalid(i)) {
-                <span class="field-error" role="alert" [attr.data-testid]="'error-' + param.key">
-                  Value out of bounds
-                </span>
+          @for (group of groups(); track group.id) {
+            <fieldset class="param-group" [attr.data-testid]="'param-group-' + group.id">
+              <legend>{{ group.heading }}</legend>
+              <p class="group-hint">{{ group.hint }}</p>
+              @for (member of group.members; track member.param.key) {
+                <div class="param-row" [formGroupName]="member.index">
+                  <label [attr.for]="'param-' + member.index">{{ member.param.key }}</label>
+                  <input
+                    type="number"
+                    step="any"
+                    [id]="'param-' + member.index"
+                    [attr.data-testid]="'param-' + member.param.key"
+                    formControlName="value"
+                  />
+                  <span class="bounds">
+                    @if (member.param.min !== undefined) {
+                      min {{ member.param.min }}
+                    }
+                    @if (member.param.max !== undefined) {
+                      max {{ member.param.max }}
+                    }
+                    @if (member.param.unit) {
+                      {{ member.param.unit }}
+                    }
+                  </span>
+                  @if (paramInvalid(member.index)) {
+                    <span class="field-error" role="alert" [attr.data-testid]="'error-' + member.param.key">
+                      Value out of bounds
+                    </span>
+                  }
+                </div>
               }
-            </div>
+            </fieldset>
           }
         </div>
 
@@ -89,6 +131,22 @@ interface ParamForm {
     `
       .muted {
         color: var(--text-muted);
+      }
+      .param-group {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm, 8px);
+        padding: 0.4rem 1rem 0.8rem;
+        margin: 0 0 1.1rem;
+      }
+      .param-group legend {
+        font-weight: 700;
+        padding: 0 0.4rem;
+        color: var(--text);
+      }
+      .group-hint {
+        color: var(--text-muted);
+        font-size: 0.82rem;
+        margin: 0.2rem 0 0.6rem;
       }
       .param-row {
         display: grid;
@@ -137,6 +195,30 @@ export class ModelParamsFormComponent implements OnInit {
 
   readonly form = new FormGroup({
     params: new FormArray<FormGroup<ParamForm>>([]),
+  });
+
+  /**
+   * The numeric params partitioned into feature groups by dotted-key prefix (Change 1). Each
+   * member keeps its original form-array index so the template still binds `[formGroupName]="i"`
+   * and the per-key testids (`param-<key>`) are preserved. Empty groups are omitted.
+   */
+  readonly groups = computed<ParamGroup[]>(() => {
+    const params = this.params();
+    const groups: ParamGroup[] = PARAM_GROUP_DEFS.map((d) => ({
+      id: d.id,
+      heading: d.heading,
+      hint: d.hint,
+      members: [],
+    }));
+    const other: ParamGroup = { id: 'other', heading: 'Other', hint: 'Uncategorised parameters.', members: [] };
+    params.forEach((param, index) => {
+      const def = PARAM_GROUP_DEFS.find((d) =>
+        d.prefixes.some((p) => param.key.toLowerCase().startsWith(p.toLowerCase()) || param.key.toLowerCase().includes(p.toLowerCase())),
+      );
+      const target = def ? groups.find((g) => g.id === def.id)! : other;
+      target.members.push({ param, index });
+    });
+    return [...groups, other].filter((g) => g.members.length > 0);
   });
 
   private get paramsArray(): FormArray<FormGroup<ParamForm>> {

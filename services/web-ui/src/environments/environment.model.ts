@@ -20,6 +20,8 @@ export interface ServiceBaseUrls {
   readonly enrichmentChatter: string;
   readonly simulatorLabels: string;
   readonly codebook: string;
+  /** Simulator synth-run trigger API (POST /synth/run, GET /synth/status). */
+  readonly simulator: string;
 }
 
 export interface AppEnvironment {

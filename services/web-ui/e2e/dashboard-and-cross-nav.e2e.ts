@@ -29,13 +29,12 @@ test.describe('Landing dashboard [AC 5]', () => {
     const incidentValue = Number(incidentText.replace(/\D+/g, ''));
     expect(incidentValue).toBeGreaterThan(0);
 
-    // Alarm-reduction ratio = totalAlarmsProcessed / totalIncidentsCreated (CE /stats), shown as
-    // "<n> : 1"; must be a non-zero numeric (not "N/A").
-    const reductionKpi = page.getByTestId('kpi-reduction');
-    await expect(reductionKpi).toBeVisible();
-    const reductionText = (await reductionKpi.innerText()).trim();
-    expect(reductionText).not.toMatch(/N\/A/i);
-    expect(reductionText).toMatch(/[0-9]+(\.[0-9]+)?\s*:\s*1/);
+    // RCA-accuracy card (CE incidents joined to the simulator ground-truth labels — the eval oracle):
+    // it renders either a percentage or an honest "N/A (no ground truth)". Assert the card + its label
+    // are present. This is DB/oracle-derived, not a simulator run-summary count.
+    const rcaKpi = page.getByTestId('kpi-rca');
+    await expect(rcaKpi).toBeVisible();
+    await expect(rcaKpi).toContainText(/RCA accuracy/i);
   });
 });
 
@@ -46,15 +45,16 @@ test.describe('Cross-navigation [AC 25]', () => {
     await page.goto('/dashboard');
     await expect(page.getByRole('heading', { name: /Platform overview/i })).toBeVisible();
 
-    // The incident-count KPI links to the correlation-stats / incidents view (spec AC 4/25).
+    // The incident-count KPI links to the unified Alarms view (Streaming + Stats merged, Part 3).
     await page.getByTestId('kpi-incidents').click();
-    await expect(page).toHaveURL(/\/stats/);
-    await expect(page.getByRole('heading', { name: /Correlation stats/i })).toBeVisible();
+    await expect(page).toHaveURL(/\/alarms/);
+    await expect(page.getByRole('heading', { name: /^Alarms$/i })).toBeVisible();
 
-    // From the incidents list, drill into a single incident-detail page (deep-linked by id).
-    const firstIncident = page.getByTestId('stats-incident').first();
-    await expect(firstIncident).toBeVisible();
-    await firstIncident.getByRole('link').first().click();
+    // An incident is represented as its highlighted RCA alarm row; its incident icon deep-links to
+    // the incident-detail page (incidents are reached by clicking that icon on the RCA row).
+    const rcaRow = page.locator('[data-testid="alarm-row"][data-role="root-cause"]').first();
+    await expect(rcaRow).toBeVisible();
+    await rcaRow.getByTestId('alarm-incident-link').click();
 
     await expect(page).toHaveURL(/\/incidents\/.+/);
     await expect(page.getByRole('heading', { name: /^Incident /i })).toBeVisible();
