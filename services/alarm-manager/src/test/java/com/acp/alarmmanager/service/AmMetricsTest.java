@@ -21,6 +21,7 @@ class AmMetricsTest {
         metrics.clearParkedForUnknownAlarm();
         metrics.correlationForUnknownAlarm();
         metrics.statusApplied("in-progress");
+        metrics.alarmsPurged(4);
         metrics.dlqRouted("alarms.enriched.live.dlq");
 
         assertThat(registry.counter("alarms_persisted_total").count()).isEqualTo(1.0);
@@ -32,6 +33,7 @@ class AmMetricsTest {
         assertThat(registry.counter("clear_parked_for_unknown_alarm_total").count())
                 .isEqualTo(1.0);
         assertThat(registry.counter("correlation_for_unknown_alarm_total").count()).isEqualTo(1.0);
+        assertThat(registry.counter("live_alarms_purged_total").count()).isEqualTo(4.0);
         assertThat(registry.get("status_changes_applied_total").tag("newStatus", "in-progress")
                 .counter().count()).isEqualTo(1.0);
         assertThat(registry.get("dlq_routed_total").tag("topic", "alarms.enriched.live.dlq")

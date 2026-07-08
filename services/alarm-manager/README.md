@@ -41,6 +41,13 @@ to the web-ui. There is **no historical corpus** — the MVP is live-only. See `
 - `GET /alarms/{alarmId}` — single alarm full record: all `AlarmEvent` fields (incl. `alarmType`),
   lifecycle state, `role`, `incidentId`, and the ordered `transitions` history (UTC timestamps;
   `source`/`changedAt` populated for `AlarmStatusChange`-driven transitions).
+- `POST /admin/purge-live-alarms` — **demo/ops P3 live-state reset.** Transactionally deletes ALL
+  rows from this service's own `live_alarm` schema (`state_transition`, `pending_status`,
+  `processed_event`, then `alarm` — FK-safe order) so the web-ui topology returns to all-green.
+  Returns `200` with `{ purgedAlarms, purgedTransitions, purgedPendingStatus, purgedProcessedEvents }`
+  (deleted counts). **P3-only / single-owner scoped:** touches no other schema (topology, noise-filter,
+  patterns, codebook, knowledge, or the Correlation Engine's `incident`). Idempotent (a second call
+  returns zeros). HTTP-only — no Kafka topic/payload change.
 - `GET /openapi.json` — OpenAPI 3.1 (checked in at `services/alarm-manager/openapi.json`, the
   single source of truth; a contract test fails the build on drift). Swagger UI at `/swagger-ui.html`.
 
@@ -70,7 +77,7 @@ land in `live_alarm`, never `public`.
 - `/actuator/health` — liveness + readiness. `/actuator/prometheus` — Micrometer metrics
   (`alarms_persisted_total`, `alarms_republished_total`, `status_changes_applied_total{newStatus}`,
   `correlation_results_applied_total`, `alarms_cleared_total`, `dlq_routed_total{topic}`,
-  `*_for_unknown_alarm_total`, …).
+  `*_for_unknown_alarm_total`, `live_alarms_purged_total`, …).
 - Structured JSON logs; the envelope `traceId` is propagated into log MDC.
 
 ## Build & test
