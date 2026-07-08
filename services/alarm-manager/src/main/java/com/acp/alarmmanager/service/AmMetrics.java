@@ -35,6 +35,15 @@ public class AmMetrics {
         registry.counter("alarms_cleared_total").increment();
     }
 
+    /**
+     * Demo/ops reset: increment the count of live alarms purged via {@code POST
+     * /admin/purge-live-alarms} by the number of {@code live_alarm.alarm} rows deleted. Exposed as
+     * {@code live_alarms_purged_total} on {@code /metrics}.
+     */
+    public void alarmsPurged(int count) {
+        registry.counter("live_alarms_purged_total").increment(count);
+    }
+
     public void dlqRouted(String topic) {
         Counter.builder("dlq_routed_total").tag("topic", topic).register(registry).increment();
     }
