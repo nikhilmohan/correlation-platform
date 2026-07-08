@@ -19,6 +19,7 @@ from simulator.obs import metrics
 from simulator.synth.p3_labels import P3LabelStore
 
 if TYPE_CHECKING:
+    from simulator.synth.mine_run_manager import MineRunManager
     from simulator.synth.run_manager import RunManager
 
 
@@ -95,11 +96,17 @@ class HealthModel(BaseModel):
     run: str
 
 
-def create_app(state: RunState, run_manager: RunManager | None = None) -> FastAPI:
+def create_app(
+    state: RunState,
+    run_manager: RunManager | None = None,
+    mine_manager: MineRunManager | None = None,
+) -> FastAPI:
     """Build the FastAPI app bound to a shared :class:`RunState`.
 
     When ``run_manager`` is provided the HTTP synth-trigger router (``POST /synth/run`` +
-    ``GET /synth/status``) is mounted; the existing read routes are untouched either way (AC 77).
+    ``GET /synth/status``) is mounted; when ``mine_manager`` is provided the P2 mine-corpus trigger
+    router (``POST /mine/run`` + ``GET /mine/status``) is mounted. The existing read routes are
+    untouched regardless (AC 77/88).
     """
     app = FastAPI(title="ACP Simulator", version="0.1.0")
 
@@ -162,5 +169,10 @@ def create_app(state: RunState, run_manager: RunManager | None = None) -> FastAP
         from simulator.api.synth_routes import build_synth_router
 
         app.include_router(build_synth_router(run_manager))
+
+    if mine_manager is not None:
+        from simulator.api.mine_routes import build_mine_router
+
+        app.include_router(build_mine_router(mine_manager))
 
     return app

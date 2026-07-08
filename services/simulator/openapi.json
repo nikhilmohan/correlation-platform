@@ -241,6 +241,72 @@
           }
         }
       }
+    },
+    "/mine/run": {
+      "post": {
+        "summary": "Mine Run",
+        "operationId": "mine_run_mine_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/MineRunRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MineRunResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MineConflictResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid override parameter"
+          }
+        }
+      }
+    },
+    "/mine/status": {
+      "get": {
+        "summary": "Mine Status",
+        "operationId": "mine_status_mine_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MineStatusResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -322,6 +388,189 @@
           "run"
         ],
         "title": "HealthModel"
+      },
+      "MineConflictResponse": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail",
+            "default": "a run is already in progress"
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runid"
+          }
+        },
+        "type": "object",
+        "title": "MineConflictResponse",
+        "description": "409 body: the already-active run's id (a mine or a synth run)."
+      },
+      "MineProgressModel": {
+        "properties": {
+          "alarmsEmitted": {
+            "type": "integer",
+            "title": "Alarmsemitted",
+            "default": 0
+          },
+          "alarmsTotal": {
+            "type": "integer",
+            "title": "Alarmstotal",
+            "default": 0
+          },
+          "alignedEmitted": {
+            "type": "integer",
+            "title": "Alignedemitted",
+            "default": 0
+          },
+          "nonAlignedEmitted": {
+            "type": "integer",
+            "title": "Nonalignedemitted",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "MineProgressModel"
+      },
+      "MineRunRequest": {
+        "properties": {
+          "scenarioInstances": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scenarioinstances"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "MineRunRequest",
+        "description": "Optional P2 corpus knob overrides for a triggered run; absent fields use env/config."
+      },
+      "MineRunResponse": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "default": "running"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId"
+        ],
+        "title": "MineRunResponse",
+        "description": "202 body: the accepted run's id + running status."
+      },
+      "MineStatusResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "runId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Runid"
+          },
+          "progress": {
+            "$ref": "#/components/schemas/MineProgressModel"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MineSummaryModel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "progress"
+        ],
+        "title": "MineStatusResponse",
+        "description": "Frozen ``GET /mine/status`` shape (top-level status is only idle/running)."
+      },
+      "MineSummaryModel": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "alarmsEmitted": {
+            "type": "integer",
+            "title": "Alarmsemitted"
+          },
+          "failureReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failurereason"
+          },
+          "startedAt": {
+            "type": "string",
+            "title": "Startedat"
+          },
+          "completedAt": {
+            "type": "string",
+            "title": "Completedat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId",
+          "status",
+          "alarmsEmitted",
+          "startedAt",
+          "completedAt"
+        ],
+        "title": "MineSummaryModel"
       },
       "P3CascadeLabelModel": {
         "properties": {

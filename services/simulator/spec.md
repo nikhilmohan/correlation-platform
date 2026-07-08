@@ -1516,6 +1516,149 @@ Each criterion maps to a single pytest test.
     response shapes as defined by the existing acceptance criteria (AC 16, 17, and the labels
     surface). The new endpoints do not alter any existing endpoint's behavior.
 
+---
+
+## HTTP Trigger for On-Demand P2 Mine-Corpus Generation (additive capability)
+
+This section is additive — the existing generate/ingest/export/synth/synth-trigger acceptance
+criteria (AC 1-77) are unchanged. All topic, payload, and event-model contracts are unchanged:
+this capability GENERATES + EMITS the P2 alarm CORPUS on the existing `alarms.history` topic using
+the frozen `AlarmEvent` payload and introduces no new Kafka topic, no new payload type, and no
+event-model field. The two new endpoints (`POST /mine/run` and `GET /mine/status`) are on the
+Simulator's own OpenAPI surface (self-owned) — they are not cross-service topic or payload
+additions and require no `docs/architecture.md` contract change beyond noting the new endpoint
+surface. **This is a contract addition to the Simulator's own HTTP API and requires human
+approval, exactly like the synth-trigger endpoints (Task 30 procedure).**
+
+### Purpose of this capability
+
+The full P2 pattern-learning flow is: the Simulator generates a labeled alarm CORPUS onto the
+history/enriched path → the Noise Filter clusters it (`transactions.clean`) → the Pattern Miner
+(already a live continuous consumer) mines it → patterns land as drafts in the Pattern Manager. So
+the Simulator only needs to GENERATE + EMIT the P2 corpus; the miner does the rest live. Today that
+generate step is CLI-only (`python -m simulator --phase p2`, `SIM_MODE=generate`). The web-ui needs
+to TRIGGER P2 corpus generation ("mine corpus" button) from a dashboard and poll its status. This
+capability adds two HTTP endpoints to the Simulator's persistent service mode (Task 25), mirroring
+the P3 synth trigger:
+
+- `POST /mine/run` — start an asynchronous P2 corpus-generate run; returns immediately with a
+  `runId`.
+- `GET /mine/status` — report the current P2 run state (idle/running), progress, and the last-run
+  summary.
+
+The P2 corpus-generate run REUSES the existing generate pipeline (`run.run_replay_phase` with
+`phase=p2` / `SIM_MODE=generate` emitting to `alarms.history`) — no new synthesis engine. It uses
+the Simulator's REAL topology/knowledge/trail-builder collaborators (env-driven `mock`/`real`) so
+the corpus is grounded in the current snapshot's trails, exactly like a manual P2 run.
+
+### Additional tasks (additive to Tasks 1-30)
+
+31. **`POST /mine/run` — trigger an asynchronous P2 corpus-generate run.** Accept an HTTP POST at
+    `/mine/run`. Start the existing P2 generate pipeline (`phase=p2`, `SIM_MODE=generate`, emitting
+    the labeled corpus onto `alarms.history`) asynchronously in the background. Return immediately
+    (HTTP 202) with a body containing the `runId` (a UUID) and `status: "running"`. The POST body
+    optionally accepts overrides for the corpus knobs (`scenarioInstances` → `SCENARIO_INSTANCES`,
+    the corpus-size knob; `seed` → `SIM_SEED`); all overrides default to env/config when absent.
+    Validate supplied overrides at request time; respond HTTP 422 for any invalid parameter
+    (`scenarioInstances` <= 0, `seed` < 0, unknown field). If a mine run OR a synth run is already
+    in progress, reject the POST with HTTP 409 and a JSON body identifying the active `runId` — the
+    mine and synth triggers share a SINGLE active-run guard (both drive the simulator's single
+    producer), so at most one may run at a time.
+
+32. **`GET /mine/status` — report current P2 run state and progress.** Return HTTP 200 with a JSON
+    body describing: (a) the current `status` (`"idle"` or `"running"`), (b) the `runId` of the
+    active run when running, or of the most recent run when idle (absent/null if no run has ever
+    occurred), (c) a `progress` object: `alarmsEmitted`, `alarmsTotal`, `alignedEmitted`,
+    `nonAlignedEmitted` counts, (d) a `summary` object when the last run has completed or failed:
+    `{runId, status, alarmsEmitted, failureReason, startedAt, completedAt}`. Same frozen-shape
+    discipline as `/synth/status`. Suitable for UI polling.
+
+33. **P2 corpus-generate reuse + shared run-guard.** The mine run REUSES the existing generate
+    orchestration (`run.run_replay_phase`) via a thin `p2_run.run_corpus(settings, producer,
+    run_id, progress)` entry — no duplicated synthesis engine, no new topic/payload. A
+    `MineRunManager` (mirroring the synth `RunManager`) runs the corpus generation on a background
+    worker thread and SHARES the same `RunGuard` as the synth `RunManager`, so a mine and a synth
+    run can never run concurrently. The persistent service (`serve.py`) wires BOTH the synth routes
+    (existing) and the new mine routes against one shared guard. Corpus knobs default to env/config
+    with optional POST-body overrides (`scenarioInstances`, `seed`); every other knob and the real
+    collaborators come from the serve container's env.
+
+34. **`POST /mine/run` and `GET /mine/status` added to the Simulator's own OpenAPI spec and
+    drift-guarded.** Both endpoints are declared in `services/simulator/openapi.json`. The drift
+    guard is extended to cover `/mine/run` and `/mine/status`. A change to these shapes is a
+    contract change to the Simulator's own API surface (same per-service procedure as Task 30).
+
+### Additional acceptance criteria (additive — P2 mine-corpus trigger)
+
+Each criterion maps to a single pytest test.
+
+78. **`POST /mine/run` returns HTTP 202 with a UUID `runId` and `status: "running"` when no run is
+    active.** With the persistent service running and no active run, a POST to `/mine/run` (no body
+    or a valid body) returns HTTP 202 with `runId` (a non-empty UUID string) and
+    `status: "running"`, before corpus emission finishes.
+
+79. **`POST /mine/run` with an invalid parameter returns HTTP 422.** A POST with
+    `{"scenarioInstances": 0}` (or `-1`, or `{"seed": -5}`, or an unknown field, or a
+    non-integer `scenarioInstances`) returns HTTP 422 and starts no background run.
+
+80. **`POST /mine/run` while a mine run is active returns HTTP 409.** Given a mine run in progress,
+    a second POST to `/mine/run` returns HTTP 409 with a JSON body containing the active `runId`.
+    No second run is started.
+
+81. **`GET /mine/status` returns `status: "running"` with progress counters while a run is
+    active.** While a P2 corpus run is in progress, `GET /mine/status` returns HTTP 200 with
+    `status: "running"`, the active `runId`, and a `progress` object with `alarmsEmitted`
+    (0 ≤ emitted ≤ total), `alarmsTotal`, `alignedEmitted`, `nonAlignedEmitted`. `summary` is null.
+
+82. **`GET /mine/status` returns `status: "idle"` with a completed `summary` after a run finishes
+    successfully.** After a P2 corpus run completes, `GET /mine/status` returns HTTP 200 with
+    `status: "idle"`, the completed run's `runId`, and a `summary` `{runId, status: "completed",
+    alarmsEmitted, failureReason: null, startedAt, completedAt}` with `completedAt >= startedAt`.
+
+83. **`GET /mine/status` returns `status: "idle"` with no `runId` or `summary` when no run has ever
+    occurred.** On a fresh instance, `GET /mine/status` returns HTTP 200 with `status: "idle"`,
+    null `runId`/`summary`, and zero-filled `progress`.
+
+84. **`GET /mine/status` reflects a failed run with a `failureReason`, and the guard is released.**
+    Given a triggered mine run that fails during background execution, `GET /mine/status` eventually
+    returns `status: "idle"` with a `summary` containing a non-empty `failureReason`. After the
+    failed run, a new `POST /mine/run` is accepted with HTTP 202 (the shared guard is released on
+    completion or failure).
+
+85. **POST body overrides `scenarioInstances`; env/config default applies when absent.** Given env
+    `SCENARIO_INSTANCES=8`, a POST with `{"scenarioInstances": 20}` runs with
+    `scenario_instances=20`; a subsequent empty-body run uses `8`.
+
+86. **POST body `seed` override maps to `SIM_SEED` for a reproducible corpus.** Two sequential runs
+    with body `{"seed": 42}` thread the same seed to the corpus generator (reproducible corpus) and
+    carry distinct `runId` values.
+
+87. **The mine trigger and the synth trigger share a single active-run guard (mutual exclusion).**
+    While a mine run holds the shared guard, a concurrent `POST /synth/run` returns HTTP 409 with
+    the active mine `runId`; and while a synth run holds the guard, a concurrent `POST /mine/run`
+    returns HTTP 409 with the active synth `runId`.
+
+88. **Persistent service: the FastAPI remains responsive during an active mine run.** While a P2
+    corpus run is in progress, `GET /health` and `GET /metrics` both return HTTP 200 within 2
+    seconds.
+
+89. **The mine routes are only mounted when a `MineRunManager` is wired.** An app created without a
+    mine manager returns HTTP 404 for `GET /mine/status` while `GET /health` still returns 200.
+
+90. **`p2_run.run_corpus` drives the P2 generate/history pipeline.** `run_corpus` reuses
+    `run.run_replay_phase` (phase=p2, generate) and emits every alarm onto the frozen
+    `alarms.history` topic (no live/other topic), returning the emitted count. Larger
+    `SCENARIO_INSTANCES` yields a larger corpus; the same `SIM_SEED` reproduces the same count.
+
+91. **`p2_run.run_corpus` reports progress via the `ProgressSink`.** When passed a `ProgressSink`,
+    `run_corpus` sets `alarmsTotal` and increments `alarmsEmitted` per produced alarm so
+    `GET /mine/status` reports live counters (`alignedEmitted + nonAlignedEmitted == alarmsEmitted`).
+
+92. **`POST /mine/run` and `GET /mine/status` are declared in `openapi.json` and the drift guard
+    catches a missing endpoint.** The checked-in `services/simulator/openapi.json` contains
+    `/mine/run` (POST, responses 202/409/422) and `/mine/status` (GET, response 200). The
+    drift-guard test, run against an `openapi.json` missing `/mine/status`, fails.
+
 ### Open questions — HTTP trigger capability
 
 - **OQ-TRIGGER-1 (design decision — recommended: reject-with-409): Concurrent run policy.**

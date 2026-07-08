@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -22,6 +21,17 @@ from simulator.config.settings import Settings
 from simulator.integrations.producer import AlarmProducer
 from simulator.obs.logging import get_logger, log_event
 from simulator.synth.progress import ProgressSink, ProgressSnapshot
+from simulator.synth.run_guard import RunConflict, RunGuard
+
+__all__ = [
+    "RunConflict",
+    "RunGuard",
+    "RunManager",
+    "RunOverrides",
+    "SynthStatus",
+    "SynthStatusSummary",
+    "derive_settings",
+]
 
 _log = get_logger("simulator.synth.run_manager")
 
@@ -89,14 +99,6 @@ class SynthStatus:
         }
 
 
-class RunConflict(RuntimeError):
-    """Raised by :meth:`RunManager.start` when a run is already active (handler -> 409)."""
-
-    def __init__(self, active_run_id: str | None) -> None:
-        super().__init__("a synth run is already in progress")
-        self.active_run_id = active_run_id
-
-
 def derive_settings(base: Settings, overrides: RunOverrides) -> Settings:
     """Return a Settings copy with the present overrides applied; absent fields keep env defaults.
 
@@ -128,26 +130,30 @@ class RunManager:
         *,
         run_synth: RunSynth,
         on_labels: Callable[[object], None] | None = None,
+        guard: RunGuard | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._producer_factory = producer_factory
         self._run_synth = run_synth
         self._on_labels = on_labels
+        # A shared RunGuard makes the synth run mutually exclusive with the P2 mine run; when none
+        # is injected the manager owns a private guard (standalone synth-only wiring / unit tests).
+        self._guard = guard or RunGuard()
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="synth-run")
-        self._active = False
         self._run_id: str | None = None
         self._progress = ProgressSink()
         self._summary: SynthStatusSummary | None = None
         self._started_at: str | None = None
 
     def start(self, overrides: RunOverrides) -> str:
-        """Accept a run (returns the new runId) or raise :class:`RunConflict` (handler -> 409)."""
+        """Accept a run (returns the new runId) or raise :class:`RunConflict` (handler -> 409).
+
+        The shared guard is acquired first: if a synth OR mine run is already active it raises
+        :class:`RunConflict` with the active runId.
+        """
+        run_id = self._guard.acquire("synth")
         with self._lock:
-            if self._active:
-                raise RunConflict(active_run_id=self._run_id)
-            run_id = str(uuid.uuid4())
-            self._active = True
             self._run_id = run_id
             self._progress = ProgressSink()
             self._started_at = datetime.now(tz=UTC).isoformat()
@@ -156,12 +162,17 @@ class RunManager:
         return run_id
 
     def status(self) -> SynthStatus:
-        """Return the frozen status shape (idle/running, runId, progress, summary)."""
+        """Return the frozen status shape (idle/running, runId, progress, summary).
+
+        Only a synth run is reported as ``running`` here — an active MINE run (holding the shared
+        guard) leaves ``/synth/status`` ``idle`` (its progress lives on ``/mine/status``).
+        """
+        guard_snap = self._guard.snapshot()
         with self._lock:
-            active = self._active
             run_id = self._run_id
             summary = self._summary
             progress = self._progress
+        active = guard_snap.active and guard_snap.kind == "synth"
         return SynthStatus(
             status="running" if active else "idle",
             run_id=run_id,
@@ -211,9 +222,9 @@ class RunManager:
             )
         finally:
             with self._lock:
-                self._active = False
                 self._run_id = run_id
                 self._summary = summary
+            self._guard.release()
 
     @staticmethod
     def _summary_from_outcome(run_id: str, outcome: object, started_at: str) -> SynthStatusSummary:
