@@ -29,15 +29,12 @@ test.describe('Landing dashboard [AC 5]', () => {
     const incidentValue = Number(incidentText.replace(/\D+/g, ''));
     expect(incidentValue).toBeGreaterThan(0);
 
-    // Dedup-reduction card (repurposed from the old alarm-reduction card, same testid convention as
-    // the Alarms header): emitted vs. kept after enrichment de-dup. It renders either an
-    // "<emitted> → <kept>" flow (with a "% deduped") when there is a consistent single-run basis, or
-    // the kept count alone / "—" otherwise. Assert the card + its label are present and that it shows
-    // a numeric flow value (kept is always known once alarms exist).
-    const dedupKpi = page.getByTestId('kpi-dedup');
-    await expect(dedupKpi).toBeVisible();
-    await expect(dedupKpi).toContainText(/Dedup reduction/i);
-    await expect(dedupKpi.getByTestId('kpi-dedup-flow')).toContainText(/[0-9]/);
+    // RCA-accuracy card (CE incidents joined to the simulator ground-truth labels — the eval oracle):
+    // it renders either a percentage or an honest "N/A (no ground truth)". Assert the card + its label
+    // are present. This is DB/oracle-derived, not a simulator run-summary count.
+    const rcaKpi = page.getByTestId('kpi-rca');
+    await expect(rcaKpi).toBeVisible();
+    await expect(rcaKpi).toContainText(/RCA accuracy/i);
   });
 });
 

@@ -71,7 +71,7 @@ describe('Landing dashboard', () => {
     expect(el.querySelector('[data-testid="recent-incident"]')).toBeNull();
     expect(el.textContent).not.toMatch(/Quick links/i);
     // KPI testids are preserved.
-    for (const id of ['kpi-incidents', 'kpi-patterns', 'kpi-dedup', 'kpi-processed', 'kpi-rca', 'kpi-autocorr']) {
+    for (const id of ['kpi-incidents', 'kpi-patterns', 'kpi-processed', 'kpi-rca', 'kpi-autocorr']) {
       expect(el.querySelector(`[data-testid="${id}"]`)).toBeTruthy();
     }
   });

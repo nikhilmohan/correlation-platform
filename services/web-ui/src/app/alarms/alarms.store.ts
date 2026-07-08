@@ -3,12 +3,8 @@ import { catchError, forkJoin, of } from 'rxjs';
 import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { CorrelationEngineClient } from '../api/correlation-engine.client';
 import { SimulatorLabelsClient } from '../api/simulator-labels.client';
-import { SimulatorClient } from '../api/simulator.client';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
-import { DedupReduction, computeDedupReduction } from '../core/dedup-reduction';
-import { AlarmSummary, GroundTruthLabel, IncidentVM, LifecycleState, StatsVM, SynthSummaryModel } from '../api/models';
-
-export type { DedupReduction } from '../core/dedup-reduction';
+import { AlarmSummary, GroundTruthLabel, IncidentVM, LifecycleState, StatsVM } from '../api/models';
 
 /** How many incidents to pull so ALL live incidents are covered (they are older than the flat tail). */
 const INCIDENT_PAGE_LIMIT = 200;
@@ -46,7 +42,6 @@ export class AlarmsStore {
   private readonly am = inject(AlarmManagerClient);
   private readonly ce = inject(CorrelationEngineClient);
   private readonly labelsSvc = inject(SimulatorLabelsClient);
-  private readonly simSvc = inject(SimulatorClient);
   private readonly rcaSvc = inject(RcaAccuracyService);
 
   readonly alarms = signal<AlarmSummary[]>([]);
@@ -61,24 +56,7 @@ export class AlarmsStore {
    */
   readonly labels = signal<GroundTruthLabel[] | null>(null);
 
-  /** Alarm-manager TOTAL alarm count = alarms KEPT after enrichment de-dup (`/alarms` page `total`). */
-  readonly alarmManagerTotal = signal<number | null>(null);
-
-  /** Latest completed simulator-run summary (carries `alarmsEmitted` = alarms EMITTED by ingestion). */
-  readonly synthSummary = signal<SynthSummaryModel | null>(null);
-
   // ── KPI header numbers (mirror the dashboard/stats formulas) ────────────────────────────────
-  /**
-   * ENRICHMENT DE-DUP reduction for the repurposed KPI card: alarms EMITTED by ingestion
-   * (`synthSummary.alarmsEmitted`) vs. alarms KEPT after enrichment's de-dup (the Alarm Manager total).
-   * Delegates to the shared `computeDedupReduction` helper (the SAME logic backs the dashboard card):
-   * graceful "—"/kept-only when there is no run summary, divide-by-zero guard, AND the kept > emitted
-   * guard (kept spans prior runs → not a single-run basis → suppress the % rather than show a negative).
-   */
-  readonly dedupReduction = computed<DedupReduction>(() =>
-    computeDedupReduction(this.synthSummary()?.alarmsEmitted ?? null, this.alarmManagerTotal()),
-  );
-
   readonly autoCorrelationPct = computed<number | null>(() => {
     const s = this.stats();
     if (!s || !s.totalAlarmsProcessed || s.correlatedAlarmCount === undefined) {
@@ -177,20 +155,11 @@ export class AlarmsStore {
       openTail: this.am.listAlarms({ limit: OPEN_TAIL_LIMIT }).pipe(catchError(() => of(null))),
       // RCA ground-truth oracle. Failed/empty → labels []; `rcaAccuracy` then resolves to N/A.
       labels: this.labelsSvc.listLabels().pipe(catchError(() => of<GroundTruthLabel[]>([]))),
-      // Latest simulator-run summary for the dedup card's EMITTED count (kept = openTail.total).
-      synth: this.simSvc.getStatus().pipe(catchError(() => of(null))),
-    }).subscribe(({ incidents, stats, openTail, labels, synth }) => {
+    }).subscribe(({ incidents, stats, openTail, labels }) => {
       if (stats) {
         this.stats.set(stats);
       }
       this.labels.set(labels ?? []);
-      if (synth?.summary) {
-        this.synthSummary.set(synth.summary);
-      }
-      // Alarm Manager total = alarms KEPT after enrichment de-dup (the dedup card's "kept").
-      if (openTail && typeof openTail.total === 'number') {
-        this.alarmManagerTotal.set(openTail.total);
-      }
       const incidentList = incidents?.items ?? [];
       this.incidents.set(incidentList);
       this.resolveAndAssemble(incidentList, openTail?.items ?? []);
@@ -268,9 +237,8 @@ export class AlarmsStore {
   }
 
   /**
-   * Refresh the KPI-header numbers the poll loop does not carry: the Correlation Engine stats, the
-   * Alarm Manager KEPT total (dedup card), and the latest simulator-run summary (dedup card's EMITTED
-   * count). Labels are static per snapshot and are NOT re-pulled here. Each read degrades independently.
+   * Refresh the KPI-header numbers the poll loop does not carry: the Correlation Engine stats. Labels
+   * are static per snapshot and are NOT re-pulled here. Each read degrades independently.
    */
   refreshStats(): void {
     this.ce
@@ -279,22 +247,6 @@ export class AlarmsStore {
       .subscribe((s) => {
         if (s) {
           this.stats.set(s);
-        }
-      });
-    this.am
-      .listAlarms({ limit: 1 })
-      .pipe(catchError(() => of(null)))
-      .subscribe((page) => {
-        if (page && typeof page.total === 'number') {
-          this.alarmManagerTotal.set(page.total);
-        }
-      });
-    this.simSvc
-      .getStatus()
-      .pipe(catchError(() => of(null)))
-      .subscribe((st) => {
-        if (st?.summary) {
-          this.synthSummary.set(st.summary);
         }
       });
   }

@@ -5,7 +5,7 @@ import { AlarmsComponent } from './alarms.component';
 import { LivePollingService } from '../streaming/live-polling.service';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { testProviders, flush } from '../../test-utils';
-import { AlarmSummary, GroundTruthLabel, IncidentVM, StatsVM, SynthSummaryModel } from '../api/models';
+import { AlarmSummary, GroundTruthLabel, IncidentVM, StatsVM } from '../api/models';
 
 function store(): AlarmsStore {
   TestBed.configureTestingModule({ providers: [AlarmsStore, RcaAccuracyService, ...testProviders()] });
@@ -83,7 +83,6 @@ describe('Alarms component (Part 3)', () => {
     const cmp = await mount();
     const el: HTMLElement = cmp.nativeElement;
     expect(el.querySelector('[data-testid="kpi-autocorr"]')).toBeTruthy();
-    expect(el.querySelector('[data-testid="kpi-dedup"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="kpi-rca"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="kpi-incidents"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="kpi-processed"]')).toBeTruthy();
@@ -412,81 +411,5 @@ describe('AlarmsStore — RCA accuracy wired to the ground-truth oracle (Change 
     expect(card.querySelector('.kpi-value')?.textContent?.trim()).toMatch(/%$/);
     // The aria/tooltip honestly describes the metric: an exact match to a ground-truth root-cause alarm.
     expect(card.getAttribute('aria-label')).toContain('root-cause alarm');
-  });
-});
-
-describe('AlarmsStore — Dedup-reduction card (Change 2)', () => {
-  function summary(alarmsEmitted: number): SynthSummaryModel {
-    return {
-      runId: 'r1', status: 'completed', alarmsEmitted, alignedFraction: 0.7, enrichmentSafeCount: 122,
-      shortfallCascades: 0, enrichmentConflictPatterns: [], failureReason: null,
-      startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:01:00Z',
-    };
-  }
-
-  it('resolves emitted → kept + the deduped fraction (200 emitted, 187 kept)', () => {
-    const s = store();
-    s.synthSummary.set(summary(200));
-    s.alarmManagerTotal.set(187);
-    const d = s.dedupReduction();
-    expect(d.emitted).toBe(200);
-    expect(d.kept).toBe(187);
-    expect(d.deduped).toBe(13);
-    expect(d.fraction).toBeCloseTo(13 / 200); // 6.5%
-  });
-
-  it('emitted is null (graceful "—") when there is no completed run this session', () => {
-    const s = store();
-    s.synthSummary.set(null);
-    s.alarmManagerTotal.set(187);
-    const d = s.dedupReduction();
-    expect(d.emitted).toBeNull();
-    expect(d.kept).toBe(187);
-    expect(d.deduped).toBeNull();
-    expect(d.fraction).toBeNull();
-  });
-
-  it('guards divide-by-zero when emitted is 0 (no bogus ratio)', () => {
-    const s = store();
-    s.synthSummary.set(summary(0));
-    s.alarmManagerTotal.set(187);
-    const d = s.dedupReduction();
-    expect(d.fraction).toBeNull();
-    expect(d.deduped).toBeNull();
-  });
-
-  it('guards kept > emitted → NO negative % / deduped (kept spans prior runs; not a single-run basis)', () => {
-    const s = store();
-    // Latest run emitted 50, but the Alarm Manager total (300) includes PRIOR runs → kept > emitted.
-    s.synthSummary.set(summary(50));
-    s.alarmManagerTotal.set(300);
-    const d = s.dedupReduction();
-    expect(d.fraction).toBeNull(); // no false/negative %
-    expect(d.deduped).toBeNull();
-    expect(d.kept).toBe(300); // kept still surfaced so the card shows "300 kept", not a bogus ratio
-    expect(d.emitted).toBe(50);
-  });
-
-  it('the kpi-dedup card renders "200 → 187" + the % deduped', async () => {
-    const cmp = await mount();
-    const s = cmp.debugElement.injector.get(AlarmsStore);
-    s.synthSummary.set(summary(200));
-    s.alarmManagerTotal.set(187);
-    cmp.detectChanges();
-    const card = cmp.nativeElement.querySelector('[data-testid="kpi-dedup"]') as HTMLElement;
-    expect(card.querySelector('[data-testid="kpi-dedup-flow"]')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('200 → 187');
-    expect(card.querySelector('[data-testid="kpi-dedup-pct"]')?.textContent?.trim()).toContain('deduped');
-    expect(card.getAttribute('aria-label')).toContain('emitted');
-  });
-
-  it('the kpi-dedup card shows the kept count alone when no run summary exists', async () => {
-    const cmp = await mount();
-    const s = cmp.debugElement.injector.get(AlarmsStore);
-    s.synthSummary.set(null);
-    s.alarmManagerTotal.set(187);
-    cmp.detectChanges();
-    const card = cmp.nativeElement.querySelector('[data-testid="kpi-dedup"]') as HTMLElement;
-    expect(card.querySelector('[data-testid="kpi-dedup-flow"]')?.textContent?.trim()).toBe('187 kept');
-    expect(card.querySelector('[data-testid="kpi-dedup-pct"]')).toBeNull();
   });
 });

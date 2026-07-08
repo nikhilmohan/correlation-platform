@@ -54,31 +54,6 @@ import { relativeTime } from '../core/relative-time';
       </span>
       <span
         class="kpi"
-        data-testid="kpi-dedup"
-        [attr.aria-label]="dedupAriaLabel()"
-        [title]="DEDUP_HELP"
-      >
-        <span class="kpi-label">Dedup reduction</span>
-        <span class="kpi-value">
-          @if (store.dedupReduction().emitted !== null && store.dedupReduction().kept !== null) {
-            <span data-testid="kpi-dedup-flow">
-              {{ store.dedupReduction().emitted }} &rarr; {{ store.dedupReduction().kept }}
-            </span>
-            @if (store.dedupReduction().fraction !== null) {
-              <small data-testid="kpi-dedup-pct">
-                {{ store.dedupReduction().fraction! | percent: '1.0-1' }} deduped
-              </small>
-            }
-          } @else if (store.dedupReduction().kept !== null) {
-            <!-- No ingestion run this session: show the kept count alone (no bogus ratio). -->
-            <span data-testid="kpi-dedup-flow">{{ store.dedupReduction().kept }} kept</span>
-          } @else {
-            &mdash;
-          }
-        </span>
-      </span>
-      <span
-        class="kpi"
         data-testid="kpi-rca"
         aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm exactly matches a simulator ground-truth root-cause alarm; N/A when no ground truth is available"
         [title]="RCA_HELP"
@@ -723,11 +698,6 @@ export class AlarmsComponent implements OnInit {
    */
   readonly TS_FMT = 'dd MMM yy HH:mm:ss.SSS';
 
-  /** Tooltip copy for the repurposed Dedup-reduction KPI card. */
-  readonly DEDUP_HELP =
-    'Alarms emitted by ingestion vs. kept after enrichment de-duplication. The gap is the number of ' +
-    'duplicate/redundant alarms enrichment removed before correlation.';
-
   /** Tooltip copy for the RCA-accuracy KPI card (validated against the simulator ground-truth oracle). */
   readonly RCA_HELP =
     'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches a ' +
@@ -824,19 +794,6 @@ export class AlarmsComponent implements OnInit {
       return 'Live updates paused on error — showing last known data';
     }
     return this.live.autoRefresh() ? 'Live updates on' : 'Live updates paused';
-  }
-
-  /** Accessible, spoken-out description of the dedup-reduction KPI's current value. */
-  dedupAriaLabel(): string {
-    const d = this.store.dedupReduction();
-    if (d.emitted !== null && d.kept !== null && d.fraction !== null) {
-      const pct = Math.round(d.fraction * 100);
-      return `Dedup reduction: ${d.emitted} alarms emitted by ingestion, ${d.kept} kept after enrichment de-duplication (${pct}% removed).`;
-    }
-    if (d.kept !== null) {
-      return `${d.kept} alarms kept after enrichment de-duplication. No ingestion run this session, so the emitted count is unavailable.`;
-    }
-    return 'Dedup reduction: alarms emitted by ingestion vs. kept after enrichment de-duplication. No data yet.';
   }
 
   /** Readable alarm-type label, preferring `alarmType` then falling back to `eventType`. */
