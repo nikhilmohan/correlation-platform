@@ -12,6 +12,7 @@ import random
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from simulator.api.app import RunState
 from simulator.config.settings import Settings
@@ -24,6 +25,9 @@ from simulator.ingest.corpus_writer import CorpusWriter
 from simulator.integrations import topology_client
 from simulator.integrations.producer import AlarmProducer
 from simulator.obs import metrics
+
+if TYPE_CHECKING:
+    from simulator.synth.progress import ProgressSink
 
 
 @dataclass
@@ -130,8 +134,14 @@ def run_replay_phase(
     *,
     state: RunState | None = None,
     run_id: str | None = None,
+    progress: ProgressSink | None = None,
 ) -> RunOutcome:
-    """P2/P3: synthesize (or ingest) the alarm stream and replay it onto the phase topic."""
+    """P2/P3: synthesize (or ingest) the alarm stream and replay it onto the phase topic.
+
+    ``progress`` (optional) is the HTTP-trigger's :class:`ProgressSink`: the emit loop increments it
+    per produced alarm and the effective corpus total is published via ``set_total`` so a status
+    handler can report live counters. The CLI one-shot path passes ``None`` (no-op).
+    """
     run_id = run_id or uuid.uuid4().hex[:12]
     pack = make_pack()
     out_dir = Path(settings.sim_output_dir)
@@ -145,7 +155,9 @@ def run_replay_phase(
             Path(settings.export_corpus_file), run_id, settings.phase, target_topic
         )
     tap = corpus_writer.tap if corpus_writer else None
-    strategy = replay.make_replay(settings.phase, producer, settings.pacing_multiplier, tap)
+    strategy = replay.make_replay(
+        settings.phase, producer, settings.pacing_multiplier, tap, progress=progress
+    )
 
     outcome = RunOutcome(run_id=run_id, phase=settings.phase, mode=settings.sim_mode)
     try:
@@ -157,6 +169,8 @@ def run_replay_phase(
             events = corpus_loader.load_corpus(settings.ingest_alarms_file)
             if settings.ingest_labels_file:
                 labels.load_from_file(Path(settings.ingest_labels_file))
+            if progress is not None:
+                progress.set_total(len(events))
             emitted = strategy.replay_events(events)
         else:
             rng = _seeded_rng(settings)
@@ -187,6 +201,8 @@ def run_replay_phase(
             if settings.total_alarms is not None:
                 metrics.TARGET_ALARMS.set(settings.total_alarms)
             labels.export_to_file(out_dir / f"labels-{run_id}.jsonl")
+            if progress is not None:
+                progress.set_total(len(result.alarms))
             emitted = strategy.replay_synth(result.alarms)
     finally:
         if corpus_writer is not None:

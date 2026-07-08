@@ -74,9 +74,15 @@ class BatchReplay:
 
     topic = HISTORY_TOPIC
 
-    def __init__(self, producer: AlarmProducer, tap: EmitTap | None = None) -> None:
+    def __init__(
+        self,
+        producer: AlarmProducer,
+        tap: EmitTap | None = None,
+        progress: ProgressCounter | None = None,
+    ) -> None:
         self._producer = producer
         self._tap = tap
+        self._progress = progress
 
     def replay_synth(self, alarms: list[SynthAlarm]) -> int:
         n = 0
@@ -91,6 +97,10 @@ class BatchReplay:
             )
             if self._tap:
                 self._tap(self.topic, envelope)
+            if self._progress is not None:
+                # Aligned == a scenario cascade member (scenario_id carries the scenarioId); noise
+                # and background alarms count as non-aligned.
+                self._progress.inc_emitted(aligned=alarm.scenario_id is not None)
             n += 1
         self._producer.flush()
         return n
@@ -179,9 +189,13 @@ class LiveReplay:
 
 
 def make_replay(
-    phase: str, producer: AlarmProducer, pacing_multiplier: float, tap: EmitTap | None = None
+    phase: str,
+    producer: AlarmProducer,
+    pacing_multiplier: float,
+    tap: EmitTap | None = None,
+    progress: ProgressCounter | None = None,
 ) -> BatchReplay | LiveReplay:
     """Pick the replay strategy for the phase (P2 → batch/history, P3 → live)."""
     if phase == "p3":
-        return LiveReplay(producer, pacing_multiplier=pacing_multiplier, tap=tap)
-    return BatchReplay(producer, tap=tap)
+        return LiveReplay(producer, pacing_multiplier=pacing_multiplier, tap=tap, progress=progress)
+    return BatchReplay(producer, tap=tap, progress=progress)
