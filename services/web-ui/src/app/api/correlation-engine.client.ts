@@ -28,4 +28,13 @@ export class CorrelationEngineClient extends HttpBaseClient {
   getStats(): Observable<StatsVM> {
     return this.get<StatsVM>('/stats');
   }
+
+  /**
+   * POST /admin/reset-correlation — reset correlation state (drop live incidents/correlation).
+   * Part of the operator Purge action (paired with the Alarm Manager live-alarm purge). Returns
+   * void; the caller cares only about success/failure.
+   */
+  resetCorrelation(): Observable<void> {
+    return this.post<void>('/admin/reset-correlation', {});
+  }
 }
