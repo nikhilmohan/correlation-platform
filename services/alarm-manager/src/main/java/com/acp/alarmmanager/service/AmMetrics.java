@@ -60,4 +60,15 @@ public class AmMetrics {
     public void correlationForUnknownAlarm() {
         registry.counter("correlation_for_unknown_alarm_total").increment();
     }
+
+    /**
+     * A status-sync STATE change was IGNORED because it would have downgraded a stronger lifecycle
+     * state (a {@code correlated} alarm being clobbered back to {@code in-progress}/{@code open} by a
+     * lagging sibling pattern-instance event). The state-precedence guard suppressed the out-of-order
+     * downgrade. Tagged by the {@code from}/{@code to} states for dashboards.
+     */
+    public void downgradeIgnored(String from, String to) {
+        Counter.builder("status_downgrade_ignored_total").tag("from", from).tag("to", to)
+                .register(registry).increment();
+    }
 }

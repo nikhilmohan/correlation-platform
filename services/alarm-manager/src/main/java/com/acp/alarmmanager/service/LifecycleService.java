@@ -25,6 +25,17 @@ public class LifecycleService {
     /** Audit reason for the single ingest-origin {@code open} entry (partial-unique guarded). */
     public static final String REASON_INGEST = "ingest";
     public static final String REASON_STATUS_SYNC = "status-sync";
+
+    /**
+     * Audit reason for a status-sync STATE change that the state-precedence guard IGNORED because it
+     * would have downgraded a {@code correlated} alarm (placed in a fired incident) back to a weaker
+     * state via the status channel — an out-of-order lagging sibling pattern-instance event. Recorded
+     * so the suppressed transition is debuggable in the {@code state_transition} audit trail; the
+     * {@code lifecycle_state} is left unchanged (still {@code correlated}).
+     */
+    public static final String REASON_DOWNGRADE_IGNORED =
+            "status-sync downgrade ignored: correlated not overwritten by weaker out-of-order state";
+
     public static final String REASON_CLEAR = "clear";
     public static final String REASON_REVERT =
             "reverted from correlation: instance expired without a match";
@@ -72,11 +83,38 @@ public class LifecycleService {
     @Transactional
     public void applyState(String alarmId, LifecycleState state, String source, Instant changedAt,
             String causedByEventId, Instant now) {
-        if (!alarms.exists(alarmId)) {
+        Optional<LifecycleState> current = alarms.currentLifecycleState(alarmId);
+        if (current.isEmpty()) {
             // Ordering race: the status change beat the alarm's own ingest/persist. Do NOT drop it
             // (that was the stuck-open bug) — PARK it durably keyed by alarmId; the ingest path
             // re-applies it once the alarm is persisted. Last-write-wins by changedAt.
             parkThenDrainIfRaced(alarmId, state.wire(), source, changedAt, causedByEventId, now);
+            return;
+        }
+        // State-precedence guard (THE fix). The correlation-engine fans one alarm across MULTIPLE
+        // pattern instances; a lagging sibling instance can emit an in-progress/open status event
+        // milliseconds AFTER the winning instance already fired `correlated` (incident placed).
+        // alarm-manager is the sole owner of the state machine, so it enforces that `correlated`
+        // ("in a fired incident") is terminal-for-downgrade on the STATUS-SYNC channel, regardless
+        // of event arrival order: a weaker-or-equal state never overwrites `correlated`. This is
+        // ONLY reached for the {open,in-progress,correlated} status states — `clear` and the
+        // expiry `revertToOpen` are their own methods and are intentionally NOT guarded here.
+        if (current.get() == LifecycleState.CORRELATED
+                && state.statusRank() <= LifecycleState.CORRELATED.statusRank()) {
+            // STATE-WRITE suppression uses `<=`: a `correlated` alarm's state is never rewritten by
+            // any {open,in-progress,correlated} status-sync event (a same-rank correlated->correlated
+            // redelivery is likewise a no-op write). But only a GENUINE downgrade (`<`) is audited +
+            // metered as a suppressed downgrade — a same-rank correlated->correlated re-apply is a
+            // silent no-op, not a misleading "downgrade ignored" audit/metric.
+            if (state.statusRank() < LifecycleState.CORRELATED.statusRank()) {
+                log.info("ignoring out-of-order status-sync downgrade for alarmId={}: {} -> {} "
+                        + "(correlated is terminal-for-downgrade on the status channel)",
+                        alarmId, current.get().wire(), state.wire());
+                // Keep an audit trail so the suppressed downgrade is debuggable; state is unchanged.
+                transitions.append(alarmId, LifecycleState.CORRELATED.wire(),
+                        REASON_DOWNGRADE_IGNORED, source, changedAt, causedByEventId, now);
+                metrics.downgradeIgnored(current.get().wire(), state.wire());
+            }
             return;
         }
         alarms.updateLifecycleState(alarmId, state, null, now);
