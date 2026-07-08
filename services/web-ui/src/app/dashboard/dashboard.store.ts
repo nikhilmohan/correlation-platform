@@ -5,7 +5,6 @@ import { CorrelationEngineClient } from '../api/correlation-engine.client';
 import { PatternManagerClient } from '../api/pattern-manager.client';
 import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { SimulatorLabelsClient } from '../api/simulator-labels.client';
-import { ApiConfigService } from '../core/api-config.service';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { GroundTruthLabel, IncidentVM, StatsVM } from '../api/models';
 
@@ -15,7 +14,6 @@ export class DashboardStore {
   private readonly pm = inject(PatternManagerClient);
   private readonly am = inject(AlarmManagerClient);
   private readonly sim = inject(SimulatorLabelsClient);
-  private readonly config = inject(ApiConfigService);
   private readonly rcaSvc = inject(RcaAccuracyService);
 
   readonly stats = signal<StatsVM | null>(null);
@@ -68,9 +66,10 @@ export class DashboardStore {
         this.loading.set(false);
       });
 
-    if (this.config.rcaLabelsEnabled && this.config.isConfigured('simulatorLabels')) {
-      this.sim.listLabels().pipe(catchError(() => of([]))).subscribe((ls) => this.labels.set(ls));
-    }
+    // Fetch the RCA ground-truth oracle (simulator `/labels`). The client resolves to `/api/simulator`
+    // (same base as the synth-run trigger), so it's reachable whenever the simulator is; a failed or
+    // empty fetch leaves `labels` empty and `rcaAccuracy` falls back to N/A (no fabrication).
+    this.sim.listLabels().pipe(catchError(() => of([]))).subscribe((ls) => this.labels.set(ls));
   }
 
   // Exposed for tests/parallel-load callers that prefer a single subscription.

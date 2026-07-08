@@ -7,7 +7,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
+import { DatePipe, PercentPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { AlarmsStore } from './alarms.store';
 import { LivePollingService } from '../streaming/live-polling.service';
@@ -36,7 +36,7 @@ import { relativeTime } from '../core/relative-time';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AlarmsStore, LivePollingService, DeltaDiffService],
-  imports: [DatePipe, DecimalPipe, PercentPipe, RouterLink],
+  imports: [DatePipe, PercentPipe, RouterLink],
   template: `
     <h1>Alarms</h1>
 
@@ -52,17 +52,37 @@ import { relativeTime } from '../core/relative-time';
           }
         </span>
       </span>
-      <span class="kpi" data-testid="kpi-reduction">
-        <span class="kpi-label">Alarm reduction</span>
+      <span
+        class="kpi"
+        data-testid="kpi-dedup"
+        [attr.aria-label]="dedupAriaLabel()"
+        [title]="DEDUP_HELP"
+      >
+        <span class="kpi-label">Dedup reduction</span>
         <span class="kpi-value">
-          @if (store.alarmReductionRatio() !== null) {
-            {{ store.alarmReductionRatio() | number: '1.1-1' }} : 1
+          @if (store.dedupReduction().emitted !== null && store.dedupReduction().kept !== null) {
+            <span data-testid="kpi-dedup-flow">
+              {{ store.dedupReduction().emitted }} &rarr; {{ store.dedupReduction().kept }}
+            </span>
+            @if (store.dedupReduction().fraction !== null) {
+              <small data-testid="kpi-dedup-pct">
+                {{ store.dedupReduction().fraction! | percent: '1.0-1' }} deduped
+              </small>
+            }
+          } @else if (store.dedupReduction().kept !== null) {
+            <!-- No ingestion run this session: show the kept count alone (no bogus ratio). -->
+            <span data-testid="kpi-dedup-flow">{{ store.dedupReduction().kept }} kept</span>
           } @else {
-            N/A
+            &mdash;
           }
         </span>
       </span>
-      <span class="kpi" data-testid="kpi-rca">
+      <span
+        class="kpi"
+        data-testid="kpi-rca"
+        aria-label="RCA accuracy — fraction of incidents whose tagged root cause matches the simulator ground-truth oracle; N/A when no ground truth is available"
+        [title]="RCA_HELP"
+      >
         <span class="kpi-label">RCA accuracy</span>
         <span class="kpi-value">
           @if (store.rcaAccuracy().value !== null) {
@@ -339,6 +359,13 @@ import { relativeTime } from '../core/relative-time';
         font-size: 1.2rem;
         font-weight: 700;
         line-height: 1.1;
+      }
+      .kpi-value small {
+        display: block;
+        font-size: 0.68rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-top: 0.1rem;
       }
       .toolbar {
         display: flex;
@@ -696,6 +723,16 @@ export class AlarmsComponent implements OnInit {
    */
   readonly TS_FMT = 'dd MMM yy HH:mm:ss.SSS';
 
+  /** Tooltip copy for the repurposed Dedup-reduction KPI card. */
+  readonly DEDUP_HELP =
+    'Alarms emitted by ingestion vs. kept after enrichment de-duplication. The gap is the number of ' +
+    'duplicate/redundant alarms enrichment removed before correlation.';
+
+  /** Tooltip copy for the RCA-accuracy KPI card (validated against the simulator ground-truth oracle). */
+  readonly RCA_HELP =
+    'Root-cause accuracy: of the incidents the correlation engine created, how often the tagged root ' +
+    'cause matches the simulator ground-truth labels (the eval oracle). N/A when no ground truth is available.';
+
   /** Screen-reader / tooltip copy for the lifecycle-state column info affordance. */
   readonly STATE_HELP =
     'open = raised, not yet correlating · in-progress = being processed in an active correlation ' +
@@ -786,6 +823,19 @@ export class AlarmsComponent implements OnInit {
       return 'Live updates paused on error — showing last known data';
     }
     return this.live.autoRefresh() ? 'Live updates on' : 'Live updates paused';
+  }
+
+  /** Accessible, spoken-out description of the dedup-reduction KPI's current value. */
+  dedupAriaLabel(): string {
+    const d = this.store.dedupReduction();
+    if (d.emitted !== null && d.kept !== null && d.fraction !== null) {
+      const pct = Math.round(d.fraction * 100);
+      return `Dedup reduction: ${d.emitted} alarms emitted by ingestion, ${d.kept} kept after enrichment de-duplication (${pct}% removed).`;
+    }
+    if (d.kept !== null) {
+      return `${d.kept} alarms kept after enrichment de-duplication. No ingestion run this session, so the emitted count is unavailable.`;
+    }
+    return 'Dedup reduction: alarms emitted by ingestion vs. kept after enrichment de-duplication. No data yet.';
   }
 
   /** Readable alarm-type label, preferring `alarmType` then falling back to `eventType`. */
