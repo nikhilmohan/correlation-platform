@@ -244,6 +244,13 @@
         { "key": "window.adaptive.gapMultiplier", "type": "number", "value": 3.0, "min": 1.0, "max": 100.0 },
         { "key": "window.adaptive.tempoPercentile", "type": "number", "value": 95.0, "min": 1.0, "max": 100.0 },
         { "key": "window.adaptive.profiles", "type": "object", "value": { "fast": 0.5, "slow": 30.0, "default": 5.0 } },
+        { "key": "anchoring.matchConfidenceThreshold", "type": "number", "value": 0.5, "min": 0.0, "max": 1.0 },
+        { "key": "anchoring.weights.order", "type": "number", "value": 0.7, "min": 0.0, "max": 1.0 },
+        { "key": "anchoring.weights.jaccard", "type": "number", "value": 0.3, "min": 0.0, "max": 1.0 },
+        { "key": "anchoring.scoringMethod", "type": "string", "value": "ordered_subsequence_jaccard" },
+        { "key": "anchoring.tieBreak", "type": "string", "value": "chain_length_then_scenario_id" },
+        { "key": "anchoring.groupingKeys", "type": "object", "value": ["scenarioId"] },
+        { "key": "sample.maxAlarms", "type": "integer", "value": 10, "min": 1, "max": 1000 },
         { "key": "codebookVersion", "type": "string", "value": "current" } ] } },
     { "recordType": "modelParams", "recordId": "core-ip/modelParams/correlation-engine",
       "payload": { "paramSet": "correlation-engine", "params": [
