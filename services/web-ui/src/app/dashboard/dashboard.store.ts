@@ -8,7 +8,7 @@ import { SimulatorLabelsClient } from '../api/simulator-labels.client';
 import { SimulatorClient } from '../api/simulator.client';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { DedupReduction, computeDedupReduction } from '../core/dedup-reduction';
-import { AlarmSummary, GroundTruthLabel, IncidentVM, StatsVM, SynthSummaryModel } from '../api/models';
+import { GroundTruthLabel, IncidentVM, StatsVM, SynthSummaryModel } from '../api/models';
 
 @Injectable()
 export class DashboardStore {
@@ -48,15 +48,12 @@ export class DashboardStore {
   });
 
   /**
-   * Resolved root-cause alarms (per incident), keyed by alarmId — carries each incident's exact
-   * failed DEVICE (`managedObjectId`) + type for the RCA-accuracy per-incident exact join. Populated
-   * after incidents load by resolving their `rootCauseAlarmId`s via the Alarm Manager.
+   * RCA accuracy (AC 57): eval-mode value, else the direct `rootCauseAlarmId` exact join against the
+   * simulator ground-truth labels, else N/A. Both the incident and the label carry `rootCauseAlarmId`,
+   * so the join needs no alarm-by-id device resolution.
    */
-  readonly rcaAlarmsById = signal<ReadonlyMap<string, AlarmSummary>>(new Map());
-
-  /** RCA accuracy (AC 57): eval-mode value, else per-incident exact device join, else N/A. */
   readonly rcaAccuracy = computed(() =>
-    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels(), this.rcaAlarmsById()),
+    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()),
   );
 
   readonly incidentCount = computed(() => this.incidents().length);
@@ -68,10 +65,7 @@ export class DashboardStore {
     this.ce
       .listIncidents()
       .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
-      .subscribe((p) => {
-        this.incidents.set(p.items);
-        this.resolveRcaAlarms(p.items);
-      });
+      .subscribe((p) => this.incidents.set(p.items));
     this.pm
       .listPatterns({ lifecycle: 'approved' })
       .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
@@ -95,23 +89,6 @@ export class DashboardStore {
       .getStatus()
       .pipe(catchError(() => of(null)))
       .subscribe((st) => this.synthSummary.set(st?.summary ?? null));
-  }
-
-  /**
-   * Resolve each incident's root-cause alarm by id (its exact device + type) for the RCA-accuracy
-   * per-incident exact join. A failed/empty fetch leaves the map empty → `rcaAccuracy` falls back to
-   * N/A (no fabrication). Only root-cause ids are needed here (children don't affect RCA accuracy).
-   */
-  private resolveRcaAlarms(incidents: readonly IncidentVM[]): void {
-    const ids = [...new Set(incidents.map((i) => i.rootCauseAlarmId).filter((id): id is string => !!id))];
-    if (ids.length === 0) {
-      this.rcaAlarmsById.set(new Map());
-      return;
-    }
-    this.am
-      .getAlarms(ids)
-      .pipe(catchError(() => of<AlarmSummary[]>([])))
-      .subscribe((alarms) => this.rcaAlarmsById.set(new Map(alarms.map((a) => [a.alarmId, a]))));
   }
 
   // Exposed for tests/parallel-load callers that prefer a single subscription.

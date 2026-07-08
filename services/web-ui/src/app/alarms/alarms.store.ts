@@ -88,20 +88,12 @@ export class AlarmsStore {
   });
 
   /**
-   * Index of resolved alarms by id, so the RCA-accuracy join can look up each incident's root-cause
-   * alarm (its exact device `managedObjectId` + type) — `alarms()` already holds the incident-resolved
-   * root-cause + child alarms fetched by id in `resolveAndAssemble`.
+   * RCA accuracy: eval-mode value, else the direct `rootCauseAlarmId` exact join against the
+   * simulator ground-truth labels, else N/A. The join keys straight off each incident's
+   * `rootCauseAlarmId` (both sides carry it), so no alarm-by-id device resolution is needed.
    */
-  private readonly alarmsById = computed<ReadonlyMap<string, AlarmSummary>>(() => {
-    const m = new Map<string, AlarmSummary>();
-    for (const a of this.alarms()) {
-      m.set(a.alarmId, a);
-    }
-    return m;
-  });
-
   readonly rcaAccuracy = computed(() =>
-    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels(), this.alarmsById()),
+    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()),
   );
 
   readonly liveIncidentCount = computed<number>(() => this.incidents().length);

@@ -8,7 +8,7 @@ import { DashboardComponent } from './dashboard.component';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { mockBackendInterceptor } from '../core/mock-backend.interceptor';
 import { flush } from '../../test-utils';
-import { AlarmSummary, GroundTruthLabel, IncidentVM, StatsVM } from '../api/models';
+import { GroundTruthLabel, IncidentVM, StatsVM } from '../api/models';
 
 @Component({ template: '' })
 class StubComponent {}
@@ -111,71 +111,57 @@ describe('Landing dashboard', () => {
     expect(el.querySelector('app-site-graph')).toBeNull();
   });
 
-  it('AC 57 — RCA accuracy: eval-mode value, else PER-INCIDENT EXACT device+type join, else N/A', () => {
+  it('AC 57 — RCA accuracy: eval-mode value, else DIRECT rootCauseAlarmId exact join, else N/A', () => {
     const svc = new RcaAccuracyService();
-    const alarm = (id: string, mo: string, type: string): AlarmSummary => ({
-      alarmId: id,
-      managedObjectId: mo,
-      eventType: type,
-      alarmType: type,
-      lifecycleState: 'correlated',
-      role: 'root-cause',
-    });
-    // i1's RCA alarm is device m1 / LOS — EXACTLY matches label sc-1 → counts.
-    // i2's RCA alarm is device m2 / LinkDown — device m2 IS labelled (sc-2) but the TYPE is wrong
-    //   (label sc-2 is CardFail) → covered by a label but NOT correct.
-    // i3's RCA alarm is device m9 — NO label covers it → excluded from BOTH num and denom.
+    // Real P3 `/labels` shape (P3CascadeLabelModel): the ground-truth root-cause ALARM id is the join
+    // key, matching the incident's rootCauseAlarmId directly — no alarm-by-id device resolution.
+    // i1's rootCauseAlarmId (a1) IS a labelled root-cause alarm id → correct.
+    // i2's rootCauseAlarmId (a2) IS labelled → correct.
+    // i3's rootCauseAlarmId (a3) is NOT a labelled root-cause alarm id → miss (counts in denominator).
     const incidents: IncidentVM[] = [
       { incidentId: 'i1', rootCauseAlarmId: 'a1', rootCauseAlarmType: 'LOS', childAlarmIds: [], confidence: 1, trailId: 't' },
-      { incidentId: 'i2', rootCauseAlarmId: 'a2', rootCauseAlarmType: 'LinkDown', childAlarmIds: [], confidence: 1, trailId: 't' },
+      { incidentId: 'i2', rootCauseAlarmId: 'a2', rootCauseAlarmType: 'CardFail', childAlarmIds: [], confidence: 1, trailId: 't' },
       { incidentId: 'i3', rootCauseAlarmId: 'a3', rootCauseAlarmType: 'LOS', childAlarmIds: [], confidence: 1, trailId: 't' },
     ];
-    const rcaAlarms = new Map<string, AlarmSummary>([
-      ['a1', alarm('a1', 'm1', 'LOS')],
-      ['a2', alarm('a2', 'm2', 'LinkDown')],
-      ['a3', alarm('a3', 'm9', 'LOS')],
-    ]);
     const labels: GroundTruthLabel[] = [
-      { scenarioId: 'sc-1', scenarioType: 'f', rootCause: 'm1', rootCauseManagedObjectId: 'm1', rootCauseAlarmType: 'LOS', children: [] },
-      { scenarioId: 'sc-2', scenarioType: 'c', rootCause: 'm2', rootCauseManagedObjectId: 'm2', rootCauseAlarmType: 'CardFail', children: [] },
+      { patternId: 'p1', trailId: 't', rootCauseAlarmId: 'a1', rootCauseAlarmType: 'LOS', childAlarmIds: [], scenarioType: 'f', instanceIndex: 0, igpArea: '0' },
+      { patternId: 'p2', trailId: 't', rootCauseAlarmId: 'a2', rootCauseAlarmType: 'CardFail', childAlarmIds: [], scenarioType: 'c', instanceIndex: 1, igpArea: '0' },
     ];
 
     // eval path wins whenever stats.rcaAccuracy is a number.
-    expect(svc.resolve({ rcaAccuracy: 0.86 } as StatsVM, incidents, labels, rcaAlarms)).toEqual({ value: 0.86, source: 'eval' });
+    expect(svc.resolve({ rcaAccuracy: 0.86 } as StatsVM, incidents, labels)).toEqual({ value: 0.86, source: 'eval' });
 
-    // client-side EXACT join: denominator = incidents whose device IS labelled (i1, i2) = 2;
-    // numerator = incidents whose device AND type match a label (only i1) = 1 → 1/2 = 0.5. i3 excluded.
-    const join = svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, labels, rcaAlarms);
-    expect(join.value).toBeCloseTo(0.5);
+    // client-side EXACT join on rootCauseAlarmId: denominator = total incidents (3);
+    // numerator = incidents whose rootCauseAlarmId ∈ label set (i1, i2) = 2 → 2/3.
+    const join = svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, labels);
+    expect(join.value).toBeCloseTo(2 / 3);
     expect(join.source).toBe('client-side-join');
 
     // No labels → N/A.
-    expect(svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, null, rcaAlarms)).toEqual({ value: null, source: 'na' });
+    expect(svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, null)).toEqual({ value: null, source: 'na' });
 
-    // Labels present but NONE cover any incident's device (empty rca-alarm map → no device resolvable) → N/A.
-    expect(svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, labels, new Map())).toEqual({ value: null, source: 'na' });
+    // Empty label list → N/A.
+    expect(svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, [])).toEqual({ value: null, source: 'na' });
   });
 
-  it('AC 57b — an incident with a NON-matching device id does NOT count (exact join, not type-membership)', () => {
+  it('AC 57b — all incidents whose rootCauseAlarmId is labelled → 100%; a non-labelled id is a miss', () => {
     const svc = new RcaAccuracyService();
-    const rcaAlarm: AlarmSummary = {
-      alarmId: 'a1',
-      managedObjectId: 'wrong-device',
-      eventType: 'LOS',
-      alarmType: 'LOS',
-      lifecycleState: 'correlated',
-      role: 'root-cause',
-    };
     const incidents: IncidentVM[] = [
       { incidentId: 'i1', rootCauseAlarmId: 'a1', rootCauseAlarmType: 'LOS', childAlarmIds: [], confidence: 1, trailId: 't' },
+      { incidentId: 'i2', rootCauseAlarmId: 'a2', rootCauseAlarmType: 'LOS', childAlarmIds: [], confidence: 1, trailId: 't' },
     ];
-    // The label's TYPE (LOS) is in the incident's type set — the OLD loose check would count this — but
-    // its DEVICE differs, so the EXACT join excludes it from the denominator entirely → N/A (0 covered).
     const labels: GroundTruthLabel[] = [
-      { scenarioId: 'sc-1', scenarioType: 'f', rootCause: 'right-device', rootCauseManagedObjectId: 'right-device', rootCauseAlarmType: 'LOS', children: [] },
+      { patternId: 'p1', trailId: 't', rootCauseAlarmId: 'a1', rootCauseAlarmType: 'LOS', childAlarmIds: [], scenarioType: 'f', instanceIndex: 0, igpArea: '0' },
+      { patternId: 'p2', trailId: 't', rootCauseAlarmId: 'a2', rootCauseAlarmType: 'LOS', childAlarmIds: [], scenarioType: 'f', instanceIndex: 1, igpArea: '0' },
     ];
-    const res = svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, labels, new Map([['a1', rcaAlarm]]));
-    expect(res).toEqual({ value: null, source: 'na' });
+    // Every incident's rootCauseAlarmId is a labelled root-cause alarm id → 2/2 = 1.0 (the live 34/34 case).
+    expect(svc.resolve({ rcaAccuracy: null } as StatsVM, incidents, labels).value).toBe(1);
+
+    // Flip i2 to an UNLABELLED root-cause alarm id → it is a genuine miss → 1/2 = 0.5.
+    const withMiss: IncidentVM[] = [incidents[0], { ...incidents[1], rootCauseAlarmId: 'unlabelled' }];
+    const res = svc.resolve({ rcaAccuracy: null } as StatsVM, withMiss, labels);
+    expect(res.value).toBeCloseTo(0.5);
+    expect(res.source).toBe('client-side-join');
   });
 
   it('AC 58 — auto-correlation% = correlatedAlarmCount / totalAlarmsProcessed; N/A when zero processed', () => {

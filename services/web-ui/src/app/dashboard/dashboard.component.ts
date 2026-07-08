@@ -89,7 +89,7 @@ import { IngestionButtonComponent } from './ingestion-button.component';
         type="button"
         (click)="nav.toStats()"
         data-testid="kpi-rca"
-        aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm matches the simulator ground-truth label (exact root-cause device + alarm type), over the incidents a label covers; N/A when no ground truth is available"
+        aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm exactly matches a simulator ground-truth root-cause alarm; N/A when no ground truth is available"
         [title]="RCA_HELP"
       >
         <span class="kpi-icon" aria-hidden="true">◎</span>
@@ -268,9 +268,9 @@ export class DashboardComponent implements OnInit {
 
   /** Tooltip copy for the RCA-accuracy KPI card (identical wording to the Alarms header card). */
   readonly RCA_HELP =
-    'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches its ' +
-    'simulator ground-truth label — the same failed device (managed object) AND alarm type — measured ' +
-    'over only the incidents a label covers. N/A when no ground truth is available.';
+    'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches a ' +
+    'simulator ground-truth root-cause alarm (a direct root-cause alarm-id match), measured over all ' +
+    'incidents. N/A when no ground truth is available.';
 
   /** Accessible, spoken-out description of the dedup-reduction KPI's current value (matches Alarms). */
   dedupAriaLabel(): string {
