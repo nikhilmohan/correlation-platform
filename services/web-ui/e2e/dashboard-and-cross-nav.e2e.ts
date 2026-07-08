@@ -29,13 +29,12 @@ test.describe('Landing dashboard [AC 5]', () => {
     const incidentValue = Number(incidentText.replace(/\D+/g, ''));
     expect(incidentValue).toBeGreaterThan(0);
 
-    // Alarm-reduction ratio = totalAlarmsProcessed / totalIncidentsCreated (CE /stats), shown as
-    // "<n> : 1"; must be a non-zero numeric (not "N/A").
-    const reductionKpi = page.getByTestId('kpi-reduction');
-    await expect(reductionKpi).toBeVisible();
-    const reductionText = (await reductionKpi.innerText()).trim();
-    expect(reductionText).not.toMatch(/N\/A/i);
-    expect(reductionText).toMatch(/[0-9]+(\.[0-9]+)?\s*:\s*1/);
+    // RCA-accuracy card (CE incidents joined to the simulator ground-truth labels — the eval oracle):
+    // it renders either a percentage or an honest "N/A (no ground truth)". Assert the card + its label
+    // are present. This is DB/oracle-derived, not a simulator run-summary count.
+    const rcaKpi = page.getByTestId('kpi-rca');
+    await expect(rcaKpi).toBeVisible();
+    await expect(rcaKpi).toContainText(/RCA accuracy/i);
   });
 });
 

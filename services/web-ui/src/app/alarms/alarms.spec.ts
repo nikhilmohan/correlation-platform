@@ -5,7 +5,7 @@ import { AlarmsComponent } from './alarms.component';
 import { LivePollingService } from '../streaming/live-polling.service';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { testProviders, flush } from '../../test-utils';
-import { AlarmSummary, StatsVM } from '../api/models';
+import { AlarmSummary, GroundTruthLabel, IncidentVM, StatsVM } from '../api/models';
 
 function store(): AlarmsStore {
   TestBed.configureTestingModule({ providers: [AlarmsStore, RcaAccuracyService, ...testProviders()] });
@@ -22,20 +22,6 @@ async function mount() {
 }
 
 describe('Unified Alarms store (Part 3)', () => {
-  it('KPI header — alarm-reduction ratio = totalAlarmsProcessed / totalIncidentsCreated', async () => {
-    const s = store();
-    s.loadAll();
-    await flush();
-    expect(s.alarmReductionRatio()).toBeCloseTo(1280 / 154);
-    expect(typeof s.alarmReductionRatio()).toBe('number');
-  });
-
-  it('KPI header — ratio is null (N/A) when totalIncidentsCreated is zero', () => {
-    const s = store();
-    s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 0 } as StatsVM);
-    expect(s.alarmReductionRatio()).toBeNull();
-  });
-
   it('loads alarms + incidents + stats from the mock backends', async () => {
     const s = store();
     s.loadAll();
@@ -97,7 +83,6 @@ describe('Alarms component (Part 3)', () => {
     const cmp = await mount();
     const el: HTMLElement = cmp.nativeElement;
     expect(el.querySelector('[data-testid="kpi-autocorr"]')).toBeTruthy();
-    expect(el.querySelector('[data-testid="kpi-reduction"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="kpi-rca"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="kpi-incidents"]')).toBeTruthy();
     expect(el.querySelector('[data-testid="kpi-processed"]')).toBeTruthy();
@@ -366,5 +351,65 @@ describe('AlarmsStore — graceful RCA promotion', () => {
     expect(rca.incidentId).toBe('INC-1');
     // rc was filtered out (correlated); the surviving open child is promoted to the row alarm.
     expect(rca.alarm.alarmId).toBe('c1');
+  });
+});
+
+describe('AlarmsStore — RCA accuracy wired to the ground-truth oracle (Change 1)', () => {
+  function incident(id: string, rootCauseAlarmId: string): IncidentVM {
+    return { incidentId: id, rootCauseAlarmId, rootCauseAlarmType: 'LOS', childAlarmIds: [], confidence: 0.9, trailId: 'TR-1' };
+  }
+  // Real P3 `/labels` shape (P3CascadeLabelModel): the join keys on the ground-truth root-cause
+  // ALARM id (rootCauseAlarmId), matching the incident's rootCauseAlarmId directly.
+  function label(rootCauseAlarmId: string): GroundTruthLabel {
+    return { patternId: 'p', trailId: 'TR-1', rootCauseAlarmId, rootCauseAlarmType: 'LOS', childAlarmIds: [], scenarioType: 'fiber-cut', instanceIndex: 0, igpArea: '0.0.0.0' };
+  }
+
+  it('loadAll() FETCHES the simulator labels into the labels signal', async () => {
+    const s = store();
+    s.loadAll();
+    await flush();
+    // The mock /labels fixture returns two P3 ground-truth labels (keyed on rootCauseAlarmId).
+    expect(s.labels()).not.toBeNull();
+    expect(s.labels()!.length).toBeGreaterThan(0);
+  });
+
+  it('computes the REAL fraction via the DIRECT rootCauseAlarmId exact join when stats.rcaAccuracy is null', () => {
+    const s = store();
+    // No eval-mode value → the direct rootCauseAlarmId label join drives the metric.
+    s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 3, rcaAccuracy: null } as StatsVM);
+    s.labels.set([label('rc-1'), label('rc-2')]);
+    // Both incidents' rootCauseAlarmId is a labelled root-cause alarm id → 2/2 = 1.0 (the live case).
+    s.incidents.set([incident('INC-1', 'rc-1'), incident('INC-2', 'rc-2')]);
+    expect(s.rcaAccuracy().value).toBe(1);
+    expect(s.rcaAccuracy().source).toBe('client-side-join');
+  });
+
+  it('a labelled rootCauseAlarmId counts; a non-labelled one is a miss (denominator = total incidents)', () => {
+    const s = store();
+    s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 3, rcaAccuracy: null } as StatsVM);
+    s.labels.set([label('rc-1')]);
+    // INC-1's rootCauseAlarmId is labelled → counts. INC-2's is NOT → a genuine miss. → 1/2 = 0.5.
+    s.incidents.set([incident('INC-1', 'rc-1'), incident('INC-2', 'rc-unlabelled')]);
+    expect(s.rcaAccuracy().value).toBe(0.5);
+    expect(s.rcaAccuracy().source).toBe('client-side-join');
+  });
+
+  it('is N/A when labels are empty (graceful fallback — no oracle)', () => {
+    const s = store();
+    s.stats.set({ totalAlarmsProcessed: 100, totalIncidentsCreated: 3, rcaAccuracy: null } as StatsVM);
+    s.labels.set([]);
+    s.incidents.set([incident('INC-1', 'rc-1')]);
+    expect(s.rcaAccuracy().value).toBeNull();
+    expect(s.rcaAccuracy().source).toBe('na');
+  });
+
+  it('the kpi-rca card renders a real percent (not N/A) when labels resolve', async () => {
+    const cmp = await mount();
+    const card = cmp.nativeElement.querySelector('[data-testid="kpi-rca"]') as HTMLElement;
+    // The mock stats carry rcaAccuracy=0.86 (eval path) → the card shows a percent, never N/A.
+    expect(card.querySelector('.kpi-value')?.textContent?.trim()).not.toBe('N/A');
+    expect(card.querySelector('.kpi-value')?.textContent?.trim()).toMatch(/%$/);
+    // The aria/tooltip honestly describes the metric: an exact match to a ground-truth root-cause alarm.
+    expect(card.getAttribute('aria-label')).toContain('root-cause alarm');
   });
 });

@@ -607,9 +607,11 @@ const ENRICHMENT_CHATTER: Record<string, EnrichmentChatterList> = {
   default: { source: 'default', chatterList: [] },
 };
 
+// P3 `/labels` shape (P3CascadeLabelModel): keyed on the ground-truth root-cause ALARM id, matching
+// the incidents' `rootCauseAlarmId` above (a-20, a-3) so the client-side RCA join resolves.
 const LABELS: GroundTruthLabel[] = [
-  { scenarioId: 'sc-1', scenarioType: 'fiber-cut', rootCause: 'FiberSpan:lon-fra-1', rootCauseManagedObjectId: 'FiberSpan:lon-fra-1', rootCauseAlarmType: 'LOS', children: ['LinkDown', 'AdjDown'] },
-  { scenarioId: 'sc-2', scenarioType: 'card-fail', rootCause: 'Router:lon-r1', rootCauseManagedObjectId: 'Router:lon-r1', rootCauseAlarmType: 'CardFail', children: ['PortFlap'] },
+  { patternId: 'PAT-8', trailId: 'TR-8', rootCauseAlarmId: 'a-20', rootCauseAlarmType: 'LinkDown', childAlarmIds: ['a-21'], scenarioType: 'fiber-cut', instanceIndex: 0, igpArea: '0.0.0.0' },
+  { patternId: 'PAT-3', trailId: 'TR-3', rootCauseAlarmId: 'a-3', rootCauseAlarmType: 'LOS', childAlarmIds: ['a-7', 'a-8'], scenarioType: 'card-fail', instanceIndex: 1, igpArea: '0.0.0.1' },
 ];
 
 const SYNTH_RUN_ACCEPTED: SynthRunResponse = { runId: 'mock-run-1', status: 'running' };
