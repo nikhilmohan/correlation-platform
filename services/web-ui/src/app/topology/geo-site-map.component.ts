@@ -23,6 +23,7 @@ import { NavigationService } from '../core/navigation.service';
 import { ErrorBannerService } from '../core/error-banner.service';
 import { ThemeService } from '../core/theme.service';
 import { SiteDto } from '../api/models';
+import { SeverityBucket } from './alarm-severity';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the (large) MapLibre
 // bundle is fetched only when this view is actually shown, and unit tests can mock it.
@@ -35,8 +36,19 @@ import type {
 } from 'maplibre-gl';
 import type { FeatureCollection, Point } from 'geojson';
 
-/** Operator status of a site. Drives the status-dot colour, the legend and the status bar. */
+/**
+ * Operator status of a site — the alarm-SEVERITY bucket of the site, mapped 1:1 to a pin colour:
+ *   - `fault`     → RED    (any active critical OR major alarm on any device at the site),
+ *   - `warning`   → AMBER  (an active minor alarm, no critical/major),
+ *   - `monitored` → GREEN  (no active fault, or only warning/cleared).
+ * Drives the status-dot colour, the legend, the status bar and the accessible per-site label.
+ */
 export type SiteStatus = 'fault' | 'warning' | 'monitored';
+
+/** Map the pure severity bucket → the site's operator status word. */
+function statusForBucket(bucket: SeverityBucket): SiteStatus {
+  return bucket === 'red' ? 'fault' : bucket === 'amber' ? 'warning' : 'monitored';
+}
 
 /**
  * Geo-site map (spec task 6, AC 26; #276 clustering). The entry view of the topology module. Sites
@@ -72,18 +84,33 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       <div class="error-banner" role="alert">{{ err.message }}</div>
     }
 
-    <!-- Operator status bar + legend (above the map). Summarises the fleet by status. -->
-    <div class="status-bar" role="group" aria-label="Site status summary">
+    <!-- Operator status bar + legend (above the map). Summarises the fleet by WORST ACTIVE alarm
+         severity per site (red = critical/major, amber = minor, green = OK), with a Refresh control
+         that re-pulls the alarm overlay and re-colours the pins. Status is text/aria-readable, never
+         colour-only (WCAG 1.4.1). -->
+    <div class="status-bar" role="group" aria-label="Site alarm-severity summary">
       <span class="status-item" data-testid="status-fault">
-        <span class="dot dot-fault" aria-hidden="true"></span>Fault: {{ statusCounts().fault }}
+        <span class="dot dot-fault" aria-hidden="true"></span>Critical/Major: {{ statusCounts().fault }}
       </span>
       <span class="status-item" data-testid="status-warning">
-        <span class="dot dot-warning" aria-hidden="true"></span>Warning: {{ statusCounts().warning }}
+        <span class="dot dot-warning" aria-hidden="true"></span>Minor: {{ statusCounts().warning }}
       </span>
       <span class="status-item" data-testid="status-monitored">
-        <span class="dot dot-monitored" aria-hidden="true"></span>Monitored: {{ statusCounts().monitored }}
+        <span class="dot dot-monitored" aria-hidden="true"></span>OK: {{ statusCounts().monitored }}
       </span>
       <span class="status-item status-total" data-testid="status-total">{{ statusCounts().total }} sites</span>
+      <button
+        type="button"
+        class="alarm-refresh"
+        data-testid="map-refresh"
+        [attr.aria-busy]="store.alarmsLoading()"
+        [disabled]="store.alarmsLoading()"
+        aria-label="Refresh alarm severity — re-pull alarms and re-colour the site pins"
+        (click)="refreshAlarms()"
+      >
+        <span class="refresh-glyph" [class.spinning]="store.alarmsLoading()" aria-hidden="true">↻</span>
+        {{ store.alarmsLoading() ? 'Refreshing…' : 'Refresh' }}
+      </button>
     </div>
 
     <div class="map-wrap">
@@ -136,10 +163,11 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
             type="button"
             class="site-chip"
             data-testid="site-marker"
+            [attr.data-status]="siteStatusFor(site)"
             (click)="select(site.siteId)"
             [attr.aria-label]="ariaFor(site)"
           >
-            <span class="dot dot-monitored" aria-hidden="true"></span>
+            <span class="dot" [class]="statusDotClass(site)" aria-hidden="true"></span>
             {{ site.name }} — {{ site.region }}
           </button>
         }
@@ -170,6 +198,48 @@ export type SiteStatus = 'fault' | 'warning' | 'monitored';
       .status-total {
         margin-left: auto;
         color: var(--text-muted);
+      }
+      /* Refresh control — re-pulls the alarm overlay + re-colours the pins. Sits at the right end of
+         the status bar; shows a spinning glyph + "Refreshing…" while the pull is in flight. */
+      .alarm-refresh {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.25rem 0.6rem;
+        font: inherit;
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      .alarm-refresh:hover:not(:disabled),
+      .alarm-refresh:focus-visible:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .alarm-refresh:disabled {
+        opacity: 0.7;
+        cursor: progress;
+      }
+      .refresh-glyph {
+        display: inline-block;
+        color: var(--accent);
+        font-weight: 700;
+      }
+      .refresh-glyph.spinning {
+        animation: refresh-spin 0.8s linear infinite;
+      }
+      @keyframes refresh-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .refresh-glyph.spinning {
+          animation: none;
+        }
       }
       .dot {
         display: inline-block;
@@ -388,13 +458,24 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   private themeEffect: EffectRef;
 
   /**
-   * Uniform site-pin GREEN (Part 1). Every independent site renders as this same green circle — the
-   * status→green/amber/red variation was removed; a site is just a green dot. Matches the `--ok`
-   * green family used elsewhere in the app.
+   * SEVERITY PIN PALETTE — the site pin fill is now driven by the site's WORST ACTIVE alarm severity
+   * (red = critical/major, amber = minor, green = OK), replacing the uniform green. High-contrast
+   * accessible hexes that read on the natural green LAND / blue SEA basemap in both themes; each pin
+   * also carries a dark stroke ring. Status is never colour-only — the accessible site list + aria
+   * carry the status WORD.
    */
-  private static readonly SITE_GREEN = '#22c55e';
-  /** Cluster bubble GREEN — same family as the pin, a shade darker so the aggregate still reads. */
+  private static readonly PIN_RED = '#ef4444';
+  private static readonly PIN_AMBER = '#f59e0b';
+  private static readonly PIN_GREEN = '#22c55e';
+  /** Cluster bubble GREEN — the aggregate bubble stays a neutral green (per-site colour is the pin). */
   private static readonly SITE_CLUSTER_GREEN = '#15803d';
+
+  /** Site-status → pin fill hex (drives the `statusColor` GeoJSON property + the data-driven layer). */
+  private static readonly STATUS_FILL: Record<SiteStatus, string> = {
+    fault: GeoSiteMapComponent.PIN_RED,
+    warning: GeoSiteMapComponent.PIN_AMBER,
+    monitored: GeoSiteMapComponent.PIN_GREEN,
+  };
 
   /** GeoJSON source id holding the site points (native MapLibre clustering source). */
   private static readonly SITES_SOURCE = 'sites';
@@ -414,9 +495,10 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   private static readonly DEFAULT_MAX_ZOOM = 4.2;
 
   /**
-   * Operator status counts for the status bar / legend, derived purely from the current sites.
-   * `monitored` is the universe minus fault/warning (the P3 hook below makes all P1 sites
-   * 'monitored' until SiteDto carries a severity).
+   * Fleet status counts for the status bar, derived from the REAL alarm snapshot: each site is
+   * bucketed by its worst active alarm severity (fault = red = critical/major, warning = amber =
+   * minor, monitored = green = OK). Recomputes reactively when the alarm snapshot or the per-site
+   * object cache changes (i.e. on Refresh).
    */
   readonly statusCounts = computed<{ fault: number; warning: number; monitored: number; total: number }>(() => {
     const sites = this.store.sites();
@@ -428,11 +510,14 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   });
 
   constructor() {
-    // Push the current sites into the clustering GeoJSON SOURCE whenever the sites signal changes,
-    // once the map is built. Created in the injection context (constructor); gated on mapReady so it
-    // no-ops until the real map + source exist, then runs reactively for every store.sites() update.
+    // Push the current sites into the clustering GeoJSON SOURCE whenever the sites signal OR the
+    // alarm overlay changes (a Refresh re-pull re-colours the pins WITHOUT rebuilding the map). Gated
+    // on mapReady so it no-ops until the real map + source exist, then runs reactively for every
+    // sites()/alarms()/site-object-cache update; the site-status computed reads those signals so the
+    // GeoJSON statusColor property carries the fresh per-site severity colour on each recompute.
     this.siteEffect = effect(() => {
       const sites = this.store.sites();
+      this.store.alarms(); // track — re-colour pins when the alarm snapshot changes (Refresh)
       if (!this.mapReady() || !this.map) {
         return;
       }
@@ -529,10 +614,28 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
 
   ngOnInit(): void {
     this.store.loadSites();
+    // Pull the alarm snapshot so the pins can be coloured by the site's worst active alarm severity.
+    // The per-site objects fan-out is NOT kicked off here: loadSites() is async, so at this point
+    // sites() is still empty and a one-shot loadAllSiteObjects() would no-op and never retry (the
+    // live bug). Instead the store's reactive effect loads the per-site objects the moment sites()
+    // becomes non-empty. The Refresh button still force-re-pulls both (see refreshAlarms()).
+    this.store.refreshAlarms();
     const trailId = this.route.snapshot.queryParamMap.get('trailId');
     if (trailId) {
       this.store.activateTrail(trailId);
     }
+  }
+
+  /**
+   * Refresh the alarm overlay (the `data-testid="map-refresh"` button): re-pull the alarm snapshot;
+   * the pin-colour effect + status-bar counts re-paint reactively from the new snapshot. Does NOT
+   * rebuild the map/basemap — only the overlay recolours. The per-site object cache is only fanned
+   * out if it hasn't been loaded yet (site objects don't change between refreshes — only alarms do),
+   * so a Refresh normally re-pulls alarms ONLY (ensureSiteObjectsLoaded no-ops once cached).
+   */
+  refreshAlarms(): void {
+    this.store.refreshAlarms();
+    this.store.ensureSiteObjectsLoaded();
   }
 
   async ngAfterViewInit(): Promise<void> {
@@ -684,15 +787,17 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
       },
     });
 
-    // Individual (unclustered) site pins — UNIFORM GREEN dot (Part 1). Every independent site is the
-    // same green circle regardless of status; a dark ring keeps it high-contrast on the green land.
+    // Individual (unclustered) site pins — coloured by the site's WORST ACTIVE alarm severity. The
+    // per-site red/amber/green fill is carried on each feature's `statusColor` property (set by
+    // sitesGeoJson from siteStatusFor), so the layer paints data-driven and re-colours the moment the
+    // source data is re-pushed on a Refresh. A dark ring keeps every pin high-contrast on the land.
     map.addLayer({
       id: 'site-unclustered',
       type: 'circle',
       source: src,
       filter: ['!', ['has', 'point_count']],
       paint: {
-        'circle-color': GeoSiteMapComponent.SITE_GREEN,
+        'circle-color': ['get', 'statusColor'],
         'circle-radius': 7,
         'circle-stroke-color': '#0b1220',
         'circle-stroke-width': 2.5,
@@ -865,12 +970,11 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   /**
-   * Pin fill colour. Part 1: sites render UNIFORMLY GREEN — every independent site is the same green
-   * circle regardless of status, so this always returns the site green (kept as a method so the
-   * GeoJSON `statusColor` feature property stays populated for any downstream/theme use).
+   * Pin fill colour — the site's WORST ACTIVE alarm severity mapped to red/amber/green (drives the
+   * GeoJSON `statusColor` feature property, which the data-driven unclustered-site layer paints).
    */
-  private statusColorFor(_site: SiteDto): string {
-    return GeoSiteMapComponent.SITE_GREEN;
+  private statusColorFor(site: SiteDto): string {
+    return GeoSiteMapComponent.STATUS_FILL[this.siteStatusFor(site)];
   }
 
   /** Bounding box [W,S,E,N] of the current sites, or the UK/EU fallback when there are none. */
@@ -894,20 +998,32 @@ export class GeoSiteMapComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   /**
-   * Operator status of a site (P3 hook). SiteDto carries no severity in the P1 contract, so every
-   * P1 site is 'monitored' (green). When the Topology contract adds a per-site severity, branch
-   * here to return 'fault'/'warning' — the status-bar counts, legend and pin colour all follow.
+   * Operator status of a site — its WORST ACTIVE alarm-severity bucket, wired to the REAL alarm
+   * snapshot via the store: the worst severity among all alarms whose node token belongs to any
+   * device at the site (fault = red = critical/major, warning = amber = minor, monitored = green).
+   * The status-bar counts, legend, pin colour and the accessible per-site label all follow.
    */
   siteStatusFor(site: SiteDto): SiteStatus {
-    void site;
-    return 'monitored';
+    return statusForBucket(this.store.siteSeverityBucket(site.siteId));
   }
 
-  /** Accessible label including the operator status word (not colour-only — WCAG 1.4.1). */
+  /** Accessible-list status dot class for a site (colour matches its pin; text/aria carry the word). */
+  statusDotClass(site: SiteDto): string {
+    return `dot-${this.siteStatusFor(site)}`;
+  }
+
+  /** Human-readable status phrase used in the accessible label (not colour-only — WCAG 1.4.1). */
+  private statusPhrase(status: SiteStatus): string {
+    return status === 'fault'
+      ? 'critical or major fault'
+      : status === 'warning'
+        ? 'minor fault'
+        : 'no active fault';
+  }
+
+  /** Accessible label including the operator status phrase (not colour-only — WCAG 1.4.1). */
   ariaFor(site: SiteDto): string {
-    const status = this.siteStatusFor(site);
-    const word = status.charAt(0).toUpperCase() + status.slice(1);
-    return `Site ${site.name} in ${site.region}. Status: ${word}. Open device graph.`;
+    return `Site ${site.name} in ${site.region}. Alarm status: ${this.statusPhrase(this.siteStatusFor(site))}. Open device graph.`;
   }
 
   /** True when the browser can produce a WebGL(2) context (jsdom returns null → false). */

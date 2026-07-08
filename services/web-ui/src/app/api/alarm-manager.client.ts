@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core';
 import { Observable, catchError, forkJoin, map, of } from 'rxjs';
 import { HttpBaseClient } from './http-base';
 import { ServiceKey } from '../core/api-config.service';
-import { AlarmDetail, AlarmPage, AlarmSummary, LifecycleState } from './models';
+import { AlarmDetail, AlarmPage, AlarmSummary, LifecycleState, PurgeSummary } from './models';
 
 /**
  * Alarm Manager alarm-lifecycle query API (frozen AM OpenAPI, P3 + streaming + incident-detail).
@@ -47,5 +47,15 @@ export class AlarmManagerClient extends HttpBaseClient {
         this.getAlarm(id).pipe(catchError(() => of(null))),
       ),
     ).pipe(map((results) => results.filter((a): a is AlarmDetail => a !== null)));
+  }
+
+  /**
+   * ADMIN reset: purge all LIVE alarms + their lifecycle bookkeeping (pending status-transitions,
+   * processed-event dedupe rows). This is the state that colours the topology (active alarms), so a
+   * purge lets the map/site-graph re-colour back to all-green on the next alarm snapshot. Idempotent
+   * server-side (a second call returns all-zeros, 200). Empty POST body.
+   */
+  purgeLiveAlarms(): Observable<PurgeSummary> {
+    return this.post<PurgeSummary>('/admin/purge-live-alarms', {});
   }
 }
