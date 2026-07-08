@@ -48,4 +48,13 @@ export class AlarmManagerClient extends HttpBaseClient {
       ),
     ).pipe(map((results) => results.filter((a): a is AlarmDetail => a !== null)));
   }
+
+  /**
+   * POST /admin/purge-live-alarms — clear the live alarm state (demo/eval reset). Part of the
+   * operator Purge action (paired with the Correlation Engine reset). Returns void; the caller
+   * cares only about success/failure.
+   */
+  purgeLiveAlarms(): Observable<void> {
+    return this.post<void>('/admin/purge-live-alarms', {});
+  }
 }
