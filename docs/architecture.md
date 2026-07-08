@@ -259,6 +259,19 @@ and detailed in `design.md` (API contracts + integration points), and is checked
 > approved patterns' `PatternView.supportingInstances[].snapshotId` if Topology is unreachable. This
 > is a read of an already-published API — no new topic/payload/field, no event-model change.
 
+> **Correlation Engine P3 demo/ops reset — `POST /admin/reset-correlation` (contract addition).**
+> An admin/ops HTTP endpoint that PURGES all P3 correlation state the Correlation Engine owns, so
+> after a demo reset the web-ui KPIs return to `0` and no stale incidents remain. It deletes the
+> CE-owned incident tables (`incident.incident` + `incident.incident_alarm`, transactional) and
+> resets the engine's session-scoped in-memory state (active-instance registry + all `/stats`
+> counters), synchronized on the correlation path's monitor. **P3 live path ONLY:** the loaded P2
+> model (compatibility index / approved patterns / codebook / Knowledge params) and the
+> `incident.processed_event` P2-event ledger survive, so a fresh run correlates without a CE restart.
+> Returns `200` with `{ purgedIncidents, purgedIncidentAlarms, resetInMemory: true }`; idempotent;
+> ticks `correlation_reset_total`. **HTTP admin surface only — no new Kafka topic/payload and no
+> event-model change** — but a new API surface, hence a **contract change** (recorded here) requiring
+> human approval.
+
 ## Topology snapshot file & ingestion API
 Topology is loaded by **file upload to an API**, not by a Kafka event:
 

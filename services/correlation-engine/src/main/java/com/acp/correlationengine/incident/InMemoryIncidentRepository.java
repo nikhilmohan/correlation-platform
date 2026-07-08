@@ -80,6 +80,20 @@ public class InMemoryIncidentRepository implements IncidentRepository {
     }
 
     @Override
+    public synchronized PurgeCounts deleteAll() {
+        long purgedIncidents = byId.size();
+        // Mirror the JDBC incident_alarm row count: one root_cause row + one row per child alarm
+        // per incident (matching JdbcIncidentRepository.insertMembership).
+        long purgedAlarms = 0;
+        for (Incident i : byId.values()) {
+            purgedAlarms += 1L + i.childAlarmIds().size();
+        }
+        byId.clear();
+        fingerprints.clear();
+        return new PurgeCounts(purgedIncidents, purgedAlarms);
+    }
+
+    @Override
     public synchronized Map<String, Long> confidenceDistribution() {
         Map<String, Long> buckets = new LinkedHashMap<>();
         for (String b : List.of("0.0-0.2", "0.2-0.4", "0.4-0.6", "0.6-0.8", "0.8-1.0")) {

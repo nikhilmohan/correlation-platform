@@ -152,6 +152,7 @@ class RestTrailBuilderClientTest {
             @Override public void incrementIndexRefresh(String trigger) { }
             @Override public void incrementRequiredTypesUnresolved() { }
             @Override public void setCompatibleTrailsForPattern(String patternId, int count) { }
+            @Override public void incrementCorrelationReset() { }
         };
     }
 }
