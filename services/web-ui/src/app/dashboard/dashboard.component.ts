@@ -5,6 +5,7 @@ import { NavigationService } from '../core/navigation.service';
 import { GeoSiteMapComponent } from '../topology/geo-site-map.component';
 import { SiteGraphComponent } from '../topology/site-graph.component';
 import { IngestionButtonComponent } from './ingestion-button.component';
+import { ResetButtonComponent } from './reset-button.component';
 
 /**
  * Landing dashboard (default route). Shows the fleet KPI widgets across the top, then embeds the
@@ -31,12 +32,14 @@ import { IngestionButtonComponent } from './ingestion-button.component';
     GeoSiteMapComponent,
     SiteGraphComponent,
     IngestionButtonComponent,
+    ResetButtonComponent,
   ],
   template: `
     <div class="page-head">
       <h1>Platform overview</h1>
       <div class="page-actions">
         <app-ingestion-button />
+        <app-reset-button />
         <button class="btn btn-secondary" type="button" (click)="store.load()">Refresh</button>
       </div>
     </div>
