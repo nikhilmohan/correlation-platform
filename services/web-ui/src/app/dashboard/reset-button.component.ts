@@ -29,8 +29,11 @@ import { DashboardActionsService } from './dashboard-actions.service';
  *        POST /api/correlation-engine/admin/reset-correlation (clears incidents + in-memory session)
  *   3. After both return 200, POLL: re-pull the shared alarm snapshot via TopologyStore.refreshAlarms()
  *      every ~pollMs and check the active-alarm count. The purge is instant server-side, so the count
- *      should drop to 0 quickly; keep spinning until it reads 0 (all green), then stop. A safety
- *      timeout stops the spinner regardless (a fresh ingestion may have started).
+ *      should drop to 0 quickly; keep spinning until it reads 0 on a COMPLETE (non-truncated) snapshot
+ *      (all green), then stop. A truncated snapshot (alarm fetch hit its safety cap) can't prove zero,
+ *      so it does NOT count as green — we keep polling. A safety timeout stops the spinner regardless;
+ *      it reports "Reset complete" ONLY if the count actually reached 0, else a distinct non-success
+ *      notice (a fresh ingestion may have started).
  *   4. Each refresh re-publishes the shared `alarms` signal → the geo map + site graph re-colour
  *      reactively (red → amber → green) as the count falls.
  *   5. On 0 active alarms: back to "Reset" idle (aria-busy=false); refresh the CE stats (KPI header
@@ -40,7 +43,13 @@ import { DashboardActionsService } from './dashboard-actions.service';
  * Accessibility: aria-busy on the button while resetting; an aria-live="polite" region announces
  * "Resetting…" / "Reset complete"; the spinner glyph is aria-hidden.
  */
-type ResetState = 'idle' | 'resetting' | 'done' | 'error';
+/**
+ * `notice` is the safety-timeout-hit-but-not-confirmed-green terminal state: spinning stops and the
+ * buttons re-enable (like `done`), but we do NOT tell the operator it's complete-and-green because the
+ * active-alarm count never actually reached 0 (e.g. a fresh ingestion is still producing, or the poll
+ * timed out on a truncated snapshot). It shows a distinct neutral notice instead of "Reset complete".
+ */
+type ResetState = 'idle' | 'resetting' | 'done' | 'notice' | 'error';
 
 @Component({
   selector: 'app-reset-button',
@@ -66,6 +75,10 @@ type ResetState = 'idle' | 'resetting' | 'done' | 'error';
 
       @if (doneLine(); as d) {
         <span class="done" data-testid="reset-done">{{ d }}</span>
+      }
+
+      @if (noticeLine(); as n) {
+        <span class="notice" role="status" data-testid="reset-notice">{{ n }}</span>
       }
 
       @if (errorLine(); as e) {
@@ -114,6 +127,11 @@ type ResetState = 'idle' | 'resetting' | 'done' | 'error';
         font-size: 0.85rem;
         color: var(--text-muted);
       }
+      .notice {
+        font-size: 0.85rem;
+        color: var(--text-muted);
+        font-weight: 600;
+      }
       .error {
         font-size: 0.85rem;
         color: var(--error-text, var(--error));
@@ -140,9 +158,13 @@ export class ResetButtonComponent {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private safetyTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** Distinct copy for the safety-timeout-hit-but-not-green terminal state. */
+  private readonly noticeText = 'Reset finished — some alarms may remain.';
+
   readonly isResetting = () => this.state() === 'resetting';
   readonly errorLine = () => (this.state() === 'error' ? this.errorMessage() : null);
   readonly doneLine = () => (this.state() === 'done' ? 'Reset complete' : null);
+  readonly noticeLine = () => (this.state() === 'notice' ? this.noticeText : null);
 
   readonly liveMessage = () => {
     switch (this.state()) {
@@ -150,6 +172,8 @@ export class ResetButtonComponent {
         return 'Resetting live alarms and correlation state. The topology is returning to healthy.';
       case 'done':
         return 'Reset complete. The topology is all clear.';
+      case 'notice':
+        return `${this.noticeText} Some active alarms may remain, for example if a fresh ingestion has started.`;
       case 'error':
         return this.errorMessage() ?? 'Reset failed.';
       default:
@@ -206,12 +230,24 @@ export class ResetButtonComponent {
       this.timer = setTimeout(() => this.checkGreenOrReschedule(), this.pollMs);
       return;
     }
-    if (this.topology.alarms().length === 0) {
+    // Only declare green on a COMPLETE zero read: count == 0 AND the fetch was not truncated. A
+    // truncated snapshot (alarm fetch hit its safety cap) can't prove zero — the count is incomplete —
+    // so we keep polling until it either confirms zero on a non-truncated read or the safety timeout
+    // fires. After a real purge the count drops to 0 and truncation clears, so this only guards against
+    // a false "green" on a truncated read.
+    if (this.topology.alarms().length === 0 && !this.topology.alarmsTruncated()) {
       this.finish();
       return;
     }
-    // Still faulted rows present — pull again and keep spinning (safety timeout is the escape hatch).
+    // Still faulted rows present (or a truncated, unprovable snapshot) — pull again and keep spinning
+    // (safety timeout is the escape hatch).
     this.pollUntilGreen();
+  }
+
+  /** True only when the current snapshot is a COMPLETE zero read (all green): count == 0 AND not
+   *  truncated. A truncated snapshot can't prove zero, so it does not count as green. */
+  private isConfirmedGreen(): boolean {
+    return this.topology.alarms().length === 0 && !this.topology.alarmsTruncated();
   }
 
   /** Successful completion: all green. Refresh the KPI header so the stats reset to 0 / N/A. */
@@ -220,6 +256,20 @@ export class ResetButtonComponent {
     this.state.set('done');
     this.actions.resetting.set(false);
     // Refresh the CE-backed KPI header (auto-correlation, alarm-reduction, RCA, live incidents → 0).
+    this.dashboard?.load();
+  }
+
+  /**
+   * Terminal state when we stopped spinning WITHOUT a confirmed-green read (safety timeout hit while
+   * alarms remain / a truncated snapshot). Re-enables the buttons and refreshes the KPI header like
+   * `finish`, but shows a DISTINCT non-success notice — we must not tell the operator it's
+   * complete-and-green when the count never reached 0.
+   */
+  private stopWithoutGreen(): void {
+    this.stopTimers();
+    this.state.set('notice');
+    this.actions.resetting.set(false);
+    // Still refresh the header so the KPIs reflect the real (possibly non-zero) current state.
     this.dashboard?.load();
   }
 
@@ -238,9 +288,17 @@ export class ResetButtonComponent {
   /** Safety bound: stop spinning after safetyMs even if alarms remain (e.g. a fresh ingestion). */
   private startSafetyTimeout(): void {
     this.safetyTimer = setTimeout(() => {
-      if (this.state() === 'resetting') {
-        // Stop gracefully — surface completion; the header still refreshes so KPIs reflect reality.
+      if (this.state() !== 'resetting') {
+        return;
+      }
+      // Stop gracefully. Only report success ("Reset complete") if the count ACTUALLY reached 0 on a
+      // complete (non-truncated) read; otherwise the reset isn't confirmed green (a fresh ingestion may
+      // still be producing, or the last read was truncated) — surface a distinct non-success notice so
+      // the operator isn't told it's complete-and-green when it isn't. Buttons re-enable either way.
+      if (this.isConfirmedGreen()) {
         this.finish();
+      } else {
+        this.stopWithoutGreen();
       }
     }, this.safetyMs);
   }

@@ -2,7 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { signal } from '@angular/core';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ResetButtonComponent } from './reset-button.component';
 import { TopologyStore } from '../topology/topology.store';
 import { DashboardStore } from './dashboard.store';
@@ -28,6 +28,7 @@ function realConfig(): Partial<ApiConfigService> & { isMock: boolean } {
 class TopologyStoreStub {
   readonly alarms = signal<readonly AlarmSummary[]>([]);
   readonly alarmsLoading = signal<boolean>(false);
+  readonly alarmsTruncated = signal<boolean>(false);
   readonly refreshAlarms = vi.fn();
 }
 
@@ -65,6 +66,11 @@ describe('ResetButtonComponent', () => {
   }
 
   beforeEach(() => setup());
+
+  afterEach(() => {
+    // If a test switched to fake timers, restore real ones for the next test.
+    vi.useRealTimers();
+  });
 
   function btn(fixture: ReturnType<typeof TestBed.createComponent<ResetButtonComponent>>): HTMLButtonElement {
     return fixture.nativeElement.querySelector('[data-testid="reset-btn"]') as HTMLButtonElement;
@@ -152,6 +158,104 @@ describe('ResetButtonComponent', () => {
     expect(dash.load).toHaveBeenCalled();
     // At least two refreshAlarms calls (one per poll tick).
     expect(store.refreshAlarms.mock.calls.length).toBeGreaterThanOrEqual(2);
+    fixture.destroy();
+  });
+
+  it('safety timeout: alarms never reach 0 → stops spinning at the timeout, shows the non-success notice (not "complete"), re-enables buttons', async () => {
+    // Fake timers so we can drive the ~30s safety bound deterministically. flushPromises settles the
+    // forkJoin microtask that fires after the HTTP responses resolve.
+    vi.useFakeTimers();
+    const flushMicro = () => Promise.resolve().then(() => Promise.resolve());
+
+    const fixture = TestBed.createComponent(ResetButtonComponent);
+    fixture.detectChanges();
+
+    // A snapshot that stays faulted forever (a fresh ingestion keeps producing) — count never hits 0.
+    store.alarms.set(activeAlarms(3));
+
+    btn(fixture).click();
+    fixture.detectChanges();
+    http.expectOne(`${AM_BASE}/admin/purge-live-alarms`).flush({
+      purgedAlarms: 3,
+      purgedTransitions: 0,
+      purgedPendingStatus: 0,
+      purgedProcessedEvents: 0,
+    });
+    http.expectOne(`${CE_BASE}/admin/reset-correlation`).flush({
+      purgedIncidents: 0,
+      purgedIncidentAlarms: 0,
+      resetInMemory: true,
+    });
+    await flushMicro();
+
+    // Drive well past the 30s safety bound; the poll keeps rescheduling but never sees 0.
+    await vi.advanceTimersByTimeAsync(31_000);
+    fixture.detectChanges();
+
+    // Spinner stopped, buttons re-enabled — not stuck.
+    const b = btn(fixture);
+    expect(b.getAttribute('aria-busy')).toBe('false');
+    expect(b.disabled).toBe(false);
+    expect(actions.resetting()).toBe(false);
+    expect(fixture.nativeElement.querySelector('.spinner')).toBeNull();
+
+    // Distinct NON-success message — NOT "Reset complete".
+    const notice = fixture.nativeElement.querySelector('[data-testid="reset-notice"]') as HTMLElement;
+    expect(notice).toBeTruthy();
+    expect(notice.textContent).toMatch(/some alarms may remain/i);
+    expect(fixture.nativeElement.querySelector('[data-testid="reset-done"]')).toBeNull();
+    // SR-only live region does not claim completion.
+    const live = fixture.nativeElement.querySelector('[data-testid="reset-status-live"]') as HTMLElement;
+    expect(live.textContent).not.toMatch(/Reset complete/i);
+
+    fixture.destroy();
+  });
+
+  it('truncated snapshot with count 0 does NOT declare done → keeps polling', async () => {
+    vi.useFakeTimers();
+    const flushMicro = () => Promise.resolve().then(() => Promise.resolve());
+
+    const fixture = TestBed.createComponent(ResetButtonComponent);
+    fixture.detectChanges();
+
+    // Count reads 0 but the fetch was TRUNCATED (hit its safety cap) — an incomplete read that can't
+    // prove zero. The poll must NOT treat this as green.
+    store.alarms.set([]);
+    store.alarmsTruncated.set(true);
+
+    btn(fixture).click();
+    fixture.detectChanges();
+    http.expectOne(`${AM_BASE}/admin/purge-live-alarms`).flush({
+      purgedAlarms: 0,
+      purgedTransitions: 0,
+      purgedPendingStatus: 0,
+      purgedProcessedEvents: 0,
+    });
+    http.expectOne(`${CE_BASE}/admin/reset-correlation`).flush({
+      purgedIncidents: 0,
+      purgedIncidentAlarms: 0,
+      resetInMemory: true,
+    });
+    await flushMicro();
+
+    // Advance a few poll cadences — count==0 but truncated → keep spinning, do NOT finish.
+    await vi.advanceTimersByTimeAsync(5_000);
+    fixture.detectChanges();
+    expect(actions.resetting()).toBe(true);
+    expect(btn(fixture).getAttribute('aria-busy')).toBe('true');
+    expect(dash.load).not.toHaveBeenCalled();
+    expect(store.refreshAlarms.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    // Truncation clears + count still 0 (a real purge settled) → next poll finishes green.
+    store.alarmsTruncated.set(false);
+    await vi.advanceTimersByTimeAsync(1_300);
+    fixture.detectChanges();
+    const b = btn(fixture);
+    expect(b.getAttribute('aria-busy')).toBe('false');
+    expect(actions.resetting()).toBe(false);
+    expect(fixture.nativeElement.querySelector('[data-testid="reset-done"]')).toBeTruthy();
+    expect(dash.load).toHaveBeenCalled();
+
     fixture.destroy();
   });
 
