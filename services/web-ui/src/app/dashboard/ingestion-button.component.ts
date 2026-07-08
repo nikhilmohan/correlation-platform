@@ -4,6 +4,7 @@ import {
   DestroyRef,
   OnInit,
   computed,
+  effect,
   inject,
   signal,
 } from '@angular/core';
@@ -11,6 +12,7 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { SimulatorClient } from '../api/simulator.client';
 import { ApiConfigService } from '../core/api-config.service';
 import { SynthProgress, SynthRunStatus, SynthSummaryModel } from '../api/models';
+import { DashboardActionsService } from './dashboard-actions.service';
 
 /**
  * "Start ingestion" button (dashboard). Kicks off the Simulator's synthetic alarm run and spins
@@ -40,7 +42,7 @@ type ButtonState = 'idle' | 'running' | 'error';
         class="btn"
         type="button"
         data-testid="start-ingestion-btn"
-        [disabled]="isRunning()"
+        [disabled]="isRunning() || actions.resetting()"
         [attr.aria-busy]="isRunning()"
         (click)="start()"
       >
@@ -125,6 +127,8 @@ export class IngestionButtonComponent implements OnInit {
   private readonly sim = inject(SimulatorClient);
   private readonly config = inject(ApiConfigService);
   private readonly destroyRef = inject(DestroyRef);
+  /** Shared coordinator: disable this button while a Reset is running (and publish our own state). */
+  readonly actions = inject(DashboardActionsService);
 
   private readonly state = signal<ButtonState>('idle');
   private readonly status = signal<SynthRunStatus | null>(null);
@@ -137,6 +141,12 @@ export class IngestionButtonComponent implements OnInit {
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   readonly isRunning = computed(() => this.state() === 'running');
+
+  constructor() {
+    // Publish our running state to the shared coordinator so the Reset button disables while we run
+    // (and vice-versa). Kept as an effect so it tracks every state transition without churn.
+    effect(() => this.actions.ingesting.set(this.isRunning()));
+  }
 
   readonly errorLine = computed(() => (this.state() === 'error' ? this.errorMessage() : null));
 

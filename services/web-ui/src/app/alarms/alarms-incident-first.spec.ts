@@ -5,9 +5,20 @@ import { describe, expect, it } from 'vitest';
 import { AlarmsStore } from './alarms.store';
 import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { CorrelationEngineClient } from '../api/correlation-engine.client';
+import { SimulatorLabelsClient } from '../api/simulator-labels.client';
+import { SimulatorClient } from '../api/simulator.client';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { flush } from '../../test-utils';
-import { AlarmDetail, AlarmPage, AlarmSummary, IncidentPage, IncidentVM, StatsVM } from '../api/models';
+import {
+  AlarmDetail,
+  AlarmPage,
+  AlarmSummary,
+  GroundTruthLabel,
+  IncidentPage,
+  IncidentVM,
+  StatsVM,
+  SynthStatusResponse,
+} from '../api/models';
 
 /**
  * Incident-FIRST load-path tests (the bug fix). The store must NOT rely on the flat `/alarms`
@@ -105,7 +116,14 @@ function stubs(opts: {
     getStats: (): Observable<StatsVM> =>
       of({ totalAlarmsProcessed: 1000, correlatedAlarmCount: 600, totalIncidentsCreated: 47, rcaAccuracy: 0.85 }),
   };
-  return { am, ce, state };
+  const labelsSvc: Partial<SimulatorLabelsClient> = {
+    listLabels: (): Observable<GroundTruthLabel[]> => of<GroundTruthLabel[]>([]),
+  };
+  const simSvc: Partial<SimulatorClient> = {
+    getStatus: (): Observable<SynthStatusResponse> =>
+      of({ status: 'idle', runId: null, progress: { alarmsEmitted: 0, alarmsTotal: 0, alignedEmitted: 0, nonAlignedEmitted: 0 }, summary: null }),
+  };
+  return { am, ce, labelsSvc, simSvc, state };
 }
 
 let currentStubs: ReturnType<typeof stubs>;
@@ -118,6 +136,8 @@ function store(opts: Parameters<typeof stubs>[0] = {}): AlarmsStore {
       RcaAccuracyService,
       { provide: AlarmManagerClient, useValue: currentStubs.am },
       { provide: CorrelationEngineClient, useValue: currentStubs.ce },
+      { provide: SimulatorLabelsClient, useValue: currentStubs.labelsSvc },
+      { provide: SimulatorClient, useValue: currentStubs.simSvc },
     ],
   });
   return TestBed.inject(AlarmsStore);

@@ -144,7 +144,10 @@ describe('#276 — geo-map native GeoJSON clustering', () => {
     expect(f0.geometry.type).toBe('Point');
     expect(f0.properties?.['siteId']).toBe(store.sites()[0].siteId);
     expect(typeof f0.properties?.['statusColor']).toBe('string');
-    expect(f0.properties?.['status']).toBe('monitored');
+    // Status is the site's REAL worst-active-alarm bucket. LON (sites()[0]) has an active minor
+    // alarm on Router:lon-r1 in the default mock → 'warning' (amber pin). The colour is a hex string.
+    expect(f0.properties?.['status']).toBe('warning');
+    expect(f0.properties?.['statusColor']).toMatch(/^#/);
   });
 
   it('the accessible site list still renders one entry per site (drill-in source of truth at any zoom)', async () => {

@@ -2,7 +2,14 @@ import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
 import { HttpBaseClient } from './http-base';
 import { ServiceKey } from '../core/api-config.service';
-import { SynthRunRequest, SynthRunResponse, SynthStatusResponse } from './models';
+import {
+  MineRunRequest,
+  MineRunResponse,
+  MineStatusResponse,
+  SynthRunRequest,
+  SynthRunResponse,
+  SynthStatusResponse,
+} from './models';
 
 /**
  * Simulator synth-run trigger API (frozen Simulator OpenAPI: POST /synth/run, GET /synth/status).
@@ -32,5 +39,20 @@ export class SimulatorClient extends HttpBaseClient {
   /** GET /synth/status — current run state, live progress counters, and terminal summary. */
   getStatus(): Observable<SynthStatusResponse> {
     return this.get<SynthStatusResponse>('/synth/status');
+  }
+
+  /**
+   * POST /mine/run — start a P2 pattern-mining corpus run. 202 → `{ runId, status: "running" }`.
+   * Like /synth/run, a 409 (a mine run is already active) is an expected outcome the caller
+   * branches on (see silentStatuses), not a global error banner; 422 is an invalid request.
+   * Send `{}` for the env-default corpus.
+   */
+  startMine(req: MineRunRequest = {}): Observable<MineRunResponse> {
+    return this.post<MineRunResponse>('/mine/run', req);
+  }
+
+  /** GET /mine/status — current mine run state, live progress counters, and last/terminal summary. */
+  getMineStatus(): Observable<MineStatusResponse> {
+    return this.get<MineStatusResponse>('/mine/status');
   }
 }

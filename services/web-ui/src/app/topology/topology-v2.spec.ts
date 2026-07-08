@@ -156,15 +156,18 @@ describe('CHANGE 1 — externalLinkNodeIds gates the amber ↗ cue', () => {
     // A DEFERRED objectsAtSite so the synchronous clear in selectSite is observable before the
     // (forkJoin) probe re-resolves — proves selectSite resets the cue set on re-root.
     const subject = new Subject<SiteObjectsDto>();
-    let call = 0;
     TestBed.configureTestingModule({
       providers: [
         ...testProviders(),
         {
           provide: TopologyClient,
           useValue: {
+            // Keyed by siteId (NOT a call counter): Site:A resolves synchronously so its probe
+            // populates the cue; Site:B is DEFERRED so the synchronous clear on re-root is observable.
+            // Keying by id is robust to the store's reactive per-site objects fan-out (loadAllSiteObjects
+            // now also calls objectsAtSite once sites load), which a call-count stub would mis-order.
             listSites: () => of(SITES),
-            objectsAtSite: () => (call++ === 0 ? of(SITE_A) : subject.asObservable()),
+            objectsAtSite: (siteId: string) => (siteId === 'Site:A' ? of(SITE_A) : subject.asObservable()),
             neighbors: (id: string) => of(neighborsFor(id)),
           },
         },

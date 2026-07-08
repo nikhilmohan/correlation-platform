@@ -7,7 +7,7 @@ import {
   inject,
   signal,
 } from '@angular/core';
-import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
+import { DatePipe, PercentPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { AlarmsStore } from './alarms.store';
 import { LivePollingService } from '../streaming/live-polling.service';
@@ -36,7 +36,7 @@ import { relativeTime } from '../core/relative-time';
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
   providers: [AlarmsStore, LivePollingService, DeltaDiffService],
-  imports: [DatePipe, DecimalPipe, PercentPipe, RouterLink],
+  imports: [DatePipe, PercentPipe, RouterLink],
   template: `
     <h1>Alarms</h1>
 
@@ -52,17 +52,12 @@ import { relativeTime } from '../core/relative-time';
           }
         </span>
       </span>
-      <span class="kpi" data-testid="kpi-reduction">
-        <span class="kpi-label">Alarm reduction</span>
-        <span class="kpi-value">
-          @if (store.alarmReductionRatio() !== null) {
-            {{ store.alarmReductionRatio() | number: '1.1-1' }} : 1
-          } @else {
-            N/A
-          }
-        </span>
-      </span>
-      <span class="kpi" data-testid="kpi-rca">
+      <span
+        class="kpi"
+        data-testid="kpi-rca"
+        aria-label="RCA accuracy — share of incidents whose tagged root-cause alarm exactly matches a simulator ground-truth root-cause alarm; N/A when no ground truth is available"
+        [title]="RCA_HELP"
+      >
         <span class="kpi-label">RCA accuracy</span>
         <span class="kpi-value">
           @if (store.rcaAccuracy().value !== null) {
@@ -339,6 +334,13 @@ import { relativeTime } from '../core/relative-time';
         font-size: 1.2rem;
         font-weight: 700;
         line-height: 1.1;
+      }
+      .kpi-value small {
+        display: block;
+        font-size: 0.68rem;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-top: 0.1rem;
       }
       .toolbar {
         display: flex;
@@ -695,6 +697,12 @@ export class AlarmsComponent implements OnInit {
    * "… ago" form is kept only as the hover title.
    */
   readonly TS_FMT = 'dd MMM yy HH:mm:ss.SSS';
+
+  /** Tooltip copy for the RCA-accuracy KPI card (validated against the simulator ground-truth oracle). */
+  readonly RCA_HELP =
+    'Root-cause accuracy: the share of incidents whose tagged root-cause alarm exactly matches a ' +
+    'simulator ground-truth root-cause alarm (a direct root-cause alarm-id match), measured over all ' +
+    'incidents. N/A when no ground truth is available.';
 
   /** Screen-reader / tooltip copy for the lifecycle-state column info affordance. */
   readonly STATE_HELP =

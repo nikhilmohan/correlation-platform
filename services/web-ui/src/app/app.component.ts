@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, inject } from '@angular/core';
 import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { ErrorBannerService } from './core/error-banner.service';
 import { ThemeService } from './core/theme.service';
+import { ActionsMenuComponent } from './dashboard/actions-menu.component';
 
 interface NavLink {
   path: string;
@@ -12,7 +13,7 @@ interface NavLink {
   selector: 'app-root',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [RouterOutlet, RouterLink, RouterLinkActive],
+  imports: [RouterOutlet, RouterLink, RouterLinkActive, ActionsMenuComponent],
   template: `
     <a class="visually-hidden" href="#main-content">Skip to main content</a>
     <header class="shell-header">
@@ -28,6 +29,7 @@ interface NavLink {
           }
         </ul>
       </nav>
+      <app-actions-menu />
       <button
         type="button"
         class="theme-toggle"
