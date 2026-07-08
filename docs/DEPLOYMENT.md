@@ -201,55 +201,121 @@ There are **no source-code changes required** to run remotely — only the optio
 
 ## 6. Extending to a new domain
 
-The platform is multi-domain by design; **Core IP is the MVP domain pack**. Alarm correlation for a
-different network/technology (e.g. optical transport, RAN, data-center fabric) is added as a new
-domain, not a fork. The engine code references nothing by domain name — everything domain-specific
-is behind a `DomainPack` protocol + Knowledge-authored config.
+The platform is **multi-domain by design**; Core IP is the MVP domain. Correlation for a different
+network/technology (optical transport, RAN, data-center fabric, …) is added as a new domain, **not a
+fork**. The whole pipeline — enrichment, noise-filter, trail-builder, codebook-generator,
+pattern-miner, pattern-manager, correlation-engine, topology — is **domain-agnostic**: each takes the
+`domain` as a runtime parameter (from the event/snapshot or Knowledge) and drives its behaviour from
+**Knowledge-authored config** + the **event-model contract**. Domain specifics live in three places:
+**Knowledge** (the authored ontology), the **Simulator** (the synthetic-data domain pack), and a
+small **web-ui** presentation map.
 
-To add a domain `<newdom>`:
+_(Every claim, file path, method, record type and env-var name below has been verified against the
+`integration` source.)_
 
-1. **Simulator domain pack** — add `services/simulator/src/simulator/domains/<newdom>/` implementing
-   the `DomainPack` Protocol (mirror `domains/coreip/`). Declare:
-   - `domain_id()` → `"<newdom>"`
-   - `object_types()`, `edge_relations()`, `attribute_keys()` — the managed-object type vocabulary
-     and topology relations
-   - `alarm_type_vocabulary()` + `alarm_shape(type)` — the domain's alarm types and their
-     event-type / probable-cause / severity shapes
-   - `propagation_templates()` — how a root fault cascades (drives realistic synthetic cascades)
-   - `scenario_library()` — the labeled fault scenarios (the eval oracle's ground truth)
-   - `noise_classes()`, `geo_sites()`, `placement_affinity()`, `build_topology()`
-   Then select it: the pack is chosen by the `make_pack()` factory in
-   `services/simulator/src/simulator/run.py` (today a single-domain factory that returns
-   `CoreIPPack()`). Extend `make_pack()` to return the new pack based on the `SYNTH_DOMAIN` /
-   `DOMAIN` setting (e.g. `core-ip` → `CoreIPPack()`, `<newdom>` → `NewDomPack()`). The engine
-   (`engine/`) references only the `DomainPack` Protocol, so no engine edit is needed.
+### What each service needs (verified)
 
-2. **Knowledge seed** — add `services/knowledge/src/main/resources/seed/<newdom>.json`: the domain
-   vocabulary + per-service model-params (DBSCAN eps/minSamples, mining `prefixspan.*` +
-   `anchoring.*` + `sample.maxAlarms`, correlation thresholds, session-window, enrichment ruleset
-   references). Mirror `seed/core-ip.json` exactly — the pattern-miner and others fail-fast if a
-   required param key is missing.
+| Service | Change for a new domain | What |
+|---|---|---|
+| **knowledge** | **Authored data** | Add `seed/<newdom>.json` (the domain ontology + params). |
+| **simulator** | **Code + data** | Add a `domains/<newdom>/` DomainPack + make `make_pack()` domain-aware. |
+| **web-ui** | **Code (small)** | Extend the alarm-type label map (presentation only). |
+| **pattern-manager** | Authored data (optional) | Add `seed/<newdom>-patterns.json` for out-of-box P3. |
+| **enrichment** | Authored data (real sources only) | Per-source ruleset mapping vendor alarms → the domain vocabulary. Not needed with the Simulator (it emits canonical `alarmType`). |
+| topology · trail-builder · codebook-generator · noise-filter · pattern-miner · correlation-engine | **No change** | Fully domain-parameterized via the Knowledge API + event-model. Verified: none hardcodes alarm-type/object-type vocabulary — only a `core-ip` config *default* and doc-comments. |
 
-3. **Pattern seed (optional but recommended)** — add
-   `services/pattern-manager/src/main/resources/seed/<newdom>-patterns.json` with a handful of
-   known-good approved cascades rooted at true causes, so P3 works out-of-the-box for the new
-   domain (same shape as `core-ip-patterns.json`).
+**Net: CODE in exactly 2 services (simulator pack + web-ui labels); AUTHORED DATA in 1 required
+(Knowledge) + 2 optional (pattern-manager, enrichment); NOTHING in the 6 core-engine services.**
+The **event-model contract (`libs/event-model`) needs no change** — generic envelope, `alarmType` is
+a free string token (no enum), `managedObjectId` is `<objectType>:<id>`; it stays byte-identical to
+`main`.
 
-4. **Enrichment ruleset** — enrichment owns a mounted per-source YAML ruleset validated against
-   Knowledge's vocabulary; add/point to the `<newdom>` ruleset.
+### Step-by-step checklist for a new domain `<newdom>`
 
-5. **Point the stack at the domain** — set the domain env on the relevant services in
-   `docker-compose.yml`: `DOMAIN`, `KNOWLEDGE_DOMAIN`, `ENRICHMENT_DOMAIN`,
-   `KNOWLEDGE_MODEL_PARAMS_RECORD_ID` (`<newdom>/modelParams/pattern-miner`), etc. — everywhere
-   `core-ip` currently appears.
+**① Knowledge ontology — `services/knowledge/src/main/resources/seed/<newdom>.json`** (required)
 
-6. **Run the phases** for the new domain: P1 (ingest the new domain's topology via the new pack's
-   `build_topology`), P2 (mine or seed patterns), P3 (correlate).
+Mirror `seed/core-ip.json`. It has **8 record types** (core-ip = 43 records total); the `SeedLoader`
+reads the `"domain"` field and auto-scopes everything (loads vocabularies → templates → params):
 
-What you do **not** need to touch: the correlation engine, alarm manager, trail-builder,
-codebook-generator, noise-filter, or web-ui — they are domain-agnostic and driven entirely by the
-domain pack + Knowledge config + the event-model contract (`libs/event-model`, which is frozen and
-must stay byte-identical to `main`).
+- `objectTypeVocabulary` ×1 — managed-object types (must include `Site`); match the pack's `object_types()`.
+- `edgeRelationVocabulary` ×1 — topology relations (must include `LOCATED_AT`); match `edge_relations()`.
+- `alarmTypeVocabulary` ×1 — canonical alarm-type tokens (the universal join key); match `alarm_type_vocabulary()`.
+- `faultOriginType` ×N (core-ip: 7) — one per root-cause object type: `{objectType, originAlarmType, description}`.
+- `propagationTemplate` ×N (core-ip: 27) — trigger `{objectType,alarmType}` → effect `{objectType,alarmType}` + traversal.
+- `trailPolicy` ×1 — trail-closure edge types + boundary + SRLG rule.
+- `attributeCatalogue` ×1 — well-known device/connection attribute keys.
+- `modelParams` ×4 — one set each for **noise-filter** (DBSCAN eps/minSamples, window, feature keys),
+  **pattern-miner** (`prefixspan.*` + the fail-fast keys `anchoring.matchConfidenceThreshold`,
+  `anchoring.weights.order`, `anchoring.weights.jaccard`, `sample.maxAlarms`), **correlation-engine**,
+  **pattern-manager**. A missing required key makes the consuming service fail fast.
+
+Validate: start Knowledge, confirm the log `pattern seed pack … loaded (N new records …)`.
+
+**② Simulator domain pack** (required — the one substantive code addition)
+
+Create `services/simulator/src/simulator/domains/<newdom>/` mirroring `domains/coreip/`. Core-IP has
+these modules (create the analogues): `__init__.py`, `pack.py` (the `<NewDom>Pack` class),
+`alarm_shapes.py`, `propagation.py`, `scenario_library.py`, `topology_model.py`, `geo_catalogue.py`,
+`p3_placement.py`.
+
+Implement the **`DomainPack` Protocol** — the exact 12 methods in
+`services/simulator/src/simulator/engine/domain_pack.py`: `domain_id`, `object_types`,
+`edge_relations`, `attribute_keys`, `alarm_type_vocabulary`, `alarm_shape(alarm_type)`,
+`propagation_templates`, `scenario_library` (≥8 labeled fault scenarios — the eval-oracle ground
+truth), `noise_classes` (≥3), `geo_sites` (≥10), `placement_affinity`, `build_topology(params, rng)`.
+**Every value must match the Knowledge seed** — same object types, relations, and alarm tokens (two
+halves of one contract).
+
+Then wire selection. Today `make_pack()` in `services/simulator/src/simulator/run.py` takes **no
+arguments** and hardcodes `return CoreIPPack()`, and it's called at three sites (P2/P3 generate + the
+serve path). To make it domain-aware you must:
+- give `make_pack()` access to the domain, e.g. `def make_pack(settings: Settings) -> DomainPack:` and
+  branch on `settings.synth_domain` (the `SYNTH_DOMAIN` env, default `core-ip`) —
+  `core-ip → CoreIPPack()`, `<newdom> → <NewDom>Pack()`; and
+- update the **three `make_pack()` call sites** in `run.py` to pass `settings`.
+The `engine/` references only the Protocol, so no engine edit is needed.
+
+**③ web-ui labels** (small code change — presentation only)
+
+`services/web-ui/src/app/patterns/alarm-type-labels.ts` — the `ALARM_TYPE_LABELS` map hardcodes
+Core-IP `alarmType → human-label` pairs (e.g. `AdjDown: 'Adjacency Down'`). Add entries for the new
+domain's alarm types. (Unmapped tokens fall back to the raw token, so the UI still works without
+this — labels just read better with it.) The node-token extraction in `topology/alarm-severity.ts`
+uses an `N\d+` regex with a **full-moid fallback**, so non-`N##` node schemes already work; override
+only if the new domain needs a specific node token.
+
+**④ pattern-manager seed** (optional — instant P3 without mining)
+
+Add `services/pattern-manager/src/main/resources/seed/<newdom>-patterns.json` (mirror
+`core-ip-patterns.json`): a few known-good approved cascades rooted at true upstream causes. Point the
+loader at it via `PATTERN_SEED_PACK`.
+
+**⑤ enrichment ruleset** (only for REAL alarm sources, not the simulator)
+
+Enrichment maps raw vendor alarms → the domain's canonical `alarmType`. With the Simulator (synthetic
+alarms already carry canonical `alarmType`), nothing is needed. For real NMS/OSS sources, author the
+per-source ruleset validated against the domain's Knowledge vocabulary.
+
+**⑥ point the stack at the domain** (config)
+
+In `docker-compose.yml` set the domain env everywhere `core-ip` appears: `DOMAIN`,
+`KNOWLEDGE_DOMAIN`, `ENRICHMENT_DOMAIN`, `SYNTH_DOMAIN` (simulator),
+`KNOWLEDGE_MODEL_PARAMS_RECORD_ID` (`<newdom>/modelParams/pattern-miner`), and the web-ui `DOMAIN`.
+
+**⑦ run the phases** — P1 (ingest the new domain's topology via the pack's `build_topology`), P2
+(mine or seed patterns), P3 (correlate) — exactly as in §3.
+
+### Two contracts a new developer must respect
+
+1. **Knowledge seed ↔ Simulator pack must agree** — the object types, relations, and alarm-type
+   vocabulary in `seed/<newdom>.json` and the `DomainPack` are the *same* contract; a mismatch fails
+   snapshot validation or mining.
+2. **The alarm-type vocabulary is the universal join key** — consistent across the Knowledge seed,
+   the simulator pack, the (optional) enrichment rulesets, and the mined/seeded patterns. Everything
+   downstream keys off it.
+
+Start from `domains/coreip/` + `seed/core-ip.json` as reference implementations, and the `DomainPack`
+Protocol in `engine/domain_pack.py` as the method checklist.
 
 ---
 
