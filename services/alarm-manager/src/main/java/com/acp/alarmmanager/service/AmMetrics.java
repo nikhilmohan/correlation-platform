@@ -35,6 +35,15 @@ public class AmMetrics {
         registry.counter("alarms_cleared_total").increment();
     }
 
+    /**
+     * Demo/ops reset: increment the count of live alarms purged via {@code POST
+     * /admin/purge-live-alarms} by the number of {@code live_alarm.alarm} rows deleted. Exposed as
+     * {@code live_alarms_purged_total} on {@code /metrics}.
+     */
+    public void alarmsPurged(int count) {
+        registry.counter("live_alarms_purged_total").increment(count);
+    }
+
     public void dlqRouted(String topic) {
         Counter.builder("dlq_routed_total").tag("topic", topic).register(registry).increment();
     }
@@ -59,5 +68,16 @@ public class AmMetrics {
 
     public void correlationForUnknownAlarm() {
         registry.counter("correlation_for_unknown_alarm_total").increment();
+    }
+
+    /**
+     * A status-sync STATE change was IGNORED because it would have downgraded a stronger lifecycle
+     * state (a {@code correlated} alarm being clobbered back to {@code in-progress}/{@code open} by a
+     * lagging sibling pattern-instance event). The state-precedence guard suppressed the out-of-order
+     * downgrade. Tagged by the {@code from}/{@code to} states for dashboards.
+     */
+    public void downgradeIgnored(String from, String to) {
+        Counter.builder("status_downgrade_ignored_total").tag("from", from).tag("to", to)
+                .register(registry).increment();
     }
 }

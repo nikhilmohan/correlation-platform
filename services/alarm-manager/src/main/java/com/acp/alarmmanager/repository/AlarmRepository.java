@@ -139,10 +139,33 @@ public class AlarmRepository {
                 """, role.wire(), incidentId, ts(now), alarmId);
     }
 
+    /**
+     * Demo/ops reset: delete every row from {@code live_alarm.alarm} and return the number of rows
+     * deleted. This is the PARENT table in the {@code state_transition -> alarm} FK, so the caller
+     * MUST delete {@code state_transition} first (FK-safe order); the transactional purge service
+     * enforces that ordering.
+     */
+    public int deleteAll() {
+        return jdbc.update("DELETE FROM live_alarm.alarm");
+    }
+
     public boolean exists(String alarmId) {
         Integer c = jdbc.queryForObject(
                 "SELECT count(*) FROM live_alarm.alarm WHERE alarm_id = ?", Integer.class, alarmId);
         return c != null && c > 0;
+    }
+
+    /**
+     * Read the alarm's CURRENT {@code lifecycle_state} (STATE channel) without loading the whole
+     * row. Used by the state-precedence guard so a stronger state (e.g. {@code correlated}) is never
+     * downgraded by a later out-of-order status-sync event. {@link Optional#empty()} when the alarm
+     * does not exist.
+     */
+    public Optional<LifecycleState> currentLifecycleState(String alarmId) {
+        return jdbc.query("SELECT lifecycle_state FROM live_alarm.alarm WHERE alarm_id = ?",
+                rs -> rs.next() ? Optional.of(LifecycleState.fromWire(rs.getString(1)))
+                        : Optional.empty(),
+                alarmId);
     }
 
     /** Filtered, paged list of alarm summaries. */

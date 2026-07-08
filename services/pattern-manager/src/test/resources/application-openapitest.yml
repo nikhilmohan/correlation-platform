@@ -19,3 +19,8 @@ spring:
 pattern-manager:
   kafka:
     enabled: false
+  seed:
+    # The OpenAPI drift gate is a pure HTTP-surface test — keep it hermetic by not running the
+    # startup pattern seed loader (the seed's behaviour is covered by PatternSeedLoaderTest and the
+    # real-Postgres SeedLoaderIT). Disable it here so this profile boots the context only.
+    on-startup: false

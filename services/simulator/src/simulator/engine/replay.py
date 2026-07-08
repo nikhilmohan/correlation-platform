@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime
+from typing import Protocol
 
 from acp_event_model import AlarmEvent, TypedEnvelope
 
@@ -28,6 +29,12 @@ LIVE_TOPIC = "alarms.live"
 
 # A tap is called once per emitted (topic, envelope) so the corpus writer records the wire stream.
 EmitTap = Callable[[str, TypedEnvelope[AlarmEvent]], None]
+
+
+class ProgressCounter(Protocol):
+    """Structural seam for the HTTP-trigger progress sink (kept domain-generic in engine/)."""
+
+    def inc_emitted(self, *, aligned: bool) -> None: ...
 
 
 def synth_to_event(alarm: SynthAlarm) -> AlarmEvent:
@@ -67,9 +74,15 @@ class BatchReplay:
 
     topic = HISTORY_TOPIC
 
-    def __init__(self, producer: AlarmProducer, tap: EmitTap | None = None) -> None:
+    def __init__(
+        self,
+        producer: AlarmProducer,
+        tap: EmitTap | None = None,
+        progress: ProgressCounter | None = None,
+    ) -> None:
         self._producer = producer
         self._tap = tap
+        self._progress = progress
 
     def replay_synth(self, alarms: list[SynthAlarm]) -> int:
         n = 0
@@ -84,6 +97,10 @@ class BatchReplay:
             )
             if self._tap:
                 self._tap(self.topic, envelope)
+            if self._progress is not None:
+                # Aligned == a scenario cascade member (scenario_id carries the scenarioId); noise
+                # and background alarms count as non-aligned.
+                self._progress.inc_emitted(aligned=alarm.scenario_id is not None)
             n += 1
         self._producer.flush()
         return n
@@ -115,12 +132,14 @@ class LiveReplay:
         tap: EmitTap | None = None,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        progress: ProgressCounter | None = None,
     ) -> None:
         self._producer = producer
         self._pacing = pacing_multiplier
         self._tap = tap
         self._sleep = sleeper
         self._clock = clock
+        self._progress = progress
 
     def _pace(self, prev: datetime | None, cur: datetime) -> None:
         if prev is None or self._pacing <= 0:
@@ -145,6 +164,9 @@ class LiveReplay:
             )
             if self._tap:
                 self._tap(self.topic, envelope)
+            if self._progress is not None:
+                # Aligned == a pattern-aligned cascade member (scenario_id carries the patternId).
+                self._progress.inc_emitted(aligned=alarm.scenario_id is not None)
             n += 1
         self._producer.flush()
         return n
@@ -167,9 +189,13 @@ class LiveReplay:
 
 
 def make_replay(
-    phase: str, producer: AlarmProducer, pacing_multiplier: float, tap: EmitTap | None = None
+    phase: str,
+    producer: AlarmProducer,
+    pacing_multiplier: float,
+    tap: EmitTap | None = None,
+    progress: ProgressCounter | None = None,
 ) -> BatchReplay | LiveReplay:
     """Pick the replay strategy for the phase (P2 → batch/history, P3 → live)."""
     if phase == "p3":
-        return LiveReplay(producer, pacing_multiplier=pacing_multiplier, tap=tap)
-    return BatchReplay(producer, tap=tap)
+        return LiveReplay(producer, pacing_multiplier=pacing_multiplier, tap=tap, progress=progress)
+    return BatchReplay(producer, tap=tap, progress=progress)

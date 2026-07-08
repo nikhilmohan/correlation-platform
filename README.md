@@ -33,3 +33,9 @@ automated CI. The full workflow, branch model, and gates are in
 1. Read [`README-workflow.md`](README-workflow.md) — **note the GitHub-auth prerequisite**.
 2. Bring up the integration infra: `docker compose up -d kafka postgres nebula-metad nebula-storaged nebula-graphd`.
 3. Toolchains are pinned to **Java 17 · Python 3.13 · Node 24** (see CI and Dockerfiles).
+
+## Deploying & operating (remote VM)
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — prerequisites (≥16 GB VM), `docker compose up`,
+running the **P1 → P2 → P3** phases, seed/bootstrap data, the remote-readiness audit (ports, env,
+no code changes needed), and **extending to a new domain**.

@@ -82,3 +82,12 @@ pattern-manager:
     # [SAMPLE-ALARMS] Per-pattern cap K on the bounded member-alarm sample served on PatternView
     # (spec OQ-SA-4 / design DA-2). Env-overridable; documented default 10. NOT a hard-coded value.
     cap-k: ${SAMPLE_ALARMS_CAP_K:10}
+  seed:
+    # [SEED] Pre-approved Core IP cascade patterns loaded on startup so a FRESH deploy can run P3
+    # correlation immediately WITHOUT first running the resource-heavy pattern-miner. Idempotent
+    # (skip patterns already present). Running the miner later refreshes/augments the store as normal.
+    # CE matches these to trails by STRUCTURE (objectType hostability), not trailId — so they survive
+    # a fresh topology snapshot. Env-overridable; documented defaults, no hard-coded magic values.
+    on-startup: ${PATTERN_SEED_ON_STARTUP:true}
+    pack: ${PATTERN_SEED_PACK:seed/core-ip-patterns.json}
+    emit-approved-events: ${PATTERN_SEED_EMIT_APPROVED_EVENTS:true}

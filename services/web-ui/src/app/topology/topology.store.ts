@@ -1,10 +1,13 @@
-import { Injectable, computed, inject, signal } from '@angular/core';
-import { catchError, forkJoin, of } from 'rxjs';
+import { Injectable, computed, effect, inject, signal } from '@angular/core';
+import { Observable, catchError, forkJoin, of, switchMap } from 'rxjs';
 import { TopologyClient } from '../api/topology.client';
 import { TrailBuilderClient } from '../api/trail-builder.client';
+import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { ApiConfigService } from '../core/api-config.service';
 import {
+  AlarmSummary,
   EdgeDto,
+  LifecycleState,
   LogicalLayer,
   NeighborsDto,
   NodeDto,
@@ -13,6 +16,7 @@ import {
   TrailSummary,
 } from '../api/models';
 import { ALL_LAYERS, layerForEdge, layerForObjectType } from './layer-mapper';
+import { SeverityBucket, nodeTokensOf, tokensForMoids, worstBucketForTokens } from './alarm-severity';
 
 export interface DerivedNode extends NodeDto {
   derivedLayer: LogicalLayer;
@@ -43,6 +47,7 @@ export const NODE_CAP = 250;
 export class TopologyStore {
   private readonly topo = inject(TopologyClient);
   private readonly trailBuilder = inject(TrailBuilderClient);
+  private readonly alarmManager = inject(AlarmManagerClient);
   private readonly apiConfig = inject(ApiConfigService);
 
   /** Effective node cap (env-config `TOPOLOGY_NODE_CAP`, default {@link NODE_CAP}). */
@@ -54,6 +59,86 @@ export class TopologyStore {
   readonly sitesLoading = signal<boolean>(false);
   readonly selectedSiteId = signal<string | null>(null);
   readonly graphLoading = signal<boolean>(false);
+
+  // ── ALARM-SEVERITY OVERLAY (shared by the geo site map + the site device graph) ────────────────
+  /**
+   * The current ACTIVE-alarm snapshot used to colour sites (map pins) and device nodes (site graph)
+   * by their WORST ACTIVE severity. Fetched COMPLETELY (all active states, fully paginated) from
+   * `GET /alarms` and re-pulled by the Refresh buttons; BOTH views derive their red/amber/green
+   * buckets from this same snapshot, so one fetch colours both levels. Public + writable so component
+   * tests can seed a deterministic set.
+   *
+   * Only NON-CLEARED alarms are pulled (see {@link refreshAlarms}) so the whole snapshot is already
+   * active — the downstream severity attribution still filters defensively (`isActiveAlarm`), so a
+   * test that seeds a mix stays correct.
+   */
+  readonly alarms = signal<readonly AlarmSummary[]>([]);
+  /** True while an alarm re-pull is in flight — drives the Refresh buttons' busy/spinner state. */
+  readonly alarmsLoading = signal<boolean>(false);
+  /**
+   * True when the last alarm pull hit the {@link ALARM_SAFETY_CAP} safety bound and STOPPED before
+   * exhausting the server's active set — i.e. the snapshot may be incomplete. Surfaced so the UI /
+   * logs can flag under-colouring rather than silently truncating (the whole point of this fix). It
+   * is a per-refresh flag: reset false at the start of every {@link refreshAlarms}.
+   */
+  readonly alarmsTruncated = signal<boolean>(false);
+  /** Per-request page size for the alarm pull (server `limit`); we page through each active state. */
+  private static readonly ALARM_PAGE_LIMIT = 500;
+  /**
+   * Hard safety bound on the TOTAL number of alarm rows pulled in a single refresh (across all active
+   * states + pages). Stops a pathological unbounded fetch; if hit, {@link alarmsTruncated} flips true
+   * and it is logged — the snapshot is NOT silently truncated without a signal.
+   */
+  private static readonly ALARM_SAFETY_CAP = 5000;
+  /**
+   * The alarm lifecycle states that count as ACTIVE (a live fault). "Active" is precisely
+   * `state !== 'cleared'`; the `/alarms` `state` filter is single-valued (one enum), so we fetch each
+   * of these server-side and merge — never pulling the `cleared` rows we would only discard. Severity
+   * is independent of lifecycle state, so an alarm's colour is unaffected by WHICH active state it is
+   * in; we just need all of them.
+   */
+  private static readonly ACTIVE_STATES: readonly LifecycleState[] = ['open', 'in-progress', 'correlated'];
+
+  /**
+   * Per-site device managedObjectId lists, keyed by siteId. Populated by {@link loadAllSiteObjects}
+   * (one objects-at-site fan-out) so the geo map can attribute alarms to a site WITHOUT selecting it.
+   * The site device graph uses the accumulating `nodeMap` directly (it is the selected site).
+   */
+  private readonly siteObjectMoids = signal<ReadonlyMap<string, readonly string[]>>(new Map());
+  /** True while the per-site objects fan-out (for the map's site-level colouring) is in flight. */
+  readonly siteObjectsLoading = signal<boolean>(false);
+
+  /**
+   * The site-set signature the per-site object cache was last loaded (or is being loaded) for — a
+   * stable join of the current sites' ids. Drives the reactive {@link loadAllSiteObjects} effect so
+   * the fan-out runs EXACTLY ONCE per distinct site set: it fires when `sites()` first becomes
+   * non-empty (fixing the init race where `loadAllSiteObjects()` was called before the async
+   * `loadSites()` had populated `sites()`), and again only if the site set genuinely changes. The
+   * Refresh button still forces a re-pull by resetting this to `null` before re-calling.
+   */
+  private loadedObjectsKey: string | null = null;
+
+  constructor() {
+    // REACTIVE site-object load — the fix for the init race. `loadSites()` is async, so at the
+    // moment ngOnInit fires its one-shot `loadAllSiteObjects()` the `sites()` signal is still EMPTY
+    // and that call no-ops (never retried) — leaving `siteObjectMoids` empty so every site fell back
+    // to green. This effect instead tracks `sites()` and drives the per-site objects fan-out the
+    // moment the site list becomes non-empty (and again when the site SET changes), so the pins get
+    // real per-site severity. Guarded by `loadedObjectsKey` so it runs once per distinct site set —
+    // no infinite loop, no redundant re-fetch on unrelated change detection. The Refresh path
+    // (loadAllSiteObjects) resets the key to force a genuine re-pull.
+    effect(() => {
+      const sites = this.sites();
+      if (sites.length === 0) {
+        return;
+      }
+      const key = sites.map((s) => s.siteId).join('|');
+      if (key === this.loadedObjectsKey) {
+        return; // already loaded (or loading) for this exact site set — no redundant fan-out.
+      }
+      this.loadAllSiteObjects();
+    });
+  }
 
   /** Accumulating explorer graph, keyed by id so merges dedupe. Single writes per merge keep the
    *  structureKey (and thus the cytoscape relayout) firing exactly once per logical change. */
@@ -267,6 +352,175 @@ export class TopologyStore {
         this.sites.set(res.sites);
         this.sitesLoading.set(false);
       });
+  }
+
+  // ── ALARM-SEVERITY OVERLAY methods ─────────────────────────────────────────────────────────────
+  /**
+   * (Re-)pull the COMPLETE active-alarm snapshot from `GET /alarms` and publish it to the `alarms`
+   * signal, from which BOTH the geo map (site pins) and the site graph (device nodes) derive their
+   * red/amber/green buckets. Called on view init and by the Refresh buttons.
+   *
+   * WHY the full fetch (the fix for the silent under-colouring): the previous single 500-item page
+   * across ALL lifecycle states dropped every fault beyond the first 500 rows (`/alarms` has no
+   * active-first ordering), so a genuinely faulted node could render green. Instead we fetch the
+   * three ACTIVE states server-side (`state` filter is single-valued) and, WITHIN each state, page
+   * through by `offset` until `offset + items.length >= total` — so ALL active alarms across the
+   * whole set inform the colouring, and we never fetch+discard `cleared` rows. Results are merged and
+   * de-duped by `alarmId` (the same alarm is not returned by two states, but the dedupe is defensive).
+   *
+   * SAFETY: the total rows pulled is bounded by {@link ALARM_SAFETY_CAP}; if that bound is reached
+   * before a state is exhausted we STOP, set {@link alarmsTruncated}, and log a warning — the snapshot
+   * is flagged as possibly-incomplete rather than silently truncated.
+   *
+   * Resilient: an error leaves the previous snapshot untouched (the overlay never breaks the base
+   * render) and clears the busy flag. No contract change — client-side derivation only.
+   */
+  refreshAlarms(): void {
+    this.alarmsLoading.set(true);
+    this.alarmsTruncated.set(false);
+    const budget = { remaining: TopologyStore.ALARM_SAFETY_CAP, capHit: false };
+    forkJoin(
+      TopologyStore.ACTIVE_STATES.map((state) => this.pullAllForState(state, budget)),
+    )
+      .pipe(catchError(() => of(null)))
+      .subscribe((perState) => {
+        if (perState) {
+          // Merge every active state's rows, de-duping by alarmId (defensive — a given alarm is in
+          // exactly one lifecycle state, but never double-count if the server overlaps).
+          const merged = new Map<string, AlarmSummary>();
+          for (const items of perState) {
+            for (const a of items) {
+              merged.set(a.alarmId, a);
+            }
+          }
+          this.alarms.set([...merged.values()]);
+          if (budget.capHit) {
+            this.alarmsTruncated.set(true);
+            console.warn(
+              `[TopologyStore] alarm fetch hit the ${TopologyStore.ALARM_SAFETY_CAP}-row safety cap; ` +
+                'the severity snapshot may be incomplete (some active alarms not pulled). ' +
+                'Sites/nodes could under-colour — raise ALARM_SAFETY_CAP if this is a real load.',
+            );
+          }
+        }
+        this.alarmsLoading.set(false);
+      });
+  }
+
+  /**
+   * Page through `GET /alarms?state=<state>` accumulating every row until the server's reported
+   * `total` for that state is covered (`offset + items.length >= total`), or the shared row `budget`
+   * is exhausted (safety cap). Recurses one page at a time so pagination is driven by the actual
+   * `total` (not a guess). Each page decrements the shared budget; when the budget can't cover a
+   * further page the `capHit` flag is set and paging stops (partial rows for this state are still
+   * returned). Per-page error → the rows gathered so far (never fails the whole refresh).
+   */
+  private pullAllForState(
+    state: LifecycleState,
+    budget: { remaining: number; capHit: boolean },
+  ): Observable<AlarmSummary[]> {
+    const pageAt = (offset: number, acc: AlarmSummary[]): Observable<AlarmSummary[]> => {
+      if (budget.remaining <= 0) {
+        budget.capHit = true;
+        return of(acc);
+      }
+      const limit = Math.min(TopologyStore.ALARM_PAGE_LIMIT, budget.remaining);
+      return this.alarmManager.listAlarms({ state, limit, offset }).pipe(
+        catchError(() => of(null)),
+        switchMap((page) => {
+          if (!page) {
+            return of(acc); // this state's page errored — keep what we have, don't fail the refresh.
+          }
+          const items = page.items ?? [];
+          budget.remaining -= items.length;
+          const next = acc.concat(items);
+          const covered = offset + items.length;
+          // Stop when the reported total is covered, the server returned a short/empty page (no more
+          // rows), or the budget is spent.
+          if (items.length === 0 || covered >= page.total || budget.remaining <= 0) {
+            if (covered < page.total && budget.remaining <= 0) {
+              budget.capHit = true; // stopped by the safety cap before exhausting this state.
+            }
+            return of(next);
+          }
+          return pageAt(covered, next);
+        }),
+      );
+    };
+    return pageAt(0, []);
+  }
+
+  /**
+   * Fetch objects-at-site for EVERY site and cache each site's device managedObjectId list, so the
+   * geo map can attribute alarms to a site (site pin colour) without drilling into it. One
+   * objects-at-site fan-out (once at map init; the Refresh button re-pulls alarms only, reusing this
+   * cache unless forced). Resilient per site (a failed site contributes an empty list). No-op with no
+   * sites yet.
+   */
+  loadAllSiteObjects(): void {
+    const sites = this.sites();
+    if (sites.length === 0) {
+      return;
+    }
+    // Record the site set this fan-out covers so the reactive effect won't redundantly re-fire for
+    // the same set (set BEFORE the async fetch resolves so an in-flight load is not re-triggered).
+    this.loadedObjectsKey = sites.map((s) => s.siteId).join('|');
+    this.siteObjectsLoading.set(true);
+    forkJoin(
+      sites.map((s) =>
+        this.topo.objectsAtSite(s.siteId).pipe(catchError(() => of(null))),
+      ),
+    ).subscribe((results) => {
+      const map = new Map<string, readonly string[]>();
+      results.forEach((res, i) => {
+        map.set(sites[i].siteId, res ? res.nodes.map((n) => n.managedObjectId) : []);
+      });
+      this.siteObjectMoids.set(map);
+      this.siteObjectsLoading.set(false);
+    });
+  }
+
+  /**
+   * Ensure the per-site object cache is loaded for the CURRENT site set WITHOUT re-fetching if it is
+   * already loaded for that exact set. Site objects don't change between refreshes — only alarms do —
+   * so the Refresh button uses this (not the unconditional {@link loadAllSiteObjects}) to avoid a
+   * redundant objects fan-out every click; it only fans out when the cache has never been loaded for
+   * this site set (e.g. the reactive load hasn't fired yet). No-op when the current set is already
+   * cached (matching {@link loadedObjectsKey}).
+   */
+  ensureSiteObjectsLoaded(): void {
+    const sites = this.sites();
+    if (sites.length === 0) {
+      return;
+    }
+    const key = sites.map((s) => s.siteId).join('|');
+    if (key === this.loadedObjectsKey) {
+      return; // already loaded (or loading) for this exact site set — objects don't change per refresh.
+    }
+    this.loadAllSiteObjects();
+  }
+
+  /**
+   * The worst ACTIVE-alarm severity bucket for a SITE (map pin colour): the worst bucket across all
+   * alarms whose node token belongs to any of the site's cached devices. Green when the site's
+   * objects are not yet cached or it has no active fault. Reads the shared `alarms` snapshot + the
+   * per-site object cache; pure attribution otherwise.
+   */
+  siteSeverityBucket(siteId: string): SeverityBucket {
+    const moids = this.siteObjectMoids().get(siteId) ?? [];
+    if (moids.length === 0) {
+      return 'green';
+    }
+    return worstBucketForTokens(this.alarms(), tokensForMoids(moids));
+  }
+
+  /**
+   * The worst ACTIVE-alarm severity bucket for a single device NODE (site-graph node colour): the
+   * worst bucket among alarms whose node token(s) intersect this node's token(s). Reads the shared
+   * `alarms` snapshot; pure attribution otherwise.
+   */
+  nodeSeverityBucket(managedObjectId: string): SeverityBucket {
+    return worstBucketForTokens(this.alarms(), nodeTokensOf(managedObjectId));
   }
 
   /**

@@ -41,6 +41,27 @@ public interface IncidentRepository {
     /** @return confidence-bucket counts ({@code "0.0-0.2"} .. {@code "0.8-1.0"}). */
     java.util.Map<String, Long> confidenceDistribution();
 
+    /**
+     * Purge ALL rows the CE owns in its {@code incident} schema — the P3 live incident state
+     * ({@code incident.incident} + {@code incident.incident_alarm}) — for a demo/ops reset. This is
+     * a transactional, all-or-nothing delete. It deliberately does NOT touch
+     * {@code incident.processed_event}: that ledger dedupes P2 model events
+     * ({@code patterns.approved} / {@code codebook.generated} / {@code trails.built}) whose
+     * {@code eventId}s must survive so the loaded P2 model is not re-ingested on redelivery.
+     *
+     * @return the purge counts (rows removed from each table)
+     */
+    PurgeCounts deleteAll();
+
+    /**
+     * The number of rows removed by {@link #deleteAll()} from each owned incident table.
+     *
+     * @param purgedIncidents rows removed from {@code incident.incident}
+     * @param purgedIncidentAlarms rows removed from {@code incident.incident_alarm}
+     */
+    record PurgeCounts(long purgedIncidents, long purgedIncidentAlarms) {
+    }
+
     /** Filter for {@link #find} / {@link #count}. */
     record IncidentFilter(
             String trailId,

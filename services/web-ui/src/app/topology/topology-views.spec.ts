@@ -66,34 +66,55 @@ describe('GeoSiteMapComponent — real-UI render (AC 26, AC 52)', () => {
     expect(fixture.componentInstance.mapInitAttempted).toBe(true);
   });
 
-  it('siteStatusFor() is the P3 hook — every P1 site (no severity in SiteDto) is "monitored"', async () => {
+  it('siteStatusFor() is wired to REAL alarm severity — LON has an active minor alarm → warning (amber)', async () => {
     const fixture = await mountGeo();
     const store = TestBed.inject(TopologyStore);
     expect(store.sites().length).toBeGreaterThanOrEqual(1);
+    // The default mock alarm fixture carries an ACTIVE minor alarm on Router:lon-r1 (a LON device),
+    // so the LON site (sites()[0]) buckets to 'warning' (amber). Sites with no active fault stay
+    // 'monitored' (green). This replaces the old "everything monitored" P3-hook placeholder.
+    expect(fixture.componentInstance.siteStatusFor(store.sites()[0])).toBe('warning');
+    // Every site resolves to a valid bucket (no site is left undefined).
     for (const site of store.sites()) {
-      expect(fixture.componentInstance.siteStatusFor(site)).toBe('monitored');
+      expect(['fault', 'warning', 'monitored']).toContain(fixture.componentInstance.siteStatusFor(site));
     }
   });
 
-  it('statusCounts() — Monitored == site count, Fault/Warning == 0, total == site count', async () => {
+  it('statusCounts() reflects the REAL alarm buckets (LON warning; the rest OK) and totals the fleet', async () => {
     const fixture = await mountGeo();
     const store = TestBed.inject(TopologyStore);
     const counts = fixture.componentInstance.statusCounts();
-    expect(counts.monitored).toBe(store.sites().length);
+    // One warning site (LON, active minor), no fault (no active critical/major in the default mock),
+    // and the counts sum to the fleet size.
+    expect(counts.warning).toBe(1);
     expect(counts.fault).toBe(0);
-    expect(counts.warning).toBe(0);
+    expect(counts.monitored).toBe(store.sites().length - 1);
+    expect(counts.fault + counts.warning + counts.monitored).toBe(store.sites().length);
     expect(counts.total).toBe(store.sites().length);
   });
 
-  it('status bar renders the status WORD (not colour-only) in each item — WCAG 1.4.1', async () => {
+  it('status bar renders the severity WORD (not colour-only) in each item — WCAG 1.4.1', async () => {
     const fixture = await mountGeo();
     const el: HTMLElement = fixture.nativeElement;
-    expect(el.querySelector('[data-testid="status-fault"]')?.textContent).toMatch(/Fault:\s*0/);
-    expect(el.querySelector('[data-testid="status-warning"]')?.textContent).toMatch(/Warning:\s*0/);
-    expect(el.querySelector('[data-testid="status-monitored"]')?.textContent).toMatch(/Monitored:\s*\d+/);
-    // Each accessible site marker's aria-label carries the status word (not colour-only).
+    expect(el.querySelector('[data-testid="status-fault"]')?.textContent).toMatch(/Critical\/Major:\s*0/);
+    expect(el.querySelector('[data-testid="status-warning"]')?.textContent).toMatch(/Minor:\s*1/);
+    expect(el.querySelector('[data-testid="status-monitored"]')?.textContent).toMatch(/OK:\s*\d+/);
+    // Each accessible site marker's aria-label carries the status PHRASE (not colour-only).
     const marker = el.querySelector('[data-testid="site-marker"]');
-    expect(marker?.getAttribute('aria-label')).toMatch(/Status: Monitored/);
+    expect(marker?.getAttribute('aria-label')).toMatch(/Alarm status: (minor fault|no active fault|critical or major fault)/);
+  });
+
+  it('the map-refresh control re-pulls the alarm snapshot (aria-busy, accessible)', async () => {
+    const fixture = await mountGeo();
+    const store = TestBed.inject(TopologyStore);
+    const btn = fixture.nativeElement.querySelector('[data-testid="map-refresh"]') as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    expect(btn.tagName).toBe('BUTTON');
+    expect(btn.getAttribute('aria-label')).toBeTruthy();
+    const spy = vi.spyOn(store, 'refreshAlarms');
+    btn.click();
+    fixture.detectChanges();
+    expect(spy).toHaveBeenCalled();
   });
 });
 

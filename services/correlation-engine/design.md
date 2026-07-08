@@ -462,14 +462,36 @@ a codebook artifact id.
 
 Constraint: `UNIQUE(incident_id, alarm_id)`. Index: `(alarm_id)`.
 
-> **`correlatedAlarmCount` derivation (D1).** `StatsAggregator` computes `correlatedAlarmCount` as
-> `COUNT(DISTINCT alarm_id)` over `incident.incident_alarm` — every distinct alarm that holds a
-> root-cause or child role in some committed incident, counted once (the `UNIQUE(incident_id,
-> alarm_id)` constraint plus the `DISTINCT` make an alarm appearing in multiple incidents or roles
-> count once toward the correlated set). `totalAlarmsProcessed` is the distinct-`alarmId` ingest
-> count (the `alarms_processed_total` source). The auto-correlation rate is the ratio of the two —
-> both numerator and denominator come from the engine's own owned state, so the shown number is
-> self-contained and reproducible.
+> **`/stats` field scopes & ratio consistency (D1).** Two ratios are surfaced and each must stay
+> within its natural bound, so **every count that participates in a ratio comes from the SAME scope —
+> the engine's own session-scoped in-memory state** (reset together on restart). This is a deliberate
+> change from an earlier draft that sourced some counts from the persistent Incident Store: mixing an
+> all-time DB count with a since-restart in-memory count produced impossible numbers (auto-correlation
+> observed at 154% live — 279 all-time correlated / 181 since-restart processed; and the sibling
+> alarm-reduction dipping below 1.0 when the all-time incident count exceeds since-restart processed
+> after a restart or on a larger DB).
+>
+> | `/stats` field | Scope | Source | In a ratio? |
+> |---|---|---|---|
+> | `totalAlarmsProcessed` | engine session | `CorrelationEngine.totalAlarmsProcessed()` = `processedAlarmIds.size()` (distinct ingested alarmIds) | auto-corr **denominator**, alarm-reduction **numerator** |
+> | `correlatedAlarmCount` | engine session | `CorrelationEngine.correlatedAlarmCount()` = `correlatedAlarmIds.size()` (distinct alarmIds placed in a fired incident) | auto-corr **numerator** |
+> | `totalIncidentsCreated` | engine session | `CorrelationEngine.totalIncidentsCreated()` = `firedIncidentIds.size()` (distinct incidents fired this session) | alarm-reduction **denominator** |
+> | `patternMatchCount` | engine session | `CorrelationEngine.patternMatchCount()` | no (informational; kept session-scoped so `pattern+codebook == totalIncidentsCreated`) |
+> | `codebookMatchCount` | engine session | `CorrelationEngine.codebookMatchCount()` | no (informational; same-scope as above) |
+> | `confidenceDistribution` | all-time DB | `IncidentRepository.confidenceDistribution()` | no (informational per-band histogram; participates in no ratio, so a DB view is fine) |
+> | `rcaAccuracy` | eval-mode only | `RcaAccuracyOracle` (`null` in production, D2) | no |
+>
+> **Rationale — ratio-participating counts must be same-scope.** Every correlated alarm was ingested
+> first (correlation only happens inside `onAlarm`), and every fired incident consumes at least its
+> root-cause alarm. With all four ratio counts session-scoped these hold structurally:
+> `correlatedAlarmCount <= totalAlarmsProcessed` and `totalIncidentsCreated <= totalAlarmsProcessed`,
+> so **auto-correlation stays in `[0, 1]`** and **alarm-reduction stays `>= 1`** — not defensive
+> clamps, but a genuine removal of the scope mismatch. The retained
+> `IncidentRepository.distinctCorrelatedAlarmCount()` / `totalIncidents()` / `countByMatchType()`
+> (all-time DB counts) are still covered by `IncidentRepositoryIT` but are **no longer wired into
+> `/stats`**. Persisting a distinct-processed-alarms ledger to make the session counts all-time was
+> rejected as a schema/design change (alarm dedupe is an in-memory MVP guard — see below); the
+> session-scoped approach keeps every ratio consistent with **zero** schema/contract change.
 
 **`incident.processed_event`** (schema `incident`, table `processed_event`) — idempotency ledger for consumed events deduped on `eventId`
 (`patterns.approved` / `codebook.generated`). `scope` distinguishes topics; `dedupe_key` is the

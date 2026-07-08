@@ -5,7 +5,6 @@ import { CorrelationEngineClient } from '../api/correlation-engine.client';
 import { PatternManagerClient } from '../api/pattern-manager.client';
 import { AlarmManagerClient } from '../api/alarm-manager.client';
 import { SimulatorLabelsClient } from '../api/simulator-labels.client';
-import { ApiConfigService } from '../core/api-config.service';
 import { RcaAccuracyService } from '../core/rca-accuracy.service';
 import { GroundTruthLabel, IncidentVM, StatsVM } from '../api/models';
 
@@ -15,26 +14,15 @@ export class DashboardStore {
   private readonly pm = inject(PatternManagerClient);
   private readonly am = inject(AlarmManagerClient);
   private readonly sim = inject(SimulatorLabelsClient);
-  private readonly config = inject(ApiConfigService);
   private readonly rcaSvc = inject(RcaAccuracyService);
 
   readonly stats = signal<StatsVM | null>(null);
   readonly incidents = signal<IncidentVM[]>([]);
   readonly activePatternCount = signal<number>(0);
-  readonly alarmCount = signal<number>(0);
   readonly labels = signal<GroundTruthLabel[] | null>(null);
   readonly loading = signal<boolean>(false);
 
-  /** alarm-reduction ratio = totalAlarmsProcessed / totalIncidentsCreated; N/A when zero incidents (AC 1). */
-  readonly alarmReductionRatio = computed<number | null>(() => {
-    const s = this.stats();
-    if (!s || s.totalIncidentsCreated === 0) {
-      return null;
-    }
-    return s.totalAlarmsProcessed / s.totalIncidentsCreated;
-  });
-
-  /** auto-correlation% = correlatedAlarmCount / totalAlarmsProcessed; N/A when zero processed (AC 58). */
+  /** auto-correlation% = correlatedAlarmCount / totalAlarmsProcessed; N/A when zero processed (AC 58 – dashboard). */
   readonly autoCorrelationPct = computed<number | null>(() => {
     const s = this.stats();
     if (!s || !s.totalAlarmsProcessed || s.correlatedAlarmCount === undefined) {
@@ -43,8 +31,14 @@ export class DashboardStore {
     return s.correlatedAlarmCount / s.totalAlarmsProcessed;
   });
 
-  /** RCA accuracy (AC 57): eval-mode value, else client-side label join, else N/A. */
-  readonly rcaAccuracy = computed(() => this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()));
+  /**
+   * RCA accuracy (AC 57): eval-mode value, else the direct `rootCauseAlarmId` exact join against the
+   * simulator ground-truth labels, else N/A. Both the incident and the label carry `rootCauseAlarmId`,
+   * so the join needs no alarm-by-id device resolution.
+   */
+  readonly rcaAccuracy = computed(() =>
+    this.rcaSvc.resolve(this.stats(), this.incidents(), this.labels()),
+  );
 
   readonly incidentCount = computed(() => this.incidents().length);
 
@@ -60,17 +54,16 @@ export class DashboardStore {
       .listPatterns({ lifecycle: 'approved' })
       .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
       .subscribe((p) => this.activePatternCount.set(p.total ?? p.items.length));
+    // Alarm Manager read drives the loading flag only; the total is no longer surfaced as a KPI.
     this.am
       .listAlarms()
       .pipe(catchError(() => of({ items: [], total: 0, limit: 50, offset: 0 })))
-      .subscribe((p) => {
-        this.alarmCount.set(p.total ?? p.items.length);
-        this.loading.set(false);
-      });
+      .subscribe(() => this.loading.set(false));
 
-    if (this.config.rcaLabelsEnabled && this.config.isConfigured('simulatorLabels')) {
-      this.sim.listLabels().pipe(catchError(() => of([]))).subscribe((ls) => this.labels.set(ls));
-    }
+    // Fetch the RCA ground-truth oracle (simulator `/labels`). The client resolves to `/api/simulator`
+    // (same base as the synth-run trigger), so it's reachable whenever the simulator is; a failed or
+    // empty fetch leaves `labels` empty and `rcaAccuracy` falls back to N/A (no fabrication).
+    this.sim.listLabels().pipe(catchError(() => of([]))).subscribe((ls) => this.labels.set(ls));
   }
 
   // Exposed for tests/parallel-load callers that prefer a single subscription.

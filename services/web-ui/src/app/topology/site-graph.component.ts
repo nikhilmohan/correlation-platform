@@ -35,6 +35,7 @@ import {
   typeLabelFor,
 } from './type-icon-mapper';
 import type { TrailDetail } from '../api/models';
+import type { SeverityBucket } from './alarm-severity';
 
 // Type-only import — the runtime module is lazy-loaded in ngAfterViewInit so the Cytoscape bundle
 // is fetched only when this view is shown, and unit tests can mock it.
@@ -101,6 +102,18 @@ import type {
         <span class="back-glyph" aria-hidden="true">←</span> Back to map
       </button>
       <h1 class="site-title">Site graph — {{ siteId() }}</h1>
+      <button
+        type="button"
+        class="alarm-refresh"
+        data-testid="site-graph-refresh"
+        [attr.aria-busy]="store.alarmsLoading()"
+        [disabled]="store.alarmsLoading()"
+        aria-label="Refresh alarm severity — re-pull alarms and re-colour the device nodes"
+        (click)="refreshAlarms()"
+      >
+        <span class="refresh-glyph" [class.spinning]="store.alarmsLoading()" aria-hidden="true">↻</span>
+        {{ store.alarmsLoading() ? 'Refreshing…' : 'Refresh' }}
+      </button>
     </div>
 
     @if (errors.forService('Topology Service'); as err) {
@@ -447,10 +460,12 @@ import type {
                     data-testid="graph-node"
                     [attr.data-icon]="iconKeyFor(node.objectType)"
                     [attr.data-object-type]="node.objectType"
+                    [attr.data-severity]="nodeStatusFor(node.managedObjectId)"
                     [class.selected]="store.selectedObjectId() === node.managedObjectId"
                     [class.trail-member]="isTrailMemberNode(node.managedObjectId)"
                     (click)="store.selectNode(node.managedObjectId)"
                     [attr.aria-pressed]="store.selectedObjectId() === node.managedObjectId"
+                    [attr.aria-label]="nodeAriaFor(node)"
                   >
                     <img
                       class="node-icon"
@@ -462,6 +477,14 @@ import type {
                     />
                     {{ node.name ?? node.managedObjectId }}
                     <span class="layer-tag">{{ node.derivedLayer }}</span>
+                    <!-- Alarm-severity tag: text label (not colour-only) carrying the node's worst
+                         active alarm severity, so screen-reader users + tests read the status. -->
+                    <span
+                      class="severity-tag"
+                      data-testid="node-severity-tag"
+                      [attr.data-severity]="nodeStatusFor(node.managedObjectId)"
+                      >{{ nodeStatusLabel(node.managedObjectId) }}</span
+                    >
                     @if (siteFor(node.managedObjectId); as sn) {
                       <span class="site-tag" data-testid="node-site-tag">site: {{ sn }}</span>
                     }
@@ -959,6 +982,74 @@ import type {
         font-size: 0.72rem;
         margin-left: 0.3rem;
       }
+      /* Alarm-severity text tag on each device row (non-colour-only status). The pill background
+         echoes the node's red/amber/green severity, but the WORD is the accessible signal. */
+      .severity-tag {
+        display: inline-block;
+        margin-left: 0.3rem;
+        padding: 0 0.35rem;
+        border-radius: 999px;
+        font-size: 0.68rem;
+        font-weight: 600;
+        line-height: 1.4;
+        border: 1px solid var(--border);
+        color: var(--text);
+      }
+      .severity-tag[data-severity='red'] {
+        background: color-mix(in srgb, #ef4444 22%, transparent);
+        border-color: #ef4444;
+      }
+      .severity-tag[data-severity='amber'] {
+        background: color-mix(in srgb, #f59e0b 22%, transparent);
+        border-color: #f59e0b;
+      }
+      .severity-tag[data-severity='green'] {
+        background: color-mix(in srgb, #22c55e 20%, transparent);
+        border-color: #22c55e;
+      }
+      /* Refresh control in the site header — re-pulls alarms + re-colours the device nodes. */
+      .alarm-refresh {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex: 0 0 auto;
+        margin-left: auto;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.35rem 0.7rem;
+        font: inherit;
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      .alarm-refresh:hover:not(:disabled),
+      .alarm-refresh:focus-visible:not(:disabled) {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .alarm-refresh:disabled {
+        opacity: 0.7;
+        cursor: progress;
+      }
+      .refresh-glyph {
+        display: inline-block;
+        color: var(--accent);
+        font-weight: 700;
+      }
+      .refresh-glyph.spinning {
+        animation: sg-refresh-spin 0.8s linear infinite;
+      }
+      @keyframes sg-refresh-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .refresh-glyph.spinning {
+          animation: none;
+        }
+      }
       /* CHANGE 2: floating on-canvas trail selector (top-left, clear of the top-right zoom group). */
       .cy-trail-selector {
         position: absolute;
@@ -1284,6 +1375,13 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
   };
   readonly LAYER_LEGEND = Object.entries(SiteGraphComponent.LAYER_COLORS).map(([layer, color]) => ({ layer, color }));
 
+  /** Alarm-severity bucket → node border/glow colour (red = critical/major, amber = minor). Green
+   *  (OK) nodes are NOT recoloured — they keep the neutral grey outline, so no green entry. */
+  static readonly SEVERITY_COLORS: Record<'red' | 'amber', string> = {
+    red: '#ef4444',
+    amber: '#f59e0b',
+  };
+
   /** Network-element type-icon legend (objectType → glyph), rendered beneath the layer legend. */
   readonly ICON_LEGEND = ICON_LEGEND;
 
@@ -1543,13 +1641,16 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       this.applyDecoration();
     });
 
-    // DECORATION effect — selection / trail highlight only toggle classes; NO layout (no blob).
+    // DECORATION effect — selection / trail highlight / ALARM-SEVERITY colouring toggle classes only;
+    // NO layout (no blob). Tracks the alarm snapshot so a Refresh re-pull re-colours the device nodes
+    // WITHOUT relaying out the graph.
     this.decorationEffect = effect(() => {
       // Track the decoration inputs explicitly.
       this.store.selectedObjectId();
       this.store.selectedTrailId();
       this.store.trailMemberIds();
       this.store.highlightedTrailIds();
+      this.store.alarms(); // track — re-colour nodes when the alarm snapshot changes (Refresh)
       if (!this.cyReady() || !this.cy) {
         return;
       }
@@ -1685,6 +1786,31 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       },
       { selector: 'node.selected', style: { 'border-width': 4, 'border-color': accent } },
       { selector: 'edge.trail-member', style: { 'line-color': trailHl, width: 5, opacity: 1 } },
+      // ALARM-SEVERITY node colouring (red = critical/major, amber = minor). A device node with an
+      // active fault gets a bold coloured border + a soft same-colour glow so the operator sees the
+      // faulted devices at a glance; green (OK) nodes keep the neutral grey outline. Applied as a
+      // class in applyDecoration from store.nodeSeverityBucket, re-run when the alarm snapshot
+      // changes (Refresh). Status is never colour-only — the accessible node list carries the word.
+      {
+        selector: 'node.sev-red',
+        style: {
+          'border-color': SiteGraphComponent.SEVERITY_COLORS.red,
+          'border-width': 5,
+          'overlay-color': SiteGraphComponent.SEVERITY_COLORS.red,
+          'overlay-opacity': 0.14,
+          'overlay-padding': 6,
+        },
+      },
+      {
+        selector: 'node.sev-amber',
+        style: {
+          'border-color': SiteGraphComponent.SEVERITY_COLORS.amber,
+          'border-width': 5,
+          'overlay-color': SiteGraphComponent.SEVERITY_COLORS.amber,
+          'overlay-opacity': 0.14,
+          'overlay-padding': 6,
+        },
+      },
     ];
   }
 
@@ -1693,6 +1819,37 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     if (id) {
       this.store.selectSite(id);
     }
+    // Pull the alarm snapshot so the device nodes can be coloured by their worst active severity.
+    this.store.refreshAlarms();
+  }
+
+  /**
+   * Refresh the alarm overlay (the `data-testid="site-graph-refresh"` button): re-pull the alarm
+   * snapshot; the decoration effect re-colours every device node from the fresh snapshot WITHOUT
+   * relaying out the graph (no full reload — just the overlay re-paints).
+   */
+  refreshAlarms(): void {
+    this.store.refreshAlarms();
+  }
+
+  /** The worst active alarm-severity bucket for a device node (drives its list-row tag + node colour). */
+  nodeStatusFor(managedObjectId: string): SeverityBucket {
+    return this.store.nodeSeverityBucket(managedObjectId);
+  }
+
+  /** Short severity WORD for a device row's non-colour-only tag (Critical/Major · Minor · OK). */
+  nodeStatusLabel(managedObjectId: string): string {
+    const bucket = this.nodeStatusFor(managedObjectId);
+    return bucket === 'red' ? 'Critical/Major' : bucket === 'amber' ? 'Minor' : 'OK';
+  }
+
+  /** Accessible label for a device row including its alarm-severity phrase (not colour-only). */
+  nodeAriaFor(node: { managedObjectId: string; name?: string; objectType: string }): string {
+    const name = node.name ?? node.managedObjectId;
+    const bucket = this.nodeStatusFor(node.managedObjectId);
+    const phrase =
+      bucket === 'red' ? 'critical or major fault' : bucket === 'amber' ? 'minor fault' : 'no active fault';
+    return `Device ${name}. Alarm status: ${phrase}.`;
   }
 
   /** Breadcrumb: back to the map. When embedded on the dashboard (a listener is bound to `closed`)
@@ -2135,7 +2292,7 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
     if (!cy) {
       return;
     }
-    cy.elements().removeClass('highlighted selected trail-member');
+    cy.elements().removeClass('highlighted selected trail-member sev-red sev-amber');
     const memberIds = this.trailMemberObjectIds();
     const selectedId = this.store.selectedObjectId();
     let highlightCount = 0;
@@ -2146,6 +2303,15 @@ export class SiteGraphComponent implements OnInit, AfterViewInit, OnDestroy {
       }
     }
     cy.nodes('[!isSiteParent]').forEach((n) => {
+      // ALARM-SEVERITY colouring: paint the node's border/glow by its worst active alarm severity
+      // (red = critical/major, amber = minor; green = OK keeps the neutral outline). Derived from the
+      // shared alarm snapshot in the store, so a Refresh re-decorates every node's colour.
+      const bucket = this.store.nodeSeverityBucket(n.id());
+      if (bucket === 'red') {
+        n.addClass('sev-red');
+      } else if (bucket === 'amber') {
+        n.addClass('sev-amber');
+      }
       if (memberIds.has(n.id())) {
         n.addClass('highlighted');
         highlightCount++;

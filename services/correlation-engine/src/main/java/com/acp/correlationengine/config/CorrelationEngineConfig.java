@@ -1,5 +1,6 @@
 package com.acp.correlationengine.config;
 
+import com.acp.correlationengine.api.CorrelationResetService;
 import com.acp.correlationengine.api.StatsAggregator;
 import com.acp.correlationengine.api.StatsAggregator.RcaAccuracyOracle;
 import com.acp.correlationengine.codebook.CodebookDecoder;
@@ -210,6 +211,12 @@ public class CorrelationEngineConfig {
     public StatsAggregator statsAggregator(IncidentRepository repository, CorrelationEngine engine,
             RcaAccuracyOracle rcaOracle) {
         return new StatsAggregator(repository, engine, rcaOracle);
+    }
+
+    @Bean
+    public CorrelationResetService correlationResetService(IncidentRepository repository,
+            CorrelationEngine engine, CorrelationMetrics metrics) {
+        return new CorrelationResetService(repository, engine, metrics);
     }
 
     @Bean

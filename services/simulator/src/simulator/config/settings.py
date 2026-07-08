@@ -97,13 +97,20 @@ class Settings(BaseSettings):
     # emitted length L yields FEWER than L correlated alarms: enrichment legitimately trims ~1
     # element and CE fires at partialMatchTolerance (needs N-1 of N), so an incident holds ~L-1
     # members, not L. Live-measured on this platform: emitting 150 aligned alarms yielded 91
-    # CE-correlated => ~0.61 correlated-per-emitted-aligned. The controller sizes the number of
-    # aligned cascades by this yield so P3_AUTO_CORRELATION_TARGET lands the CE-measured rate
-    # without manual over-provision-margin tuning. When > 0 this flat fraction is used directly
-    # (expected correlated per cascade = yield * L); when <= 0 the controller DERIVES the yield
-    # from each pattern's length + tolerance (L - expected_enrichment_trim, bounded by the
-    # N-tolerance firing floor). Default 0.61 matches the live measurement out of the box.
-    p3_cascade_yield: float = Field(default=0.61, alias="P3_CASCADE_YIELD")
+    # CE-correlated => ~0.61 correlated-per-emitted-aligned on a first bench read. The controller
+    # sizes the number of aligned cascades by this yield so P3_AUTO_CORRELATION_TARGET lands the
+    # CE-measured rate without manual over-provision-margin tuning. When > 0 this flat fraction is
+    # used directly (expected correlated per cascade = yield * L); when <= 0 the controller DERIVES
+    # the yield from each pattern's length + tolerance (L - expected_enrichment_trim, bounded by the
+    # N-tolerance firing floor).
+    #
+    # Default 0.66 is the MEASURED ACTUAL correlated-per-emitted-aligned yield on this platform.
+    # Derivation: at estimate 0.61 with TARGET=0.6 the controller emitted 0.6/0.61 ~= 0.984 of T
+    # as aligned and CE realized ~0.653 (over-target). The realized rate = emitted_aligned_fraction
+    # * actual_yield, so actual_yield ~= 0.653 / 0.984 ~= 0.66. Feeding that back as the estimate
+    # makes the controller emit 0.6/0.66 ~= 0.91 of T aligned and realize ~0.60 — TARGET centers on
+    # the realized rate. Ops can override P3_CASCADE_YIELD for a different enrichment/tolerance cfg.
+    p3_cascade_yield: float = Field(default=0.66, alias="P3_CASCADE_YIELD")
     # CE partial-match tolerance: an incident fires when N - tolerance of a pattern's N elements
     # match (default 1 => N-1). Used only by the DERIVED yield path (P3_CASCADE_YIELD <= 0) as the
     # firing floor. Overridable so ops can mirror the deployed Knowledge partialMatchTolerance.

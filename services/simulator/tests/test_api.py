@@ -13,6 +13,27 @@ from fastapi.testclient import TestClient
 from simulator.api.app import RunState, create_app
 from simulator.engine.labels import LabelStore
 from simulator.engine.models import GroundTruthLabel
+from simulator.synth.mine_run_manager import MineRunManager
+from simulator.synth.run_manager import RunManager
+
+
+def _full_app():
+    """The full HTTP surface (read routes + synth + mine triggers) — authoritative surface."""
+
+    def _noop_run(settings, producer, *, run_id, progress=None):  # pragma: no cover
+        raise RuntimeError("unused")
+
+    rm = RunManager(
+        lambda: None,  # type: ignore[arg-type,return-value]
+        lambda s: None,  # type: ignore[arg-type,return-value]
+        run_synth=_noop_run,
+    )
+    mm = MineRunManager(
+        lambda: None,  # type: ignore[arg-type,return-value]
+        lambda s: None,  # type: ignore[arg-type,return-value]
+        run_corpus=_noop_run,
+    )
+    return create_app(RunState(started=True), run_manager=rm, mine_manager=mm)
 
 
 def _label(scenario_id: str = "s1") -> GroundTruthLabel:
@@ -111,6 +132,66 @@ def test_checked_in_openapi_matches_live_surface() -> None:
     spec_path = Path(__file__).resolve().parents[1] / "openapi.json"
     assert spec_path.exists(), "services/simulator/openapi.json must be checked in"
     checked_in = json.loads(spec_path.read_text())
-    live = create_app(RunState(started=True)).openapi()
+    # The authoritative surface is the FULL app (read routes + the synth trigger, AC 75).
+    live = _full_app().openapi()
     assert checked_in["openapi"] == live["openapi"]
     assert set(checked_in["paths"]) == set(live["paths"])
+
+
+def test_ac75_openapi_declares_synth_endpoints() -> None:
+    """POST /synth/run (202/409/422) and GET /synth/status (200) are in the checked-in spec."""
+    import json
+    from pathlib import Path
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.json"
+    checked_in = json.loads(spec_path.read_text())
+    paths = checked_in["paths"]
+    assert "/synth/run" in paths, "checked-in openapi.json missing /synth/run"
+    assert "/synth/status" in paths, "checked-in openapi.json missing /synth/status"
+    run_responses = paths["/synth/run"]["post"]["responses"]
+    assert {"202", "409", "422"}.issubset(run_responses)
+    assert "200" in paths["/synth/status"]["get"]["responses"]
+
+
+def test_ac92_openapi_declares_mine_endpoints() -> None:
+    """POST /mine/run (202/409/422) and GET /mine/status (200) are in the checked-in spec."""
+    import json
+    from pathlib import Path
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.json"
+    checked_in = json.loads(spec_path.read_text())
+    paths = checked_in["paths"]
+    assert "/mine/run" in paths, "checked-in openapi.json missing /mine/run"
+    assert "/mine/status" in paths, "checked-in openapi.json missing /mine/status"
+    run_responses = paths["/mine/run"]["post"]["responses"]
+    assert {"202", "409", "422"}.issubset(run_responses)
+    assert "200" in paths["/mine/status"]["get"]["responses"]
+
+
+def test_ac92_drift_guard_catches_missing_mine_status() -> None:
+    """Deleting /mine/status from the checked-in doc makes the drift comparison fail (non-zero)."""
+    import copy
+    import json
+    from pathlib import Path
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.json"
+    checked_in = json.loads(spec_path.read_text())
+    tampered = copy.deepcopy(checked_in)
+    tampered["paths"].pop("/mine/status", None)
+    live = _full_app().openapi()
+    assert set(tampered["paths"]) != set(live["paths"])
+
+
+def test_ac75_drift_guard_catches_missing_synth_status() -> None:
+    """Deleting /synth/status from the checked-in doc makes the drift comparison fail (non-zero)."""
+    import copy
+    import json
+    from pathlib import Path
+
+    spec_path = Path(__file__).resolve().parents[1] / "openapi.json"
+    checked_in = json.loads(spec_path.read_text())
+    tampered = copy.deepcopy(checked_in)
+    tampered["paths"].pop("/synth/status", None)
+    live = _full_app().openapi()
+    # The real drift assertion is set-equality on paths; the tampered doc must fail it.
+    assert set(tampered["paths"]) != set(live["paths"])

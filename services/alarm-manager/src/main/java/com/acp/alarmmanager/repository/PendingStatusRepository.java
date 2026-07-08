@@ -84,6 +84,15 @@ public class PendingStatusRepository {
         return rows.stream().findFirst();
     }
 
+    /**
+     * Demo/ops reset: delete every parked row from {@code live_alarm.pending_status} and return the
+     * number of rows deleted. No FK dependency, so order relative to the other tables is
+     * immaterial; the transactional purge includes it in a single reset.
+     */
+    public int deleteAll() {
+        return jdbc.update("DELETE FROM live_alarm.pending_status");
+    }
+
     /** Delete the parked entry after it has been re-applied. Idempotent. */
     public void delete(String alarmId) {
         jdbc.update("DELETE FROM live_alarm.pending_status WHERE alarm_id = ?", alarmId);

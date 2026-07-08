@@ -17,6 +17,8 @@ import {
   SiteListDto,
   SiteObjectsDto,
   StatsVM,
+  SynthRunResponse,
+  SynthStatusResponse,
   TraversalDto,
   TrailDetail,
   TrailsForObjectResponse,
@@ -26,6 +28,13 @@ interface MockHandler {
   matches(req: HttpRequest<unknown>): boolean;
   respond(req: HttpRequest<unknown>): unknown;
 }
+
+/**
+ * Sentinel a handler returns to make the mock interceptor emit a 404 (rather than a 200 body).
+ * Mirrors the real backend so by-id resilience (an incident referencing a missing alarm id) is
+ * exercised in unit/component tests.
+ */
+export const MOCK_NOT_FOUND = Symbol('mock-not-found');
 
 const has = (url: string, frag: string) => url.includes(frag);
 
@@ -541,38 +550,33 @@ const INCIDENTS: IncidentVM[] = [
 const INCIDENT_PAGE: IncidentPage = { items: INCIDENTS, total: 2, limit: 50, offset: 0 };
 
 // --- Alarm Manager fixtures (P3) ---
+// The flat `GET /alarms` window mirrors the REAL backend: it returns only the freshest,
+// still-UNCORRELATED tail (correlated alarms are older and fall outside the window). The Alarms
+// view is INCIDENT-FIRST — it resolves each incident's correlated alarms by id (`GET /alarms/{id}`,
+// served from ALARM_BY_ID below), never from this flat list.
 const ALARMS: AlarmPage = {
-  total: 6,
+  total: 3,
   limit: 50,
   offset: 0,
   items: [
-    // Correlation group INC-12 — one root cause (a-3) + two children (a-7, a-8), matching the
-    // incident fixture's childAlarmIds so the grouped Alarm-Lifecycle view renders a full group.
-    { alarmId: 'a-3', managedObjectId: 'FiberSpan:lon-fra-1', eventType: 'LOS', alarmType: 'LOS', perceivedSeverity: 'critical', raisedAt: '2026-06-01T12:00:00Z', lifecycleState: 'correlated', role: 'root-cause', incidentId: 'INC-12', trailIds: ['TR-7'] },
-    { alarmId: 'a-7', managedObjectId: 'Interface:lon-r1-e1', eventType: 'LinkDown', alarmType: 'LinkDown', perceivedSeverity: 'major', raisedAt: '2026-06-01T12:00:03Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
-    { alarmId: 'a-8', managedObjectId: 'IGPAdj:lon-r1-r2', eventType: 'AdjDown', alarmType: 'AdjDown', perceivedSeverity: 'minor', raisedAt: '2026-06-01T12:00:05Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'] },
-    // Uncorrelated alarms (role='none') — rendered in the separate bottom section. Their raisedAt
-    // values are deliberately OUT OF array order (a-2 oldest, a-1 middle, a-9 newest) so the store's
-    // raisedAt-descending sort is exercised: rendered order must be a-9, a-1, a-2.
+    // Uncorrelated alarms (role='none'). Their raisedAt values are deliberately OUT OF array order
+    // (a-2 oldest, a-1 middle, a-9 newest) so the store's raisedAt-descending sort is exercised.
     { alarmId: 'a-2', managedObjectId: 'Router:lon-r1', eventType: 'CpuHigh', alarmType: 'CpuHigh', perceivedSeverity: 'warning', raisedAt: '2026-06-01T11:45:00Z', lifecycleState: 'in-progress', role: 'none', incidentId: null, trailIds: [] },
     { alarmId: 'a-1', managedObjectId: 'Router:lon-r1', eventType: 'PortFlap', alarmType: 'PortFlap', perceivedSeverity: 'minor', raisedAt: '2026-06-01T11:55:00Z', lifecycleState: 'open', role: 'none', incidentId: null, trailIds: [] },
     { alarmId: 'a-9', managedObjectId: 'Router:lon-r1', eventType: 'AdjDown', alarmType: 'AdjDown', perceivedSeverity: 'cleared', raisedAt: '2026-06-01T12:10:00Z', lifecycleState: 'cleared', role: 'none', incidentId: null, trailIds: [] },
   ],
 };
 
-const ALARM_DETAILS: Record<string, AlarmDetail> = {
-  'a-3': { ...ALARMS.items[0], transitions: [{ toState: 'open', occurredAt: '2026-06-01T12:00:00Z' }, { toState: 'correlated', occurredAt: '2026-06-01T12:00:05Z' }] },
-  'a-7': { ...ALARMS.items[1], transitions: [{ toState: 'open', occurredAt: '2026-06-01T12:00:01Z' }, { toState: 'correlated', occurredAt: '2026-06-01T12:00:06Z' }] },
-  'a-8': {
-    alarmId: 'a-8',
-    managedObjectId: 'Router:lon-r1',
-    eventType: 'AdjDown',
-    lifecycleState: 'correlated',
-    role: 'child',
-    incidentId: 'INC-12',
-    trailIds: ['TR-7'],
-    transitions: [{ toState: 'open', occurredAt: '2026-06-01T12:00:02Z' }, { toState: 'correlated', occurredAt: '2026-06-01T12:00:07Z' }],
-  },
+/**
+ * By-id alarm resolution for `GET /alarms/{id}` — the incident-first view hydrates each incident's
+ * RCA + child alarms from here. Covers INC-12 (a-3 RCA + a-7, a-8 children). INC-11's alarm ids
+ * (a-20, a-21) are DELIBERATELY absent so a by-id lookup 404s — exercising the "a 404 child still
+ * renders the group" resilience path (INC-11 resolves to zero alarms → no group, load still ok).
+ */
+const ALARM_BY_ID: Record<string, AlarmDetail> = {
+  'a-3': { alarmId: 'a-3', managedObjectId: 'FiberSpan:lon-fra-1', eventType: 'LOS', alarmType: 'LOS', perceivedSeverity: 'critical', raisedAt: '2026-06-01T12:00:00Z', lifecycleState: 'correlated', role: 'root-cause', incidentId: 'INC-12', trailIds: ['TR-7'], transitions: [{ toState: 'open', occurredAt: '2026-06-01T12:00:00Z' }, { toState: 'correlated', occurredAt: '2026-06-01T12:00:05Z' }] },
+  'a-7': { alarmId: 'a-7', managedObjectId: 'Interface:lon-r1-e1', eventType: 'LinkDown', alarmType: 'LinkDown', perceivedSeverity: 'major', raisedAt: '2026-06-01T12:00:03Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'], transitions: [{ toState: 'open', occurredAt: '2026-06-01T12:00:01Z' }, { toState: 'correlated', occurredAt: '2026-06-01T12:00:06Z' }] },
+  'a-8': { alarmId: 'a-8', managedObjectId: 'IGPAdj:lon-r1-r2', eventType: 'AdjDown', alarmType: 'AdjDown', perceivedSeverity: 'minor', raisedAt: '2026-06-01T12:00:05Z', lifecycleState: 'correlated', role: 'child', incidentId: 'INC-12', trailIds: ['TR-7'], transitions: [{ toState: 'open', occurredAt: '2026-06-01T12:00:02Z' }, { toState: 'correlated', occurredAt: '2026-06-01T12:00:07Z' }] },
 };
 
 // --- Noise Filter fixtures (P2) ---
@@ -603,10 +607,20 @@ const ENRICHMENT_CHATTER: Record<string, EnrichmentChatterList> = {
   default: { source: 'default', chatterList: [] },
 };
 
+// P3 `/labels` shape (P3CascadeLabelModel): keyed on the ground-truth root-cause ALARM id, matching
+// the incidents' `rootCauseAlarmId` above (a-20, a-3) so the client-side RCA join resolves.
 const LABELS: GroundTruthLabel[] = [
-  { scenarioId: 'sc-1', scenarioType: 'fiber-cut', rootCause: 'FiberSpan:lon-fra-1', rootCauseManagedObjectId: 'FiberSpan:lon-fra-1', rootCauseAlarmType: 'LOS', children: ['LinkDown', 'AdjDown'] },
-  { scenarioId: 'sc-2', scenarioType: 'card-fail', rootCause: 'Router:lon-r1', rootCauseManagedObjectId: 'Router:lon-r1', rootCauseAlarmType: 'CardFail', children: ['PortFlap'] },
+  { patternId: 'PAT-8', trailId: 'TR-8', rootCauseAlarmId: 'a-20', rootCauseAlarmType: 'LinkDown', childAlarmIds: ['a-21'], scenarioType: 'fiber-cut', instanceIndex: 0, igpArea: '0.0.0.0' },
+  { patternId: 'PAT-3', trailId: 'TR-3', rootCauseAlarmId: 'a-3', rootCauseAlarmType: 'LOS', childAlarmIds: ['a-7', 'a-8'], scenarioType: 'card-fail', instanceIndex: 1, igpArea: '0.0.0.1' },
 ];
+
+const SYNTH_RUN_ACCEPTED: SynthRunResponse = { runId: 'mock-run-1', status: 'running' };
+const SYNTH_STATUS_IDLE: SynthStatusResponse = {
+  status: 'idle',
+  runId: null,
+  progress: { alarmsEmitted: 0, alarmsTotal: 0, alignedEmitted: 0, nonAlignedEmitted: 0 },
+  summary: null,
+};
 
 export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => has(r.url, '/topology/sites/') && has(r.url, '/objects'), respond: (r) => objectsForSite(siteIdFromObjectsUrl(r)) },
@@ -632,6 +646,10 @@ export const MOCK_FIXTURES: MockHandler[] = [
   { matches: (r) => has(r.url, '/observed-chatter'), respond: () => OBSERVED_CHATTER },
   { matches: (r) => has(r.url, '/chatter'), respond: (r) => enrichmentChatter(r) },
   { matches: (r) => has(r.url, '/labels'), respond: () => LABELS },
+  // Simulator synth-run trigger. Default mock: an idle run (nothing in progress). POST /synth/run
+  // returns a started run; the button's poll then reads /synth/status (idle here) → returns to idle.
+  { matches: (r) => has(r.url, '/synth/run') && r.method === 'POST', respond: () => SYNTH_RUN_ACCEPTED },
+  { matches: (r) => has(r.url, '/synth/status'), respond: () => SYNTH_STATUS_IDLE },
 ];
 
 function paramOf(req: HttpRequest<unknown>, key: string): string | null {
@@ -720,9 +738,9 @@ function incidentById(req: HttpRequest<unknown>): IncidentVM {
   return INCIDENTS.find((i) => i.incidentId === id) ?? INCIDENTS[0];
 }
 
-function alarmById(req: HttpRequest<unknown>): AlarmDetail {
+function alarmById(req: HttpRequest<unknown>): AlarmDetail | typeof MOCK_NOT_FOUND {
   const id = decodeURIComponent(req.url.split('?')[0].split('/').pop() ?? '');
-  return ALARM_DETAILS[id] ?? { ...ALARMS.items[0], transitions: [] };
+  return ALARM_BY_ID[id] ?? MOCK_NOT_FOUND;
 }
 
 function filterAlarms(req: HttpRequest<unknown>): AlarmPage {

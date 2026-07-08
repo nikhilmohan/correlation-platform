@@ -16,7 +16,7 @@ service must respect. (Full narrative lives in the Solution Design doc.)
 | pattern-miner | Python | PrefixSpan mining only | transactions.clean | patterns.mined |
 | pattern-manager | Spring Boot | Pattern Store, RCA, reconcile, XAI, lifecycle | patterns.mined, patterns.approved | patterns.discovered, patterns.approved |
 | correlation-engine | Spring Boot | real-time match/score/RCA; incidents | alarms.persisted.live, patterns.approved, codebook.generated, trails.built | correlation.results |
-| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`, and keeps live alarm status in sync from generic `alarms.status.changed` (`AlarmStatusChange`, produced by any service); serves the live alarm query API | alarms.enriched.live, correlation.results, alarms.status.changed | alarms.persisted.live |
+| alarm-manager | Spring Boot | sole owner of **live alarm state**: persists each live enriched alarm, republishes it for correlation, and maintains its lifecycle (open→correlated→cleared) + correlation-group membership (root-cause/child) from `correlation.results`, and keeps live alarm status in sync from generic `alarms.status.changed` (`AlarmStatusChange`, produced by any service); serves the live alarm query API (`GET /alarms`, `GET /alarms/{alarmId}`) and an admin/ops **P3 live-state reset** (`POST /admin/purge-live-alarms`, deletes only its own `live_alarm` schema) | alarms.enriched.live, correlation.results, alarms.status.changed | alarms.persisted.live |
 | web-ui | Angular 20 | topology/trails, pattern review, config, stats | service APIs | patterns.approved (via API) |
 
 ## Runtime phases (the operating model)
@@ -258,6 +258,19 @@ and detailed in `design.md` (API contracts + integration points), and is checked
 > config-switchable (`mock|real`, `TOPOLOGY_BASE_URL`/`TOPOLOGY_MODE`) client, with a fallback to the
 > approved patterns' `PatternView.supportingInstances[].snapshotId` if Topology is unreachable. This
 > is a read of an already-published API — no new topic/payload/field, no event-model change.
+
+> **Correlation Engine P3 demo/ops reset — `POST /admin/reset-correlation` (contract addition).**
+> An admin/ops HTTP endpoint that PURGES all P3 correlation state the Correlation Engine owns, so
+> after a demo reset the web-ui KPIs return to `0` and no stale incidents remain. It deletes the
+> CE-owned incident tables (`incident.incident` + `incident.incident_alarm`, transactional) and
+> resets the engine's session-scoped in-memory state (active-instance registry + all `/stats`
+> counters), synchronized on the correlation path's monitor. **P3 live path ONLY:** the loaded P2
+> model (compatibility index / approved patterns / codebook / Knowledge params) and the
+> `incident.processed_event` P2-event ledger survive, so a fresh run correlates without a CE restart.
+> Returns `200` with `{ purgedIncidents, purgedIncidentAlarms, resetInMemory: true }`; idempotent;
+> ticks `correlation_reset_total`. **HTTP admin surface only — no new Kafka topic/payload and no
+> event-model change** — but a new API surface, hence a **contract change** (recorded here) requiring
+> human approval.
 
 ## Topology snapshot file & ingestion API
 Topology is loaded by **file upload to an API**, not by a Kafka event:

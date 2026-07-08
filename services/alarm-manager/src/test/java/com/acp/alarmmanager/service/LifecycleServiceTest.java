@@ -76,6 +76,7 @@ class LifecycleServiceTest {
     /** THE bug's unit-level guard: a correlated status for a not-yet-persisted alarm is PARKED. */
     @Test
     void applyStateForUnknownAlarmParksInsteadOfDropping() {
+        when(alarms.currentLifecycleState("ALM-RACE")).thenReturn(Optional.empty());
         when(alarms.exists("ALM-RACE")).thenReturn(false);
         Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
 
@@ -95,7 +96,8 @@ class LifecycleServiceTest {
 
     @Test
     void applyStateForKnownAlarmAppliesImmediatelyAndDoesNotPark() {
-        when(alarms.exists("ALM-0001")).thenReturn(true);
+        when(alarms.currentLifecycleState("ALM-0001"))
+                .thenReturn(Optional.of(LifecycleState.IN_PROGRESS));
         Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
 
         lifecycle.applyState("ALM-0001", LifecycleState.CORRELATED, "correlation-engine", changedAt,
@@ -115,8 +117,10 @@ class LifecycleServiceTest {
         when(pending.claim("ALM-RACE")).thenReturn(Optional.of(new PendingStatus(
                 "ALM-RACE", "correlated", "correlation-engine", changedAt, "evt-corr",
                 Instant.parse("2026-06-13T09:05:01Z"))));
-        // Alarm has just been persisted, so the re-apply takes the apply branch.
-        when(alarms.exists("ALM-RACE")).thenReturn(true);
+        // Alarm has just been persisted (open), so the re-apply takes the apply branch and the
+        // forward open->correlated transition is applied.
+        when(alarms.currentLifecycleState("ALM-RACE"))
+                .thenReturn(Optional.of(LifecycleState.OPEN));
 
         lifecycle.reapplyPending("ALM-RACE", Instant.now());
 
@@ -161,8 +165,12 @@ class LifecycleServiceTest {
     @Test
     void parkPathDrainsItselfWhenAlarmPersistedDuringParkWindow() {
         Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
-        // First exists()=false (park branch), then true (persisted during the park window).
-        when(alarms.exists("ALM-RACE")).thenReturn(false, true);
+        // First currentLifecycleState()=empty (park branch); parkThenDrainIfRaced then sees
+        // exists()=true (persisted during the park window) and self-drains, whose reapply re-enters
+        // applyState and reads the now-persisted state (open) so open->correlated applies forward.
+        when(alarms.currentLifecycleState("ALM-RACE"))
+                .thenReturn(Optional.empty(), Optional.of(LifecycleState.OPEN));
+        when(alarms.exists("ALM-RACE")).thenReturn(true);
         // The row this call parked is what the self-drain claims back.
         when(pending.claim("ALM-RACE")).thenReturn(Optional.of(new PendingStatus(
                 "ALM-RACE", "correlated", "correlation-engine", changedAt, "evt-corr",
@@ -188,7 +196,8 @@ class LifecycleServiceTest {
     @Test
     void parkPathLeavesRowParkedWhenAlarmStillAbsentAfterUpsert() {
         Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
-        when(alarms.exists("ALM-RACE")).thenReturn(false, false);
+        when(alarms.currentLifecycleState("ALM-RACE")).thenReturn(Optional.empty());
+        when(alarms.exists("ALM-RACE")).thenReturn(false);
 
         lifecycle.applyState("ALM-RACE", LifecycleState.CORRELATED, "correlation-engine", changedAt,
                 "evt-corr", Instant.now());
@@ -200,7 +209,8 @@ class LifecycleServiceTest {
 
     @Test
     void appliesInProgressStateWithSourceAndChangedAtOnAudit() {
-        when(alarms.exists("ALM-0001")).thenReturn(true);
+        when(alarms.currentLifecycleState("ALM-0001"))
+                .thenReturn(Optional.of(LifecycleState.OPEN));
         Instant changedAt = Instant.parse("2026-06-13T09:05:00Z");
 
         lifecycle.applyState("ALM-0001", LifecycleState.IN_PROGRESS, "correlation-engine",
@@ -210,6 +220,146 @@ class LifecycleServiceTest {
                 isNull(), any());
         verify(transitions).append(eq("ALM-0001"), eq("in-progress"), any(),
                 eq("correlation-engine"), eq(changedAt), eq("evt-2"), any());
+    }
+
+    // ---- State-precedence guard (THE bug fix) --------------------------------------------------
+
+    /**
+     * THE bug: a `correlated` alarm (placed in a fired incident) is clobbered back to `in-progress`
+     * by a lagging sibling pattern-instance's out-of-order status-sync event. The guard IGNORES the
+     * downgrade — the alarm stays `correlated`, and the suppressed transition is audited.
+     */
+    @Test
+    void correlatedIsNotDowngradedToInProgressByOutOfOrderStatusSync() {
+        when(alarms.currentLifecycleState("ALM-CHILD"))
+                .thenReturn(Optional.of(LifecycleState.CORRELATED));
+        Instant changedAt = Instant.parse("2026-06-13T13:06:34.426Z");
+
+        lifecycle.applyState("ALM-CHILD", LifecycleState.IN_PROGRESS, "correlation-engine",
+                changedAt, "evt-lagging", Instant.now());
+
+        // The downgrade is NOT applied — lifecycle_state stays correlated.
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        // An audit entry records the ignored transition (state remains correlated, special reason).
+        ArgumentCaptor<String> toState = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> reason = ArgumentCaptor.forClass(String.class);
+        verify(transitions).append(eq("ALM-CHILD"), toState.capture(), reason.capture(),
+                eq("correlation-engine"), eq(changedAt), eq("evt-lagging"), any());
+        assertThat(toState.getValue()).isEqualTo("correlated");
+        assertThat(reason.getValue()).isEqualTo(LifecycleService.REASON_DOWNGRADE_IGNORED);
+        verify(metrics).downgradeIgnored("correlated", "in-progress");
+    }
+
+    /** A `correlated` alarm is not downgraded to `open` by a later status-sync event either. */
+    @Test
+    void correlatedIsNotDowngradedToOpenByOutOfOrderStatusSync() {
+        when(alarms.currentLifecycleState("ALM-CHILD"))
+                .thenReturn(Optional.of(LifecycleState.CORRELATED));
+        Instant changedAt = Instant.parse("2026-06-13T13:06:35Z");
+
+        lifecycle.applyState("ALM-CHILD", LifecycleState.OPEN, "correlation-engine", changedAt,
+                "evt-lagging-open", Instant.now());
+
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        verify(transitions).append(eq("ALM-CHILD"), eq("correlated"),
+                eq(LifecycleService.REASON_DOWNGRADE_IGNORED), any(), any(), any(), any());
+        verify(metrics).downgradeIgnored("correlated", "open");
+    }
+
+    /**
+     * A `correlated -> correlated` re-apply (a redelivered / duplicate correlated status-sync event)
+     * is a SILENT no-op: the state is not rewritten (still `<=` STATE-WRITE suppression), but because
+     * it is NOT a genuine downgrade (same rank) it must NOT be audited as REASON_DOWNGRADE_IGNORED
+     * nor increment status_downgrade_ignored_total{from=correlated,to=correlated}.
+     */
+    @Test
+    void correlatedToCorrelatedRedeliveryIsSilentNoOpNotDowngradeIgnored() {
+        when(alarms.currentLifecycleState("ALM-DUP"))
+                .thenReturn(Optional.of(LifecycleState.CORRELATED));
+        Instant changedAt = Instant.parse("2026-06-13T13:07:00Z");
+
+        lifecycle.applyState("ALM-DUP", LifecycleState.CORRELATED, "correlation-engine", changedAt,
+                "evt-redelivered", Instant.now());
+
+        // State is not rewritten (suppression still holds) ...
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        // ... and it is a SILENT no-op: no downgrade-ignored audit and no downgrade-ignored metric.
+        verify(transitions, never()).append(any(), any(), any(), any(), any(), any(), any());
+        verify(metrics, never()).downgradeIgnored(any(), any());
+    }
+
+    /** Forward transitions still apply: open -> in-progress -> correlated each writes. */
+    @Test
+    void forwardTransitionsStillApply() {
+        // open -> in-progress
+        when(alarms.currentLifecycleState("ALM-FWD"))
+                .thenReturn(Optional.of(LifecycleState.OPEN));
+        lifecycle.applyState("ALM-FWD", LifecycleState.IN_PROGRESS, "correlation-engine",
+                Instant.parse("2026-06-13T09:00:00Z"), "evt-a", Instant.now());
+        verify(alarms).updateLifecycleState(eq("ALM-FWD"), eq(LifecycleState.IN_PROGRESS), isNull(),
+                any());
+
+        // in-progress -> correlated
+        when(alarms.currentLifecycleState("ALM-FWD"))
+                .thenReturn(Optional.of(LifecycleState.IN_PROGRESS));
+        lifecycle.applyState("ALM-FWD", LifecycleState.CORRELATED, "correlation-engine",
+                Instant.parse("2026-06-13T09:00:01Z"), "evt-b", Instant.now());
+        verify(alarms).updateLifecycleState(eq("ALM-FWD"), eq(LifecycleState.CORRELATED), isNull(),
+                any());
+        verify(metrics, never()).downgradeIgnored(any(), any());
+    }
+
+    /**
+     * The genuine expiry-revert path (in-progress -> open for a NON-correlated alarm whose window
+     * expired without a match) is a DIFFERENT method and is NOT blocked by the precedence guard.
+     */
+    @Test
+    void genuineExpiryRevertForNonCorrelatedAlarmStillApplies() {
+        when(alarms.exists("ALM-NOMATCH")).thenReturn(true);
+
+        lifecycle.revertToOpen("ALM-NOMATCH", "correlation-engine",
+                Instant.parse("2026-06-13T09:10:00Z"), "evt-expiry", Instant.now());
+
+        // Applied via the revert path (never consulted the precedence guard / currentLifecycleState).
+        verify(alarms).revertToOpenClearingProvisionalRole(eq("ALM-NOMATCH"), any());
+        verify(alarms, never()).currentLifecycleState(any());
+        verify(metrics, never()).downgradeIgnored(any(), any());
+    }
+
+    /** A real terminal clear following `correlated` (correlated -> cleared) STILL applies. */
+    @Test
+    void correlatedToClearedStillApplies() {
+        when(alarms.exists("ALM-CLR")).thenReturn(true);
+        Instant clearedAt = Instant.parse("2026-06-13T09:20:00Z");
+
+        lifecycle.clear("ALM-CLR", "simulator", clearedAt, "evt-clear", Instant.now());
+
+        verify(alarms).updateLifecycleState(eq("ALM-CLR"), eq(LifecycleState.CLEARED), eq(clearedAt),
+                any());
+        verify(alarms, never()).currentLifecycleState(any());
+        verify(metrics, never()).downgradeIgnored(any(), any());
+    }
+
+    /**
+     * The precedence guard also applies when a PARKED status is drained: a parked in-progress that
+     * drains AFTER the alarm has become correlated must NOT downgrade it.
+     */
+    @Test
+    void parkedInProgressDrainedAfterCorrelatedIsIgnored() {
+        Instant changedAt = Instant.parse("2026-06-13T13:06:34.426Z");
+        when(pending.claim("ALM-CHILD")).thenReturn(Optional.of(new PendingStatus(
+                "ALM-CHILD", "in-progress", "correlation-engine", changedAt, "evt-lagging",
+                Instant.parse("2026-06-13T13:06:34.500Z"))));
+        // By the time the park drains, the alarm is already correlated.
+        when(alarms.currentLifecycleState("ALM-CHILD"))
+                .thenReturn(Optional.of(LifecycleState.CORRELATED));
+
+        lifecycle.reapplyPending("ALM-CHILD", Instant.now());
+
+        verify(alarms, never()).updateLifecycleState(any(), any(), any(), any());
+        verify(transitions).append(eq("ALM-CHILD"), eq("correlated"),
+                eq(LifecycleService.REASON_DOWNGRADE_IGNORED), any(), any(), any(), any());
+        verify(metrics).downgradeIgnored("correlated", "in-progress");
     }
 
     @Test

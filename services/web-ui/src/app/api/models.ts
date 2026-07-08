@@ -264,6 +264,18 @@ export interface StatsVM {
   rcaAccuracy?: number | null;
 }
 
+/**
+ * Result of `POST /admin/reset-correlation` (Correlation Engine P3 reset). Clears persisted
+ * incidents + their incident-alarm links and resets the in-memory correlation session so the KPIs
+ * (auto-correlation, alarm-reduction, RCA accuracy, live incidents) return to 0 / N/A. Idempotent:
+ * a second call returns all-zeros with a 200.
+ */
+export interface ResetResult {
+  purgedIncidents: number;
+  purgedIncidentAlarms: number;
+  resetInMemory: boolean;
+}
+
 // ---- Alarm Manager (frozen P3-G3) ----
 export type LifecycleState = 'open' | 'in-progress' | 'correlated' | 'cleared';
 export type AlarmRole = 'root-cause' | 'child' | 'none';
@@ -286,6 +298,20 @@ export interface AlarmSummary {
   trailIds?: string[];
 }
 export type AlarmPage = Page<AlarmSummary>;
+
+/**
+ * Result of `POST /admin/purge-live-alarms` (Alarm Manager P3 reset). Purges the LIVE alarm state
+ * that colours the topology (active alarms + their pending status-transitions + processed-event
+ * dedupe rows), leaving P1 topology + P2 (noise / patterns / codebook) untouched. Idempotent: a
+ * second call returns all-zeros with a 200.
+ */
+export interface PurgeSummary {
+  purgedAlarms: number;
+  purgedTransitions: number;
+  purgedPendingStatus: number;
+  purgedProcessedEvents: number;
+}
+
 /**
  * One correlation (incident) group for the Alarm-Lifecycle view: the root-cause alarm (may be
  * null if the incident's RCA alarm role is not yet resolved in the Alarm Manager) plus its child
@@ -359,12 +385,126 @@ export interface EnrichmentChatterList {
   chatterList: EnrichmentChatterEntry[];
 }
 
-// ---- Simulator labels (frozen, demo/eval RCA oracle) ----
+// ---- Simulator labels (P3 RCA oracle) ----
+/**
+ * The ground-truth label shape ACTUALLY returned by the simulator's `GET /labels` in P3 — i.e. the
+ * simulator OpenAPI `P3CascadeLabelModel`. NOTE: an earlier frozen model here mirrored the OTHER
+ * schema in that spec (`GroundTruthLabelModel`, keyed on `rootCauseManagedObjectId`), but that is
+ * NOT what `/labels` serves; the live endpoint returns `rootCauseAlarmId` and has NO
+ * `rootCauseManagedObjectId`. The RCA-accuracy join therefore keys on `rootCauseAlarmId`, which both
+ * the label and the incident carry directly (an exact alarm-id match — no device resolution needed).
+ */
 export interface GroundTruthLabel {
-  scenarioId: string;
-  scenarioType: string;
-  rootCause: string;
-  rootCauseManagedObjectId: string;
+  patternId: string;
+  trailId: string;
+  rootCauseAlarmId: string;
   rootCauseAlarmType: string;
-  children: string[];
+  childAlarmIds: string[];
+  scenarioType: string;
+  instanceIndex: number;
+  igpArea: string;
+}
+
+// ---- Simulator synth-run trigger (frozen Simulator OpenAPI: /synth/run, /synth/status) ----
+
+/** POST /synth/run body — all optional; the server fills env defaults for an omitted field. */
+export interface SynthRunRequest {
+  target?: number;
+  totalAlarms?: number;
+  seed?: number;
+}
+
+/** 202 Accepted from POST /synth/run — a run was started. */
+export interface SynthRunResponse {
+  runId: string;
+  status: 'running';
+}
+
+/** 409 Conflict from POST /synth/run — a run is already active for `runId`. */
+export interface SynthConflictResponse {
+  detail: string;
+  runId: string;
+}
+
+/** The four lifecycle states of a synth run (string in the schema; these are the only values). */
+export type SynthRunStatus = 'idle' | 'running' | 'completed' | 'failed';
+
+/** Live progress counters (all default 0). */
+export interface SynthProgress {
+  alarmsEmitted: number;
+  alarmsTotal: number;
+  alignedEmitted: number;
+  nonAlignedEmitted: number;
+}
+
+/** Terminal-state summary (present only when a run has completed or failed). */
+export interface SynthSummaryModel {
+  runId: string;
+  status: string;
+  alarmsEmitted: number;
+  alignedFraction: number;
+  enrichmentSafeCount: number;
+  shortfallCascades: number;
+  /** Pattern IDs with enrichment-safety conflicts (simulator OpenAPI: array of string). */
+  enrichmentConflictPatterns: string[];
+  failureReason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** GET /synth/status — current run state, live progress, and terminal summary. */
+export interface SynthStatusResponse {
+  status: SynthRunStatus;
+  runId: string | null;
+  progress: SynthProgress;
+  summary: SynthSummaryModel | null;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern-mining corpus run (Simulator /mine/*) — P2 trigger. A mine run
+// generates a P2 corpus that the live pattern-miner mines into DRAFT patterns
+// (reviewed + approved by the operator in ML → Pattern mining; never auto-approved).
+// ---------------------------------------------------------------------------
+
+/** POST /mine/run body — all optional; the server fills env defaults for an omitted field. */
+export interface MineRunRequest {
+  scenarioInstances?: number;
+  seed?: number;
+}
+
+/** 202 Accepted from POST /mine/run — a mine run was started. */
+export interface MineRunResponse {
+  runId: string;
+  status: 'running';
+}
+
+/** Mine run lifecycle: the status endpoint reports only idle vs running (terminal state is read
+ *  from `summary.status`, mirroring how synth exposes completed/failed there). */
+export type MineRunStatus = 'idle' | 'running';
+
+/** Live mine progress counters (all default 0). Mirrors SynthProgress. */
+export interface MineProgress {
+  alarmsEmitted: number;
+  alarmsTotal: number;
+  alignedEmitted: number;
+  nonAlignedEmitted: number;
+}
+
+/** Terminal/last-run summary (present once a run has started; `status` carries the terminal state
+ *  e.g. "completed" / "failed"; `failureReason` is set on failure). */
+export interface MineSummaryModel {
+  runId: string;
+  status: string;
+  alarmsEmitted: number;
+  failureReason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** GET /mine/status — current mine run state, live progress, and last/terminal summary. */
+export interface MineStatusResponse {
+  status: MineRunStatus;
+  runId: string | null;
+  progress: MineProgress;
+  summary: MineSummaryModel | null;
 }

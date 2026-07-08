@@ -5,10 +5,28 @@
     "version" : "v0"
   },
   "servers" : [ {
-    "url" : "http://localhost:61774",
+    "url" : "http://localhost:62637",
     "description" : "Generated server url"
   } ],
   "paths" : {
+    "/admin/reset-correlation" : {
+      "post" : {
+        "tags" : [ "admin-reset-controller" ],
+        "operationId" : "reset",
+        "responses" : {
+          "200" : {
+            "description" : "OK",
+            "content" : {
+              "*/*" : {
+                "schema" : {
+                  "$ref" : "#/components/schemas/ResetResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/stats" : {
       "get" : {
         "tags" : [ "stats-controller" ],
@@ -121,6 +139,21 @@
   },
   "components" : {
     "schemas" : {
+      "ResetResult" : {
+        "properties" : {
+          "purgedIncidents" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "purgedIncidentAlarms" : {
+            "type" : "integer",
+            "format" : "int64"
+          },
+          "resetInMemory" : {
+            "type" : "boolean"
+          }
+        }
+      },
       "StatsView" : {
         "properties" : {
           "totalAlarmsProcessed" : {

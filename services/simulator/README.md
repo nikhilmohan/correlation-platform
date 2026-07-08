@@ -77,9 +77,37 @@ KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
 KAFKA_BOOTSTRAP_SERVERS=localhost:9092 \
   python -m simulator.main --synth \
     --p3-config-snapshot-path /data/sim/p3-config-snapshot.json --p3-rng-seed 42
+
+# PERSISTENT SERVICE MODE: stay up and serve the HTTP triggers (web-ui polls these)
+#   P3 real-time synth:
+#     POST /synth/run   -> 202 {runId, status:"running"}  (409 if a run is active, 422 on bad body)
+#     GET  /synth/status-> {status:"idle"|"running", runId, progress{...}, summary{...}}
+#   P2 mine-corpus (feeds pattern mining):
+#     POST /mine/run    -> 202 {runId, status:"running"}  (409 if a run is active, 422 on bad body)
+#     GET  /mine/status -> {status:"idle"|"running", runId, progress{...}, summary{...}}
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092 P3_NETWORK_WIDE=true P3_TOTAL_ALARMS=500 \
+  python -m simulator serve            # == python -m simulator.main serve (compose: command:["serve"])
+
+# trigger + poll a P3 synth run against the running service
+curl -sX POST localhost:8085/synth/run -H 'content-type: application/json' \
+  -d '{"target":0.6,"totalAlarms":500,"seed":42}'
+curl -s localhost:8085/synth/status
+
+# trigger + poll a P2 mine-corpus run (generate the labeled corpus that feeds pattern mining)
+#   scenarioInstances -> SCENARIO_INSTANCES (corpus size); seed -> SIM_SEED. both optional.
+curl -sX POST localhost:8085/mine/run -H 'content-type: application/json' \
+  -d '{"scenarioInstances":20,"seed":42}'
+curl -s localhost:8085/mine/status
 ```
 
 `--help` prints the full option surface; `--dry-run` validates config + inputs without emitting.
+`serve` runs the FastAPI app under uvicorn indefinitely (all read endpoints stay available); a
+triggered run executes on a background worker thread so `/health` + `/metrics` stay responsive.
+The **P2 mine-corpus** trigger reuses the P2 generate pipeline (phase=p2, `SIM_MODE=generate`) to
+emit the labeled alarm corpus onto `alarms.history`; the Noise Filter clusters it and the (already
+live) Pattern Miner mines it into pattern drafts — the Simulator only generates + emits the corpus.
+The mine and synth triggers **share one active-run guard** (both drive the single producer), so a
+409 is returned if either is triggered while the other is running.
 
 ## Configuration (env only — no hard-coded values)
 

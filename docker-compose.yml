@@ -371,9 +371,14 @@ services:
         condition: service_completed_successfully
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      PHASE: p2
-      SIM_MODE: generate
+      PHASE: p3                        # persistent service; POST /synth/run drives a P3 synth run
+      SIM_MODE: synth
+      P3_NETWORK_WIDE: "true"
+      P3_AUTO_CORRELATION_TARGET: "0.6"
+      P3_TOTAL_ALARMS: "500"
       TOPOLOGY_API_MODE: mock          # switch to "real" + TOPOLOGY_API_BASE_URL for integration
+      TRAIL_BUILDER_API_MODE: mock     # switch to "real" + TRAIL_BUILDER_API_BASE_URL for integration
+      PATTERN_MANAGER_API_MODE: mock   # switch to "real" + PATTERN_MANAGER_API_BASE_URL once PM is in compose
       KNOWLEDGE_MODE: local
       TOPOLOGY_NODE_COUNT: "20"
       SITE_COUNT: "5"
@@ -383,11 +388,18 @@ services:
       SIM_OUTPUT_DIR: /data/sim        # persistent, configurable artifact path (labels+snapshot+corpus)
       HTTP_PORT: "8080"
       LOG_LEVEL: INFO
-    command: ["--phase", "p2"]
+    command: ["serve"]                 # persistent service mode (was ["--phase","p2"]); OQ-TRIGGER-3
+    restart: unless-stopped            # persistent (was one-shot); OQ-TRIGGER-3
+    healthcheck:                       # stays green while idle between runs (AC 76)
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     volumes:
       - sim-data:/data/sim
     ports:
-      - "8085:8080"                    # /health (liveness) + /metrics (Prometheus)
+      - "8085:8080"                    # /health /metrics /synth/run /synth/status
     networks:
       - cp-net
 
@@ -428,6 +440,7 @@ services:
       TRAIL_BUILDER_API_BASE_URL: "/api/trail-builder"  # → nginx → trail-builder:8000
       CODEBOOK_API_BASE_URL: "/api/codebook"            # → nginx → codebook-api:8000
       KNOWLEDGE_API_BASE_URL: "/api/knowledge"          # → nginx → knowledge:8080
+      SIMULATOR_API_BASE_URL: "/api/simulator"          # → nginx → simulator:8080 (synth-run trigger)
       # P2 services (now in this compose) — same-origin prefixes proxied by nginx BY SERVICE NAME:
       PATTERN_MANAGER_API_BASE_URL: "/api/pattern-manager"  # → nginx → pattern-manager:8080
       NOISE_FILTER_API_BASE_URL: "/api/noise-filter"        # → nginx → noise-filter:8080

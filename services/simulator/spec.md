@@ -231,19 +231,31 @@ Correlation Engine's `/stats` and `/incidents` responses.
     self-clear/transient-suppression, and flap-damping are expected and correct (only the
     separate noise-filter service is P2-only; it is NOT in the P3 live path). Every
     pattern-aligned cascade emitted in network-wide P3 mode MUST be synthesized to survive
-    enrichment intact so the full cascade reaches the Correlation Engine and auto-correlates:
-    - No rapid duplicate raises on the same `managedObjectId` within enrichment's dedup window
-      — each cascade element targets a **distinct object/type occurrence**.
-    - No self-clearing/transient alarms as cascade members — nothing that enrichment would
-      suppress as a transient.
-    - Inter-arrival spacing of cascade elements is ABOVE the enrichment dedup window (so
-      consecutive elements on different objects are not deduped) yet WITHIN the pattern's
-      `sessionWindow.windowMs` (so CE still matches the sequence). If these two bounds conflict
-      for a given pattern (e.g. a pattern whose `sessionWindow` is shorter than the enrichment
-      dedup window), the Simulator flags the conflict in the per-run summary and excludes that
-      pattern from aligned synthesis (logs a structured warning; does not abort).
-    - No flapping (repeated raise/clear) patterns as cascade members that flap-damping would
-      collapse.
+    enrichment intact so the full cascade reaches the Correlation Engine and auto-correlates.
+    NOTE: The enrichment-safety invariant was corrected during live validation (P3 network-wide
+    build #392). The correct invariant is: **distinct dedup keys (distinct managedObjectId per
+    element + distinct alarmType per sequence position) + sustained single-raise (no `cleared`
+    event emitted for cascade members) + no genuine same-key duplicate**. It is NOT an alarmType
+    blocklist and NOT a dedup-window spacing floor. The shipped build already implements this.
+    - **Distinct dedup keys:** each cascade element targets a **distinct `managedObjectId`** and
+      a **distinct `alarmType`** per sequence position. Enrichment's DedupStep key is
+      `(path, source, managedObjectId, eventType, alarmType, state)`; it only collapses repeated
+      identical alarms (same object + same alarmType + same state). Distinct-key elements are
+      never deduped, regardless of inter-arrival timing.
+    - **Sustained single-raise:** aligned cascade members are emitted as sustained single `raised`
+      events — no `cleared` event is emitted for cascade members. Enrichment's SelfClearStep
+      suppresses a raise only when a matching CLEAR arrives within the hold-time; a sustained
+      raise with no paired clear passes through regardless of alarmType. This makes every cascade
+      member self-clear-safe and flap-safe without any alarmType restriction.
+    - **No genuine same-key duplicate:** distinct-object placement already prevents any
+      `(managedObjectId, alarmType, state)` repeat within a cascade.
+    - **Session-window timing:** inter-arrival timing stays within the pattern's
+      `sessionWindow.windowMs` so CE still matches the sequence. No minimum inter-arrival floor
+      above the dedup window is required for distinct-key elements.
+    - **Conflict exclusion:** if a pattern's `sessionWindow.windowMs` is too short to fit even
+      the minimal natural timing (a genuine structural conflict), that pattern is excluded from
+      aligned synthesis and logged. This is distinct from the (now-corrected) dedup-window floor.
+    - **No flapping:** no repeated raise/clear sequence on the same object within the cascade window.
     The non-aligned/noise portion of the stream MAY still include realistic transients,
     duplicates, and flaps — those are expected not to correlate, and that is correct behavior.
     Ground-truth labels record the expected-correlatable count as the count of
@@ -450,20 +462,30 @@ Correlation Engine's `/stats` and `/incidents` responses.
     enrichmentConflictPatterns}`.
 
 24. **Enforce enrichment-safe constraints on every aligned cascade.** Before emitting a
-    pattern-aligned cascade, validate it against enrichment's processing rules:
-    (a) ensure every cascade element targets a distinct `managedObjectId`/`alarmType`
-    combination (no rapid duplicate raises on the same object within the enrichment dedup
-    window); (b) ensure no cascade member is a transient/self-clearing alarm (not of a type
-    that enrichment suppresses as transient); (c) ensure inter-arrival spacing between
-    consecutive cascade elements is above the configured enrichment dedup window
-    (`P3_ENRICHMENT_DEDUP_WINDOW_MS`) yet within the pattern's `sessionWindow.windowMs` —
-    if these two bounds conflict for a pattern, exclude that pattern from aligned synthesis,
-    record it in `enrichmentConflictPatterns`, and log a structured warning; (d) ensure no
-    cascade member triggers flap-damping (no repeated raise/clear sequence). The non-aligned
-    and noise portions of the stream are NOT subject to these constraints (realistic
-    transients and dups there are correct behavior). Record the count of enrichment-safe
-    aligned cascade alarms as `enrichmentSafeCount` in the per-run summary; this count
-    is the expected-correlatable count measurable against CE `/stats`.
+    pattern-aligned cascade, validate it against enrichment's processing rules.
+    NOTE: Constraints (b) and (c) below were corrected during live validation (P3 network-wide
+    build #392); the shipped build already implements the corrected behavior. The enrichment-
+    safety invariant is: distinct dedup keys + sustained single-raise + no genuine same-key
+    duplicate. It is NOT an alarmType blocklist and NOT a dedup-window spacing floor.
+    (a) ensure every cascade element targets a distinct `managedObjectId` and occupies a
+    distinct `alarmType` sequence position — enrichment's DedupStep key is
+    `(path, source, managedObjectId, eventType, alarmType, state)` and only collapses repeated
+    identical alarms; distinct-key elements are never collapsed regardless of timing;
+    (b) ensure every aligned cascade member is emitted as a **sustained single `raised` event**
+    with NO corresponding `cleared` emitted — enrichment's SelfClearStep suppresses a raise
+    only when a matching CLEAR arrives within hold-time; a sustained raise without a clear
+    passes through regardless of alarmType; there is NO alarmType blocklist for cascade members;
+    (c) ensure inter-arrival timing stays **within the pattern's `sessionWindow.windowMs`** so
+    CE still matches the sequence — no minimum floor above the enrichment dedup window is
+    required or enforced for distinct-key cascades; if a pattern's `sessionWindow` is too short
+    to fit natural timing, exclude that pattern from aligned synthesis, record it in
+    `enrichmentConflictPatterns`, and log a structured warning;
+    (d) ensure no cascade member triggers flap-damping (no repeated raise/clear sequence on
+    the same object within the cascade window).
+    The non-aligned and noise portions of the stream are NOT subject to these constraints
+    (realistic transients and dups there are correct behavior). Record the count of
+    enrichment-safe aligned cascade alarms as `enrichmentSafeCount` in the per-run summary;
+    this count is the expected-correlatable count measurable against CE `/stats`.
 
 ## Phase applicability
 
@@ -1096,30 +1118,75 @@ Each criterion maps to a single pytest test.
     are structurally impossible by construction. A unit test over 100 synthesized cascades
     confirms zero same-object/same-type pairs within the dedup window across all elements.
 
-60. **No aligned cascade member is a transient/self-clearing alarm type.**
-    The domain pack's alarm shapes for cascade members in pattern-aligned synthesis are
-    restricted to non-transient alarm types (types that enrichment does not classify as
-    self-clearing transients). A unit test asserts that, for every synthesized cascade across
-    all approved patterns, no cascade element's `alarmType` appears in the configured
-    enrichment transient-suppression set. The transient-alarm type set is config-driven
-    (`P3_ENRICHMENT_TRANSIENT_TYPES` or equivalent), not hard-coded.
+60. **Aligned cascade members are emitted as sustained single `raised` events — enrichment self-clear and flap safety derives from this, not from an alarmType blocklist.**
+    NOTE: This criterion corrects a premise found wrong during live validation (P3 network-wide
+    build #392). The original premise — that no transient/self-clearing `alarmType` may be a
+    cascade member — conflated alarmType identity with per-instance raise/clear behavior.
+    The shipped build already implements the correct behavior described here.
 
-61. **Inter-arrival spacing is above the enrichment dedup window and within the session window.**
-    For a synthesized cascade with `P3_ENRICHMENT_DEDUP_WINDOW_MS=2000` and
-    `sessionWindow.windowMs=30000`, the time gap between consecutive cascade elements is:
-    (a) at least 2000 ms (above the dedup window) so enrichment does not collapse them; and
-    (b) at most 30000 ms (within the session window) so CE still matches the sequence.
-    A unit test generates 50 cascades under these parameters and confirms every inter-arrival
-    gap satisfies both bounds.
+    Transience is a per-instance property (a raise+clear pair arriving within enrichment's
+    hold-time), NOT an alarmType property. An alarmType used as a self-clearing noise alarm
+    elsewhere is still valid as a sustained cascade member. Enrichment's SelfClearStep
+    suppresses a raise only when a matching CLEAR arrives within the hold-time; a sustained
+    raise with no paired clear passes through regardless of alarmType.
 
-62. **Patterns whose sessionWindow conflicts with the enrichment dedup window are excluded and logged.**
-    Given a pattern whose `sessionWindow.windowMs` is less than or equal to
-    `P3_ENRICHMENT_DEDUP_WINDOW_MS` (making enrichment-safe synthesis impossible — no
-    inter-arrival gap can be simultaneously above the dedup window and within the session
-    window), the Simulator: (a) excludes that pattern from aligned synthesis; (b) logs a
-    structured warning identifying the pattern by `patternId` and the conflicting bounds;
-    (c) records the pattern's `patternId` in `enrichmentConflictPatterns` in the per-run
-    summary; (d) does NOT abort the run if other patterns are conflict-free.
+    The invariant is: aligned cascade elements are emitted as **sustained single `raised` events**
+    — the Simulator emits NO `cleared` event for any cascade member. This makes every cascade
+    member self-clear-safe and flap-safe by construction, independent of alarmType.
+    There is no alarmType blocklist for cascade membership.
+
+    A unit test asserts that, for every synthesized cascade across all approved patterns,
+    every cascade element's `state` is `raised` and no corresponding `cleared` event is emitted
+    for any `(managedObjectId, alarmType)` cascade pair within the cascade window. The test
+    must NOT assert that cascade member `alarmType` values are absent from any transient-type
+    set — that is the corrected (invalid) premise.
+
+    The non-aligned/noise portion of the stream MAY still emit self-clearing raise+clear pairs
+    — those are intended noise behavior.
+
+61. **Cascade elements have distinct dedup keys — no minimum inter-arrival floor above the dedup window is required.**
+    NOTE: This criterion corrects a premise (AC61b) found wrong during live validation (P3
+    network-wide build #392). The original premise — that cascade element inter-arrival must
+    exceed the enrichment dedup window to avoid deduplication — was wrong for distinct-key
+    cascades. The shipped build already implements the correct behavior described here.
+
+    Enrichment's DedupStep key is `(path, source, managedObjectId, eventType, alarmType, state)`.
+    It only collapses REPEATED IDENTICAL alarms — same object AND same alarmType AND same state
+    within the dedup window. Aligned cascade elements have DISTINCT dedup keys by construction:
+    each element targets a distinct `managedObjectId` (enforced by AC59) AND a distinct
+    `alarmType` per sequence position. Therefore enrichment never dedups them, regardless of
+    inter-arrival spacing.
+
+    The enrichment-safety invariant for spacing is: cascade elements use their **natural pattern
+    timing** within the `sessionWindow.windowMs` (so CE still matches the sequence). No minimum
+    inter-arrival floor above the dedup window is required or enforced.
+    The ONLY spacing concern that would cause deduplication is a genuine repeated
+    `(managedObjectId, alarmType, state)` — which distinct-object placement (AC59) already
+    prevents by construction.
+
+    (a) A unit test generates 50 cascades and confirms every inter-arrival gap is within
+    `sessionWindow.windowMs` (CE session-window bound is honored).
+    (b) The test must NOT assert a lower bound of `P3_ENRICHMENT_DEDUP_WINDOW_MS` on
+    inter-arrival gaps — that is the corrected (invalid) premise for distinct-key cascades.
+
+62. **Patterns whose sessionWindow is too short for natural cascade timing are excluded and logged.**
+    NOTE: This criterion is updated for consistency with the corrected AC61 premise. The
+    original conflict condition (sessionWindow <= dedup window) was derived from the now-
+    corrected premise that inter-arrival must exceed the dedup window. For distinct-key
+    cascades, the dedup window is irrelevant; the only genuine conflict is when a pattern's
+    `sessionWindow.windowMs` is too short to accommodate the cascade's natural timing (e.g.
+    shorter than the minimum physically-achievable inter-arrival for the pattern's sequence
+    length and throughput constraints).
+
+    Given a pattern whose `sessionWindow.windowMs` is too short to fit even the minimum
+    natural inter-arrival timing for its sequence (making it impossible to emit all cascade
+    elements as distinct, ordered events within the window), the Simulator:
+    (a) excludes that pattern from aligned synthesis; (b) logs a structured warning
+    identifying the pattern by `patternId` and the conflicting bounds; (c) records the
+    pattern's `patternId` in `enrichmentConflictPatterns` in the per-run summary;
+    (d) does NOT abort the run if other patterns are conflict-free.
+    A unit test confirms that a pattern with a `sessionWindow.windowMs` of 0 ms (or 1 ms)
+    is always excluded; a pattern with a `sessionWindow.windowMs` of 30000 ms proceeds.
 
 63. **No aligned cascade member triggers flap-damping.**
     Aligned cascade members do not include repeated raise/clear sequences on the same object
@@ -1273,3 +1340,404 @@ Each criterion maps to a single pytest test.
   `services/trail-builder/openapi.json`). No contract change is needed anywhere. The
   Simulator enumerates the full trail list using this existing endpoint. Design proceeds
   on this basis.
+
+---
+
+## HTTP Trigger for On-Demand P3 Synth Ingestion (additive capability)
+
+This section is additive — the existing generate/ingest/export/synth acceptance criteria
+(AC 1-65) are unchanged. All topic, payload, and event-model contracts are unchanged: this
+capability emits on the existing `alarms.live` topic using the frozen `AlarmEvent` payload
+and introduces no new Kafka topic, no new payload type, and no event-model field. The two
+new endpoints (`POST /synth/run` and `GET /synth/status`) are on the Simulator's own OpenAPI
+surface (self-owned) — they are not cross-service topic or payload additions and require no
+`docs/architecture.md` contract change beyond noting the new endpoint surface.
+
+### Purpose of this capability
+
+Today the Simulator's P3 network-wide synth run is CLI-only (`python -m simulator --phase p3`
+or equivalent) and the FastAPI process exits after the run completes. The web-ui needs to
+TRIGGER a P3 synth run from a dashboard button and poll its status to show a spinner while
+the run is in progress. This capability makes the Simulator a **persistent long-lived service**
+(the FastAPI stays up continuously serving all existing read endpoints and the new
+trigger/status endpoints), and adds two new HTTP endpoints to the Simulator's own OpenAPI:
+
+- `POST /synth/run` — start an asynchronous P3 network-wide synth batch; returns immediately
+  with a `runId`.
+- `GET /synth/status` — report the current run state (idle/running), progress, and the last
+  run summary.
+
+### Additional tasks (additive to Tasks 1-24)
+
+25. **Persistent service mode.** The Simulator runs as a long-lived process: the FastAPI server
+    starts and stays up continuously serving all existing endpoints (`/health`, `/metrics`,
+    `/labels`, `/scenarios`) plus the new `/synth/run` and `/synth/status` endpoints, without
+    exiting after a synth run completes. A synth run executes in the background; the HTTP API
+    remains responsive during the run. This changes the Simulator's compose lifecycle from
+    one-shot to persistent — see Open Questions OQ-TRIGGER-3.
+
+26. **`POST /synth/run` — trigger an asynchronous P3 network-wide synth run.** Accept an HTTP
+    POST at `/synth/run`. Start the existing P3 network-wide synth pipeline (Tasks 13-24:
+    read approved patterns + topology + compatible trails, synthesize enrichment-safe aligned
+    cascades + non-aligned/noise, emit wall-clock-paced to `alarms.live` at the configured
+    auto-correlation target) asynchronously in the background. Return immediately (HTTP 202)
+    with a response body containing the `runId` (a UUID identifying this run) and `status:
+    "running"`. The POST body optionally accepts override values for the P3 knobs (`target`,
+    `totalAlarms`, `seed`); all overrides default to the env/config values
+    (`P3_AUTO_CORRELATION_TARGET`, `P3_TOTAL_ALARMS`, `P3_RNG_SEED`) when absent. Validate
+    all supplied override values at request time; respond HTTP 422 for any invalid parameter
+    (e.g. `target` outside [0.0, 1.0], `totalAlarms` <= 0). If a synth run is already in
+    progress, reject the POST with HTTP 409 and a JSON body identifying the active `runId` —
+    no queuing; see OQ-TRIGGER-1.
+
+27. **`GET /synth/status` — report current run state and progress.** Return HTTP 200 with a
+    JSON body describing: (a) the current `status` (`"idle"` or `"running"`), (b) the `runId`
+    of the active run when running, or of the most recent completed run when idle (absent/null
+    if no run has ever occurred), (c) a `progress` object when running: `alarmsEmitted`
+    (non-negative integer), `alarmsTotal` (total planned for this run), `alignedEmitted`, and
+    `nonAlignedEmitted` counts, (d) a `summary` object when the last run has completed or
+    failed: `{runId, status, alarmsEmitted, alignedFraction, enrichmentSafeCount,
+    shortfallCascades, enrichmentConflictPatterns, failureReason, startedAt, completedAt}`.
+    The same summary fields as the per-run summary from Task 23. See OQ-TRIGGER-2 for the
+    recommended full shape. This endpoint is suitable for UI polling: the client spins while
+    `status == "running"` and stops when `status == "idle"`.
+
+28. **Error propagation to status.** If a triggered run fails during background execution
+    (e.g. Pattern Manager unreachable, no approved patterns available, all patterns have
+    session-window conflicts), the run terminates and `/synth/status` returns `status: "idle"`
+    (or `"failed"` — see OQ-TRIGGER-2) with a `summary` that includes a non-empty
+    `failureReason` field. The POST `/synth/run` response returns HTTP 202 when the run is
+    accepted (failure is surfaced via polling, not the trigger response), except for failures
+    detectable synchronously from the POST body (invalid parameters → HTTP 422) — see
+    OQ-TRIGGER-4 for the recommended sync/async failure boundary.
+
+29. **Run parameters from config/env with optional POST body overrides.** The P3 knobs for a
+    triggered run default to env/config: `P3_AUTO_CORRELATION_TARGET`, `P3_TOTAL_ALARMS`,
+    `P3_RNG_SEED`, `P3_NETWORK_WIDE`, `P3_MAX_CASCADES_PER_TRAIL`, `P3_TARGET_TOLERANCE`,
+    `P3_ENRICHMENT_OVER_PROVISION_MARGIN`. The POST body MAY supply override values for
+    `target` (maps to `P3_AUTO_CORRELATION_TARGET`), `totalAlarms` (maps to
+    `P3_TOTAL_ALARMS`), and `seed` (maps to `P3_RNG_SEED`). All other knobs come from
+    env/config only (not overridable via POST body in MVP — see OQ-TRIGGER-5). An absent
+    body field means "use the env/config default." The accepted body shape and field types
+    are published in the Simulator's own OpenAPI spec.
+
+30. **`POST /synth/run` and `GET /synth/status` added to the Simulator's own OpenAPI spec and
+    drift-guarded.** Both endpoints are declared in `services/simulator/openapi.json` (the
+    Simulator's self-owned, checked-in OpenAPI 3.1 document). The existing drift guard test
+    is extended to cover `/synth/run` and `/synth/status`. The request/response shapes are
+    defined in the Simulator's own OpenAPI — they are not a cross-service contract addition.
+    A change to these endpoint shapes is a contract change to the Simulator's own API surface
+    and follows the existing per-service contract-change procedure.
+
+### Additional acceptance criteria (additive — HTTP trigger capability)
+
+Each criterion maps to a single pytest test.
+
+66. **`POST /synth/run` returns HTTP 202 with a UUID `runId` and `status: "running"` when no
+    run is active.**
+    Given the Simulator is running as a persistent service with no active synth run, a POST to
+    `/synth/run` (with no body or a valid body) returns HTTP 202 with a JSON body containing
+    `runId` (a non-empty UUID string) and `status: "running"`. The response is returned before
+    the synth run completes — the endpoint does not block until emission finishes.
+
+67. **`POST /synth/run` with an invalid parameter returns HTTP 422.**
+    A POST to `/synth/run` with body `{"target": 1.5}` (outside [0.0, 1.0]) returns HTTP 422
+    with a JSON body identifying the invalid field and reason. No background run is started.
+    A POST with `{"totalAlarms": 0}` and a POST with `{"totalAlarms": -1}` each also return
+    HTTP 422.
+
+68. **`POST /synth/run` while a run is active returns HTTP 409.**
+    Given a P3 synth run is currently in progress (started by a prior POST), a second POST to
+    `/synth/run` returns HTTP 409 with a JSON body containing the active `runId`. No second
+    run is started; the in-progress run continues unaffected.
+
+69. **`GET /synth/status` returns `status: "running"` with progress counters while a run is
+    active.**
+    While a P3 synth run is in progress, `GET /synth/status` returns HTTP 200 with
+    `status: "running"`, the active `runId` (matching the UUID returned by the triggering
+    POST), and a `progress` object containing: `alarmsEmitted` (a non-negative integer
+    less than or equal to `alarmsTotal`), `alarmsTotal` (the planned total for this run),
+    `alignedEmitted` (non-negative integer), and `nonAlignedEmitted` (non-negative integer).
+    The `summary` field is absent or null while the run is active.
+
+70. **`GET /synth/status` returns `status: "idle"` with a completed `summary` after a run
+    finishes successfully.**
+    After a P3 synth run completes, `GET /synth/status` returns HTTP 200 with
+    `status: "idle"`, the `runId` of the completed run, and a `summary` object containing
+    at minimum: `{runId, status: "completed", alarmsEmitted, alignedFraction,
+    enrichmentSafeCount, shortfallCascades, enrichmentConflictPatterns, startedAt,
+    completedAt}`. `alarmsEmitted` is a positive integer; `alignedFraction` is in [0.0,
+    1.0]; `startedAt` and `completedAt` are ISO-8601 timestamps; `completedAt` is after
+    `startedAt`.
+
+71. **`GET /synth/status` returns `status: "idle"` with no `runId` or `summary` when no run
+    has ever occurred.**
+    On a freshly started Simulator instance with no prior synth run, `GET /synth/status`
+    returns HTTP 200 with `status: "idle"` and absent or null values for `runId` and
+    `summary`. The endpoint does not error.
+
+72. **`GET /synth/status` reflects a failed run with a `failureReason` in the summary.**
+    Given a triggered run that fails during background execution (simulated via a mock Pattern
+    Manager that returns an empty approved-pattern list after the run has been accepted),
+    `GET /synth/status` eventually returns `status: "idle"` (or `"failed"` — see
+    OQ-TRIGGER-2) with a `summary` containing a non-empty `failureReason` string. After the
+    failed run, a new `POST /synth/run` is accepted with HTTP 202 — the 409 concurrency guard
+    is released once the run terminates (by completion or failure).
+
+73. **POST body overrides `target`, `totalAlarms`, and `seed`; env/config defaults apply for
+    absent fields.**
+    Given env config `P3_AUTO_CORRELATION_TARGET=0.6` and `P3_TOTAL_ALARMS=500`, a POST to
+    `/synth/run` with body `{"target": 0.75, "totalAlarms": 200}` starts a run using
+    `target=0.75` and `totalAlarms=200`. `GET /synth/status` while running reports
+    `alarmsTotal=200`. A subsequent run triggered with an empty body uses `target=0.6` and
+    `totalAlarms=500` (the env/config defaults).
+
+74. **POST body `seed` override produces a reproducible alarm sequence for the same seed.**
+    Two sequential triggered runs with body `{"seed": 42}` and the same persisted P3 config
+    snapshot produce alarm streams that are identical in `alarmType`, `managedObjectId`, and
+    ordering — verifiable by comparing the ground-truth label store's cascade records after
+    each run. The two runs carry different `runId` values.
+
+75. **`POST /synth/run` and `GET /synth/status` are declared in `openapi.json` and the drift
+    guard catches a missing endpoint.**
+    The checked-in `services/simulator/openapi.json` contains path entries for `/synth/run`
+    (POST, responses: 202/409/422) and `/synth/status` (GET, response: 200 with
+    `status`/`runId`/`summary` fields). The drift-guard test, when run against an
+    `openapi.json` that is missing the `/synth/status` path, fails with a non-zero exit code.
+
+76. **Persistent service: the FastAPI remains responsive during an active synth run.**
+    While a P3 synth run is in progress (triggered via POST), `GET /health` returns HTTP 200
+    and `GET /metrics` returns HTTP 200 within 2 seconds. The background run does not block
+    the HTTP server's ability to serve requests.
+
+77. **Existing read endpoints are unaffected by the trigger capability.**
+    With the persistent service running and no synth run active, `GET /labels`,
+    `GET /scenarios`, `GET /health`, and `GET /metrics` all return HTTP 200 with the same
+    response shapes as defined by the existing acceptance criteria (AC 16, 17, and the labels
+    surface). The new endpoints do not alter any existing endpoint's behavior.
+
+---
+
+## HTTP Trigger for On-Demand P2 Mine-Corpus Generation (additive capability)
+
+This section is additive — the existing generate/ingest/export/synth/synth-trigger acceptance
+criteria (AC 1-77) are unchanged. All topic, payload, and event-model contracts are unchanged:
+this capability GENERATES + EMITS the P2 alarm CORPUS on the existing `alarms.history` topic using
+the frozen `AlarmEvent` payload and introduces no new Kafka topic, no new payload type, and no
+event-model field. The two new endpoints (`POST /mine/run` and `GET /mine/status`) are on the
+Simulator's own OpenAPI surface (self-owned) — they are not cross-service topic or payload
+additions and require no `docs/architecture.md` contract change beyond noting the new endpoint
+surface. **This is a contract addition to the Simulator's own HTTP API and requires human
+approval, exactly like the synth-trigger endpoints (Task 30 procedure).**
+
+### Purpose of this capability
+
+The full P2 pattern-learning flow is: the Simulator generates a labeled alarm CORPUS onto the
+history/enriched path → the Noise Filter clusters it (`transactions.clean`) → the Pattern Miner
+(already a live continuous consumer) mines it → patterns land as drafts in the Pattern Manager. So
+the Simulator only needs to GENERATE + EMIT the P2 corpus; the miner does the rest live. Today that
+generate step is CLI-only (`python -m simulator --phase p2`, `SIM_MODE=generate`). The web-ui needs
+to TRIGGER P2 corpus generation ("mine corpus" button) from a dashboard and poll its status. This
+capability adds two HTTP endpoints to the Simulator's persistent service mode (Task 25), mirroring
+the P3 synth trigger:
+
+- `POST /mine/run` — start an asynchronous P2 corpus-generate run; returns immediately with a
+  `runId`.
+- `GET /mine/status` — report the current P2 run state (idle/running), progress, and the last-run
+  summary.
+
+The P2 corpus-generate run REUSES the existing generate pipeline (`run.run_replay_phase` with
+`phase=p2` / `SIM_MODE=generate` emitting to `alarms.history`) — no new synthesis engine. It uses
+the Simulator's REAL topology/knowledge/trail-builder collaborators (env-driven `mock`/`real`) so
+the corpus is grounded in the current snapshot's trails, exactly like a manual P2 run.
+
+### Additional tasks (additive to Tasks 1-30)
+
+31. **`POST /mine/run` — trigger an asynchronous P2 corpus-generate run.** Accept an HTTP POST at
+    `/mine/run`. Start the existing P2 generate pipeline (`phase=p2`, `SIM_MODE=generate`, emitting
+    the labeled corpus onto `alarms.history`) asynchronously in the background. Return immediately
+    (HTTP 202) with a body containing the `runId` (a UUID) and `status: "running"`. The POST body
+    optionally accepts overrides for the corpus knobs (`scenarioInstances` → `SCENARIO_INSTANCES`,
+    the corpus-size knob; `seed` → `SIM_SEED`); all overrides default to env/config when absent.
+    Validate supplied overrides at request time; respond HTTP 422 for any invalid parameter
+    (`scenarioInstances` <= 0, `seed` < 0, unknown field). If a mine run OR a synth run is already
+    in progress, reject the POST with HTTP 409 and a JSON body identifying the active `runId` — the
+    mine and synth triggers share a SINGLE active-run guard (both drive the simulator's single
+    producer), so at most one may run at a time.
+
+32. **`GET /mine/status` — report current P2 run state and progress.** Return HTTP 200 with a JSON
+    body describing: (a) the current `status` (`"idle"` or `"running"`), (b) the `runId` of the
+    active run when running, or of the most recent run when idle (absent/null if no run has ever
+    occurred), (c) a `progress` object: `alarmsEmitted`, `alarmsTotal`, `alignedEmitted`,
+    `nonAlignedEmitted` counts, (d) a `summary` object when the last run has completed or failed:
+    `{runId, status, alarmsEmitted, failureReason, startedAt, completedAt}`. Same frozen-shape
+    discipline as `/synth/status`. Suitable for UI polling.
+
+33. **P2 corpus-generate reuse + shared run-guard.** The mine run REUSES the existing generate
+    orchestration (`run.run_replay_phase`) via a thin `p2_run.run_corpus(settings, producer,
+    run_id, progress)` entry — no duplicated synthesis engine, no new topic/payload. A
+    `MineRunManager` (mirroring the synth `RunManager`) runs the corpus generation on a background
+    worker thread and SHARES the same `RunGuard` as the synth `RunManager`, so a mine and a synth
+    run can never run concurrently. The persistent service (`serve.py`) wires BOTH the synth routes
+    (existing) and the new mine routes against one shared guard. Corpus knobs default to env/config
+    with optional POST-body overrides (`scenarioInstances`, `seed`); every other knob and the real
+    collaborators come from the serve container's env.
+
+34. **`POST /mine/run` and `GET /mine/status` added to the Simulator's own OpenAPI spec and
+    drift-guarded.** Both endpoints are declared in `services/simulator/openapi.json`. The drift
+    guard is extended to cover `/mine/run` and `/mine/status`. A change to these shapes is a
+    contract change to the Simulator's own API surface (same per-service procedure as Task 30).
+
+### Additional acceptance criteria (additive — P2 mine-corpus trigger)
+
+Each criterion maps to a single pytest test.
+
+78. **`POST /mine/run` returns HTTP 202 with a UUID `runId` and `status: "running"` when no run is
+    active.** With the persistent service running and no active run, a POST to `/mine/run` (no body
+    or a valid body) returns HTTP 202 with `runId` (a non-empty UUID string) and
+    `status: "running"`, before corpus emission finishes.
+
+79. **`POST /mine/run` with an invalid parameter returns HTTP 422.** A POST with
+    `{"scenarioInstances": 0}` (or `-1`, or `{"seed": -5}`, or an unknown field, or a
+    non-integer `scenarioInstances`) returns HTTP 422 and starts no background run.
+
+80. **`POST /mine/run` while a mine run is active returns HTTP 409.** Given a mine run in progress,
+    a second POST to `/mine/run` returns HTTP 409 with a JSON body containing the active `runId`.
+    No second run is started.
+
+81. **`GET /mine/status` returns `status: "running"` with progress counters while a run is
+    active.** While a P2 corpus run is in progress, `GET /mine/status` returns HTTP 200 with
+    `status: "running"`, the active `runId`, and a `progress` object with `alarmsEmitted`
+    (0 ≤ emitted ≤ total), `alarmsTotal`, `alignedEmitted`, `nonAlignedEmitted`. `summary` is null.
+
+82. **`GET /mine/status` returns `status: "idle"` with a completed `summary` after a run finishes
+    successfully.** After a P2 corpus run completes, `GET /mine/status` returns HTTP 200 with
+    `status: "idle"`, the completed run's `runId`, and a `summary` `{runId, status: "completed",
+    alarmsEmitted, failureReason: null, startedAt, completedAt}` with `completedAt >= startedAt`.
+
+83. **`GET /mine/status` returns `status: "idle"` with no `runId` or `summary` when no run has ever
+    occurred.** On a fresh instance, `GET /mine/status` returns HTTP 200 with `status: "idle"`,
+    null `runId`/`summary`, and zero-filled `progress`.
+
+84. **`GET /mine/status` reflects a failed run with a `failureReason`, and the guard is released.**
+    Given a triggered mine run that fails during background execution, `GET /mine/status` eventually
+    returns `status: "idle"` with a `summary` containing a non-empty `failureReason`. After the
+    failed run, a new `POST /mine/run` is accepted with HTTP 202 (the shared guard is released on
+    completion or failure).
+
+85. **POST body overrides `scenarioInstances`; env/config default applies when absent.** Given env
+    `SCENARIO_INSTANCES=8`, a POST with `{"scenarioInstances": 20}` runs with
+    `scenario_instances=20`; a subsequent empty-body run uses `8`.
+
+86. **POST body `seed` override maps to `SIM_SEED` for a reproducible corpus.** Two sequential runs
+    with body `{"seed": 42}` thread the same seed to the corpus generator (reproducible corpus) and
+    carry distinct `runId` values.
+
+87. **The mine trigger and the synth trigger share a single active-run guard (mutual exclusion).**
+    While a mine run holds the shared guard, a concurrent `POST /synth/run` returns HTTP 409 with
+    the active mine `runId`; and while a synth run holds the guard, a concurrent `POST /mine/run`
+    returns HTTP 409 with the active synth `runId`.
+
+88. **Persistent service: the FastAPI remains responsive during an active mine run.** While a P2
+    corpus run is in progress, `GET /health` and `GET /metrics` both return HTTP 200 within 2
+    seconds.
+
+89. **The mine routes are only mounted when a `MineRunManager` is wired.** An app created without a
+    mine manager returns HTTP 404 for `GET /mine/status` while `GET /health` still returns 200.
+
+90. **`p2_run.run_corpus` drives the P2 generate/history pipeline.** `run_corpus` reuses
+    `run.run_replay_phase` (phase=p2, generate) and emits every alarm onto the frozen
+    `alarms.history` topic (no live/other topic), returning the emitted count. Larger
+    `SCENARIO_INSTANCES` yields a larger corpus; the same `SIM_SEED` reproduces the same count.
+
+91. **`p2_run.run_corpus` reports progress via the `ProgressSink`.** When passed a `ProgressSink`,
+    `run_corpus` sets `alarmsTotal` and increments `alarmsEmitted` per produced alarm so
+    `GET /mine/status` reports live counters (`alignedEmitted + nonAlignedEmitted == alarmsEmitted`).
+
+92. **`POST /mine/run` and `GET /mine/status` are declared in `openapi.json` and the drift guard
+    catches a missing endpoint.** The checked-in `services/simulator/openapi.json` contains
+    `/mine/run` (POST, responses 202/409/422) and `/mine/status` (GET, response 200). The
+    drift-guard test, run against an `openapi.json` missing `/mine/status`, fails.
+
+### Open questions — HTTP trigger capability
+
+- **OQ-TRIGGER-1 (design decision — recommended: reject-with-409): Concurrent run policy.**
+  The spec recommends rejecting a second `POST /synth/run` with HTTP 409 while a run is in
+  progress (single concurrent run, no queue). The alternative — queuing the request — adds
+  complexity not needed for MVP (the web-ui button can disable itself after triggering).
+  A human must confirm reject-with-409 is the intended behavior, or specify queuing semantics,
+  before the designer wires the concurrency guard.
+
+- **OQ-TRIGGER-2 (design decision — recommended shape given): Exact `GET /synth/status`
+  response shape and progress granularity.**
+  The recommended JSON shape is:
+  ```
+  {
+    "status": "idle" | "running" | "failed",
+    "runId": "<uuid or null>",
+    "progress": {
+      "alarmsEmitted": 0,
+      "alarmsTotal": 0,
+      "alignedEmitted": 0,
+      "nonAlignedEmitted": 0
+    },
+    "summary": {
+      "runId": "<uuid>",
+      "status": "completed" | "failed",
+      "alarmsEmitted": 0,
+      "alignedFraction": 0.0,
+      "enrichmentSafeCount": 0,
+      "shortfallCascades": 0,
+      "enrichmentConflictPatterns": [],
+      "failureReason": null,
+      "startedAt": "<iso8601>",
+      "completedAt": "<iso8601>"
+    }
+  }
+  ```
+  Open points requiring human confirmation before the openapi.json is frozen: (a) whether
+  `"failed"` is a distinct top-level `status` value or collapses to `"idle"` (with
+  `summary.status: "failed"`) — recommend distinct; (b) whether `progress` is present
+  when `status == "idle"` — recommend absent or zero-filled; (c) whether `summary` is
+  present when no run has ever occurred — recommend null/absent.
+
+- **OQ-TRIGGER-3 (compose/ops change — flag for human confirmation): Compose lifecycle shift
+  from one-shot to persistent service.**
+  The Simulator currently exits after a run completes; its Docker Compose entry uses a
+  one-shot lifecycle (e.g. `restart: no`). Making it a persistent service requires changing
+  the compose entry to `restart: unless-stopped` (or equivalent), a health-check that stays
+  green while idle between runs, and an `/api/simulator` nginx proxy entry so the web-ui can
+  reach `POST /synth/run` and `GET /synth/status` without CORS issues. This is an ops/compose
+  change — not a Kafka or event-model contract change — but the deployment-model shift must
+  be confirmed by a human before the designer wires compose + the nginx proxy entry. The
+  designer/build agent will implement the compose and nginx changes; this open question flags
+  the shift for human awareness and approval.
+
+- **OQ-TRIGGER-4 (design decision — recommended: 202-then-fail-in-status): Synchronous vs.
+  asynchronous failure detection boundary.**
+  Some failure modes (e.g. a POST body `target` value out of range) are detectable
+  synchronously at POST time and return HTTP 422. Others (e.g. Pattern Manager returns no
+  approved patterns during the background fetch, or `P3_NETWORK_WIDE` is false) are detected
+  only during the background run. The recommended boundary: validate only the POST body
+  parameters synchronously (HTTP 422 on bad params); all other failures surface via
+  `/synth/status` (the run is accepted as HTTP 202, then `status: "failed"` with a
+  `failureReason`). A human must confirm this boundary or specify which runtime config
+  checks should be synchronous gates before the 202 is issued.
+
+- **OQ-TRIGGER-5 (design decision — recommended: env-only for MVP): Which P3 knobs are
+  overridable in the POST body?**
+  The spec allows `target`, `totalAlarms`, and `seed` as POST body overrides. Exposing
+  additional knobs (e.g. `maxCascadesPerTrail`, `enrichmentOverProvisionMargin`) would make
+  the trigger more flexible but increases the validation surface and the openapi.json schema.
+  The recommended MVP posture: only `target`, `totalAlarms`, and `seed` are POST-overridable;
+  all other knobs come from env/config only. A human must confirm or expand the list before
+  the openapi.json body schema is frozen.
+
+- **OQ-TRIGGER-6 (design/ops note — no contract change assumed): nginx proxy entry for
+  `/api/simulator`.**
+  The web-ui reaches Simulator endpoints via the nginx proxy at `/api/simulator`. The new
+  `POST /synth/run` and `GET /synth/status` paths must be forwarded by the nginx proxy
+  config. This is not a cross-service Kafka/event-model contract change, but the designer
+  and build agent must wire the nginx proxy entry for these two paths. No human decision is
+  needed before design (it follows the existing `/api/simulator` proxy pattern); flagged
+  here for the designer's awareness.

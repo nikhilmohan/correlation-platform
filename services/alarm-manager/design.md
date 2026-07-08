@@ -371,8 +371,8 @@ CREATE INDEX IF NOT EXISTS idx_alarm_alarm_type ON live_alarm.alarm (alarm_type)
 |---|---|---|
 | `id` | `bigint` PK (identity) | surrogate |
 | `alarm_id` | `text` NOT NULL FK to `alarm.alarm_id` | |
-| `to_state` | `text` NOT NULL | `open` / `in-progress` / `correlated` / `cleared` (or `role-assigned` for ROLE-only audit) |
-| `reason` | `text` NULL | e.g. `ingest`, `status-sync`, `clear`, `reverted from correlation: instance expired without a match`, `role-assigned` |
+| `to_state` | `text` NOT NULL | `open` / `in-progress` / `correlated` / `cleared` (or `role-assigned` for ROLE-only audit). For a guard-suppressed downgrade this is `correlated` (state unchanged) with the downgrade recorded via `reason` |
+| `reason` | `text` NULL | e.g. `ingest`, `status-sync`, `clear`, `reverted from correlation: instance expired without a match`, `role-assigned`, and `REASON_DOWNGRADE_IGNORED` (a status-sync `in-progress`/`open` event that the precedence guard suppressed because the alarm is already `correlated` — audited for debuggability, STATE unchanged; same-rank `correlated`→`correlated` redeliveries are *not* recorded) |
 | `source` | `text` NULL | **new** — `AlarmStatusChange.source` (the service that fired the change) where the transition came from the status channel |
 | `changed_at` | `timestamptz` NULL | **new** — `AlarmStatusChange.changedAt` (when the originator observed the change) |
 | `caused_by_event_id` | `text` NULL | envelope `eventId` of the causing event (dedupe trace) |
@@ -418,7 +418,9 @@ CREATE INDEX IF NOT EXISTS idx_alarm_alarm_type ON live_alarm.alarm (alarm_type)
     **Idempotency / dedupe key:** envelope `eventId` (`processed_event` unique insert). Applies
     `newStatus` to `lifecycle_state` via `LifecycleService`. **DLQ:** `alarms.status.changed.dlq`
     (codec failure, unknown `schemaVersion`, or unrecognised `newStatus`). At-least-once
-    delivery; a later authoritative status event wins for STATE.
+    delivery; a later authoritative status event wins for STATE **except** where the
+    status-sync precedence guard applies — see *Complementary model / precedence* below (a
+    `correlated` alarm is terminal-for-downgrade on this channel).
   - `correlation.results` then `CorrelationResultConsumer` *(re-scoped to ROLE + incident only)*.
     **Idempotency / dedupe key:** envelope `eventId` (`processed_event` unique insert). **DLQ:**
     `correlation.results.dlq`.
@@ -430,8 +432,31 @@ CREATE INDEX IF NOT EXISTS idx_alarm_alarm_type ON live_alarm.alarm (alarm_type)
 **Complementary model / precedence (STATE vs. ROLE), reconciled on `alarmId`.**
 
 - **STATE** (`lifecycle_state`) is owned by `AlarmStatusChange` on `alarms.status.changed`. A
-  later authoritative status event wins (last-writer per `eventId` dedupe). `open` to
+  later authoritative status event wins for STATE (last-writer per `eventId` dedupe) **subject to
+  the status-sync precedence guard below** — it is *not* pure last-writer-wins. `open` to
   `in-progress` to `correlated` are driven by status events; `cleared` and revert-to-`open` too.
+- **Status-sync precedence guard (STATE channel only).** The status-sync channel carries a
+  precedence ranking `open(0) < in-progress(1) < correlated(2)` (with `cleared(3)` ranked highest
+  but **outside** the downgrade ordering), carried on `LifecycleState.statusRank()`. On this
+  channel a `correlated` alarm is **terminal-for-downgrade**: once STATE is `correlated` (the alarm
+  is placed in a *fired* incident), a later `in-progress`/`open` status-sync event is **IGNORED** —
+  STATE is left unchanged (`correlated`), the suppressed transition is recorded in the
+  `state_transition` audit with reason `REASON_DOWNGRADE_IGNORED`, and
+  `status_downgrade_ignored_total{from,to}` is incremented. A same-rank `correlated`→`correlated`
+  redelivery is a **silent no-op** (state not rewritten, but *not* counted/audited as a
+  downgrade — only a genuine downgrade `incoming rank < current rank` is metered/audited).
+  - **Why:** the Correlation Engine's generalization fans one alarm across **multiple** pattern
+    instances whose per-instance status events can arrive **out of order**; as the sole owner of
+    the lifecycle state machine, Alarm Manager must enforce precedence so a fired-incident
+    correlation is not clobbered by a lagging sibling instance's stale `in-progress`. This is
+    **complementary** to the Correlation Engine's `correlatedAlarmIds` revert-guard (#398).
+  - **Explicit carve-outs (NOT affected by the guard).** The guard is scoped to the
+    `{open,in-progress,correlated}` status-sync writes only:
+    - `clear()` — `correlated`→`cleared` still applies (`cleared` is ranked outside the downgrade
+      ordering; a real clear is never blocked).
+    - `revertToOpen()` / instance-expiry — a **genuinely non-correlated** in-progress alarm still
+      reverts to `open` when its window expires without a match. This is the intentional path and
+      is a separate method, deliberately **unguarded**.
 - **ROLE + `incidentId`** (`role`, `incident_id`) are owned by `CorrelationResultEvent` on
   `correlation.results`. They are never derived from `AlarmStatusChange`.
 - **Reconciliation on `alarmId`** (and `incidentId` for the group). The two channels write
@@ -661,6 +686,14 @@ Note: `reverted-open` is **not** a node — it is the labelled transition back t
 (`root-cause` / `child` / `none`) and `incidentId` are orthogonal attributes set by the ROLE
 channel; they are not states in this machine.
 
+**Status-sync precedence guard on this machine.** The `correlated`→`in_progress` and
+`correlated`→`open` edges are **not** driven by a plain `in-progress`/`open` status-sync event —
+such a downgrade on the status-sync channel is **IGNORED** by the precedence guard (see
+*Complementary model / precedence*), leaving STATE `correlated`. The `correlated`→`open` edge in
+the diagram is exclusively the `reverted-open` transition (a distinct method/audit reason for a
+genuinely non-correlated alarm whose correlation instance expired), which is deliberately
+**unguarded**; `correlated`→`cleared` (a real terminal clear) is likewise unguarded.
+
 Decision logic per consumed message:
 
 1. **Enriched-alarm message.** Deserialize plus validate (codec; rejects unknown major
@@ -682,8 +715,11 @@ Decision logic per consumed message:
    then `alarms.status.changed.dlq` and the store is untouched. Else insert
    `processed_event(eventId)`; on conflict no-op. Else apply `newStatus` via `LifecycleService`,
    recording `source` plus `changedAt` in the audit entry:
-   - `in-progress` to `lifecycle_state = in-progress`.
-   - `correlated` to `lifecycle_state = correlated` (role/incident untouched).
+   - `in-progress` to `lifecycle_state = in-progress` — **unless** the alarm is already
+     `correlated`, in which case the status-sync precedence guard IGNORES the downgrade (STATE
+     stays `correlated`, audited `REASON_DOWNGRADE_IGNORED`, `status_downgrade_ignored_total`++).
+   - `correlated` to `lifecycle_state = correlated` (role/incident untouched). A
+     `correlated`→`correlated` redelivery is a silent no-op (not audited/metered as a downgrade).
    - `cleared` to `lifecycle_state = cleared`, `cleared_at = changedAt`.
    - `reverted-open` to `lifecycle_state = open` with the revert reason; clear a **provisional**
      in-progress role association (`role = none` if not finalised by a `CorrelationResultEvent`).

@@ -68,6 +68,22 @@ public class CorrelationEngine {
      * ingest registries; a durable/pruned store is the deferred RocksDB-changelog target).
      */
     private final Set<String> correlatedAlarmIds = new LinkedHashSet<>();
+    /**
+     * incidentIds of incidents this engine has FIRED (committed via {@link #fireIncident}) this
+     * session — the {@code totalIncidentsCreated} count used for the alarm-reduction ratio. This is
+     * deliberately session-scoped (in-memory, resets on restart) to share one scope with
+     * {@link #processedAlarmIds} / {@link #correlatedAlarmIds}: the alarm-reduction ratio
+     * ({@code totalAlarmsProcessed / totalIncidentsCreated}) must be same-scope with its numerator,
+     * else — as the reviewer found — an all-time DB incident count paired with a since-restart
+     * processed count can drive the ratio below 1.0 (fewer alarms than incidents), the same
+     * "impossible number" class as the &gt;100% auto-correlation bug. Only successfully-inserted
+     * (non-duplicate) incidents are added, so this equals the distinct incidents fired this session.
+     */
+    private final Set<String> firedIncidentIds = new LinkedHashSet<>();
+    /** Count of PATTERN-matched incidents fired this session (session-scoped, matches the others). */
+    private long sessionPatternMatchCount = 0;
+    /** Count of CODEBOOK-matched incidents fired this session (session-scoped, matches the others). */
+    private long sessionCodebookMatchCount = 0;
 
     public CorrelationEngine(
             CompatibilityIndexService compatibilityIndex,
@@ -204,10 +220,13 @@ public class CorrelationEngine {
             correlatedAlarmIds.add(child);
         }
         metrics.incrementIncidentsCreated();
+        firedIncidentIds.add(incident.incidentId());
         if (winner.matchType() == MatchCandidate.MatchType.PATTERN) {
             metrics.incrementPatternMatch();
+            sessionPatternMatchCount++;
         } else {
             metrics.incrementCodebookMatch();
+            sessionCodebookMatchCount++;
         }
     }
 
@@ -293,8 +312,87 @@ public class CorrelationEngine {
         return processedAlarmIds.size();
     }
 
+    /**
+     * @return the count of distinct {@code alarmId}s the engine has CORRELATED into a committed
+     *     incident (root-cause or child) — the {@code correlatedAlarmCount} numerator of the
+     *     auto-correlation rate (D1). Sourced from the engine's own {@link #correlatedAlarmIds} set,
+     *     which shares its lifetime with {@link #processedAlarmIds} (both are session-scoped in-memory
+     *     state that reset together on restart). Every correlated alarm was necessarily ingested
+     *     first, so {@code correlatedAlarmCount() <= totalAlarmsProcessed()} always holds and the
+     *     auto-correlation rate stays in {@code [0, 1]}. This deliberately does NOT read the persistent
+     *     Incident Store: mixing an all-time DB numerator with a since-restart in-memory denominator is
+     *     what produced the impossible &gt;100% rate live.
+     */
+    public synchronized long correlatedAlarmCount() {
+        return correlatedAlarmIds.size();
+    }
+
+    /**
+     * @return the count of distinct incidents this engine has FIRED this session — the
+     *     {@code totalIncidentsCreated} denominator of the alarm-reduction ratio
+     *     ({@code totalAlarmsProcessed / totalIncidentsCreated}). Session-scoped (from
+     *     {@link #firedIncidentIds}), sharing its lifetime with {@link #processedAlarmIds}, so it is
+     *     same-scope with that ratio's numerator. Because every fired incident consumes at least one
+     *     ingested alarm (root-cause), {@code totalIncidentsCreated() <= totalAlarmsProcessed()}
+     *     always holds and the alarm-reduction ratio stays {@code >= 1}. This deliberately does NOT
+     *     read {@code repository.totalIncidents()}: that all-time DB count paired with the
+     *     since-restart processed count is what could drive the ratio below 1.0 across a restart.
+     */
+    public synchronized long totalIncidentsCreated() {
+        return firedIncidentIds.size();
+    }
+
+    /**
+     * @return count of PATTERN-matched incidents fired this session. Session-scoped so it is
+     *     consistent with {@link #totalIncidentsCreated()} (their sum with
+     *     {@link #codebookMatchCount()} equals the session incident count).
+     */
+    public synchronized long patternMatchCount() {
+        return sessionPatternMatchCount;
+    }
+
+    /** @return count of CODEBOOK-matched incidents fired this session (session-scoped; see above). */
+    public synchronized long codebookMatchCount() {
+        return sessionCodebookMatchCount;
+    }
+
     /** @return true if a live instance exists for {@code (trailId, patternId)} (test introspection). */
     public synchronized boolean hasInstance(String trailId, String patternId) {
         return instances.containsKey(key(trailId, patternId));
+    }
+
+    /**
+     * Reset ALL session-scoped in-memory correlation state so a subsequent run starts fresh and the
+     * {@code /stats} KPIs return to zero — the in-memory half of the P3 demo reset (the DB purge is
+     * done separately by the reset orchestrator).
+     *
+     * <p><b>Thread-safety.</b> This is {@code synchronized} on the same monitor as {@link #onAlarm}
+     * and {@link #onClockTick}, so it never races a concurrent correlation step: an in-flight
+     * {@code onAlarm} completes fully (or has not yet started) before/after the clear — the state is
+     * never observed half-cleared by the correlation path.
+     *
+     * <p><b>Scope — P3 live state ONLY.</b> This clears the active correlation-instance registry
+     * ({@link #instances}), the per-trail uncovered/codebook-fallback buffers
+     * ({@link #uncoveredByTrail}), and every session counter that feeds {@code /stats}
+     * ({@link #processedAlarmIds}, {@link #correlatedAlarmIds}, {@link #firedIncidentIds},
+     * {@link #sessionPatternMatchCount}, {@link #sessionCodebookMatchCount}). After this,
+     * {@code totalAlarmsProcessed}, {@code correlatedAlarmCount}, {@code totalIncidentsCreated},
+     * {@code patternMatchCount} and {@code codebookMatchCount} all report {@code 0}.
+     *
+     * <p>It deliberately does NOT touch the loaded P2 model — the compatibility index / approved
+     * patterns / codebook / Knowledge params are owned outside the engine core (the
+     * {@code CompatibilityIndexService} / {@code CodebookStore} / {@code KnowledgeParamsProvider}
+     * collaborators) and are untouched here, so a fresh {@link #onAlarm} after reset still correlates
+     * without a restart.
+     */
+    public synchronized void reset() {
+        instances.clear();
+        uncoveredByTrail.clear();
+        processedAlarmIds.clear();
+        correlatedAlarmIds.clear();
+        firedIncidentIds.clear();
+        sessionPatternMatchCount = 0;
+        sessionCodebookMatchCount = 0;
+        metrics.setActiveInstances(0);
     }
 }

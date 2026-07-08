@@ -1,0 +1,145 @@
+{
+  "domain": "core-ip",
+  "comment": "Pre-approved Core IP seed patterns — shipped so a fresh deploy can run P3 correlation immediately WITHOUT first running the resource-heavy pattern-miner. Each pattern is authored to the SAME PatternView shape a mined+approved pattern has, and is loaded through the Pattern Store's sole-writer path already in the 'approved' lifecycle (idempotent on restart). CRITICAL: the Correlation Engine matches an approved pattern to trails by STRUCTURE (hostability-subset over objectTypes, area-agnostic, root-present — CompatibilityEvaluator), NOT by the pattern's trailId. It derives each pattern's required objectTypes from sampleAlarms[].managedObjectId prefixes ('<objectType>:<id>'). The trailId here is provenance-only (a synthetic 'seed:*' reference); it never pins the pattern to a single trail, so these seeds generalize to EVERY structurally-compatible trail in whatever snapshot a fresh P1 topology ingest produces. Every sequence alarmType therefore carries at least one sampleAlarm whose managedObjectId prefix is the objectType that raises it, and the root alarm's objectType is always present (so the cascade origin can be hosted). Cascade shapes + alarmType->objectType witnesses mirror the Knowledge Core IP propagation templates (seed/core-ip.json). rootCauseAlarmType is the TRUE upstream cause (the first/causal sequence element), so RCA accuracy is high (unlike mined fragment patterns). sessionWindow.type='gap-based'; windowMs sized to the cascade depth. reconcileStatus='confirmed' + structurallyValidated=true (authored, connected dependency paths). support/confidence/lift are conservative authored priors. These are seed defaults: running the miner later refreshes/augments the store as normal.",
+  "patterns": [
+    {
+      "seedId": "core-ip/seed/fibercut-to-vpn",
+      "rootCauseAlarmType": "FiberCut",
+      "sequence": ["FiberCut", "LOS", "InterfaceDown", "LinkDown", "LSPDown", "VPNReachabilityLoss"],
+      "support": 0.42,
+      "confidence": 0.9,
+      "lift": 3.1,
+      "sessionWindow": { "windowMs": 90000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/fibercut",
+      "timing": { "medianGapMs": 8000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-fibercut-1", "alarmType": "FiberCut", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "FiberSpan:seed-fiber-1", "perceivedSeverity": "critical" },
+        { "alarmId": "seed-fibercut-2", "alarmType": "LOS", "raisedAt": "2026-01-01T00:00:03Z", "managedObjectId": "Port:seed-port-1", "perceivedSeverity": "critical" },
+        { "alarmId": "seed-fibercut-3", "alarmType": "InterfaceDown", "raisedAt": "2026-01-01T00:00:06Z", "managedObjectId": "Interface:seed-intf-1", "perceivedSeverity": "major" },
+        { "alarmId": "seed-fibercut-4", "alarmType": "LinkDown", "raisedAt": "2026-01-01T00:00:09Z", "managedObjectId": "IPLink:seed-iplink-1", "perceivedSeverity": "major" },
+        { "alarmId": "seed-fibercut-5", "alarmType": "LSPDown", "raisedAt": "2026-01-01T00:00:12Z", "managedObjectId": "LSP:seed-lsp-1", "perceivedSeverity": "major" },
+        { "alarmId": "seed-fibercut-6", "alarmType": "VPNReachabilityLoss", "raisedAt": "2026-01-01T00:00:15Z", "managedObjectId": "VPNService:seed-vpn-1", "perceivedSeverity": "critical" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/linecard-to-isis",
+      "rootCauseAlarmType": "LineCardFault",
+      "sequence": ["LineCardFault", "PortDown", "InterfaceDown", "ISISAdjacencyDown"],
+      "support": 0.38,
+      "confidence": 0.88,
+      "lift": 2.9,
+      "sessionWindow": { "windowMs": 60000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/linecard",
+      "timing": { "medianGapMs": 6000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-lc-1", "alarmType": "LineCardFault", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "LineCard:seed-lc-1", "perceivedSeverity": "critical" },
+        { "alarmId": "seed-lc-2", "alarmType": "PortDown", "raisedAt": "2026-01-01T00:00:03Z", "managedObjectId": "Port:seed-port-2", "perceivedSeverity": "major" },
+        { "alarmId": "seed-lc-3", "alarmType": "InterfaceDown", "raisedAt": "2026-01-01T00:00:06Z", "managedObjectId": "Interface:seed-intf-2", "perceivedSeverity": "major" },
+        { "alarmId": "seed-lc-4", "alarmType": "ISISAdjacencyDown", "raisedAt": "2026-01-01T00:00:09Z", "managedObjectId": "IGPAdjacency:seed-adj-1", "perceivedSeverity": "major" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/iplink-to-vpn",
+      "rootCauseAlarmType": "LinkDown",
+      "sequence": ["LinkDown", "LSPDown", "VPNReachabilityLoss"],
+      "support": 0.45,
+      "confidence": 0.91,
+      "lift": 3.0,
+      "sessionWindow": { "windowMs": 45000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/iplink",
+      "timing": { "medianGapMs": 5000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-link-1", "alarmType": "LinkDown", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "IPLink:seed-iplink-2", "perceivedSeverity": "major" },
+        { "alarmId": "seed-link-2", "alarmType": "LSPDown", "raisedAt": "2026-01-01T00:00:04Z", "managedObjectId": "LSP:seed-lsp-2", "perceivedSeverity": "major" },
+        { "alarmId": "seed-link-3", "alarmType": "VPNReachabilityLoss", "raisedAt": "2026-01-01T00:00:08Z", "managedObjectId": "VPNService:seed-vpn-2", "perceivedSeverity": "critical" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/interface-to-bgp",
+      "rootCauseAlarmType": "InterfaceDown",
+      "sequence": ["InterfaceDown", "ISISAdjacencyDown", "BGPPeerDown", "RouteFlap"],
+      "support": 0.36,
+      "confidence": 0.86,
+      "lift": 2.7,
+      "sessionWindow": { "windowMs": 60000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/interface",
+      "timing": { "medianGapMs": 7000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-if-1", "alarmType": "InterfaceDown", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "Interface:seed-intf-3", "perceivedSeverity": "major" },
+        { "alarmId": "seed-if-2", "alarmType": "ISISAdjacencyDown", "raisedAt": "2026-01-01T00:00:03Z", "managedObjectId": "IGPAdjacency:seed-adj-2", "perceivedSeverity": "major" },
+        { "alarmId": "seed-if-3", "alarmType": "BGPPeerDown", "raisedAt": "2026-01-01T00:00:06Z", "managedObjectId": "IGPAdjacency:seed-adj-3", "perceivedSeverity": "major" },
+        { "alarmId": "seed-if-4", "alarmType": "RouteFlap", "raisedAt": "2026-01-01T00:00:09Z", "managedObjectId": "IGPAdjacency:seed-adj-4", "perceivedSeverity": "warning" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/port-to-iplink",
+      "rootCauseAlarmType": "PortDown",
+      "sequence": ["PortDown", "InterfaceDown", "LinkDown"],
+      "support": 0.4,
+      "confidence": 0.89,
+      "lift": 2.8,
+      "sessionWindow": { "windowMs": 45000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/port",
+      "timing": { "medianGapMs": 5000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-port-a", "alarmType": "PortDown", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "Port:seed-port-3", "perceivedSeverity": "major" },
+        { "alarmId": "seed-port-b", "alarmType": "InterfaceDown", "raisedAt": "2026-01-01T00:00:03Z", "managedObjectId": "Interface:seed-intf-4", "perceivedSeverity": "major" },
+        { "alarmId": "seed-port-c", "alarmType": "LinkDown", "raisedAt": "2026-01-01T00:00:06Z", "managedObjectId": "IPLink:seed-iplink-3", "perceivedSeverity": "major" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/iplink-frr-congestion",
+      "rootCauseAlarmType": "LinkDown",
+      "sequence": ["LinkDown", "FRRSwitchover", "Congestion"],
+      "support": 0.33,
+      "confidence": 0.84,
+      "lift": 2.5,
+      "sessionWindow": { "windowMs": 45000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/frr",
+      "timing": { "medianGapMs": 6000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-frr-1", "alarmType": "LinkDown", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "IPLink:seed-iplink-4", "perceivedSeverity": "major" },
+        { "alarmId": "seed-frr-2", "alarmType": "FRRSwitchover", "raisedAt": "2026-01-01T00:00:03Z", "managedObjectId": "LSP:seed-lsp-3", "perceivedSeverity": "minor" },
+        { "alarmId": "seed-frr-3", "alarmType": "Congestion", "raisedAt": "2026-01-01T00:00:06Z", "managedObjectId": "VPNService:seed-vpn-3", "perceivedSeverity": "warning" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/iplink-bundle-degraded",
+      "rootCauseAlarmType": "LinkDown",
+      "sequence": ["LinkDown", "LinkBundleDegraded"],
+      "support": 0.3,
+      "confidence": 0.82,
+      "lift": 2.3,
+      "sessionWindow": { "windowMs": 30000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/bundle",
+      "timing": { "medianGapMs": 4000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-bundle-1", "alarmType": "LinkDown", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "IPLink:seed-iplink-5", "perceivedSeverity": "major" },
+        { "alarmId": "seed-bundle-2", "alarmType": "LinkBundleDegraded", "raisedAt": "2026-01-01T00:00:02Z", "managedObjectId": "IPLink:seed-iplink-6", "perceivedSeverity": "minor" }
+      ]
+    },
+    {
+      "seedId": "core-ip/seed/lsp-service-degraded",
+      "rootCauseAlarmType": "LSPDown",
+      "sequence": ["LSPDown", "ServiceDegraded"],
+      "support": 0.31,
+      "confidence": 0.83,
+      "lift": 2.4,
+      "sessionWindow": { "windowMs": 30000, "type": "gap-based" },
+      "reconcileStatus": "confirmed",
+      "codebookMatchId": "seed/lsp",
+      "timing": { "medianGapMs": 4000, "note": "authored seed prior" },
+      "sampleAlarms": [
+        { "alarmId": "seed-lsp-a", "alarmType": "LSPDown", "raisedAt": "2026-01-01T00:00:00Z", "managedObjectId": "LSP:seed-lsp-4", "perceivedSeverity": "major" },
+        { "alarmId": "seed-lsp-b", "alarmType": "ServiceDegraded", "raisedAt": "2026-01-01T00:00:03Z", "managedObjectId": "VPNService:seed-vpn-4", "perceivedSeverity": "warning" }
+      ]
+    }
+  ]
+}

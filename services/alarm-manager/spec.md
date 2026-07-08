@@ -166,6 +166,15 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
       fields (including `eventType`, `probableCause`, and the canonical **`alarmType`** join
       token), lifecycle state, `incidentId`, role tag (`root-cause` / `child` / `none`), and
       the ordered list of state transitions with UTC timestamps.
+  - *Admin/ops API (demo/ops reset — contract addition, needs human approval):*
+    - `POST /admin/purge-live-alarms` — demo/ops **P3 live-state reset**. Transactionally deletes
+      ALL rows from the Alarm Manager's own `live_alarm` schema (`alarm`, `state_transition`,
+      `pending_status`, `processed_event`) in FK-safe order so the web-ui topology returns to
+      all-green. Returns `200` with
+      `{ purgedAlarms, purgedTransitions, purgedPendingStatus, purgedProcessedEvents }` (deleted
+      counts). **Single-owner scoped / P3-only:** touches no other schema (P1 topology, P2
+      noise-filter/patterns/codebook/knowledge, and the Correlation Engine's `incident` are all
+      untouched). Idempotent (second call returns zeros). HTTP-only — no new Kafka topic/payload.
 - **APIs/data consumed from other services:** None. The Alarm Manager is a Kafka-consumer and
   HTTP-server only; it does not call other services' HTTP APIs.
 - **Integration points (mock vs. real):** The Alarm Manager exposes HTTP APIs consumed by
@@ -324,6 +333,20 @@ payload is introduced: `alarms.persisted.live` carries the existing `AlarmEvent`
     the `GET /alarms/{alarmId}` full record, as a field distinct from `eventType` and
     `probableCause`, matching the ingested value. (`alarmType` is the platform canonical
     alarm-type join key the web-ui/incident views and the alarm-to-incident join rely on.)
+
+22. **(Demo/ops P3 live-state reset — contract addition, needs human approval.)** Given a
+    `POST /admin/purge-live-alarms` request, the Alarm Manager transactionally deletes ALL rows
+    from its OWN `live_alarm` schema — `live_alarm.state_transition` and `live_alarm.pending_status`
+    and `live_alarm.processed_event` and `live_alarm.alarm` — in FK-safe order (the child
+    `state_transition` before the parent `alarm`, given the `state_transition -> alarm` foreign
+    key), and returns `200` with the JSON summary
+    `{ purgedAlarms, purgedTransitions, purgedPendingStatus, purgedProcessedEvents }` whose values
+    are the per-table deleted-row counts. The endpoint is **P3-only** and single-owner scoped: it
+    touches NO other schema (`noise_filter`, `pattern`, `codebook`, `knowledge`, and the
+    Correlation Engine's `incident` are all untouched), so P1 topology and P2 mined data survive.
+    It is **idempotent** — a second call on an already-empty store deletes nothing and returns all
+    zeros with `200`. The metric `live_alarms_purged_total` (counter) is incremented by the number
+    of alarms purged. This is HTTP-only: no Kafka topic or event-model payload is added or changed.
 
 ## Open questions
 

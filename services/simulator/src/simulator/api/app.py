@@ -9,6 +9,7 @@ authoritative surface). ``/labels`` returns the frozen shape
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
@@ -16,6 +17,10 @@ from pydantic import BaseModel
 from simulator.engine.labels import LabelStore
 from simulator.obs import metrics
 from simulator.synth.p3_labels import P3LabelStore
+
+if TYPE_CHECKING:
+    from simulator.synth.mine_run_manager import MineRunManager
+    from simulator.synth.run_manager import RunManager
 
 
 @dataclass
@@ -91,8 +96,18 @@ class HealthModel(BaseModel):
     run: str
 
 
-def create_app(state: RunState) -> FastAPI:
-    """Build the FastAPI app bound to a shared :class:`RunState`."""
+def create_app(
+    state: RunState,
+    run_manager: RunManager | None = None,
+    mine_manager: MineRunManager | None = None,
+) -> FastAPI:
+    """Build the FastAPI app bound to a shared :class:`RunState`.
+
+    When ``run_manager`` is provided the HTTP synth-trigger router (``POST /synth/run`` +
+    ``GET /synth/status``) is mounted; when ``mine_manager`` is provided the P2 mine-corpus trigger
+    router (``POST /mine/run`` + ``GET /mine/status``) is mounted. The existing read routes are
+    untouched regardless (AC 77/88).
+    """
     app = FastAPI(title="ACP Simulator", version="0.1.0")
 
     @app.get("/health", response_model=HealthModel)
@@ -149,5 +164,15 @@ def create_app(state: RunState) -> FastAPI:
     @app.get("/scenarios")
     def scenarios() -> list[dict[str, object]]:
         return state.scenarios
+
+    if run_manager is not None:
+        from simulator.api.synth_routes import build_synth_router
+
+        app.include_router(build_synth_router(run_manager))
+
+    if mine_manager is not None:
+        from simulator.api.mine_routes import build_mine_router
+
+        app.include_router(build_mine_router(mine_manager))
 
     return app
