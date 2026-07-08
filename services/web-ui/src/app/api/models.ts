@@ -459,3 +459,52 @@ export interface SynthStatusResponse {
   progress: SynthProgress;
   summary: SynthSummaryModel | null;
 }
+
+// ---------------------------------------------------------------------------
+// Pattern-mining corpus run (Simulator /mine/*) — P2 trigger. A mine run
+// generates a P2 corpus that the live pattern-miner mines into DRAFT patterns
+// (reviewed + approved by the operator in ML → Pattern mining; never auto-approved).
+// ---------------------------------------------------------------------------
+
+/** POST /mine/run body — all optional; the server fills env defaults for an omitted field. */
+export interface MineRunRequest {
+  scenarioInstances?: number;
+  seed?: number;
+}
+
+/** 202 Accepted from POST /mine/run — a mine run was started. */
+export interface MineRunResponse {
+  runId: string;
+  status: 'running';
+}
+
+/** Mine run lifecycle: the status endpoint reports only idle vs running (terminal state is read
+ *  from `summary.status`, mirroring how synth exposes completed/failed there). */
+export type MineRunStatus = 'idle' | 'running';
+
+/** Live mine progress counters (all default 0). Mirrors SynthProgress. */
+export interface MineProgress {
+  alarmsEmitted: number;
+  alarmsTotal: number;
+  alignedEmitted: number;
+  nonAlignedEmitted: number;
+}
+
+/** Terminal/last-run summary (present once a run has started; `status` carries the terminal state
+ *  e.g. "completed" / "failed"; `failureReason` is set on failure). */
+export interface MineSummaryModel {
+  runId: string;
+  status: string;
+  alarmsEmitted: number;
+  failureReason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+/** GET /mine/status — current mine run state, live progress, and last/terminal summary. */
+export interface MineStatusResponse {
+  status: MineRunStatus;
+  runId: string | null;
+  progress: MineProgress;
+  summary: MineSummaryModel | null;
+}
