@@ -360,4 +360,39 @@ public class CorrelationEngine {
     public synchronized boolean hasInstance(String trailId, String patternId) {
         return instances.containsKey(key(trailId, patternId));
     }
+
+    /**
+     * Reset ALL session-scoped in-memory correlation state so a subsequent run starts fresh and the
+     * {@code /stats} KPIs return to zero — the in-memory half of the P3 demo reset (the DB purge is
+     * done separately by the reset orchestrator).
+     *
+     * <p><b>Thread-safety.</b> This is {@code synchronized} on the same monitor as {@link #onAlarm}
+     * and {@link #onClockTick}, so it never races a concurrent correlation step: an in-flight
+     * {@code onAlarm} completes fully (or has not yet started) before/after the clear — the state is
+     * never observed half-cleared by the correlation path.
+     *
+     * <p><b>Scope — P3 live state ONLY.</b> This clears the active correlation-instance registry
+     * ({@link #instances}), the per-trail uncovered/codebook-fallback buffers
+     * ({@link #uncoveredByTrail}), and every session counter that feeds {@code /stats}
+     * ({@link #processedAlarmIds}, {@link #correlatedAlarmIds}, {@link #firedIncidentIds},
+     * {@link #sessionPatternMatchCount}, {@link #sessionCodebookMatchCount}). After this,
+     * {@code totalAlarmsProcessed}, {@code correlatedAlarmCount}, {@code totalIncidentsCreated},
+     * {@code patternMatchCount} and {@code codebookMatchCount} all report {@code 0}.
+     *
+     * <p>It deliberately does NOT touch the loaded P2 model — the compatibility index / approved
+     * patterns / codebook / Knowledge params are owned outside the engine core (the
+     * {@code CompatibilityIndexService} / {@code CodebookStore} / {@code KnowledgeParamsProvider}
+     * collaborators) and are untouched here, so a fresh {@link #onAlarm} after reset still correlates
+     * without a restart.
+     */
+    public synchronized void reset() {
+        instances.clear();
+        uncoveredByTrail.clear();
+        processedAlarmIds.clear();
+        correlatedAlarmIds.clear();
+        firedIncidentIds.clear();
+        sessionPatternMatchCount = 0;
+        sessionCodebookMatchCount = 0;
+        metrics.setActiveInstances(0);
+    }
 }
