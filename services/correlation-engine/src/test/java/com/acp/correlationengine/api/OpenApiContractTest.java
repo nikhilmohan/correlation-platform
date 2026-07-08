@@ -61,6 +61,9 @@ class OpenApiContractTest {
         assertThat(paths.has("/incidents")).isTrue();
         assertThat(paths.has("/incidents/{incidentId}")).isTrue();
         assertThat(paths.has("/stats")).isTrue();
+        // Contract addition — P3 demo/ops reset (admin path).
+        assertThat(paths.has("/admin/reset-correlation")).isTrue();
+        assertThat(paths.get("/admin/reset-correlation").has("post")).isTrue();
 
         // Check the generated document in to the service dir (kept in sync with the code).
         Path out = Path.of(System.getProperty("user.dir"), "openapi.json");
